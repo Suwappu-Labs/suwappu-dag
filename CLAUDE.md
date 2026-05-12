@@ -91,7 +91,7 @@ Between sessions, you resume via:
 | DAG-S16 | LTP Commitment Node DA SLA                                | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_da.rs`) |
 | DAG-S17 | Cross-chain DID STARK pipeline (SP1/Plonky3)             | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_did_stark.rs`) |
 | DAG-S18 | `gsx-transport` — SCION path-authenticated routing       | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_scion.rs`) |
-| DAG-S19 | SCION-IP-Gateway fallback                                | ⏳ Queued    | `gateway_fallback_correctness` @ 10k |
+| DAG-S19 | SCION-IP-Gateway fallback                                | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_gateway.rs`) |
 | DAG-S20 | `gsx-node` — full validator composition                  | ⏳ Queued    | `node_runs_genesis_block` (E2E) |
 
 Update this table when a sprint closes.
