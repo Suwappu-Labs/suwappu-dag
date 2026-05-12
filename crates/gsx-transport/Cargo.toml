@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+publish.workspace = true
 description = "Inter-validator transport — SCION + RaptorQ erasure coding (paper §6.3)."
 
 [dependencies]

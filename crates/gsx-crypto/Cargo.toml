@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+publish.workspace = true
 description = "GSX DAG L1 cryptographic primitives: ML-DSA-65, ML-KEM-768, BLS12-381, SHA3-256, Poseidon2 (paper §3.3, §10, §12)."
 
 [dependencies]

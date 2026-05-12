@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+publish.workspace = true
 description = "Lattice Transfer Protocol attestation pipeline + super-node integration (paper §10)."
 
 [dependencies]

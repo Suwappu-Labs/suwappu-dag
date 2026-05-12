@@ -20,6 +20,10 @@ rust-version = "1.78"
 license = "Apache-2.0"
 repository = "https://github.com/GlobalSettlementNetwork/gsx-dag"
 authors = ["Global Settlement Network <eng@globalsettlement.com>"]
+# Workspace-internal crates. These are not published to crates.io; consuming
+# code uses git/path dependencies on the repo. This also lets cargo-deny
+# accept the workspace path wildcards under `[bans] allow-wildcard-paths`.
+publish = false
 
 [workspace.dependencies]
 # Internal
