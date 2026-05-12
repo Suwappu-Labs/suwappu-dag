@@ -11,6 +11,7 @@ description = "Inter-validator transport — SCION + RaptorQ erasure coding (pap
 
 [dependencies]
 gsx-crypto.workspace = true
+blake3.workspace = true
 raptorq.workspace = true
 serde.workspace = true
 thiserror.workspace = true
@@ -18,5 +19,6 @@ tracing.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+blake3.workspace = true
 proptest.workspace = true
 rand.workspace = true
