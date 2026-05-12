@@ -1,0 +1,23 @@
+[package]
+name = "gsx-execution"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "DAG block executor — wires the gsx-db state substrate into the consensus pipeline (paper §7)."
+
+[dependencies]
+gsx-crypto.workspace = true
+gsx-consensus.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+# gsx-db dependency added in DAG-S10 once the public Git tag is cut.
+# gsxdb-bridge = { git = "https://github.com/GlobalSettlementNetwork/gsx-db", tag = "v0.1.0" }
+# gsxdb-state  = { git = "https://github.com/GlobalSettlementNetwork/gsx-db", tag = "v0.1.0" }
+
+[dev-dependencies]
+proptest.workspace = true

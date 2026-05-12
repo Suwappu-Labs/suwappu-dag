@@ -1,0 +1,30 @@
+[package]
+name = "gsx-node"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Top-level GSX DAG node binary: composes all layers into a running validator."
+
+[[bin]]
+name = "gsx-node"
+path = "src/main.rs"
+
+[dependencies]
+gsx-crypto.workspace = true
+gsx-consensus.workspace = true
+gsx-authority.workspace = true
+gsx-validator.workspace = true
+gsx-fastpath.workspace = true
+gsx-execution.workspace = true
+gsx-precompiles.workspace = true
+gsx-ltp.workspace = true
+gsx-transport.workspace = true
+
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true

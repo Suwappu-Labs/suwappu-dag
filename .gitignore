@@ -1,0 +1,38 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Local config
+config.local.toml
+.env
+.env.local
+
+# Build artifacts
+/dist
+/out
+
+# Terraform
+**/.terraform/
+**/.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfplan
+terraform.tfvars
+terraform.tfvars.json
+
+# Coverage
+/coverage
+*.profraw
+*.profdata
+
+# Local sprint state (allowed at root, ignored elsewhere)
+**/.sprint-state.md
+!/.sprint-state.md

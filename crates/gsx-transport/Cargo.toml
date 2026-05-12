@@ -1,0 +1,19 @@
+[package]
+name = "gsx-transport"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Inter-validator transport — SCION + RaptorQ erasure coding (paper §6.3)."
+
+[dependencies]
+gsx-crypto.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
