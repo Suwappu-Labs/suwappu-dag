@@ -74,7 +74,7 @@ Between sessions, you resume via:
 | Sprint | Scope                                                     | Status      | Exit gate |
 |--------|-----------------------------------------------------------|-------------|-----------|
 | DAG-S1 | `gsx-crypto` — ML-DSA-65, ML-KEM-768, BLS12-381, SHA3-256 | ✅ Closed    | 7 properties × 10k cases (`tests/proptest_roundtrips.rs`) |
-| DAG-S2 | `gsx-transport` — RaptorQ shred/reconstruct (in-mem)      | ⏳ Queued    | `raptorq_reconstructs_under_loss` @ 10k |
+| DAG-S2 | `gsx-transport` — RaptorQ shred/reconstruct (in-mem)      | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_reconstruction.rs`) |
 | DAG-S3 | `gsx-consensus` — DAG store, certificate types, voting   | ⏳ Queued    | `dag_topological_order_unique` @ 10k |
 | DAG-S4 | `gsx-consensus` — Mysticeti-C commit rule                | ⏳ Queued    | `mysticeti_c_finality` @ 10k |
 | DAG-S5 | `gsx-consensus` — joint-quorum AND-gate                  | ⏳ Queued    | `joint_quorum_safety` @ 10k |

@@ -49,6 +49,9 @@ blst = "0.3"
 sha3 = "0.10"
 blake3 = "1.5"
 
+# Erasure coding (RFC 6330) — gsx-transport block shred/reconstruct
+raptorq = "2.0"
+
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

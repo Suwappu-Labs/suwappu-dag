@@ -13,12 +13,16 @@
 //!
 //! Sprint scope:
 //!
-//! - DAG-S2: RaptorQ block-shred + reconstruction (in-memory)
+//! - DAG-S2: RaptorQ block-shred + reconstruction (in-memory) ✅
 //! - DAG-S18: SCION path-authenticated routing integration
 //! - DAG-S19: SCION-IP-Gateway external-client fallback
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
+
+pub mod raptorq;
+
+pub use raptorq::{reconstruct, shred, Shred, ShredSet, TransportError};
 
 /// Default RaptorQ block size for inter-validator gossip (tunable).
 pub const DEFAULT_RAPTORQ_BLOCK_BYTES: usize = 64 * 1024;
