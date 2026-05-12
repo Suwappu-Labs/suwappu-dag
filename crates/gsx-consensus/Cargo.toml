@@ -11,9 +11,11 @@ description = "Mysticeti-C certificate DAG consensus + BFT linearization for the
 
 [dependencies]
 gsx-crypto.workspace = true
+blake3.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+rand.workspace = true

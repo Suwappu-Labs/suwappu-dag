@@ -8,9 +8,9 @@
 //! - §6.3 inter-validator transport boundary (delegated to `gsx-transport`)
 //! - §6.4 fast-path lane boundary (delegated to `gsx-fastpath`)
 //!
-//! Sprint scope (this crate):
+//! Sprint scope:
 //!
-//! - DAG-S3: certificate types, DAG store, voting rule
+//! - DAG-S3: certificate types, DAG store, deterministic linearization ✅
 //! - DAG-S4: Mysticeti-C commit rule, fork-choice
 //! - DAG-S5: joint-quorum AND-gate over Authority Ring + Validator Ring
 //!   certificates (paper Theorem 2)
@@ -20,18 +20,10 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-/// Placeholder for the consensus round counter.
-///
-/// Will be defined concretely in DAG-S3.
-pub type Round = u64;
+pub mod cert;
+pub mod dag;
+pub mod error;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn round_is_u64() {
-        let r: Round = 0;
-        assert_eq!(r, 0);
-    }
-}
+pub use cert::{AuthorityId, CertHash, Certificate, Round};
+pub use dag::DagStore;
+pub use error::ConsensusError;
