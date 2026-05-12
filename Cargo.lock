@@ -303,6 +303,7 @@ name = "gsx-execution"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "gsx-authority",
  "gsx-consensus",
  "gsx-crypto",
  "hex",

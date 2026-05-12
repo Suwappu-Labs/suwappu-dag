@@ -10,8 +10,9 @@ publish.workspace = true
 description = "DAG block executor — wires the gsx-db state substrate into the consensus pipeline (paper §7)."
 
 [dependencies]
-gsx-crypto.workspace = true
+gsx-authority.workspace = true
 gsx-consensus.workspace = true
+gsx-crypto.workspace = true
 blake3.workspace = true
 hex.workspace = true
 serde.workspace = true

@@ -56,6 +56,12 @@ impl Signature {
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
+    /// Construct from wire bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
+        mldsa65::DetachedSignature::from_bytes(bytes)
+            .map(|_| Self(bytes.to_vec()))
+            .map_err(|_| CryptoError::InvalidSignature)
+    }
 }
 
 /// Generate a fresh ML-DSA-65 keypair from system randomness.
