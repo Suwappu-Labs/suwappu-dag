@@ -30,11 +30,15 @@ gsx-transport.workspace = true
 
 anyhow.workspace = true
 bincode.workspace = true
+clap.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util", "sync", "time"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util", "sync", "time", "fs"] }
+toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-serde.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
