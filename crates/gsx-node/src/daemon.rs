@@ -167,6 +167,18 @@ impl Daemon {
         // when this daemon is dropped.
         tasks.append(&mut wire_tasks);
 
+        // Client listener: load generator submits intents over this socket.
+        {
+            let client_task = crate::client::run(
+                cfg.client_listen,
+                self_label.clone(),
+                state.clone(),
+                log.clone(),
+            )
+            .await?;
+            tasks.push(client_task);
+        }
+
         Ok(Self {
             _log_task: log_task,
             tasks,
@@ -346,6 +358,69 @@ mod tests {
     use super::*;
     use crate::config::{GenesisValidator, Peer};
     use std::net::SocketAddr;
+
+    /// Submit one transfer intent over the client listener, give it time to
+    /// land in `state.pending_intents`, and verify it was queued.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn client_listener_accepts_intent() {
+        let n = 1u32;
+        let base_port: u16 = 19_500;
+        let manifest = GenesisManifest {
+            network_id: "client-1n".into(),
+            validators: (0..n)
+                .map(|i| GenesisValidator {
+                    authority_id: i,
+                    label: format!("v{}", i),
+                    mldsa_public_key_hex: "00".into(),
+                    bls_public_key_hex: "00".into(),
+                    validator_stake_gsx: 1_000,
+                    authority_stake_gsx: 1_000,
+                })
+                .collect(),
+        };
+        let cfg = NodeConfig {
+            self_id: "v0".into(),
+            authority_id: 0,
+            listen: format!("127.0.0.1:{}", base_port).parse().unwrap(),
+            client_listen: format!("127.0.0.1:{}", base_port + 100).parse().unwrap(),
+            peers: vec![],
+            round_ms: 500,
+            checkpoint_cadence_rounds: 1,
+            mldsa_secret_key_path: "/dev/null".into(),
+            bls_secret_key_path: "/dev/null".into(),
+            genesis_manifest_path: "/dev/null".into(),
+            event_log_path: std::env::temp_dir().join("gsx-client-test.ndjson"),
+        };
+        let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let mut client = crate::client::LoadGenClient::connect(cfg.client_listen)
+            .await
+            .unwrap();
+        let intent = gsx_execution::Intent::Transfer {
+            from: [1u8; 20],
+            to: [2u8; 20],
+            amount: 42,
+        };
+        let _hash = client.submit(intent).await.unwrap();
+        // Give the daemon a moment to process the submission.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // The intent is briefly in pending_intents before being drained by the
+        // next round tick. Either we catch it before the tick, or the next
+        // round (within 500ms) carries it into the block cache.
+        let s = d.state.lock().await;
+        let queued_or_committed = !s.pending_intents.is_empty()
+            || s.blocks.values().any(|b| {
+                b.intents.iter().any(|i| {
+                    matches!(
+                        i,
+                        gsx_execution::Intent::Transfer { amount: 42, .. }
+                    )
+                })
+            });
+        assert!(queued_or_committed, "intent was not queued or blocked");
+    }
 
     /// 4 daemons on loopback, all dialing each other. Within 3 seconds at
     /// 100 ms round cadence, every validator should have committed at least

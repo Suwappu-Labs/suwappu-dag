@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod client;
 pub mod config;
 pub mod daemon;
 pub mod events;

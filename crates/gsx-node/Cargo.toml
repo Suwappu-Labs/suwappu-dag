@@ -17,6 +17,14 @@ path = "src/lib.rs"
 name = "gsx-node"
 path = "src/main.rs"
 
+[[bin]]
+name = "gsx-loadgen"
+path = "src/bin/gsx-loadgen.rs"
+
+[[bin]]
+name = "gsx-metrics"
+path = "src/bin/gsx-metrics.rs"
+
 [dependencies]
 gsx-crypto.workspace = true
 gsx-consensus.workspace = true
@@ -33,10 +41,11 @@ bincode.workspace = true
 blake3.workspace = true
 clap.workspace = true
 hex.workspace = true
+rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util", "sync", "time", "fs"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util", "sync", "time", "fs", "signal"] }
 toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

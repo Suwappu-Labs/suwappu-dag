@@ -1,15 +1,29 @@
 //! gsx-node — top-level GSX DAG node binary.
 //!
-//! Composes the consensus, authority/validator, fast-path, execution, precompile,
-//! LTP, and transport crates into a single running validator. Configuration is
-//! read from `config.toml`; telemetry is emitted via `tracing`.
+//! Loads a TOML config + shared genesis manifest, starts the validator
+//! daemon, and runs until killed. The daemon composes wire transport, DAG
+//! consensus, joint-quorum voting, block execution, and the client intent
+//! listener.
 //!
-//! Phase-1 binary is a no-op shell — actual subsystem wiring lands sprint by
-//! sprint per `docs/architecture/sprint-map.md`. The full integration logic
-//! is exposed as a library at `gsx_node::validator` (see DAG-S20).
+//! Usage:
+//!
+//! ```text
+//! gsx-node --config /etc/gsx/node.toml
+//! ```
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use clap::Parser;
 use tracing_subscriber::EnvFilter;
+
+use gsx_node::{Daemon, GenesisManifest, NodeConfig};
+
+#[derive(Parser, Debug)]
+#[command(name = "gsx-node", version, about = "GSX DAG validator daemon")]
+struct Args {
+    /// Path to the per-validator TOML config.
+    #[arg(long)]
+    config: std::path::PathBuf,
+}
 
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
@@ -19,9 +33,29 @@ fn init_tracing() {
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing();
+    let args = Args::parse();
+
+    let cfg = NodeConfig::from_path(&args.config)
+        .with_context(|| format!("load node config {}", args.config.display()))?;
+    let manifest = GenesisManifest::from_path(&cfg.genesis_manifest_path)
+        .with_context(|| format!("load genesis {}", cfg.genesis_manifest_path.display()))?;
+
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
-        "gsx-node starting (phase-1 shell — subsystem wiring lands per sprint)",
+        self_id = %cfg.self_id,
+        authority_id = cfg.authority_id,
+        listen = %cfg.listen,
+        client_listen = %cfg.client_listen,
+        peers = cfg.peers.len(),
+        "gsx-node starting"
     );
+
+    let _daemon = Daemon::start(cfg, manifest).await?;
+    tracing::info!("gsx-node running — SIGINT/SIGTERM to stop");
+
+    // Park until the process is signalled; tokio's ctrl_c also catches
+    // SIGTERM from systemd on Linux.
+    tokio::signal::ctrl_c().await.ok();
+    tracing::info!("gsx-node shutting down");
     Ok(())
 }
