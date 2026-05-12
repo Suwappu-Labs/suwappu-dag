@@ -35,10 +35,31 @@ use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-use gsx_consensus::cert::Certificate;
+use gsx_consensus::cert::{CertHash, Certificate};
 use gsx_consensus::joint::Vote;
+use gsx_execution::Intent;
 use gsx_fastpath::cert::FastPathCert;
 use gsx_ltp::attestation::CorridorAttestation;
+
+/// Side-channel block payload referenced by a [`Certificate::payload_digest`].
+/// Mysticeti-C separates cert proposal from block dissemination — the cert
+/// commits to a 32-byte digest, the block (which carries the actual intents)
+/// flows on a parallel `WireMessage::Block` frame.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BlockPayload {
+    /// 32-byte content hash of `intents` (blake3). Must equal the
+    /// `payload_digest` of the associated cert.
+    pub payload_digest: [u8; 32],
+    /// Authoring authority id (matches the cert's `author`).
+    pub author: u32,
+    /// DAG round number (matches the cert's `round`).
+    pub round: u64,
+    /// Cert hash this block backs. Lets the receiver match block → cert
+    /// without reconstructing the cert independently.
+    pub cert_hash: CertHash,
+    /// Ordered list of intents in this block.
+    pub intents: Vec<Intent>,
+}
 
 /// Per-cluster peer identifier. Carries a human label so logs are readable
 /// across a 7-region deployment. Not load-bearing for consensus — every
@@ -58,6 +79,8 @@ impl PeerId {
 pub enum WireMessage {
     /// Authority Ring certificate proposal (Mysticeti-C).
     Cert(Certificate),
+    /// Block payload backing a cert (intents + digest match check).
+    Block(BlockPayload),
     /// Validator Ring ratification vote (joint quorum AND-gate).
     Vote(Vote),
     /// Single-owner fast-path certificate (paper §6.4).
@@ -129,6 +152,18 @@ pub struct Wire {
     tasks: Vec<JoinHandle<()>>,
 }
 
+/// Components of a [`Wire`] handed out via [`Wire::split`]. The accept/dialer
+/// background tasks transfer with the inbox so callers don't have to track
+/// them separately.
+pub struct WireSplit {
+    /// Inbound receiver — drains messages from every peer.
+    pub inbox: mpsc::Receiver<WireEvent>,
+    /// Per-peer outbound senders.
+    pub outbound: HashMap<PeerId, mpsc::Sender<WireMessage>>,
+    /// Background accept/dialer tasks. Abort them to stop the wire.
+    pub tasks: Vec<JoinHandle<()>>,
+}
+
 impl Drop for Wire {
     fn drop(&mut self) {
         for t in self.tasks.drain(..) {
@@ -138,6 +173,23 @@ impl Drop for Wire {
 }
 
 impl Wire {
+    /// Decompose into raw inbox / outbound / task-set components. After this,
+    /// the original `Wire` is consumed and the caller is responsible for
+    /// aborting the returned tasks when shutting down.
+    pub fn split(mut self) -> WireSplit {
+        // Replace the inner channels with empty stand-ins so `Drop` doesn't
+        // abort the tasks we're handing out.
+        let (_dummy_tx, dummy_inbox) = mpsc::channel::<WireEvent>(1);
+        let inbox = std::mem::replace(&mut self.inbox, dummy_inbox);
+        let outbound = std::mem::take(&mut self.outbound);
+        let tasks = std::mem::take(&mut self.tasks);
+        WireSplit {
+            inbox,
+            outbound,
+            tasks,
+        }
+    }
+
     /// Bind the listen socket, dial every peer, return a running handle.
     pub async fn start(cfg: WireConfig) -> Result<Self, WireError> {
         let (inbound_tx, inbound_rx) = mpsc::channel::<WireEvent>(4096);

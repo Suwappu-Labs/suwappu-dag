@@ -1,0 +1,427 @@
+//! Validator daemon — main DAG lane.
+//!
+//! Composes the wire transport, DAG store, joint-quorum voter, and block
+//! executor into a single running process. Drives Mysticeti-C rounds on a
+//! tokio interval and surfaces per-event timestamps to the [`EventLog`].
+//!
+//! Scope of this module is the **main lane only**: cert proposal, vote
+//! handling, joint-commit, block execution. Fast-path and LTP integration
+//! live in their own modules (added in follow-on commits) and tap the same
+//! Wire / EventLog instances.
+//!
+//! Event-log lines emitted:
+//!
+//! - `lane=main event=proposed`  — round driver authored a cert
+//! - `lane=main event=received`  — peer cert arrived
+//! - `lane=main event=voted`     — local validator emitted a Vote
+//! - `lane=main event=committed` — joint quorum fired; cert committed
+
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::sync::Mutex;
+use tracing::debug;
+
+use gsx_consensus::cert::{CertHash, Certificate};
+use gsx_consensus::commit::{cert_at, quorum_threshold};
+use gsx_consensus::dag::DagStore;
+use gsx_consensus::joint::{joint_commit, StakeTable, Vote};
+use gsx_consensus::AuthorityId;
+use gsx_execution::{execute_block, Block, InMemorySubstrate};
+#[cfg(test)]
+use gsx_execution::Substrate;
+
+use crate::config::{GenesisManifest, NodeConfig};
+use crate::events::{Event, EventLog, Lane};
+use crate::wire::{BlockPayload, PeerId, Wire, WireConfig, WireEvent, WireMessage, WireSplit};
+
+/// Pending main-lane state. Shared between the inbox handler and the round
+/// driver, both of which mutate it.
+pub(crate) struct State {
+    pub(crate) dag: DagStore,
+    pub(crate) substrate: InMemorySubstrate,
+    pub(crate) stake_table: StakeTable,
+    pub(crate) votes: HashMap<CertHash, Vec<Vote>>,
+    pub(crate) blocks: HashMap<CertHash, BlockPayload>,
+    pub(crate) committed: HashSet<CertHash>,
+    pub(crate) last_authored_round: Option<u64>,
+    pub(crate) pending_intents: Vec<gsx_execution::Intent>,
+    pub(crate) n_authorities: u32,
+}
+
+impl State {
+    fn new(manifest: &GenesisManifest) -> Self {
+        let mut stake_table = StakeTable::new();
+        for v in &manifest.validators {
+            stake_table.insert(v.authority_id, v.validator_stake_gsx);
+        }
+        let n = manifest.validators.len() as u32;
+        Self {
+            dag: DagStore::new(),
+            substrate: InMemorySubstrate::new(),
+            stake_table,
+            votes: HashMap::new(),
+            blocks: HashMap::new(),
+            committed: HashSet::new(),
+            last_authored_round: None,
+            pending_intents: Vec::new(),
+            n_authorities: n,
+        }
+    }
+
+    /// Count distinct authors that have a cert at `round` in the local DAG.
+    /// Mysticeti-C admits a cert at round R+1 once `quorum_threshold(n)`
+    /// distinct authors are observed at round R.
+    fn distinct_authors_at(&self, round: u64) -> u32 {
+        (0..self.n_authorities)
+            .filter(|a| cert_at(&self.dag, round, *a).is_some())
+            .count() as u32
+    }
+
+    /// Round R parents = every cert at round R-1 the local DAG has observed.
+    fn parents_for_round(&self, round: u64) -> Vec<CertHash> {
+        if round == 0 {
+            return Vec::new();
+        }
+        (0..self.n_authorities)
+            .filter_map(|a| cert_at(&self.dag, round - 1, a))
+            .collect()
+    }
+}
+
+/// Running daemon handle. Drop to stop all background tasks.
+pub struct Daemon {
+    /// Held so the writer task survives until the daemon is dropped.
+    _log_task: tokio::task::JoinHandle<()>,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+    /// Internal state. Exposed to crate-local code (integration tests, plus
+    /// the upcoming load-generator + metrics modules that will read commit
+    /// progress and inject intents).
+    #[allow(dead_code)]
+    pub(crate) state: Arc<Mutex<State>>,
+}
+
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        for t in self.tasks.drain(..) {
+            t.abort();
+        }
+    }
+}
+
+impl Daemon {
+    /// Bootstrap the daemon: wire up, load registries, spawn the round driver
+    /// and inbox handler. Returns once the wire is bound and tasks are live —
+    /// does not block until shutdown. Drop the returned handle to stop.
+    pub async fn start(cfg: NodeConfig, manifest: GenesisManifest) -> anyhow::Result<Self> {
+        manifest.validate_against(&cfg)?;
+        let self_id: AuthorityId = cfg.authority_id;
+        let self_label = cfg.self_id.clone();
+        let round_ms = cfg.round_ms;
+
+        let (log, log_task) = EventLog::start(&cfg.event_log_path).await?;
+        let wire = Wire::start(WireConfig {
+            self_id: PeerId::new(self_label.clone()),
+            listen: cfg.listen,
+            peers: cfg
+                .peers
+                .iter()
+                .map(|p| (PeerId::new(p.id.clone()), p.addr))
+                .collect(),
+        })
+        .await?;
+        let WireSplit {
+            inbox,
+            outbound,
+            tasks: mut wire_tasks,
+        } = wire.split();
+        let outbound = Arc::new(outbound);
+        let state = Arc::new(Mutex::new(State::new(&manifest)));
+
+        let mut tasks = Vec::new();
+
+        // Inbox handler: per-message dispatch.
+        {
+            let state = state.clone();
+            let outbound = outbound.clone();
+            let log = log.clone();
+            let self_label = self_label.clone();
+            tasks.push(tokio::spawn(async move {
+                run_inbox(self_label, self_id, state, outbound, log, inbox).await;
+            }));
+        }
+
+        // Round driver.
+        {
+            let state = state.clone();
+            let outbound = outbound.clone();
+            let log = log.clone();
+            let self_label = self_label.clone();
+            tasks.push(tokio::spawn(async move {
+                run_round_driver(self_label, self_id, round_ms, state, outbound, log).await;
+            }));
+        }
+
+        // Take ownership of the wire's accept/dialer tasks so they're aborted
+        // when this daemon is dropped.
+        tasks.append(&mut wire_tasks);
+
+        Ok(Self {
+            _log_task: log_task,
+            tasks,
+            state,
+        })
+    }
+}
+
+async fn run_inbox(
+    self_label: String,
+    self_id: AuthorityId,
+    state: Arc<Mutex<State>>,
+    outbound: Arc<HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>>,
+    log: EventLog,
+    mut inbox: tokio::sync::mpsc::Receiver<WireEvent>,
+) {
+    while let Some(ev) = inbox.recv().await {
+        let WireEvent { from, msg } = ev;
+        match msg {
+            WireMessage::Cert(cert) => {
+                let h = cert.hash();
+                let round = cert.round;
+                log.emit(
+                    Event::now(&self_label, Lane::Main, "received")
+                        .with_round(round)
+                        .with_cert_hash(&h.0)
+                        .with_peer(from.0.clone()),
+                );
+                let mut s = state.lock().await;
+                if s.dag.insert(cert).is_err() {
+                    debug!(peer = %from.0, "inbox: duplicate or invalid cert");
+                    continue;
+                }
+                let vote = Vote {
+                    validator: self_id,
+                    candidate: h,
+                };
+                s.votes.entry(h).or_default().push(vote);
+                drop(s);
+
+                log.emit(
+                    Event::now(&self_label, Lane::Main, "voted")
+                        .with_round(round)
+                        .with_cert_hash(&h.0),
+                );
+                broadcast(&outbound, WireMessage::Vote(vote)).await;
+                // After voting we may have just enabled a commit ourselves
+                // (e.g. quorum_threshold reached on the round-0 leader).
+                let mut s = state.lock().await;
+                try_commit(&mut s, &self_label, &log);
+            }
+            WireMessage::Block(block) => {
+                let mut s = state.lock().await;
+                s.blocks.insert(block.cert_hash, block);
+            }
+            WireMessage::Vote(vote) => {
+                let mut s = state.lock().await;
+                s.votes.entry(vote.candidate).or_default().push(vote);
+                try_commit(&mut s, &self_label, &log);
+            }
+            WireMessage::FastPath(_) | WireMessage::Ltp(_) => {
+                // Lanes handled in follow-on commit. Ignored on the main lane.
+            }
+            WireMessage::Ping(t) => {
+                if let Some(tx) = outbound.get(&from) {
+                    let _ = tx.send(WireMessage::Pong(t)).await;
+                }
+            }
+            WireMessage::Pong(_) => {}
+        }
+    }
+}
+
+async fn broadcast(
+    outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
+    msg: WireMessage,
+) {
+    for tx in outbound.values() {
+        let _ = tx.send(msg.clone()).await;
+    }
+}
+
+fn try_commit(s: &mut State, self_label: &str, log: &EventLog) {
+    // Find rounds with at least one voted-on cert. For each such round, ask
+    // joint_commit whether the round's leader fires.
+    let candidate_rounds: BTreeSet<u64> = s
+        .votes
+        .keys()
+        .filter_map(|h| s.dag.get(h).map(|c| c.round))
+        .collect();
+
+    for round in candidate_rounds {
+        let votes_flat: Vec<Vote> = s.votes.values().flatten().copied().collect();
+        let Some(committed) =
+            joint_commit(&s.dag, round, s.n_authorities, &s.stake_table, &votes_flat)
+        else {
+            continue;
+        };
+        if !s.committed.insert(committed) {
+            continue;
+        }
+        let intents = s
+            .blocks
+            .get(&committed)
+            .map(|b| b.intents.clone())
+            .unwrap_or_default();
+        let block = Block { round, intents };
+        let _ = execute_block(&mut s.substrate, &block);
+        log.emit(
+            Event::now(self_label, Lane::Main, "committed")
+                .with_round(round)
+                .with_cert_hash(&committed.0),
+        );
+        s.votes.remove(&committed);
+    }
+}
+
+async fn run_round_driver(
+    self_label: String,
+    self_id: AuthorityId,
+    round_ms: u64,
+    state: Arc<Mutex<State>>,
+    outbound: Arc<HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>>,
+    log: EventLog,
+) {
+    let mut tick = tokio::time::interval(Duration::from_millis(round_ms));
+    loop {
+        tick.tick().await;
+        let mut s = state.lock().await;
+        let target_round = match s.last_authored_round {
+            None => 0u64,
+            Some(prev) => {
+                if s.distinct_authors_at(prev) < quorum_threshold(s.n_authorities) {
+                    debug!(prev, "round driver: waiting for quorum at prev round");
+                    continue;
+                }
+                prev + 1
+            }
+        };
+        let parents = s.parents_for_round(target_round);
+        let intents = std::mem::take(&mut s.pending_intents);
+        let payload_digest: [u8; 32] = blake3::hash(
+            &bincode::serialize(&intents).expect("intents serialize"),
+        )
+        .into();
+        let cert = Certificate {
+            author: self_id,
+            round: target_round,
+            parents,
+            payload_digest,
+        };
+        let cert_hash = cert.hash();
+        s.last_authored_round = Some(target_round);
+        let _ = s.dag.insert(cert.clone());
+        let block = BlockPayload {
+            payload_digest,
+            author: self_id,
+            round: target_round,
+            cert_hash,
+            intents,
+        };
+        s.blocks.insert(cert_hash, block.clone());
+        drop(s);
+
+        log.emit(
+            Event::now(&self_label, Lane::Main, "proposed")
+                .with_round(target_round)
+                .with_cert_hash(&cert_hash.0),
+        );
+        broadcast(&outbound, WireMessage::Block(block)).await;
+        broadcast(&outbound, WireMessage::Cert(cert)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{GenesisValidator, Peer};
+    use std::net::SocketAddr;
+
+    /// 4 daemons on loopback, all dialing each other. Within 3 seconds at
+    /// 100 ms round cadence, every validator should have committed at least
+    /// one round-0 cert, and all 4 substrates should agree on the post-commit
+    /// state root.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn four_node_main_lane_commits() {
+        let n = 4u32;
+        let base_port: u16 = 19_000;
+
+        let manifest = GenesisManifest {
+            network_id: "test-4n".into(),
+            validators: (0..n)
+                .map(|i| GenesisValidator {
+                    authority_id: i,
+                    label: format!("v{}", i),
+                    mldsa_public_key_hex: "00".into(),
+                    bls_public_key_hex: "00".into(),
+                    validator_stake_gsx: 1_000,
+                    authority_stake_gsx: 1_000,
+                })
+                .collect(),
+        };
+
+        let mut daemons = Vec::new();
+        for i in 0..n {
+            let peers: Vec<Peer> = (0..n)
+                .filter(|j| *j != i)
+                .map(|j| Peer {
+                    id: format!("v{}", j),
+                    addr: format!("127.0.0.1:{}", base_port + j as u16)
+                        .parse::<SocketAddr>()
+                        .unwrap(),
+                })
+                .collect();
+            let cfg = NodeConfig {
+                self_id: format!("v{}", i),
+                authority_id: i,
+                listen: format!("127.0.0.1:{}", base_port + i as u16)
+                    .parse::<SocketAddr>()
+                    .unwrap(),
+                client_listen: format!("127.0.0.1:{}", base_port + 100 + i as u16)
+                    .parse::<SocketAddr>()
+                    .unwrap(),
+                peers,
+                round_ms: 100,
+                checkpoint_cadence_rounds: 1,
+                mldsa_secret_key_path: "/dev/null".into(),
+                bls_secret_key_path: "/dev/null".into(),
+                genesis_manifest_path: "/dev/null".into(),
+                event_log_path: std::env::temp_dir()
+                    .join(format!("gsx-daemon-test-v{}.ndjson", i)),
+            };
+            let d = Daemon::start(cfg, manifest.clone()).await.unwrap();
+            daemons.push(d);
+        }
+
+        // Give the network time to bring up TCP, propose round 0, vote, and
+        // commit. 3s @ 100ms cadence = 30 rounds of headroom.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+
+        // Assert every daemon committed at least one cert and all agree on
+        // the substrate state root.
+        let mut state_roots = Vec::new();
+        for d in &daemons {
+            let s = d.state.lock().await;
+            assert!(
+                !s.committed.is_empty(),
+                "daemon {:?} did not commit any cert",
+                s.last_authored_round
+            );
+            state_roots.push(s.substrate.state_root());
+        }
+        let first = state_roots[0];
+        for r in &state_roots[1..] {
+            assert_eq!(*r, first, "state roots disagree across daemons");
+        }
+    }
+}

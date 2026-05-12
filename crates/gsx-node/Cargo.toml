@@ -30,6 +30,7 @@ gsx-transport.workspace = true
 
 anyhow.workspace = true
 bincode.workspace = true
+blake3.workspace = true
 clap.workspace = true
 hex.workspace = true
 serde.workspace = true
