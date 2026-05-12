@@ -47,4 +47,8 @@ highlight = "all"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+allow-git = [
+    # gsx-db state substrate (paper §7.4). Consumed at v0.1.0 by
+    # gsx-execution's GsxDbSubstrate adapter.
+    "https://github.com/GlobalSettlementNetwork/gsx-db",
+]
