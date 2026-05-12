@@ -26,6 +26,10 @@ authors = ["Global Settlement Network <eng@globalsettlement.com>"]
 publish = false
 
 [workspace.dependencies]
+# External: gsx-db state substrate (paper §7.4)
+gsxdb-bridge = { git = "https://github.com/GlobalSettlementNetwork/gsx-db.git", tag = "v0.1.0" }
+gsxdb-state = { git = "https://github.com/GlobalSettlementNetwork/gsx-db.git", tag = "v0.1.0" }
+
 # Internal
 gsx-crypto = { path = "crates/gsx-crypto", default-features = false }
 gsx-consensus = { path = "crates/gsx-consensus", default-features = false }

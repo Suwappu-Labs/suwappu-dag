@@ -31,6 +31,7 @@
 pub mod block;
 pub mod checkpoint;
 pub mod error;
+pub mod gsx_db_substrate;
 pub mod substrate;
 
 pub use block::{execute_block, Block, ExecutionReport};
@@ -39,6 +40,7 @@ pub use checkpoint::{
     CheckpointSignature, Checkpointer, CoSignedCheckpoint,
 };
 pub use error::ExecutionError;
+pub use gsx_db_substrate::GsxDbSubstrate;
 pub use substrate::{Address, Balance, InMemorySubstrate, Intent, Substrate};
 
 /// Checkpoint cadence C — the rate at which the Authority Ring co-signs a

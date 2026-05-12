@@ -13,18 +13,13 @@ description = "DAG block executor — wires the gsx-db state substrate into the 
 gsx-authority.workspace = true
 gsx-consensus.workspace = true
 gsx-crypto.workspace = true
+gsxdb-bridge.workspace = true
+gsxdb-state.workspace = true
 blake3.workspace = true
 hex.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-
-# gsx-db is consumed through the `Substrate` trait (this crate) so the
-# phase-1 adapter has zero external dep. The real wire-up — a thin
-# `GsxDbSubstrate` impl over `gsxdb-bridge::BlockExecutor` — lands when
-# the gsx-db v0.1.0 tag is cut on GitHub:
-# gsxdb-bridge = { git = "https://github.com/GlobalSettlementNetwork/gsx-db", tag = "v0.1.0" }
-# gsxdb-state  = { git = "https://github.com/GlobalSettlementNetwork/gsx-db", tag = "v0.1.0" }
 
 [dev-dependencies]
 proptest.workspace = true

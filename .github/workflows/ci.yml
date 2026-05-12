@@ -9,6 +9,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
+  # Use system git for cargo fetches so the SSH deploy key works.
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
 jobs:
   fmt:
@@ -26,6 +28,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Setup gsx-db deploy key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.GSX_DB_DEPLOY_KEY }}
+      - name: Rewrite https://github.com → git@github.com for cargo
+        run: git config --global url."git@github.com:".insteadOf "https://github.com/"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -37,6 +45,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Setup gsx-db deploy key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.GSX_DB_DEPLOY_KEY }}
+      - name: Rewrite https://github.com → git@github.com for cargo
+        run: git config --global url."git@github.com:".insteadOf "https://github.com/"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-targets
@@ -46,6 +60,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Setup gsx-db deploy key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.GSX_DB_DEPLOY_KEY }}
+      - name: Rewrite https://github.com → git@github.com for cargo
+        run: git config --global url."git@github.com:".insteadOf "https://github.com/"
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
