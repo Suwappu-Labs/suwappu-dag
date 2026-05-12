@@ -20,8 +20,10 @@
 #![warn(missing_docs)]
 
 pub mod registry;
+pub mod slashing;
 
 pub use registry::{AdmissionError, AuthorityMember, AuthorityRegistry};
+pub use slashing::{readmit_authority, slash_authority, AuthoritySlash};
 
 /// Authority Ring participant identifier — index into the published set.
 pub type AuthorityId = u32;

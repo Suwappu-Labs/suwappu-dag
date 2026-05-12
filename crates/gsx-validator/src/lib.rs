@@ -18,8 +18,10 @@
 #![warn(missing_docs)]
 
 pub mod registry;
+pub mod slashing;
 
 pub use registry::{AdmissionError, ValidatorMember, ValidatorRegistry};
+pub use slashing::{slash_validator, slash_validator_double_vote, SlashSeverity, ValidatorSlash};
 
 /// Validator Ring participant identifier.
 pub type ValidatorId = u32;
