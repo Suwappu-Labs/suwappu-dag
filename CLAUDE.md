@@ -80,7 +80,7 @@ Between sessions, you resume via:
 | DAG-S5 | `gsx-consensus` — joint-quorum AND-gate (Theorem 2)     | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_joint_quorum.rs`) |
 | DAG-S6 | `gsx-authority` + `gsx-validator` — registries & quorum  | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_quorum.rs`) |
 | DAG-S7 | Equivocation detection + slashing                         | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_slashing.rs`) |
-| DAG-S8 | `gsx-fastpath` — single-owner lane + K=4 binding         | ⏳ Queued    | `fast_path_main_lane_consistency` @ 10k |
+| DAG-S8 | `gsx-fastpath` — single-owner lane + K=4 binding         | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_fast_path.rs`) |
 | DAG-S9 | Fast-path equivocation slashing                          | ⏳ Queued    | `fast_path_equivocation_full_slash` @ 10k |
 | DAG-S10 | `gsx-execution` — wire gsx-db; block executor adapter   | ⏳ Queued    | `block_execution_matches_substrate` @ 10k |
 | DAG-S11 | Checkpoint cadence + Authority joint co-signature       | ⏳ Queued    | `joint_state_commitment_signed` @ 10k |

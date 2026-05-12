@@ -11,26 +11,21 @@
 //!
 //! Sprint scope:
 //!
-//! - DAG-S8: eligibility check, fast-path certificate type, K=4 main-lane
-//!   confirmation rounds
+//! - DAG-S8: eligibility check, fast-path certificate type,
+//!   K=4 main-lane binding window ✅
 //! - DAG-S9: equivocation detection and slashing path
 //!
 //! Property: a fast-path-certified transaction whose main-lane confirmation
-//! observes a conflicting ordering yields an equivocation proof that slashes
-//! every signing Authority Node at 100% of bonded stake.
+//! observes a conflicting ordering within `FAST_PATH_CONFIRMATION_K` rounds
+//! yields an equivocation signal; otherwise the certificate is binding.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-/// Main-lane confirmation depth K for fast-path binding (paper §6.4).
-pub const FAST_PATH_CONFIRMATION_K: u32 = 4;
+pub mod binding;
+pub mod cert;
+pub mod quorum;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn confirmation_k_matches_paper() {
-        assert_eq!(FAST_PATH_CONFIRMATION_K, 4);
-    }
-}
+pub use binding::{is_main_lane_consistent, MainLaneTx, FAST_PATH_CONFIRMATION_K};
+pub use cert::{FastPathCert, FastPathTx, OwnedObjectId, OwnerAddress};
+pub use quorum::{certify, fast_path_quorum_size, FastPathError};
