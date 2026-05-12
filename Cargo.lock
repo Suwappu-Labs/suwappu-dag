@@ -330,8 +330,10 @@ dependencies = [
 name = "gsx-ltp"
 version = "0.1.0"
 dependencies = [
+ "blst",
  "gsx-crypto",
  "proptest",
+ "rand 0.8.6",
  "serde",
  "thiserror",
 ]

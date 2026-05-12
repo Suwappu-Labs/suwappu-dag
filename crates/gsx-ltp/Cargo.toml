@@ -11,8 +11,10 @@ description = "Lattice Transfer Protocol attestation pipeline + super-node integ
 
 [dependencies]
 gsx-crypto.workspace = true
+blst.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+rand.workspace = true

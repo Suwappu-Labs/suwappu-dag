@@ -14,7 +14,7 @@
 //!
 //! Sprint scope:
 //!
-//! - DAG-S15: super-node attestation pipeline (7-of-9 quorum)
+//! - DAG-S15: super-node attestation pipeline (7-of-9 quorum) ✅
 //! - DAG-S16: Commitment Node DA SLA enforcement
 //! - DAG-S17: cross-chain DID STARK proof generation + verification
 //!
@@ -23,6 +23,13 @@
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
+
+pub mod attestation;
+
+pub use attestation::{
+    attest, verify_attestation, AttestationPayload, AuthorityId, ChainId, Corridor,
+    CorridorAttestation, CorridorId, LtpError, SuperNode, WitnessSignature,
+};
 
 /// LTP super-node attestation quorum (7-of-9).
 pub const LTP_ATTESTATION_QUORUM_THRESHOLD: usize = 7;
