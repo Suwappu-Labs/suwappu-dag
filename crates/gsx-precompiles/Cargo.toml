@@ -11,8 +11,10 @@ description = "Application-layer precompiles: registered-issuer, DID, policy-voc
 
 [dependencies]
 gsx-crypto.workspace = true
+blake3.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+rand.workspace = true

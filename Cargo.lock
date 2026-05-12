@@ -360,8 +360,10 @@ dependencies = [
 name = "gsx-precompiles"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "gsx-crypto",
  "proptest",
+ "rand 0.8.6",
  "serde",
  "thiserror",
 ]

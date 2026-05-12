@@ -2,7 +2,7 @@
 //!
 //! Implements §8 of the *GSX DAG Layer 1* paper:
 //!
-//! - §8.1 Identity on the account — DID field + credential proofs (W3C DID 2022)
+//! - §8.1 Identity on the account — DID field + credential proofs (W3C DID 2022) ✅
 //! - §8.2 Registered-issuer precompile — mint/burn surface for institutional-grade
 //!   assets, with reserve-attestation schema and policy-vocabulary rules
 //! - §8.3 Reserve-coverage circuit breaker — PlonK-based zero-knowledge predicate
@@ -11,7 +11,7 @@
 //!
 //! Sprint scope:
 //!
-//! - DAG-S12: DID resolver + W3C DID document validation
+//! - DAG-S12: DID resolver + W3C DID document validation ✅
 //! - DAG-S13: registered-issuer mint/burn surface
 //! - DAG-S14: reserve-coverage PlonK circuit (SP1 or Plonky3 backend)
 //!
@@ -23,6 +23,15 @@
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
+
+pub mod did;
+pub mod did_resolver;
+
+pub use did::{
+    Did, DidDocument, DidError, KeyAlgorithm, Service, VerificationMethod, VerificationMethodId,
+    VerificationRelationship,
+};
+pub use did_resolver::InMemoryDidResolver;
 
 /// Reserve coverage target ratios per issuer class (paper §8.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
