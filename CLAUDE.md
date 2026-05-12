@@ -86,7 +86,7 @@ Between sessions, you resume via:
 | DAG-S11 | Checkpoint cadence + Authority joint co-signature       | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_checkpoint.rs`) |
 | DAG-S12 | `gsx-precompiles` — DID resolver                         | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_did.rs`) |
 | DAG-S13 | Registered-issuer precompile (mint/burn)                | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_issuer.rs`) |
-| DAG-S14 | Reserve-coverage PlonK circuit                           | ⏳ Queued    | `reserve_coverage_predicate` @ 10k |
+| DAG-S14 | Reserve-coverage circuit breaker (predicate)             | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_reserve.rs`) |
 | DAG-S15 | `gsx-ltp` — super-node 7-of-9 attestation                | ⏳ Queued    | `seven_of_nine_attestation` @ 10k |
 | DAG-S16 | LTP Commitment Node DA SLA                                | ⏳ Queued    | `da_sla_enforced` @ 10k |
 | DAG-S17 | Cross-chain DID STARK pipeline (SP1/Plonky3)             | ⏳ Queued    | `did_stark_round_trip` @ 10k |

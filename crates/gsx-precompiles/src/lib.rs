@@ -12,8 +12,8 @@
 //! Sprint scope:
 //!
 //! - DAG-S12: DID resolver + W3C DID document validation ✅
-//! - DAG-S13: registered-issuer mint/burn surface
-//! - DAG-S14: reserve-coverage PlonK circuit (SP1 or Plonky3 backend)
+//! - DAG-S13: registered-issuer mint/burn surface ✅
+//! - DAG-S14: reserve-coverage circuit breaker (predicate + state machine) ✅
 //!
 //! Phased rollout (paper §8.1):
 //!
@@ -27,6 +27,7 @@
 pub mod did;
 pub mod did_resolver;
 pub mod issuer;
+pub mod reserve;
 
 pub use did::{
     Did, DidDocument, DidError, KeyAlgorithm, Service, VerificationMethod, VerificationMethodId,
@@ -37,24 +38,7 @@ pub use issuer::{
     AssetId, AssetSupply, BurnId, Issuer, IssuerError, IssuerId, IssuerRegistry,
     PaymentReceiptAttestation, PendingBurn, DEFAULT_BURN_SLA_ROUNDS,
 };
-
-/// Reserve coverage target ratios per issuer class (paper §8.3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReserveCoverage {
-    /// 1:1 par. GENIUS Act payment stablecoins, MiCA EMTs.
-    OneToOnePar,
-    /// NAV strike. Tokenized fund interests.
-    NavStrike,
-    /// Jurisdiction-specific rule.
-    JurisdictionRule,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn reserve_coverage_variants_distinct() {
-        assert_ne!(ReserveCoverage::OneToOnePar, ReserveCoverage::NavStrike);
-    }
-}
+pub use reserve::{
+    predicate_satisfied, CoverageError, CoverageRule, DisclosureTier, ReserveAttestation,
+    ReserveCoverageChecker, DEFAULT_ATTESTATION_TTL_ROUNDS,
+};
