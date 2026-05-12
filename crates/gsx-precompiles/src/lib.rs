@@ -26,12 +26,17 @@
 
 pub mod did;
 pub mod did_resolver;
+pub mod issuer;
 
 pub use did::{
     Did, DidDocument, DidError, KeyAlgorithm, Service, VerificationMethod, VerificationMethodId,
     VerificationRelationship,
 };
 pub use did_resolver::InMemoryDidResolver;
+pub use issuer::{
+    AssetId, AssetSupply, BurnId, Issuer, IssuerError, IssuerId, IssuerRegistry,
+    PaymentReceiptAttestation, PendingBurn, DEFAULT_BURN_SLA_ROUNDS,
+};
 
 /// Reserve coverage target ratios per issuer class (paper §8.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

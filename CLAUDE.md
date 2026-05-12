@@ -85,7 +85,7 @@ Between sessions, you resume via:
 | DAG-S10 | `gsx-execution` — block executor adapter (Substrate trait) | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_block_execution.rs`) |
 | DAG-S11 | Checkpoint cadence + Authority joint co-signature       | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_checkpoint.rs`) |
 | DAG-S12 | `gsx-precompiles` — DID resolver                         | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_did.rs`) |
-| DAG-S13 | Registered-issuer precompile (mint/burn)                | ⏳ Queued    | `issuer_mint_burn_atomic` @ 10k |
+| DAG-S13 | Registered-issuer precompile (mint/burn)                | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_issuer.rs`) |
 | DAG-S14 | Reserve-coverage PlonK circuit                           | ⏳ Queued    | `reserve_coverage_predicate` @ 10k |
 | DAG-S15 | `gsx-ltp` — super-node 7-of-9 attestation                | ⏳ Queued    | `seven_of_nine_attestation` @ 10k |
 | DAG-S16 | LTP Commitment Node DA SLA                                | ⏳ Queued    | `da_sla_enforced` @ 10k |
