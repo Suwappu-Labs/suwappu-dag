@@ -24,6 +24,7 @@ pub mod cert;
 pub mod commit;
 pub mod dag;
 pub mod error;
+pub mod joint;
 
 pub use cert::{AuthorityId, CertHash, Certificate, Round};
 pub use commit::{
@@ -31,3 +32,7 @@ pub use commit::{
 };
 pub use dag::DagStore;
 pub use error::ConsensusError;
+pub use joint::{
+    authority_equivocators, joint_commit, validator_double_vote_stake, validator_quorum_met,
+    validator_quorum_threshold, voting_stake, Stake, StakeTable, ValidatorId, Vote,
+};
