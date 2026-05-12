@@ -332,6 +332,7 @@ version = "0.1.0"
 dependencies = [
  "blst",
  "gsx-crypto",
+ "gsx-precompiles",
  "proptest",
  "rand 0.8.6",
  "serde",

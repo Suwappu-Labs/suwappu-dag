@@ -16,7 +16,7 @@
 //!
 //! - DAG-S15: super-node attestation pipeline (7-of-9 quorum) ✅
 //! - DAG-S16: Commitment Node DA SLA enforcement ✅
-//! - DAG-S17: cross-chain DID STARK proof generation + verification
+//! - DAG-S17: cross-chain DID STARK proof generation + verification ✅
 //!
 //! Super-node quorum tolerates a sub-quorum minority of compromised witnesses
 //! without producing a forged attestation (paper §9, mitigation 1).
@@ -26,12 +26,16 @@
 
 pub mod attestation;
 pub mod da;
+pub mod did_stark;
 
 pub use attestation::{
     attest, verify_attestation, AttestationPayload, AuthorityId, ChainId, Corridor,
     CorridorAttestation, CorridorId, LtpError, SuperNode, WitnessSignature,
 };
 pub use da::{verify_sla, Cid, Commitment, CommitmentNetwork, DaError, DaSla};
+pub use did_stark::{
+    prove_rotation, verify_rotation_proof, DidRotationStatement, DidStarkError, DidStarkProof,
+};
 
 /// LTP super-node attestation quorum (7-of-9).
 pub const LTP_ATTESTATION_QUORUM_THRESHOLD: usize = 7;
