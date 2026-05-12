@@ -14,6 +14,11 @@ ignore = [
     # serde-derive, and pqcrypto. No known vulnerabilities; replacement is
     # tracked upstream in RUSTSEC-2024-0436. Revisit when those crates migrate.
     "RUSTSEC-2024-0436",
+    # `rustls-pemfile` is unmaintained; pulled in transitively by `reqwest 0.11`
+    # via `gsxdb-bridge`. No known vulnerabilities. Cleared when gsxdb-bridge
+    # bumps to reqwest 0.12 (rustls-pki-types path). Tracked at
+    # RUSTSEC-2025-0134 / https://github.com/rustls/pemfile/issues/61.
+    "RUSTSEC-2025-0134",
 ]
 
 [licenses]
