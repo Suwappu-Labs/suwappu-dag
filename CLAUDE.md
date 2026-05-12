@@ -89,7 +89,7 @@ Between sessions, you resume via:
 | DAG-S14 | Reserve-coverage circuit breaker (predicate)             | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_reserve.rs`) |
 | DAG-S15 | `gsx-ltp` — super-node 7-of-9 attestation                | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_attestation.rs`) |
 | DAG-S16 | LTP Commitment Node DA SLA                                | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_da.rs`) |
-| DAG-S17 | Cross-chain DID STARK pipeline (SP1/Plonky3)             | ⏳ Queued    | `did_stark_round_trip` @ 10k |
+| DAG-S17 | Cross-chain DID STARK pipeline (SP1/Plonky3)             | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_did_stark.rs`) |
 | DAG-S18 | `gsx-transport` — SCION routing                          | ⏳ Queued    | `scion_path_auth` @ 10k |
 | DAG-S19 | SCION-IP-Gateway fallback                                | ⏳ Queued    | `gateway_fallback_correctness` @ 10k |
 | DAG-S20 | `gsx-node` — full validator composition                  | ⏳ Queued    | `node_runs_genesis_block` (E2E) |
