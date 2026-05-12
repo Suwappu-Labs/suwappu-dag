@@ -15,14 +15,19 @@
 //!
 //! - DAG-S2: RaptorQ block-shred + reconstruction (in-memory) ✅
 //! - DAG-S18: SCION path-authenticated routing predicate ✅
-//! - DAG-S19: SCION-IP-Gateway external-client fallback
+//! - DAG-S19: SCION-IP-Gateway external-client fallback ✅
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod gateway;
 pub mod raptorq;
 pub mod scion;
 
+pub use gateway::{
+    sign_response, verify_response, GatewayConfig, GatewayEnvelope, GatewayError, GatewayResponse,
+    IpPacket,
+};
 pub use raptorq::{reconstruct, shred, Shred, ShredSet, TransportError};
 pub use scion::{
     hop_mac, seal_path, verify_path, AsId, HopField, HopMac, IsdId, Path, ScionError,
