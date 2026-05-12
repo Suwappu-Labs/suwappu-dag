@@ -5,7 +5,8 @@
 //! read from `config.toml`; telemetry is emitted via `tracing`.
 //!
 //! Phase-1 binary is a no-op shell — actual subsystem wiring lands sprint by
-//! sprint per `docs/architecture/sprint-map.md`.
+//! sprint per `docs/architecture/sprint-map.md`. The full integration logic
+//! is exposed as a library at `gsx_node::validator` (see DAG-S20).
 
 use anyhow::Result;
 use tracing_subscriber::EnvFilter;

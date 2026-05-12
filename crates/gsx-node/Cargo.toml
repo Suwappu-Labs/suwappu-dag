@@ -9,6 +9,10 @@ authors.workspace = true
 publish.workspace = true
 description = "Top-level GSX DAG node binary: composes all layers into a running validator."
 
+[lib]
+name = "gsx_node"
+path = "src/lib.rs"
+
 [[bin]]
 name = "gsx-node"
 path = "src/main.rs"
@@ -25,7 +29,11 @@ gsx-ltp.workspace = true
 gsx-transport.workspace = true
 
 anyhow.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 serde.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

@@ -92,7 +92,7 @@ Between sessions, you resume via:
 | DAG-S17 | Cross-chain DID STARK pipeline (SP1/Plonky3)             | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_did_stark.rs`) |
 | DAG-S18 | `gsx-transport` — SCION path-authenticated routing       | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_scion.rs`) |
 | DAG-S19 | SCION-IP-Gateway fallback                                | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_gateway.rs`) |
-| DAG-S20 | `gsx-node` — full validator composition                  | ⏳ Queued    | `node_runs_genesis_block` (E2E) |
+| DAG-S20 | `gsx-node` — full validator composition (E2E)            | ✅ Closed    | 3 properties × 10k cases (`tests/proptest_genesis_flow.rs`) |
 
 Update this table when a sprint closes.
 
