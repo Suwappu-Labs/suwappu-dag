@@ -9,7 +9,12 @@ no-default-features = false
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
-ignore = []
+ignore = [
+    # `paste` is unmaintained but stable and widely used by tracing-derive,
+    # serde-derive, and pqcrypto. No known vulnerabilities; replacement is
+    # tracked upstream in RUSTSEC-2024-0436. Revisit when those crates migrate.
+    "RUSTSEC-2024-0436",
+]
 
 [licenses]
 allow = [
@@ -19,6 +24,9 @@ allow = [
     "BSD-3-Clause",
     "ISC",
     "Unicode-DFS-2016",
+    # Unicode-3.0 replaces Unicode-DFS-2016 in crates published post-2024
+    # (icu / unicode-ident family). The license terms are equivalent.
+    "Unicode-3.0",
     "CC0-1.0",
     "Zlib",
 ]
@@ -27,6 +35,9 @@ confidence-threshold = 0.8
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Workspace-internal `path = "..."` dependencies look like wildcards to
+# cargo-deny without this flag — the workspace itself is the version source.
+allow-wildcard-paths = true
 highlight = "all"
 
 # Lane separation analog: forbid pulling unaudited crypto into non-crypto crates.
