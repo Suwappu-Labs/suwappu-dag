@@ -302,9 +302,12 @@ dependencies = [
 name = "gsx-execution"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "gsx-consensus",
  "gsx-crypto",
+ "hex",
  "proptest",
+ "rand 0.8.6",
  "serde",
  "thiserror",
  "tracing",

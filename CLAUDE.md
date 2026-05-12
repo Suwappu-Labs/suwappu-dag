@@ -82,7 +82,7 @@ Between sessions, you resume via:
 | DAG-S7 | Equivocation detection + slashing                         | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_slashing.rs`) |
 | DAG-S8 | `gsx-fastpath` — single-owner lane + K=4 binding         | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_fast_path.rs`) |
 | DAG-S9 | Fast-path equivocation slashing                          | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_fp_slashing.rs`) |
-| DAG-S10 | `gsx-execution` — wire gsx-db; block executor adapter   | ⏳ Queued    | `block_execution_matches_substrate` @ 10k |
+| DAG-S10 | `gsx-execution` — block executor adapter (Substrate trait) | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_block_execution.rs`) |
 | DAG-S11 | Checkpoint cadence + Authority joint co-signature       | ⏳ Queued    | `joint_state_commitment_signed` @ 10k |
 | DAG-S12 | `gsx-precompiles` — DID resolver                         | ⏳ Queued    | `did_document_validates` @ 10k |
 | DAG-S13 | Registered-issuer precompile (mint/burn)                | ⏳ Queued    | `issuer_mint_burn_atomic` @ 10k |

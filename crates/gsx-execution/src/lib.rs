@@ -14,8 +14,7 @@
 //!
 //! Sprint scope:
 //!
-//! - DAG-S10: gsx-db workspace dependency wired in, block-executor adapter,
-//!   anchor dispatcher hookup
+//! - DAG-S10: `Substrate` trait + in-memory adapter + block executor ✅
 //! - DAG-S11: checkpoint cadence + Authority-Ring joint co-signature over
 //!   the joint state commitment (Σ_EVM, Σ_Move)
 //!
@@ -28,6 +27,14 @@
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
+
+pub mod block;
+pub mod error;
+pub mod substrate;
+
+pub use block::{execute_block, Block, ExecutionReport};
+pub use error::ExecutionError;
+pub use substrate::{Address, Balance, InMemorySubstrate, Intent, Substrate};
 
 /// Checkpoint cadence C — the rate at which the Authority Ring co-signs a
 /// (Σ_EVM, Σ_Move) snapshot. Configured per testnet/mainnet; default below
