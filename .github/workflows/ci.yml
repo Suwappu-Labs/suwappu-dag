@@ -66,6 +66,13 @@ jobs:
           ssh-private-key: ${{ secrets.GSX_DB_DEPLOY_KEY }}
       - name: Rewrite https://github.com → git@github.com for cargo
         run: git config --global url."git@github.com:".insteadOf "https://github.com/"
-      - uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          command: check
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # cargo-deny runs on the host runner (not the EmbarkStudios container
+      # action) so the SSH agent set up above is reachable for the gsx-db
+      # private git dep. The container action exports SSH_AUTH_SOCK into the
+      # container but doesn't mount the agent's UNIX socket, breaking auth.
+      - name: Install cargo-deny
+        run: cargo install --locked cargo-deny
+      - name: cargo-deny check
+        run: cargo deny check
