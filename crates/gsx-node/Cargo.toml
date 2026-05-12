@@ -29,8 +29,9 @@ gsx-ltp.workspace = true
 gsx-transport.workspace = true
 
 anyhow.workspace = true
+bincode.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util", "sync", "time"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 serde.workspace = true

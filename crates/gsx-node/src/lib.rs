@@ -8,5 +8,7 @@
 #![warn(missing_docs)]
 
 pub mod validator;
+pub mod wire;
 
 pub use validator::{run_genesis_flow_with_keys, seed_registry, NodeError, Validator};
+pub use wire::{PeerId, Wire, WireConfig, WireError, WireEvent, WireMessage, MAX_FRAME_BYTES};
