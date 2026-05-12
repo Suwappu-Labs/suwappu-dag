@@ -11,13 +11,20 @@
 //!
 //! Sprint scope:
 //!
-//! - DAG-S6: admission state machine, certificate types, phase-gated rules
+//! - DAG-S6: admission state machine, registry, quorum threshold math ✅
 //! - DAG-S7: equivocation detection, slashing (100% bonded stake + expulsion)
 //!
 //! Quorum: |Q_A| > (2/3)|A| (Definition 2).
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
+
+pub mod registry;
+
+pub use registry::{AdmissionError, AuthorityMember, AuthorityRegistry};
+
+/// Authority Ring participant identifier — index into the published set.
+pub type AuthorityId = u32;
 
 /// Stake threshold per Authority Node, in GSX.
 pub const AUTHORITY_STAKE_THRESHOLD_GSX: u64 = 100_000;
@@ -36,5 +43,10 @@ mod tests {
     fn ring_size_bounds_match_paper() {
         assert_eq!(AUTHORITY_RING_MIN, 30);
         assert_eq!(AUTHORITY_RING_MAX, 50);
+    }
+
+    #[test]
+    fn stake_threshold_matches_paper() {
+        assert_eq!(AUTHORITY_STAKE_THRESHOLD_GSX, 100_000);
     }
 }

@@ -15,4 +15,6 @@ serde.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+gsx-authority.workspace = true
+gsx-consensus.workspace = true
 proptest.workspace = true

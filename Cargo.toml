@@ -27,10 +27,10 @@ publish = false
 
 [workspace.dependencies]
 # Internal
-gsx-crypto = { path = "crates/gsx-crypto" }
-gsx-consensus = { path = "crates/gsx-consensus" }
-gsx-authority = { path = "crates/gsx-authority" }
-gsx-validator = { path = "crates/gsx-validator" }
+gsx-crypto = { path = "crates/gsx-crypto", default-features = false }
+gsx-consensus = { path = "crates/gsx-consensus", default-features = false }
+gsx-authority = { path = "crates/gsx-authority", default-features = false }
+gsx-validator = { path = "crates/gsx-validator", default-features = false }
 gsx-fastpath = { path = "crates/gsx-fastpath" }
 gsx-execution = { path = "crates/gsx-execution" }
 gsx-precompiles = { path = "crates/gsx-precompiles" }

@@ -78,7 +78,7 @@ Between sessions, you resume via:
 | DAG-S3 | `gsx-consensus` — DAG store, certificate types, voting   | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_dag_order.rs`) |
 | DAG-S4 | `gsx-consensus` — Mysticeti-C commit rule                | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_mysticeti_commit.rs`) |
 | DAG-S5 | `gsx-consensus` — joint-quorum AND-gate (Theorem 2)     | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_joint_quorum.rs`) |
-| DAG-S6 | `gsx-authority` + `gsx-validator` — registries & quorum  | ⏳ Queued    | `quorum_math_matches_paper` @ 10k |
+| DAG-S6 | `gsx-authority` + `gsx-validator` — registries & quorum  | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_quorum.rs`) |
 | DAG-S7 | Equivocation detection + slashing                         | ⏳ Queued    | `equivocation_proof_slashes` @ 10k |
 | DAG-S8 | `gsx-fastpath` — single-owner lane + K=4 binding         | ⏳ Queued    | `fast_path_main_lane_consistency` @ 10k |
 | DAG-S9 | Fast-path equivocation slashing                          | ⏳ Queued    | `fast_path_equivocation_full_slash` @ 10k |
