@@ -314,6 +314,7 @@ dependencies = [
 name = "gsx-fastpath"
 version = "0.1.0"
 dependencies = [
+ "gsx-authority",
  "gsx-consensus",
  "gsx-crypto",
  "proptest",

@@ -24,8 +24,12 @@
 
 pub mod binding;
 pub mod cert;
+pub mod equivocation;
 pub mod quorum;
+pub mod slashing;
 
 pub use binding::{is_main_lane_consistent, MainLaneTx, FAST_PATH_CONFIRMATION_K};
 pub use cert::{FastPathCert, FastPathTx, OwnedObjectId, OwnerAddress};
+pub use equivocation::{detect_fast_path_equivocation, FastPathEquivocationProof};
 pub use quorum::{certify, fast_path_quorum_size, FastPathError};
+pub use slashing::{slash_fast_path_signers, FastPathSlashOutcome};

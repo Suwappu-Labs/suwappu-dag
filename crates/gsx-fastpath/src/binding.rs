@@ -17,6 +17,7 @@
 //! linearizes them.
 
 use gsx_consensus::{CertHash, Round};
+use serde::{Deserialize, Serialize};
 
 use crate::cert::{FastPathCert, OwnedObjectId};
 
@@ -27,7 +28,7 @@ pub const FAST_PATH_CONFIRMATION_K: u32 = 4;
 ///
 /// Phase-1 models the main lane as a flat sequence; in production this
 /// is the output of `gsx_consensus::finalize`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MainLaneTx {
     /// Round at which this main-lane tx was committed.
     pub round: Round,
