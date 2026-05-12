@@ -21,9 +21,13 @@
 #![warn(missing_docs)]
 
 pub mod cert;
+pub mod commit;
 pub mod dag;
 pub mod error;
 
 pub use cert::{AuthorityId, CertHash, Certificate, Round};
+pub use commit::{
+    causal_history, cert_at, commit_leader, finalize, leader, quorum_threshold, CommitteeSize,
+};
 pub use dag::DagStore;
 pub use error::ConsensusError;

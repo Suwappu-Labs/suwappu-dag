@@ -76,7 +76,7 @@ Between sessions, you resume via:
 | DAG-S1 | `gsx-crypto` — ML-DSA-65, ML-KEM-768, BLS12-381, SHA3-256 | ✅ Closed    | 7 properties × 10k cases (`tests/proptest_roundtrips.rs`) |
 | DAG-S2 | `gsx-transport` — RaptorQ shred/reconstruct (in-mem)      | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_reconstruction.rs`) |
 | DAG-S3 | `gsx-consensus` — DAG store, certificate types, voting   | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_dag_order.rs`) |
-| DAG-S4 | `gsx-consensus` — Mysticeti-C commit rule                | ⏳ Queued    | `mysticeti_c_finality` @ 10k |
+| DAG-S4 | `gsx-consensus` — Mysticeti-C commit rule                | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_mysticeti_commit.rs`) |
 | DAG-S5 | `gsx-consensus` — joint-quorum AND-gate                  | ⏳ Queued    | `joint_quorum_safety` @ 10k |
 | DAG-S6 | `gsx-authority` + `gsx-validator` — registries & quorum  | ⏳ Queued    | `quorum_math_matches_paper` @ 10k |
 | DAG-S7 | Equivocation detection + slashing                         | ⏳ Queued    | `equivocation_proof_slashes` @ 10k |
