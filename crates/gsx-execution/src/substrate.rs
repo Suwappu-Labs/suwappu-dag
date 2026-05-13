@@ -21,10 +21,16 @@ pub type Address = [u8; 20];
 /// Balance type. `u128` matches the canonical `gsx-db::BalanceSlot` storage.
 pub type Balance = u128;
 
-/// A state-mutating intent. Phase-1 covers a single `Transfer` variant;
-/// gsx-db's `Intent::{Transfer, Call, …}` lands when the substrate
-/// dependency is wired in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// A state-mutating intent. Carries balance transfers plus
+/// Phase G validator-set governance actions. Governance variants
+/// (`AdmitAuthority` / `ExitAuthority` / `EjectAuthority`) do not
+/// mutate the substrate's balance state — they are picked up by the
+/// daemon and queued for atomic application at the next epoch
+/// boundary (DAG-S25.3).
+///
+/// `Copy` was dropped in S25.2 to accommodate variable-size pubkey
+/// material. Existing pattern matches now bind by reference.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Intent {
     /// Transfer `amount` from `from` to `to`.
     Transfer {
@@ -34,6 +40,36 @@ pub enum Intent {
         to: Address,
         /// Transfer amount.
         amount: Balance,
+    },
+    /// Admit a new Authority Ring member, applied at the next epoch
+    /// boundary. Stake gates whether the candidate makes the active
+    /// set (selection logic lands in S25.3); pubkey material is the
+    /// canonical ML-DSA-65 + BLS12-381 binding.
+    AdmitAuthority {
+        /// Candidate authority id (zero-indexed slot the caller wants).
+        authority_id: u32,
+        /// Stake the candidate is locking. Must be ≥ floor.
+        stake_gsx: u64,
+        /// ML-DSA-65 public key (1952 B canonical).
+        mldsa_public_key: Vec<u8>,
+        /// BLS12-381 G1 public key (48 B compressed).
+        bls_public_key: Vec<u8>,
+    },
+    /// Voluntary withdrawal. Applied at the next epoch boundary.
+    /// MVP has no cooling-off period — that's a Phase G follow-on.
+    ExitAuthority {
+        /// Authority id to remove from the active set.
+        authority_id: u32,
+    },
+    /// Ejection on confirmed equivocation (paper Invariant 5).
+    /// Carries a reference to the proof transaction so the slashing
+    /// pipeline can audit. 100% bonded stake forfeit.
+    EjectAuthority {
+        /// Authority id being ejected.
+        authority_id: u32,
+        /// Reference to the equivocation proof (cert hash or
+        /// EquivocationProof commitment).
+        proof_ref: [u8; 32],
     },
 }
 
@@ -107,8 +143,9 @@ impl Substrate for InMemorySubstrate {
     }
 
     fn apply_intent(&mut self, intent: &Intent) -> Result<(), ExecutionError> {
-        match *intent {
+        match intent {
             Intent::Transfer { from, to, amount } => {
+                let (from, to, amount) = (*from, *to, *amount);
                 if amount == 0 {
                     return Ok(());
                 }
@@ -144,6 +181,14 @@ impl Substrate for InMemorySubstrate {
                 self.balances.insert(to, new_dest);
                 Ok(())
             }
+            // Governance variants (DAG-S25 Phase G) are no-ops at the
+            // substrate level — they don't mutate balance state. The
+            // daemon picks them up out of committed blocks and queues
+            // them for atomic application at the next epoch boundary
+            // (S25.3 + S25.4).
+            Intent::AdmitAuthority { .. }
+            | Intent::ExitAuthority { .. }
+            | Intent::EjectAuthority { .. } => Ok(()),
         }
     }
 
