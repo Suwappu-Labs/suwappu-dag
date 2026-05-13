@@ -29,7 +29,8 @@ pub mod joint;
 
 pub use cert::{AuthorityId, CertHash, Certificate, Round};
 pub use commit::{
-    causal_history, cert_at, commit_leader, finalize, leader, quorum_threshold, CommitteeSize,
+    causal_history, cert_at, commit_leader, decide_slot, finalize, leader, quorum_threshold,
+    try_direct_decide, try_indirect_decide, CommitteeSize, LeaderStatus,
 };
 pub use dag::DagStore;
 pub use equivocation::{

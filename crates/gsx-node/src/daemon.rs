@@ -24,10 +24,11 @@ use std::{
 
 use gsx_consensus::{
     cert::{CertHash, Certificate},
-    commit::{cert_at, leader as round_leader, quorum_threshold},
+    commit::{cert_at, quorum_threshold},
     dag::DagStore,
-    joint::{joint_commit, StakeTable, Vote},
-    AuthorityId,
+    decide_slot,
+    joint::{StakeTable, Vote},
+    validator_quorum_met, AuthorityId, ConsensusError, LeaderStatus,
 };
 #[cfg(test)]
 use gsx_execution::Substrate;
@@ -52,14 +53,34 @@ pub(crate) struct State {
     pub(crate) committed: HashSet<CertHash>,
     pub(crate) last_authored_round: Option<u64>,
     /// Highest round number observed in any cert inserted into the local
-    /// DAG — own or peer. The round driver snaps `target_round` up to this
-    /// value + 1 (Mysticeti-C "max observed round" pattern) so a slow
-    /// validator catches up by skipping rounds rather than stalling at R+1
-    /// of its own last authored round.
+    /// DAG — own or peer. The synchronizer (S21.3) uses this to detect
+    /// catch-up gaps; the round driver does not consult it directly (a
+    /// node always advances one round at a time from its own last
+    /// authored round — see S21.5 / IQ-002).
     pub(crate) max_observed_round: u64,
     pub(crate) pending_intents: Vec<gsx_execution::Intent>,
     pub(crate) n_authorities: u32,
+    /// Certs received whose parents aren't yet in the local DAG. Keyed
+    /// by the missing parent hash — when that hash later inserts,
+    /// every orphan waiting on it is retried in a work-queue cascade.
+    /// See [`ingest_cert`] and [`run_sync_sweeper`].
+    pub(crate) orphans: HashMap<CertHash, Vec<Certificate>>,
+    /// Cert hashes for which a `GetCert` request is outstanding.
+    /// Prevents fan-out storms when many orphans reference the same
+    /// missing parent and lets the periodic sweeper re-issue requests
+    /// without unbounded multiplicity.
+    pub(crate) inflight_fetches: HashSet<CertHash>,
 }
+
+/// Soft cap on orphan-buffer size. A Byzantine peer could otherwise
+/// flood unresolvable certs and OOM the node. 4096 ≈ 16 MB of
+/// bincode-serialized certs — far more than any honest reconvergence.
+const MAX_ORPHAN_CERTS: usize = 4096;
+
+/// Interval at which the synchronizer re-issues `GetCert` for any
+/// missing parents still in `inflight_fetches`. Matches Sui's
+/// `synchronizer.rs` periodic scheduler cadence.
+const SYNC_SWEEPER_INTERVAL_MS: u64 = 1_000;
 
 impl State {
     fn new(manifest: &GenesisManifest) -> Self {
@@ -79,6 +100,8 @@ impl State {
             max_observed_round: 0,
             pending_intents: Vec::new(),
             n_authorities: n,
+            orphans: HashMap::new(),
+            inflight_fetches: HashSet::new(),
         }
     }
 
@@ -99,19 +122,6 @@ impl State {
         (0..self.n_authorities)
             .filter_map(|a| cert_at(&self.dag, round - 1, a))
             .collect()
-    }
-
-    /// Highest round R in [0, max_observed_round] at which the local DAG
-    /// already has at least `threshold` distinct authors. Returns None if
-    /// no round satisfies it. Used by the round driver's snap-up: rather
-    /// than jumping to `max_observed_round + 1` (where we may have only
-    /// one author's cert), we jump to the highest round where the parents
-    /// gate is actually satisfiable.
-    fn highest_round_with(&self, threshold: u32) -> Option<u64> {
-        let max = self.max_observed_round;
-        (0..=max)
-            .rev()
-            .find(|r| self.distinct_authors_at(*r) >= threshold)
     }
 }
 
@@ -188,6 +198,17 @@ impl Daemon {
             }));
         }
 
+        // Synchronizer sweeper — re-issues `GetCert` for hashes still
+        // in `inflight_fetches` (S21.3). Without this, a single dropped
+        // GetCert leaves the orphan stuck forever.
+        {
+            let state = state.clone();
+            let outbound = outbound.clone();
+            tasks.push(tokio::spawn(async move {
+                run_sync_sweeper(state, outbound).await;
+            }));
+        }
+
         // Take ownership of the wire's accept/dialer tasks so they're aborted
         // when this daemon is dropped.
         tasks.append(&mut wire_tasks);
@@ -233,28 +254,24 @@ async fn run_inbox(
                         .with_peer(from.0.clone()),
                 );
                 let mut s = state.lock().await;
-                if s.dag.insert(cert).is_err() {
-                    debug!(peer = %from.0, "inbox: duplicate or invalid cert");
-                    continue;
-                }
-                if round > s.max_observed_round {
-                    s.max_observed_round = round;
-                }
-                let vote = Vote {
-                    validator: self_id,
-                    candidate: h,
-                };
-                s.votes.entry(h).or_default().push(vote);
+                let inserted = ingest_cert(&mut s, cert, &from, &outbound);
                 drop(s);
-
-                log.emit(
-                    Event::now(&self_label, Lane::Main, "voted")
-                        .with_round(round)
-                        .with_cert_hash(&h.0),
-                );
-                broadcast(&outbound, WireMessage::Vote(vote));
-                // After voting we may have just enabled a commit ourselves
-                // (e.g. quorum_threshold reached on the round-0 leader).
+                for ic in inserted {
+                    let vote = Vote {
+                        validator: self_id,
+                        candidate: ic.hash,
+                    };
+                    {
+                        let mut s = state.lock().await;
+                        s.votes.entry(ic.hash).or_default().push(vote);
+                    }
+                    log.emit(
+                        Event::now(&self_label, Lane::Main, "voted")
+                            .with_round(ic.round)
+                            .with_cert_hash(&ic.hash.0),
+                    );
+                    broadcast(&outbound, WireMessage::Vote(vote));
+                }
                 let mut s = state.lock().await;
                 try_commit(&mut s, &self_label, &log);
             }
@@ -267,8 +284,19 @@ async fn run_inbox(
                 s.votes.entry(vote.candidate).or_default().push(vote);
                 try_commit(&mut s, &self_label, &log);
             }
+            WireMessage::GetCert(hash) => {
+                let cert_opt = {
+                    let s = state.lock().await;
+                    s.dag.get(&hash).cloned()
+                };
+                if let Some(cert) = cert_opt {
+                    if let Some(tx) = outbound.get(&from) {
+                        let _ = tx.try_send(WireMessage::Cert(cert));
+                    }
+                }
+            }
             WireMessage::FastPath(_) | WireMessage::Ltp(_) => {
-                // Lanes handled in follow-on commit. Ignored on the main lane.
+                // Lanes handled in follow-on commits (S22 / S23).
             }
             WireMessage::Ping(t) => {
                 if let Some(tx) = outbound.get(&from) {
@@ -276,6 +304,120 @@ async fn run_inbox(
                 }
             }
             WireMessage::Pong(_) => {}
+        }
+    }
+}
+
+/// One successful cert ingestion. The inbox handler emits a `voted`
+/// event and broadcasts a `Vote` for each.
+struct IngestedCert {
+    hash: CertHash,
+    round: u64,
+}
+
+/// Insert `cert` into the DAG, cascading through any orphans that were
+/// waiting on certs we just admitted. On `UnknownParent`, buffer the
+/// orphan keyed by the missing parent and ask up to two peers for it
+/// (sender first, then one other) — avoids single-peer dependency.
+///
+/// This is the synchronous-fetch leg of S21.3. The periodic sweeper
+/// (`run_sync_sweeper`) handles requests that never get answered.
+fn ingest_cert(
+    s: &mut State,
+    cert: Certificate,
+    from: &PeerId,
+    outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
+) -> Vec<IngestedCert> {
+    let mut inserted = Vec::new();
+    let mut work: Vec<Certificate> = vec![cert];
+    while let Some(c) = work.pop() {
+        let h = c.hash();
+        let round = c.round;
+        match s.dag.insert(c.clone()) {
+            Ok(_) => {
+                if round > s.max_observed_round {
+                    s.max_observed_round = round;
+                }
+                s.inflight_fetches.remove(&h);
+                inserted.push(IngestedCert { hash: h, round });
+                if let Some(unblocked) = s.orphans.remove(&h) {
+                    work.extend(unblocked);
+                }
+            }
+            Err(ConsensusError::UnknownParent(missing)) => {
+                if s.orphans.values().map(|v| v.len()).sum::<usize>() >= MAX_ORPHAN_CERTS {
+                    debug!(peer = %from.0, "inbox: orphan buffer full, dropping cert");
+                    continue;
+                }
+                s.orphans.entry(missing).or_default().push(c);
+                if s.inflight_fetches.insert(missing) {
+                    fetch_cert_from_peers(missing, Some(from), outbound);
+                }
+            }
+            Err(e) => {
+                debug!(peer = %from.0, err = ?e, "inbox: dag rejected cert");
+            }
+        }
+    }
+    inserted
+}
+
+/// Unicast `GetCert(hash)` to up to two peers — `prefer` (if any,
+/// usually the cert sender) and one other. Two-peer fan-out matches
+/// Sui's `MAX_AUTHORITIES_TO_FETCH_PER_BLOCK = 2` so we don't depend on
+/// a single peer being live.
+fn fetch_cert_from_peers(
+    hash: CertHash,
+    prefer: Option<&PeerId>,
+    outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
+) {
+    let mut sent = 0usize;
+    if let Some(p) = prefer {
+        if let Some(tx) = outbound.get(p) {
+            if tx.try_send(WireMessage::GetCert(hash)).is_ok() {
+                sent += 1;
+            }
+        }
+    }
+    if sent >= 2 {
+        return;
+    }
+    for (peer, tx) in outbound.iter() {
+        if Some(peer) == prefer {
+            continue;
+        }
+        if tx.try_send(WireMessage::GetCert(hash)).is_ok() {
+            sent += 1;
+            if sent >= 2 {
+                return;
+            }
+        }
+    }
+}
+
+/// Periodic sweeper: every `SYNC_SWEEPER_INTERVAL_MS` re-issues
+/// `GetCert` for every hash still in `inflight_fetches`. A peer that
+/// dropped our first request (full channel, restart, …) gets a fresh
+/// chance to answer. Without this, a node that lost a single `GetCert`
+/// stays stuck on that orphan forever.
+///
+/// Re-issue is multi-peer (`fetch_cert_from_peers` with no preference)
+/// so we rotate naturally rather than re-asking the same dropped peer.
+async fn run_sync_sweeper(
+    state: Arc<Mutex<State>>,
+    outbound: Arc<HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>>,
+) {
+    let mut tick = tokio::time::interval(Duration::from_millis(SYNC_SWEEPER_INTERVAL_MS));
+    // Skip the first immediate tick.
+    tick.tick().await;
+    loop {
+        tick.tick().await;
+        let pending: Vec<CertHash> = {
+            let s = state.lock().await;
+            s.inflight_fetches.iter().copied().collect()
+        };
+        for h in pending {
+            fetch_cert_from_peers(h, None, &outbound);
         }
     }
 }
@@ -289,47 +431,79 @@ async fn run_inbox(
 /// cluster's progress. `try_send` matches the "best-effort gossip" model
 /// the wire transport advertises — retries happen via natural cert
 /// re-broadcast at the next round.
-fn broadcast(
-    outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
-    msg: WireMessage,
-) {
+fn broadcast(outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>, msg: WireMessage) {
     for tx in outbound.values() {
         let _ = tx.try_send(msg.clone());
     }
 }
 
 fn try_commit(s: &mut State, self_label: &str, log: &EventLog) {
-    // Find rounds with at least one voted-on cert. For each such round, ask
-    // joint_commit whether the round's leader fires.
-    let candidate_rounds: BTreeSet<u64> = s
-        .votes
-        .keys()
-        .filter_map(|h| s.dag.get(h).map(|c| c.round))
-        .collect();
+    // Build the votes view once — re-derived inside loops would multiply
+    // work for no benefit; this function holds the State mutex.
+    let votes_flat: Vec<Vote> = s.votes.values().flatten().copied().collect();
+    let n = s.n_authorities;
+
+    // Try direct + indirect decision on every round we have seen at
+    // least one cert at. Indirect commit may pull in slots we haven't
+    // explicitly received votes for as long as their leader cert is in
+    // a later directly-decided anchor's causal history.
+    let candidate_rounds: BTreeSet<u64> = {
+        let mut rounds = BTreeSet::new();
+        for h in s.dag.linearize() {
+            if let Some(c) = s.dag.get(&h) {
+                rounds.insert(c.round);
+            }
+        }
+        rounds
+    };
 
     for round in candidate_rounds {
-        let votes_flat: Vec<Vote> = s.votes.values().flatten().copied().collect();
-        let Some(committed) =
-            joint_commit(&s.dag, round, s.n_authorities, &s.stake_table, &votes_flat)
-        else {
-            continue;
+        let status = decide_slot(&s.dag, round, n);
+        let leader_hash = match status {
+            LeaderStatus::Direct(h) => h,
+            LeaderStatus::Skip | LeaderStatus::Undecided => continue,
         };
-        if !s.committed.insert(committed) {
+
+        if s.committed.contains(&leader_hash) {
             continue;
         }
-        let intents = s
-            .blocks
-            .get(&committed)
-            .map(|b| b.intents.clone())
-            .unwrap_or_default();
-        let block = Block { round, intents };
-        let _ = execute_block(&mut s.substrate, &block);
-        log.emit(
-            Event::now(self_label, Lane::Main, "committed")
-                .with_round(round)
-                .with_cert_hash(&committed.0),
-        );
-        s.votes.remove(&committed);
+
+        // Joint-quorum AND-gate: Authority side already passed via
+        // decide_slot. Validator-Ring stake side must also pass before
+        // we can finalize.
+        if !validator_quorum_met(&s.stake_table, leader_hash, &votes_flat) {
+            continue;
+        }
+
+        // Commit the directly-decided leader plus every cert in its
+        // causal history — this is where indirect-decided earlier slots
+        // become observable. Walk the linearized history (deterministic
+        // order) and execute each.
+        for h in gsx_consensus::causal_history(&s.dag, leader_hash) {
+            if !s.committed.insert(h) {
+                continue;
+            }
+            let cert_round = match s.dag.get(&h) {
+                Some(c) => c.round,
+                None => continue,
+            };
+            let intents = s
+                .blocks
+                .get(&h)
+                .map(|b| b.intents.clone())
+                .unwrap_or_default();
+            let block = Block {
+                round: cert_round,
+                intents,
+            };
+            let _ = execute_block(&mut s.substrate, &block);
+            log.emit(
+                Event::now(self_label, Lane::Main, "committed")
+                    .with_round(cert_round)
+                    .with_cert_hash(&h.0),
+            );
+            s.votes.remove(&h);
+        }
     }
 }
 
@@ -340,23 +514,14 @@ fn f_plus_one(n: u32) -> u32 {
     (n - 1) / 3 + 1
 }
 
-/// Round-driver fallback timing (in `round_ms` multiples). Three tiers:
+/// Round-driver leader timeout (in `round_ms` multiples). If a round
+/// doesn't reach strict quorum within this many ticks, force-propose with
+/// any ≥ f+1 parents. With the indirect commit rule (S21.2), a leader
+/// that fires under timeout-force can still be committed retroactively
+/// when a later directly-decided anchor's causal history reaches it.
 ///
-/// 1. `STRICT_OK_AFTER_ROUNDS`: if `quorum_threshold` parents are observed
-///    sooner, advance immediately.
-/// 2. `LEADER_FALLBACK_ROUNDS`: after this elapses, accept fewer parents
-///    (≥ f+1) **as long as the previous round's leader is among them**.
-///    Mysticeti-C commits the round-R leader retroactively when ≥ quorum
-///    round-(R+1) certs include the leader's hash as a parent — so the
-///    leader-as-parent invariant is what makes commits fire under
-///    partial-synchrony.
-/// 3. `LEADERLESS_FALLBACK_ROUNDS`: extreme fallback when the leader itself
-///    is the laggy peer. Accept ≥ f+1 parents without the leader. Some
-///    round-R leaders never commit in this case, which is acceptable;
-///    later rounds with a healthy leader will commit and pull the missed
-///    rounds along via causal history.
-const LEADER_FALLBACK_ROUNDS: u32 = 8;
-const LEADERLESS_FALLBACK_ROUNDS: u32 = 32;
+/// Matches Sui's `leader_timeout` (consensus/core/src/leader_timeout.rs).
+const LEADER_TIMEOUT_ROUNDS: u32 = 4;
 
 async fn run_round_driver(
     self_label: String,
@@ -367,87 +532,53 @@ async fn run_round_driver(
     log: EventLog,
 ) {
     let mut tick = tokio::time::interval(Duration::from_millis(round_ms));
-    // Wall-clock when the round driver last advanced. Two fallback deadlines:
-    // - leader fallback: f+1 parents that *include the previous leader*
-    // - leaderless fallback: f+1 parents, leader can be missing
+    // Per-round leader timeout: if we haven't advanced after this much
+    // elapsed wall-clock, force-propose with whatever parents we have
+    // (≥ f+1). Bypasses the strict quorum gate so a slow peer can't
+    // permanently stall the cluster. Matches Sui's `leader_timeout`.
+    let leader_timeout = Duration::from_millis(round_ms * LEADER_TIMEOUT_ROUNDS as u64);
     let mut round_started_at = tokio::time::Instant::now();
-    let leader_fallback_after =
-        Duration::from_millis(round_ms * LEADER_FALLBACK_ROUNDS as u64);
-    let leaderless_fallback_after =
-        Duration::from_millis(round_ms * LEADERLESS_FALLBACK_ROUNDS as u64);
 
     loop {
         tick.tick().await;
         let mut s = state.lock().await;
         let n = s.n_authorities;
-        // Snap-up: jump to the highest round R such that we have at least
-        // f+1 parents at R, then author at R+1. This ensures the
-        // parents-at-prev-round gate is satisfiable when we advance —
-        // jumping naively to max_observed_round + 1 strands the snap-up at
-        // the leading edge where we typically have only the one peer's
-        // cert that informed us of the new round.
-        let next_own = s.last_authored_round.map(|p| p + 1).unwrap_or(0);
-        let next_snap = s
-            .highest_round_with(f_plus_one(n))
-            .map(|r| r + 1)
-            .unwrap_or(0);
-        let candidate_round = next_own.max(next_snap);
-        let prev_round = candidate_round.saturating_sub(1);
+        // Always advance one round at a time from our own last authored
+        // round. Skipping rounds (the pre-S21.5 snap-up) breaks the
+        // per-authority equivocation invariant — every authority's
+        // column in the DAG must be contiguous. Catch-up of missing
+        // peer certs is the synchronizer's job (S21.3), not the round
+        // driver's.
+        let target_round = s.last_authored_round.map(|r| r + 1).unwrap_or(0);
+        let prev_round = target_round.saturating_sub(1);
 
-        let target_round = if s.last_authored_round.is_none() {
-            // Round 0: bootstrap, no gating.
-            0u64
-        } else {
-            // Use the prev round of the snapped-up candidate, not just
-            // last_authored - 1, so the readiness check matches the round
-            // we'd actually author next.
+        if s.last_authored_round.is_some() {
             let parents_count = s.distinct_authors_at(prev_round);
-            let prev_leader = round_leader(prev_round, n);
-            let leader_observed = cert_at(&s.dag, prev_round, prev_leader).is_some();
             let elapsed = round_started_at.elapsed();
-
             let strict_ok = parents_count >= quorum_threshold(n);
-            let leader_fallback_ok = parents_count >= f_plus_one(n)
-                && leader_observed
-                && elapsed >= leader_fallback_after;
-            let leaderless_fallback_ok =
-                parents_count >= f_plus_one(n) && elapsed >= leaderless_fallback_after;
+            let timeout_force = parents_count >= f_plus_one(n) && elapsed >= leader_timeout;
 
-            if !strict_ok && !leader_fallback_ok && !leaderless_fallback_ok {
+            if !strict_ok && !timeout_force {
                 debug!(
-                    candidate_round,
+                    target_round,
                     prev_round,
                     parents = parents_count,
                     quorum = quorum_threshold(n),
-                    leader_observed,
                     elapsed_ms = elapsed.as_millis() as u64,
                     "round driver: waiting"
                 );
                 continue;
             }
-            if candidate_round > next_own {
-                tracing::info!(
-                    skip_from = next_own,
-                    skip_to = candidate_round,
-                    "round driver: snap-up engaged"
-                );
-            }
             if !strict_ok {
                 tracing::warn!(
-                    round = candidate_round,
+                    round = target_round,
                     parents = parents_count,
                     quorum = quorum_threshold(n),
-                    leader_observed,
-                    mode = if leader_fallback_ok {
-                        "leader-fallback"
-                    } else {
-                        "leaderless-fallback"
-                    },
-                    "round driver: fallback engaged"
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    "round driver: leader-timeout force-propose"
                 );
             }
-            candidate_round
-        };
+        }
         round_started_at = tokio::time::Instant::now();
         let parents = s.parents_for_round(target_round);
         let intents = std::mem::take(&mut s.pending_intents);
@@ -500,6 +631,7 @@ mod tests {
         assert_eq!(f_plus_one(6), 2); // f=1 — perf testnet
         assert_eq!(f_plus_one(7), 3); // f=2 — 7-of-9 LTP corridor
         assert_eq!(f_plus_one(10), 4); // f=3
+
         // Strict quorum threshold should always exceed f+1.
         for n in 3u32..=20 {
             assert!(

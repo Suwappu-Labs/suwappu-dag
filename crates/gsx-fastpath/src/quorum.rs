@@ -1,14 +1,12 @@
 //! Fast-path quorum.
 //!
-//! Paper §6.4: "Eligible transactions are certified by a fast-path
-//! quorum of `⌈(2/3)|A|⌉ + 1` Authority Ring members."
-//!
-//! This is *strictly larger* than the Mysticeti-C main-lane quorum
-//! (`⌈2n/3⌉ + 1`) for the same `n`; in the integer arithmetic both
-//! formulas evaluate to the same value but the fast-path semantics are
-//! stricter: certified by the same threshold, but with the added
-//! requirement that signers commit irrevocably (equivocation is
-//! slashable at 100% bonded stake, DAG-S9).
+//! Paper §6.4 writes `⌈(2/3)|A|⌉ + 1`, but per `docs/iq/IQ-001` the
+//! canonical Mysticeti / Bullshark / Sui threshold is `q = 2f + 1` with
+//! `f = ⌊(n-1)/3⌋` — equivalently `q = n − ⌊(n-1)/3⌋`. This matches
+//! the main-lane `gsx_consensus::commit::quorum_threshold`. Fast-path
+//! semantics remain stricter than the main lane only in that signers
+//! commit irrevocably: equivocation is slashable at 100% bonded stake
+//! (DAG-S9).
 
 use std::collections::BTreeSet;
 
@@ -34,14 +32,14 @@ pub enum FastPathError {
     UnknownSigner(AuthorityId),
 }
 
-/// `⌈(2/3)n⌉ + 1` per paper §6.4. Capped at `n` to admit small-`n` test
-/// envelopes (which would otherwise demand more signers than exist).
+/// `q = 2f + 1` with `f = ⌊(n-1)/3⌋` — equivalently `n − ⌊(n-1)/3⌋`.
+/// Matches `gsx_consensus::commit::quorum_threshold`. See IQ-001 for the
+/// divergence from paper §6.4's literal `⌈2n/3⌉ + 1`.
 pub fn fast_path_quorum_size(n_authorities: u32) -> u32 {
     if n_authorities == 0 {
         return 1;
     }
-    let q = (2 * n_authorities).div_ceil(3) + 1;
-    q.min(n_authorities)
+    n_authorities - (n_authorities - 1) / 3
 }
 
 /// Verify that `signers` constitutes a fast-path quorum for the supplied
@@ -84,20 +82,29 @@ mod tests {
     }
 
     #[test]
-    fn quorum_size_matches_paper() {
-        // n = 30: ⌈60/3⌉ + 1 = 21
-        assert_eq!(fast_path_quorum_size(30), 21);
-        // n = 50: ⌈100/3⌉ + 1 = 35
-        assert_eq!(fast_path_quorum_size(50), 35);
-        // n = 1: capped at 1
+    fn quorum_size_matches_canonical_bft() {
+        // q = n − ⌊(n-1)/3⌋ — equivalent to ⌊2n/3⌋ + 1 and to 2f+1 when
+        // n = 3f+1. See IQ-001 for divergence from paper §6.4's `⌈2n/3⌉+1`.
+        assert_eq!(fast_path_quorum_size(0), 1); // defensive
         assert_eq!(fast_path_quorum_size(1), 1);
-        // n = 0: minimum of 1 (defensive)
-        assert_eq!(fast_path_quorum_size(0), 1);
+        assert_eq!(fast_path_quorum_size(4), 3); // was 4 under paper (unanimity bug)
+        assert_eq!(fast_path_quorum_size(7), 5); // was 6 under paper
+        assert_eq!(fast_path_quorum_size(10), 7); // was 8 under paper
+        assert_eq!(fast_path_quorum_size(30), 21);
+        assert_eq!(fast_path_quorum_size(50), 34); // was 35 under paper
+
+        // Property: q > 2n/3 (strict supermajority) for every committee size.
+        for n in 1u32..=64 {
+            let q = fast_path_quorum_size(n);
+            assert!(3 * q > 2 * n, "n={n}: q={q} fails strict 2/3 majority");
+            assert!(q <= n, "n={n}: q={q} exceeds committee");
+        }
     }
 
     #[test]
     fn certify_below_quorum_fails() {
-        let signers: BTreeSet<AuthorityId> = (0..20).collect(); // 20 < 21
+        // n=30, q=21. 20 signers is below.
+        let signers: BTreeSet<AuthorityId> = (0..20).collect();
         let err = certify(dummy_tx(), signers, 30);
         assert!(matches!(err, Err(FastPathError::BelowQuorum { .. })));
     }
@@ -112,7 +119,7 @@ mod tests {
     #[test]
     fn certify_with_out_of_bounds_signer_fails() {
         let mut signers: BTreeSet<AuthorityId> = (0..21).collect();
-        signers.insert(99); // outside committee
+        signers.insert(99);
         let err = certify(dummy_tx(), signers, 30);
         assert!(matches!(err, Err(FastPathError::UnknownSigner(99))));
     }
