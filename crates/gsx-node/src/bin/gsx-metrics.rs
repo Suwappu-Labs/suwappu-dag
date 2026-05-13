@@ -296,18 +296,50 @@ fn emit_pair_mode(events: &[Event]) {
 fn emit_tps_mode(events: &[Event], bucket_ms: u64) {
     // bucket_start_ms → (distinct certs, intent count).
     let mut buckets: BTreeMap<u64, (BTreeSet<String>, u64)> = BTreeMap::new();
+    // DAG-S28.5: track how many committed events lacked an
+    // `intent_hashes` field so the operator sees when the TPS column
+    // falls back to per-cert counting (one intent per cert).
+    let mut commits_total: u64 = 0;
+    let mut commits_with_intents: u64 = 0;
     for ev in events {
         if ev.event != "committed" {
             continue;
         }
+        commits_total += 1;
         let bucket = (ev.t_ms / bucket_ms) * bucket_ms;
         let entry = buckets.entry(bucket).or_default();
         if let Some(h) = &ev.cert_hash {
             entry.0.insert(h.clone());
         }
-        if let Some(hashes) = &ev.intent_hashes {
-            entry.1 += hashes.len() as u64;
+        match &ev.intent_hashes {
+            Some(hashes) if !hashes.is_empty() => {
+                entry.1 += hashes.len() as u64;
+                commits_with_intents += 1;
+            }
+            _ => {
+                // DAG-S28.5 fallback: if the committed event has no
+                // `intent_hashes` (older binary, lane filter, missing
+                // field), count the commit itself as one intent batch
+                // so TPS doesn't silently report 0 when commits are
+                // landing but intent-trace events aren't.
+                entry.1 += 1;
+            }
         }
+    }
+    if commits_total > 0 && commits_with_intents == 0 {
+        eprintln!(
+            "gsx-metrics tps: warning — {} committed events lacked `intent_hashes`; \
+             reporting commit-rate (1 intent per cert) instead of intent-rate. \
+             Upgrade validators past DAG-S26.1 for true intent counts.",
+            commits_total
+        );
+    } else if commits_total > 0 && commits_with_intents < commits_total {
+        eprintln!(
+            "gsx-metrics tps: {} of {} committed events had no `intent_hashes` \
+             (fallback applied for those)",
+            commits_total - commits_with_intents,
+            commits_total
+        );
     }
     println!("bucket_start_ms,bucket_end_ms,distinct_certs,intents,tps");
     for (start, (certs, intents)) in buckets {

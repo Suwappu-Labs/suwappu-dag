@@ -11,7 +11,7 @@ TF="$ROOT/terraform/perf"
 OUT="$ROOT/target/perf/configs"
 CONSENSUS_PORT="${CONSENSUS_PORT:-9090}"
 CLIENT_PORT="${CLIENT_PORT:-9091}"
-ROUND_MS="${ROUND_MS:-250}"
+ROUND_MS="${ROUND_MS:-100}"
 
 if ! command -v jq >/dev/null 2>&1; then
   echo "error: jq required" >&2

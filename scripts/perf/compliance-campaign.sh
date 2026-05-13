@@ -67,9 +67,21 @@ sleep "$DURATION_S"
 END_MS=$(date +%s%3N)
 echo "[$(date -u +%FT%TZ)] observation window closed"
 
-# Step 4–5: collect logs from each validator in parallel via SSM.
-echo "[$(date -u +%FT%TZ)] collecting events.ndjson + loadgen.csv via SSM"
-declare -A SSM_CMDS
+# Step 4–5: collect logs from each validator via S3 push (DAG-S28.1).
+# SSM `StandardOutputContent` truncates at 24,576 bytes per command —
+# pre-S28 this silently dropped multi-MB event logs to ~130 lines per
+# region. The validator EC2 IAM role already has `s3:PutObject` on the
+# `logs/` prefix of the artifact bucket (terraform/perf/modules/region/
+# main.tf:165-172), so we instruct each validator to gzip its events
+# file and `aws s3 cp` it into `s3://<bucket>/logs/<campaign>/<region>.
+# ndjson.gz`, then download locally from S3 with no truncation.
+BUCKET="${ARTIFACT_BUCKET:-gsx-dag-perf-artifacts}"
+S3_PREFIX="logs/$CAMPAIGN_ID"
+echo "[$(date -u +%FT%TZ)] collecting events.ndjson via S3 push -> s3://$BUCKET/$S3_PREFIX/"
+
+# Use parallel indexed arrays (region:cmd_id pairs) instead of an
+# associative array — Mac default bash is 3.2 and lacks `declare -A`.
+SSM_CMDS_PAIRS=()
 for v in "${VALIDATORS[@]}"; do
   region="${v%%:*}"
   iid="${v##*:}"
@@ -77,26 +89,38 @@ for v in "${VALIDATORS[@]}"; do
     --region "$region" \
     --instance-ids "$iid" \
     --document-name AWS-RunShellScript \
-    --parameters 'commands=["cat /var/log/gsx/events.ndjson"]' \
+    --parameters "commands=[\"set -e\",\"sudo cp /var/log/gsx/events.ndjson /tmp/e-$CAMPAIGN_ID.ndjson\",\"sudo chmod 644 /tmp/e-$CAMPAIGN_ID.ndjson\",\"gzip -f /tmp/e-$CAMPAIGN_ID.ndjson\",\"aws s3 cp /tmp/e-$CAMPAIGN_ID.ndjson.gz s3://$BUCKET/$S3_PREFIX/$region.ndjson.gz --region us-east-1\",\"rm -f /tmp/e-$CAMPAIGN_ID.ndjson.gz\",\"echo uploaded $region\"]" \
     --query Command.CommandId --output text)
-  SSM_CMDS["$region"]="$cmd_id"
+  SSM_CMDS_PAIRS+=("$region:$cmd_id")
 done
 
 for v in "${VALIDATORS[@]}"; do
   region="${v%%:*}"
   iid="${v##*:}"
-  cmd_id="${SSM_CMDS[$region]}"
-  # Wait for completion, then dump StandardOutputContent to events file.
+  cmd_id=""
+  for pair in "${SSM_CMDS_PAIRS[@]}"; do
+    if [[ "${pair%%:*}" == "$region" ]]; then cmd_id="${pair#*:}"; break; fi
+  done
   until aws ssm get-command-invocation \
           --region "$region" --command-id "$cmd_id" --instance-id "$iid" \
           --query Status --output text 2>/dev/null \
-          | grep -q "Success\|Failed"; do
+          | grep -qE "Success|Failed|Cancelled|TimedOut"; do
     sleep 2
   done
-  aws ssm get-command-invocation \
+  status=$(aws ssm get-command-invocation \
       --region "$region" --command-id "$cmd_id" --instance-id "$iid" \
-      --query StandardOutputContent --output text \
-      > "$CAMPAIGN_DIR/events/$region.ndjson"
+      --query Status --output text)
+  if [[ "$status" != "Success" ]]; then
+    echo "  $region: upload FAILED ($status)"
+    aws ssm get-command-invocation \
+        --region "$region" --command-id "$cmd_id" --instance-id "$iid" \
+        --query StandardErrorContent --output text >&2
+    continue
+  fi
+  # Pull the gzipped log from S3 to the local campaign dir.
+  aws s3 cp "s3://$BUCKET/$S3_PREFIX/$region.ndjson.gz" \
+      "$CAMPAIGN_DIR/events/$region.ndjson.gz" --region us-east-1 --quiet
+  gunzip -f "$CAMPAIGN_DIR/events/$region.ndjson.gz"
   echo "  $region: $(wc -l < "$CAMPAIGN_DIR/events/$region.ndjson") events"
 done
 
@@ -112,24 +136,48 @@ if [[ -n "$LOADGEN_IID" ]]; then
     --region "$LOADGEN_HOST_REGION" \
     --instance-ids "$LOADGEN_IID" \
     --document-name AWS-RunShellScript \
-    --parameters 'commands=["cat /var/log/gsx/loadgen.csv 2>/dev/null || true"]' \
+    --parameters "commands=[\"set -e\",\"if [ -f /var/log/gsx/loadgen.csv ]; then sudo cp /var/log/gsx/loadgen.csv /tmp/lg-$CAMPAIGN_ID.csv; sudo chmod 644 /tmp/lg-$CAMPAIGN_ID.csv; gzip -f /tmp/lg-$CAMPAIGN_ID.csv; aws s3 cp /tmp/lg-$CAMPAIGN_ID.csv.gz s3://$BUCKET/$S3_PREFIX/loadgen.csv.gz --region us-east-1; rm -f /tmp/lg-$CAMPAIGN_ID.csv.gz; echo uploaded loadgen; else echo no loadgen.csv; fi\"]" \
     --query Command.CommandId --output text)
   until aws ssm get-command-invocation \
           --region "$LOADGEN_HOST_REGION" --command-id "$cmd_id" --instance-id "$LOADGEN_IID" \
           --query Status --output text 2>/dev/null \
-          | grep -q "Success\|Failed"; do
+          | grep -qE "Success|Failed|Cancelled|TimedOut"; do
     sleep 2
   done
-  aws ssm get-command-invocation \
-      --region "$LOADGEN_HOST_REGION" --command-id "$cmd_id" --instance-id "$LOADGEN_IID" \
-      --query StandardOutputContent --output text \
-      > "$CAMPAIGN_DIR/loadgen.csv"
-  echo "  loadgen.csv: $(wc -l < "$CAMPAIGN_DIR/loadgen.csv") rows"
+  if aws s3 ls "s3://$BUCKET/$S3_PREFIX/loadgen.csv.gz" --region us-east-1 >/dev/null 2>&1; then
+    aws s3 cp "s3://$BUCKET/$S3_PREFIX/loadgen.csv.gz" \
+        "$CAMPAIGN_DIR/loadgen.csv.gz" --region us-east-1 --quiet
+    gunzip -f "$CAMPAIGN_DIR/loadgen.csv.gz"
+    echo "  loadgen.csv: $(wc -l < "$CAMPAIGN_DIR/loadgen.csv") rows"
+  else
+    echo "  loadgen.csv: (not found on loadgen host)"
+    echo "client_submitted_ms,tx_hash,target_idx" > "$CAMPAIGN_DIR/loadgen.csv"
+  fi
 fi
 
-# Step 6: run gsx-metrics in each mode. Assumes gsx-metrics is built
-# in ./target/release or available on PATH.
-METRICS="${GSX_METRICS_BIN:-gsx-metrics}"
+# Step 6: run gsx-metrics in each mode (DAG-S28.4 — resolve in order:
+#   1. $GSX_METRICS_BIN env var if explicitly set
+#   2. ./target/release/gsx-metrics relative to repo root
+#   3. on-demand `cargo build --release -p gsx-node --bin gsx-metrics`
+#   4. PATH fallback (CI containers / docker)
+ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+if [[ -n "${GSX_METRICS_BIN:-}" ]] && [[ -x "$GSX_METRICS_BIN" ]]; then
+  METRICS="$GSX_METRICS_BIN"
+elif [[ -x "$ROOT_DIR/target/release/gsx-metrics" ]]; then
+  METRICS="$ROOT_DIR/target/release/gsx-metrics"
+elif command -v cargo >/dev/null 2>&1; then
+  echo "[$(date -u +%FT%TZ)] building gsx-metrics (native, one-shot)"
+  ( cd "$ROOT_DIR" && cargo build --release -p gsx-node --bin gsx-metrics 2>&1 | tail -2 )
+  METRICS="$ROOT_DIR/target/release/gsx-metrics"
+elif command -v gsx-metrics >/dev/null 2>&1; then
+  METRICS="gsx-metrics"
+else
+  echo "error: gsx-metrics not found. Set GSX_METRICS_BIN=/path/to/gsx-metrics," >&2
+  echo "       run \`cargo build --release -p gsx-node --bin gsx-metrics\` first," >&2
+  echo "       or run this script from a container with gsx-metrics on PATH." >&2
+  exit 1
+fi
+echo "[$(date -u +%FT%TZ)] gsx-metrics: $METRICS"
 
 LOG_ARGS=()
 for r in "${REGIONS[@]}"; do
