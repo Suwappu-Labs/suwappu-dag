@@ -252,7 +252,7 @@ async fn run_inbox(
                         .with_round(round)
                         .with_cert_hash(&h.0),
                 );
-                broadcast(&outbound, WireMessage::Vote(vote)).await;
+                broadcast(&outbound, WireMessage::Vote(vote));
                 // After voting we may have just enabled a commit ourselves
                 // (e.g. quorum_threshold reached on the round-0 leader).
                 let mut s = state.lock().await;
@@ -280,12 +280,21 @@ async fn run_inbox(
     }
 }
 
-async fn broadcast(
+/// Best-effort broadcast: drop on full channel, never block.
+///
+/// Previously this used `tx.send(...).await`, which queues if the per-peer
+/// outbound mpsc is full. A single slow peer (which couldn't drain its
+/// 1024-slot channel fast enough) would back-pressure the broadcasting
+/// validator's round driver to a complete halt, deadlocking the whole
+/// cluster's progress. `try_send` matches the "best-effort gossip" model
+/// the wire transport advertises — retries happen via natural cert
+/// re-broadcast at the next round.
+fn broadcast(
     outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
     msg: WireMessage,
 ) {
     for tx in outbound.values() {
-        let _ = tx.send(msg.clone()).await;
+        let _ = tx.try_send(msg.clone());
     }
 }
 
@@ -471,8 +480,8 @@ async fn run_round_driver(
                 .with_round(target_round)
                 .with_cert_hash(&cert_hash.0),
         );
-        broadcast(&outbound, WireMessage::Block(block)).await;
-        broadcast(&outbound, WireMessage::Cert(cert)).await;
+        broadcast(&outbound, WireMessage::Block(block));
+        broadcast(&outbound, WireMessage::Cert(cert));
     }
 }
 
