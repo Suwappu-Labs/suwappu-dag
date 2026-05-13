@@ -52,10 +52,10 @@ pub(crate) struct State {
     pub(crate) committed: HashSet<CertHash>,
     pub(crate) last_authored_round: Option<u64>,
     /// Highest round number observed in any cert inserted into the local
-    /// DAG — own or peer. The round driver snaps `target_round` up to this
-    /// value + 1 (Mysticeti-C "max observed round" pattern) so a slow
-    /// validator catches up by skipping rounds rather than stalling at R+1
-    /// of its own last authored round.
+    /// DAG — own or peer. The synchronizer (S21.3) uses this to detect
+    /// catch-up gaps; the round driver does not consult it directly (a
+    /// node always advances one round at a time from its own last
+    /// authored round — see S21.5 / IQ-002).
     pub(crate) max_observed_round: u64,
     pub(crate) pending_intents: Vec<gsx_execution::Intent>,
     pub(crate) n_authorities: u32,
@@ -101,18 +101,6 @@ impl State {
             .collect()
     }
 
-    /// Highest round R in [0, max_observed_round] at which the local DAG
-    /// already has at least `threshold` distinct authors. Returns None if
-    /// no round satisfies it. Used by the round driver's snap-up: rather
-    /// than jumping to `max_observed_round + 1` (where we may have only
-    /// one author's cert), we jump to the highest round where the parents
-    /// gate is actually satisfiable.
-    fn highest_round_with(&self, threshold: u32) -> Option<u64> {
-        let max = self.max_observed_round;
-        (0..=max)
-            .rev()
-            .find(|r| self.distinct_authors_at(*r) >= threshold)
-    }
 }
 
 /// Running daemon handle. Drop to stop all background tasks.
@@ -340,23 +328,14 @@ fn f_plus_one(n: u32) -> u32 {
     (n - 1) / 3 + 1
 }
 
-/// Round-driver fallback timing (in `round_ms` multiples). Three tiers:
+/// Round-driver leader timeout (in `round_ms` multiples). If a round
+/// doesn't reach strict quorum within this many ticks, force-propose with
+/// any ≥ f+1 parents. With the indirect commit rule (S21.2), a leader
+/// that fires under timeout-force can still be committed retroactively
+/// when a later directly-decided anchor's causal history reaches it.
 ///
-/// 1. `STRICT_OK_AFTER_ROUNDS`: if `quorum_threshold` parents are observed
-///    sooner, advance immediately.
-/// 2. `LEADER_FALLBACK_ROUNDS`: after this elapses, accept fewer parents
-///    (≥ f+1) **as long as the previous round's leader is among them**.
-///    Mysticeti-C commits the round-R leader retroactively when ≥ quorum
-///    round-(R+1) certs include the leader's hash as a parent — so the
-///    leader-as-parent invariant is what makes commits fire under
-///    partial-synchrony.
-/// 3. `LEADERLESS_FALLBACK_ROUNDS`: extreme fallback when the leader itself
-///    is the laggy peer. Accept ≥ f+1 parents without the leader. Some
-///    round-R leaders never commit in this case, which is acceptable;
-///    later rounds with a healthy leader will commit and pull the missed
-///    rounds along via causal history.
-const LEADER_FALLBACK_ROUNDS: u32 = 8;
-const LEADERLESS_FALLBACK_ROUNDS: u32 = 32;
+/// Matches Sui's `leader_timeout` (consensus/core/src/leader_timeout.rs).
+const LEADER_TIMEOUT_ROUNDS: u32 = 4;
 
 async fn run_round_driver(
     self_label: String,
@@ -367,87 +346,53 @@ async fn run_round_driver(
     log: EventLog,
 ) {
     let mut tick = tokio::time::interval(Duration::from_millis(round_ms));
-    // Wall-clock when the round driver last advanced. Two fallback deadlines:
-    // - leader fallback: f+1 parents that *include the previous leader*
-    // - leaderless fallback: f+1 parents, leader can be missing
+    // Per-round leader timeout: if we haven't advanced after this much
+    // elapsed wall-clock, force-propose with whatever parents we have
+    // (≥ f+1). Bypasses the strict quorum gate so a slow peer can't
+    // permanently stall the cluster. Matches Sui's `leader_timeout`.
+    let leader_timeout = Duration::from_millis(round_ms * LEADER_TIMEOUT_ROUNDS as u64);
     let mut round_started_at = tokio::time::Instant::now();
-    let leader_fallback_after =
-        Duration::from_millis(round_ms * LEADER_FALLBACK_ROUNDS as u64);
-    let leaderless_fallback_after =
-        Duration::from_millis(round_ms * LEADERLESS_FALLBACK_ROUNDS as u64);
 
     loop {
         tick.tick().await;
         let mut s = state.lock().await;
         let n = s.n_authorities;
-        // Snap-up: jump to the highest round R such that we have at least
-        // f+1 parents at R, then author at R+1. This ensures the
-        // parents-at-prev-round gate is satisfiable when we advance —
-        // jumping naively to max_observed_round + 1 strands the snap-up at
-        // the leading edge where we typically have only the one peer's
-        // cert that informed us of the new round.
-        let next_own = s.last_authored_round.map(|p| p + 1).unwrap_or(0);
-        let next_snap = s
-            .highest_round_with(f_plus_one(n))
-            .map(|r| r + 1)
-            .unwrap_or(0);
-        let candidate_round = next_own.max(next_snap);
-        let prev_round = candidate_round.saturating_sub(1);
+        // Always advance one round at a time from our own last authored
+        // round. Skipping rounds (the pre-S21.5 snap-up) breaks the
+        // per-authority equivocation invariant — every authority's
+        // column in the DAG must be contiguous. Catch-up of missing
+        // peer certs is the synchronizer's job (S21.3), not the round
+        // driver's.
+        let target_round = s.last_authored_round.map(|r| r + 1).unwrap_or(0);
+        let prev_round = target_round.saturating_sub(1);
 
-        let target_round = if s.last_authored_round.is_none() {
-            // Round 0: bootstrap, no gating.
-            0u64
-        } else {
-            // Use the prev round of the snapped-up candidate, not just
-            // last_authored - 1, so the readiness check matches the round
-            // we'd actually author next.
+        if s.last_authored_round.is_some() {
             let parents_count = s.distinct_authors_at(prev_round);
-            let prev_leader = round_leader(prev_round, n);
-            let leader_observed = cert_at(&s.dag, prev_round, prev_leader).is_some();
             let elapsed = round_started_at.elapsed();
-
             let strict_ok = parents_count >= quorum_threshold(n);
-            let leader_fallback_ok = parents_count >= f_plus_one(n)
-                && leader_observed
-                && elapsed >= leader_fallback_after;
-            let leaderless_fallback_ok =
-                parents_count >= f_plus_one(n) && elapsed >= leaderless_fallback_after;
+            let timeout_force = parents_count >= f_plus_one(n) && elapsed >= leader_timeout;
 
-            if !strict_ok && !leader_fallback_ok && !leaderless_fallback_ok {
+            if !strict_ok && !timeout_force {
                 debug!(
-                    candidate_round,
+                    target_round,
                     prev_round,
                     parents = parents_count,
                     quorum = quorum_threshold(n),
-                    leader_observed,
                     elapsed_ms = elapsed.as_millis() as u64,
                     "round driver: waiting"
                 );
                 continue;
             }
-            if candidate_round > next_own {
-                tracing::info!(
-                    skip_from = next_own,
-                    skip_to = candidate_round,
-                    "round driver: snap-up engaged"
-                );
-            }
             if !strict_ok {
                 tracing::warn!(
-                    round = candidate_round,
+                    round = target_round,
                     parents = parents_count,
                     quorum = quorum_threshold(n),
-                    leader_observed,
-                    mode = if leader_fallback_ok {
-                        "leader-fallback"
-                    } else {
-                        "leaderless-fallback"
-                    },
-                    "round driver: fallback engaged"
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    "round driver: leader-timeout force-propose"
                 );
             }
-            candidate_round
-        };
+        }
         round_started_at = tokio::time::Instant::now();
         let parents = s.parents_for_round(target_round);
         let intents = std::mem::take(&mut s.pending_intents);
