@@ -930,8 +930,7 @@ fn try_commit(s: &mut State, self_label: &str, log: &EventLog) {
                 s.epoch.current = new_epoch;
                 s.epoch.last_boundary_round = cert_round;
                 log.emit(
-                    Event::now(self_label, Lane::Main, "epoch_boundary")
-                        .with_round(cert_round),
+                    Event::now(self_label, Lane::Main, "epoch_boundary").with_round(cert_round),
                 );
                 tracing::info!(
                     epoch = new_epoch,
