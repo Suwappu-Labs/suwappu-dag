@@ -85,31 +85,15 @@ module "ap_northeast_1" {
   artifact_bucket  = aws_s3_bucket.artifacts.id
 }
 
-module "ap_southeast_2" {
-  source           = "./modules/region"
-  providers        = { aws = aws.ap_southeast_2 }
-  region_label     = "ap-southeast-2"
-  authority_id     = 4
-  instance_type    = var.instance_type
-  ssh_public_key   = var.ssh_public_key
-  operator_ip_cidr = var.operator_ip_cidr
-  consensus_port   = var.consensus_port
-  client_port      = var.client_port
-  artifact_bucket  = aws_s3_bucket.artifacts.id
-}
-
-module "sa_east_1" {
-  source           = "./modules/region"
-  providers        = { aws = aws.sa_east_1 }
-  region_label     = "sa-east-1"
-  authority_id     = 5
-  instance_type    = var.instance_type
-  ssh_public_key   = var.ssh_public_key
-  operator_ip_cidr = var.operator_ip_cidr
-  consensus_port   = var.consensus_port
-  client_port      = var.client_port
-  artifact_bucket  = aws_s3_bucket.artifacts.id
-}
+# ap-southeast-2 (Sydney) and sa-east-1 (São Paulo) intentionally NOT
+# instantiated for this campaign. Both showed >2s peer-to-peer RTT under
+# real load and stalled the round driver waiting for them as leaders.
+# When we add a "max observed round" snap-up to the round driver (so slow
+# nodes can skip ahead by referencing parents from a later round), we can
+# put them back. Tracked as a follow-up.
+#
+# module "ap_southeast_2" { ... }
+# module "sa_east_1" { ... }
 
 # af-south-1 is intentionally NOT instantiated. The region requires a manual
 # one-time opt-in via the AWS console / `aws account enable-region`, and the

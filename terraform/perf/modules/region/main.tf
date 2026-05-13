@@ -19,6 +19,19 @@ terraform {
 data "aws_region" "this" {}
 data "aws_caller_identity" "this" {}
 
+# Pick the first AZ in this region that supports the requested instance type.
+# Without this, AWS sometimes places the subnet in an AZ (e.g. us-east-1e)
+# that doesn't offer t3.* sizes, and instance creation fails with
+# "Unsupported: Your requested instance type ... is not supported in your
+# requested Availability Zone ...".
+data "aws_ec2_instance_type_offerings" "supported" {
+  filter {
+    name   = "instance-type"
+    values = [var.instance_type]
+  }
+  location_type = "availability-zone"
+}
+
 # Use the canonical Ubuntu 24.04 LTS AMI. Region-specific lookup avoids
 # hard-coding AMI ids that drift over time.
 data "aws_ami" "ubuntu" {
@@ -47,7 +60,10 @@ resource "aws_subnet" "public" {
   vpc_id                  = aws_vpc.this.id
   cidr_block              = "10.42.1.0/24"
   map_public_ip_on_launch = true
-  tags                    = { Name = "gsx-perf-${var.region_label}-subnet" }
+  # First AZ that offers the requested instance type. Sorting gives a
+  # deterministic pick across applies.
+  availability_zone = sort(data.aws_ec2_instance_type_offerings.supported.locations)[0]
+  tags              = { Name = "gsx-perf-${var.region_label}-subnet" }
 }
 
 resource "aws_internet_gateway" "this" {
@@ -137,14 +153,24 @@ resource "aws_iam_role_policy" "s3_read" {
   role = aws_iam_role.ec2.id
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
-      Effect = "Allow"
-      Action = ["s3:GetObject", "s3:ListBucket"]
-      Resource = [
-        "arn:aws:s3:::${var.artifact_bucket}",
-        "arn:aws:s3:::${var.artifact_bucket}/*",
-      ]
-    }]
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = ["s3:GetObject", "s3:ListBucket"]
+        Resource = [
+          "arn:aws:s3:::${var.artifact_bucket}",
+          "arn:aws:s3:::${var.artifact_bucket}/*",
+        ]
+      },
+      {
+        # Logs prefix only — validators upload their events.ndjson here at
+        # the end of a campaign so the operator can pull complete files
+        # without going through SSM (which truncates output at ~24 KB).
+        Effect   = "Allow"
+        Action   = ["s3:PutObject"]
+        Resource = ["arn:aws:s3:::${var.artifact_bucket}/logs/*"]
+      },
+    ]
   })
 }
 

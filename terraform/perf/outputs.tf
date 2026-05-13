@@ -7,8 +7,7 @@ output "validators" {
     "us-west-2"      = { authority_id = module.us_west_2.authority_id, public_ip = module.us_west_2.public_ip }
     "eu-west-1"      = { authority_id = module.eu_west_1.authority_id, public_ip = module.eu_west_1.public_ip }
     "ap-northeast-1" = { authority_id = module.ap_northeast_1.authority_id, public_ip = module.ap_northeast_1.public_ip }
-    "ap-southeast-2" = { authority_id = module.ap_southeast_2.authority_id, public_ip = module.ap_southeast_2.public_ip }
-    "sa-east-1"      = { authority_id = module.sa_east_1.authority_id, public_ip = module.sa_east_1.public_ip }
+    # ap-southeast-2 / sa-east-1 disabled — see main.tf.
   }
 }
 
