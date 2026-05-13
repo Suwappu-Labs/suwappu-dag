@@ -24,7 +24,7 @@ use std::{
 
 use gsx_consensus::{
     cert::{CertHash, Certificate},
-    commit::{cert_at, quorum_threshold},
+    commit::{cert_at, leader as round_leader, quorum_threshold},
     dag::DagStore,
     joint::{joint_commit, StakeTable, Vote},
     AuthorityId,
@@ -308,11 +308,23 @@ fn f_plus_one(n: u32) -> u32 {
     (n - 1) / 3 + 1
 }
 
-/// How long (in round_ms multiples) to wait for the strict
-/// `quorum_threshold` of parents before falling back to `f+1`. 4 rounds at
-/// 250 ms cadence ≈ 1 s of slack — enough for cross-continent RTT to land
-/// without burning the lane on a single laggy peer.
-const FALLBACK_AFTER_ROUNDS: u32 = 4;
+/// Round-driver fallback timing (in `round_ms` multiples). Three tiers:
+///
+/// 1. `STRICT_OK_AFTER_ROUNDS`: if `quorum_threshold` parents are observed
+///    sooner, advance immediately.
+/// 2. `LEADER_FALLBACK_ROUNDS`: after this elapses, accept fewer parents
+///    (≥ f+1) **as long as the previous round's leader is among them**.
+///    Mysticeti-C commits the round-R leader retroactively when ≥ quorum
+///    round-(R+1) certs include the leader's hash as a parent — so the
+///    leader-as-parent invariant is what makes commits fire under
+///    partial-synchrony.
+/// 3. `LEADERLESS_FALLBACK_ROUNDS`: extreme fallback when the leader itself
+///    is the laggy peer. Accept ≥ f+1 parents without the leader. Some
+///    round-R leaders never commit in this case, which is acceptable;
+///    later rounds with a healthy leader will commit and pull the missed
+///    rounds along via causal history.
+const LEADER_FALLBACK_ROUNDS: u32 = 8;
+const LEADERLESS_FALLBACK_ROUNDS: u32 = 32;
 
 async fn run_round_driver(
     self_label: String,
@@ -323,11 +335,14 @@ async fn run_round_driver(
     log: EventLog,
 ) {
     let mut tick = tokio::time::interval(Duration::from_millis(round_ms));
-    // Wall-clock when the round driver last advanced. The deadline for the
-    // next round is `round_started_at + FALLBACK_AFTER_ROUNDS * round_ms`.
-    // If that passes without strict quorum, we fall through with f+1 parents.
+    // Wall-clock when the round driver last advanced. Two fallback deadlines:
+    // - leader fallback: f+1 parents that *include the previous leader*
+    // - leaderless fallback: f+1 parents, leader can be missing
     let mut round_started_at = tokio::time::Instant::now();
-    let fallback_after = Duration::from_millis(round_ms * FALLBACK_AFTER_ROUNDS as u64);
+    let leader_fallback_after =
+        Duration::from_millis(round_ms * LEADER_FALLBACK_ROUNDS as u64);
+    let leaderless_fallback_after =
+        Duration::from_millis(round_ms * LEADERLESS_FALLBACK_ROUNDS as u64);
 
     loop {
         tick.tick().await;
@@ -337,14 +352,24 @@ async fn run_round_driver(
             None => 0u64,
             Some(prev) => {
                 let parents_count = s.distinct_authors_at(prev);
+                let prev_leader = round_leader(prev, n);
+                let leader_observed = cert_at(&s.dag, prev, prev_leader).is_some();
+                let elapsed = round_started_at.elapsed();
+
                 let strict_ok = parents_count >= quorum_threshold(n);
-                let fallback_ok = parents_count >= f_plus_one(n)
-                    && round_started_at.elapsed() >= fallback_after;
-                if !strict_ok && !fallback_ok {
+                let leader_fallback_ok = parents_count >= f_plus_one(n)
+                    && leader_observed
+                    && elapsed >= leader_fallback_after;
+                let leaderless_fallback_ok = parents_count >= f_plus_one(n)
+                    && elapsed >= leaderless_fallback_after;
+
+                if !strict_ok && !leader_fallback_ok && !leaderless_fallback_ok {
                     debug!(
                         prev,
                         parents = parents_count,
                         quorum = quorum_threshold(n),
+                        leader_observed,
+                        elapsed_ms = elapsed.as_millis() as u64,
                         "round driver: waiting"
                     );
                     continue;
@@ -354,8 +379,9 @@ async fn run_round_driver(
                         round = prev + 1,
                         parents = parents_count,
                         quorum = quorum_threshold(n),
-                        fallback = f_plus_one(n),
-                        "round driver: f+1 fallback engaged"
+                        leader_observed,
+                        mode = if leader_fallback_ok { "leader-fallback" } else { "leaderless-fallback" },
+                        "round driver: fallback engaged"
                     );
                 }
                 prev + 1
