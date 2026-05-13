@@ -51,6 +51,12 @@ pub(crate) struct State {
     pub(crate) blocks: HashMap<CertHash, BlockPayload>,
     pub(crate) committed: HashSet<CertHash>,
     pub(crate) last_authored_round: Option<u64>,
+    /// Highest round number observed in any cert inserted into the local DAG
+    /// — own or peer. The round driver snaps `target_round` up to this value
+    /// + 1 (Mysticeti-C "max observed round" pattern) so a slow validator
+    /// catches up by skipping rounds rather than stalling at R+1 of its own
+    /// last authored round.
+    pub(crate) max_observed_round: u64,
     pub(crate) pending_intents: Vec<gsx_execution::Intent>,
     pub(crate) n_authorities: u32,
 }
@@ -70,6 +76,7 @@ impl State {
             blocks: HashMap::new(),
             committed: HashSet::new(),
             last_authored_round: None,
+            max_observed_round: 0,
             pending_intents: Vec::new(),
             n_authorities: n,
         }
@@ -217,6 +224,9 @@ async fn run_inbox(
                     debug!(peer = %from.0, "inbox: duplicate or invalid cert");
                     continue;
                 }
+                if round > s.max_observed_round {
+                    s.max_observed_round = round;
+                }
                 let vote = Vote {
                     validator: self_id,
                     candidate: h,
@@ -348,44 +358,67 @@ async fn run_round_driver(
         tick.tick().await;
         let mut s = state.lock().await;
         let n = s.n_authorities;
-        let target_round = match s.last_authored_round {
-            None => 0u64,
-            Some(prev) => {
-                let parents_count = s.distinct_authors_at(prev);
-                let prev_leader = round_leader(prev, n);
-                let leader_observed = cert_at(&s.dag, prev, prev_leader).is_some();
-                let elapsed = round_started_at.elapsed();
+        // Snap-up: the next round is max(our last + 1, observed leading edge).
+        // If we're behind, jump forward instead of stalling. Otherwise keep
+        // marching one round at a time.
+        let next_own = s.last_authored_round.map(|p| p + 1).unwrap_or(0);
+        let next_snap = s.max_observed_round.saturating_add(1);
+        let candidate_round = next_own.max(next_snap);
+        let prev_round = candidate_round.saturating_sub(1);
 
-                let strict_ok = parents_count >= quorum_threshold(n);
-                let leader_fallback_ok = parents_count >= f_plus_one(n)
-                    && leader_observed
-                    && elapsed >= leader_fallback_after;
-                let leaderless_fallback_ok = parents_count >= f_plus_one(n)
-                    && elapsed >= leaderless_fallback_after;
+        let target_round = if s.last_authored_round.is_none() {
+            // Round 0: bootstrap, no gating.
+            0u64
+        } else {
+            // Use the prev round of the snapped-up candidate, not just
+            // last_authored - 1, so the readiness check matches the round
+            // we'd actually author next.
+            let parents_count = s.distinct_authors_at(prev_round);
+            let prev_leader = round_leader(prev_round, n);
+            let leader_observed = cert_at(&s.dag, prev_round, prev_leader).is_some();
+            let elapsed = round_started_at.elapsed();
 
-                if !strict_ok && !leader_fallback_ok && !leaderless_fallback_ok {
-                    debug!(
-                        prev,
-                        parents = parents_count,
-                        quorum = quorum_threshold(n),
-                        leader_observed,
-                        elapsed_ms = elapsed.as_millis() as u64,
-                        "round driver: waiting"
-                    );
-                    continue;
-                }
-                if !strict_ok {
-                    tracing::warn!(
-                        round = prev + 1,
-                        parents = parents_count,
-                        quorum = quorum_threshold(n),
-                        leader_observed,
-                        mode = if leader_fallback_ok { "leader-fallback" } else { "leaderless-fallback" },
-                        "round driver: fallback engaged"
-                    );
-                }
-                prev + 1
+            let strict_ok = parents_count >= quorum_threshold(n);
+            let leader_fallback_ok = parents_count >= f_plus_one(n)
+                && leader_observed
+                && elapsed >= leader_fallback_after;
+            let leaderless_fallback_ok =
+                parents_count >= f_plus_one(n) && elapsed >= leaderless_fallback_after;
+
+            if !strict_ok && !leader_fallback_ok && !leaderless_fallback_ok {
+                debug!(
+                    candidate_round,
+                    prev_round,
+                    parents = parents_count,
+                    quorum = quorum_threshold(n),
+                    leader_observed,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    "round driver: waiting"
+                );
+                continue;
             }
+            if candidate_round > next_own {
+                tracing::info!(
+                    skip_from = next_own,
+                    skip_to = candidate_round,
+                    "round driver: snap-up engaged"
+                );
+            }
+            if !strict_ok {
+                tracing::warn!(
+                    round = candidate_round,
+                    parents = parents_count,
+                    quorum = quorum_threshold(n),
+                    leader_observed,
+                    mode = if leader_fallback_ok {
+                        "leader-fallback"
+                    } else {
+                        "leaderless-fallback"
+                    },
+                    "round driver: fallback engaged"
+                );
+            }
+            candidate_round
         };
         round_started_at = tokio::time::Instant::now();
         let parents = s.parents_for_round(target_round);
@@ -400,6 +433,9 @@ async fn run_round_driver(
         };
         let cert_hash = cert.hash();
         s.last_authored_round = Some(target_round);
+        if target_round > s.max_observed_round {
+            s.max_observed_round = target_round;
+        }
         let _ = s.dag.insert(cert.clone());
         let block = BlockPayload {
             payload_digest,
