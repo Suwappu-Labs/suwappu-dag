@@ -1,49 +1,34 @@
 # AWS CodeBuild spec for the musl cross-compile.
 #
-# Invoked by scripts/perf/build.sh after uploading the source zip to
-# s3://<artifact_bucket>/sources/gsx-dag.zip. CodeBuild extracts the zip into
-# $CODEBUILD_SRC_DIR, then runs this spec.
-#
-# Output: three statically-linked binaries at
-#   - $CODEBUILD_SRC_DIR/out/gsx-node
-#   - $CODEBUILD_SRC_DIR/out/gsx-loadgen
-#   - $CODEBUILD_SRC_DIR/out/gsx-metrics
-# These are uploaded by the artifacts: stanza to s3://<bucket>/bin/.
+# Image: aws/codebuild/standard:7.0 (Ubuntu 22.04). Ships with rust + cargo
+# pre-installed under /root/.cargo. We just `rustup target add` for musl
+# and install musl-tools via apt.
 
 version: 0.2
 
 env:
   variables:
     CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-    # Cargo cache lives on the CodeBuild S3 cache mount.
-    CARGO_HOME: "/root/.cargo"
-    RUSTUP_HOME: "/root/.rustup"
 
 phases:
   install:
-    # Skipping runtime-versions: the standard:7.0 image ships rust but we
-    # rustup-install the latest stable below for predictable behavior.
     commands:
       - apt-get update -qq
       - apt-get install -y musl-tools build-essential pkg-config libssl-dev zip jq
-      - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
-      - source $CARGO_HOME/env
+      # standard:7.0 has rust pre-installed; just confirm + add target.
+      - rustc --version || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+      - export PATH="$HOME/.cargo/bin:$PATH"
       - rustup target add x86_64-unknown-linux-musl
       - rustc --version
-      - cargo --version
 
   pre_build:
     commands:
-      # gsx-db is a private git dep. The deploy key is delivered via SSM
-      # Parameter Store at /gsx-perf/gsx-db-deploy-key (SecureString). If
-      # missing, the build aborts here with a clear message.
+      - export PATH="$HOME/.cargo/bin:$PATH"
+      # Pull the gsx-db deploy key from SSM SecureString. If missing, bail.
       - |
         if ! aws ssm get-parameter --name /gsx-perf/gsx-db-deploy-key --with-decryption --query Parameter.Value --output text > /tmp/gsx-db.key 2>/tmp/ssm-err; then
-          echo "ERROR: SSM parameter /gsx-perf/gsx-db-deploy-key not found." >&2
+          echo "ERROR: SSM /gsx-perf/gsx-db-deploy-key not found." >&2
           cat /tmp/ssm-err >&2
-          echo "" >&2
-          echo "Upload it with:" >&2
-          echo "  aws ssm put-parameter --name /gsx-perf/gsx-db-deploy-key --type SecureString --value \"\$(cat ~/.ssh/gsx-db-deploy)\" --profile gsn" >&2
           exit 1
         fi
       - chmod 600 /tmp/gsx-db.key
@@ -55,6 +40,7 @@ phases:
 
   build:
     commands:
+      - export PATH="$HOME/.cargo/bin:$PATH"
       - cd $CODEBUILD_SRC_DIR
       - cargo build --release --target x86_64-unknown-linux-musl --bin gsx-node --bin gsx-loadgen --bin gsx-metrics
 
@@ -64,7 +50,7 @@ phases:
       - cp target/x86_64-unknown-linux-musl/release/gsx-node $CODEBUILD_SRC_DIR/out/
       - cp target/x86_64-unknown-linux-musl/release/gsx-loadgen $CODEBUILD_SRC_DIR/out/
       - cp target/x86_64-unknown-linux-musl/release/gsx-metrics $CODEBUILD_SRC_DIR/out/
-      - strip $CODEBUILD_SRC_DIR/out/*
+      - strip $CODEBUILD_SRC_DIR/out/* || true
       - ls -lh $CODEBUILD_SRC_DIR/out/
       - file $CODEBUILD_SRC_DIR/out/gsx-node
 
@@ -79,4 +65,3 @@ cache:
   paths:
     - "/root/.cargo/registry/**/*"
     - "/root/.cargo/git/**/*"
-    - "target/**/*"
