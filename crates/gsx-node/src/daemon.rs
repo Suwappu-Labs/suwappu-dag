@@ -16,25 +16,30 @@
 //! - `lane=main event=voted`     — local validator emitted a Vote
 //! - `lane=main event=committed` — joint quorum fired; cert committed
 
-use std::collections::{BTreeSet, HashMap, HashSet};
-use std::sync::Arc;
-use std::time::Duration;
+use std::{
+    collections::{BTreeSet, HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 
+use gsx_consensus::{
+    cert::{CertHash, Certificate},
+    commit::{cert_at, quorum_threshold},
+    dag::DagStore,
+    joint::{joint_commit, StakeTable, Vote},
+    AuthorityId,
+};
+#[cfg(test)]
+use gsx_execution::Substrate;
+use gsx_execution::{execute_block, Block, InMemorySubstrate};
 use tokio::sync::Mutex;
 use tracing::debug;
 
-use gsx_consensus::cert::{CertHash, Certificate};
-use gsx_consensus::commit::{cert_at, quorum_threshold};
-use gsx_consensus::dag::DagStore;
-use gsx_consensus::joint::{joint_commit, StakeTable, Vote};
-use gsx_consensus::AuthorityId;
-use gsx_execution::{execute_block, Block, InMemorySubstrate};
-#[cfg(test)]
-use gsx_execution::Substrate;
-
-use crate::config::{GenesisManifest, NodeConfig};
-use crate::events::{Event, EventLog, Lane};
-use crate::wire::{BlockPayload, PeerId, Wire, WireConfig, WireEvent, WireMessage, WireSplit};
+use crate::{
+    config::{GenesisManifest, NodeConfig},
+    events::{Event, EventLog, Lane},
+    wire::{BlockPayload, PeerId, Wire, WireConfig, WireEvent, WireMessage, WireSplit},
+};
 
 /// Pending main-lane state. Shared between the inbox handler and the round
 /// driver, both of which mutate it.
@@ -320,10 +325,8 @@ async fn run_round_driver(
         };
         let parents = s.parents_for_round(target_round);
         let intents = std::mem::take(&mut s.pending_intents);
-        let payload_digest: [u8; 32] = blake3::hash(
-            &bincode::serialize(&intents).expect("intents serialize"),
-        )
-        .into();
+        let payload_digest: [u8; 32] =
+            blake3::hash(&bincode::serialize(&intents).expect("intents serialize")).into();
         let cert = Certificate {
             author: self_id,
             round: target_round,
@@ -355,9 +358,10 @@ async fn run_round_driver(
 
 #[cfg(test)]
 mod tests {
+    use std::net::SocketAddr;
+
     use super::*;
     use crate::config::{GenesisValidator, Peer};
-    use std::net::SocketAddr;
 
     /// Submit one transfer intent over the client listener, give it time to
     /// land in `state.pending_intents`, and verify it was queued.
@@ -412,12 +416,9 @@ mod tests {
         let s = d.state.lock().await;
         let queued_or_committed = !s.pending_intents.is_empty()
             || s.blocks.values().any(|b| {
-                b.intents.iter().any(|i| {
-                    matches!(
-                        i,
-                        gsx_execution::Intent::Transfer { amount: 42, .. }
-                    )
-                })
+                b.intents
+                    .iter()
+                    .any(|i| matches!(i, gsx_execution::Intent::Transfer { amount: 42, .. }))
             });
         assert!(queued_or_committed, "intent was not queued or blocked");
     }
@@ -471,8 +472,7 @@ mod tests {
                 mldsa_secret_key_path: "/dev/null".into(),
                 bls_secret_key_path: "/dev/null".into(),
                 genesis_manifest_path: "/dev/null".into(),
-                event_log_path: std::env::temp_dir()
-                    .join(format!("gsx-daemon-test-v{}.ndjson", i)),
+                event_log_path: std::env::temp_dir().join(format!("gsx-daemon-test-v{}.ndjson", i)),
             };
             let d = Daemon::start(cfg, manifest.clone()).await.unwrap();
             daemons.push(d);

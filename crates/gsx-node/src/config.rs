@@ -5,8 +5,10 @@
 //! validator's public key + stake. See `terraform/perf/templates/` for the
 //! per-region rendering.
 
-use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::{
+    net::SocketAddr,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -132,8 +134,8 @@ impl NodeConfig {
     /// Load from a TOML file.
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
         let path = path.as_ref();
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| ConfigError::Read(path.to_path_buf(), e))?;
+        let text =
+            std::fs::read_to_string(path).map_err(|e| ConfigError::Read(path.to_path_buf(), e))?;
         toml::from_str(&text).map_err(|e| ConfigError::Parse(path.to_path_buf(), e))
     }
 }
@@ -142,8 +144,8 @@ impl GenesisManifest {
     /// Load from a TOML file.
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
         let path = path.as_ref();
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| ConfigError::Read(path.to_path_buf(), e))?;
+        let text =
+            std::fs::read_to_string(path).map_err(|e| ConfigError::Read(path.to_path_buf(), e))?;
         toml::from_str(&text).map_err(|e| ConfigError::Parse(path.to_path_buf(), e))
     }
 

@@ -20,15 +20,18 @@
 //! gsx-metrics --logs us-east-1=/path/to/us.ndjson --logs eu-west-1=/path/to/eu.ndjson > main_lane.csv
 //! ```
 
-use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use serde::Deserialize;
 
 #[derive(Parser, Debug)]
-#[command(name = "gsx-metrics", version, about = "Join GSX validator event logs into CSV")]
+#[command(
+    name = "gsx-metrics",
+    version,
+    about = "Join GSX validator event logs into CSV"
+)]
 struct Args {
     /// One per region: `region=path/to/file.ndjson`. May be passed multiple
     /// times.
@@ -75,8 +78,8 @@ fn main() -> Result<()> {
     let mut grouped: BTreeMap<(String, String), Row> = BTreeMap::new();
 
     for (region, path) in &args.logs {
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("read {}", path.display()))?;
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
         for (lineno, line) in text.lines().enumerate() {
             if line.trim().is_empty() {
                 continue;

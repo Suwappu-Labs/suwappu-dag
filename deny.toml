@@ -19,6 +19,11 @@ ignore = [
     # bumps to reqwest 0.12 (rustls-pki-types path). Tracked at
     # RUSTSEC-2025-0134 / https://github.com/rustls/pemfile/issues/61.
     "RUSTSEC-2025-0134",
+    # `bincode 1.x` is unmaintained — upstream moved to 2.x with a different
+    # API. We use 1.3 across the workspace for wire framing. No CVE; bumping
+    # to 2.x is a separate refactor (breaking serde-derive API changes).
+    # Tracked at RUSTSEC-2025-0141.
+    "RUSTSEC-2025-0141",
 ]
 
 [licenses]

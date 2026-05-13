@@ -12,19 +12,23 @@
 //! gsx-loadgen --target 127.0.0.1:19100 --rate 100 --duration 30
 //! ```
 
-use std::net::SocketAddr;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::{
+    net::SocketAddr,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::Context;
 use clap::Parser;
-use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
-
 use gsx_execution::Intent;
 use gsx_node::client::LoadGenClient;
+use rand::{rngs::StdRng, Rng, SeedableRng};
 
 #[derive(Parser, Debug)]
-#[command(name = "gsx-loadgen", version, about = "Submit transfer intents to a GSX validator")]
+#[command(
+    name = "gsx-loadgen",
+    version,
+    about = "Submit transfer intents to a GSX validator"
+)]
 struct Args {
     /// Validator client_listen address.
     #[arg(long)]

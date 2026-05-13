@@ -13,9 +13,8 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use tracing_subscriber::EnvFilter;
-
 use gsx_node::{Daemon, GenesisManifest, NodeConfig};
+use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
 #[command(name = "gsx-node", version, about = "GSX DAG validator daemon")]

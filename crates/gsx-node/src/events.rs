@@ -21,13 +21,17 @@
 //! - `cert_hash`/`tx_hash` — optional content-addressed reference
 //! - `peer`     — optional peer label (for `"received"` events)
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncWriteExt;
-use tokio::sync::{mpsc, Mutex};
+use tokio::{
+    io::AsyncWriteExt,
+    sync::{mpsc, Mutex},
+};
 
 /// Which lane a given event belongs to. Matches the paper's three on-chain
 /// commitment surfaces plus a synthetic "client" lane for load-generator IO.
@@ -126,7 +130,9 @@ pub struct EventLog {
 impl EventLog {
     /// Start a writer task for the given path. Returns the handle plus a
     /// `JoinHandle` the daemon should hold for the lifetime of the process.
-    pub async fn start(path: impl AsRef<Path>) -> std::io::Result<(Self, tokio::task::JoinHandle<()>)> {
+    pub async fn start(
+        path: impl AsRef<Path>,
+    ) -> std::io::Result<(Self, tokio::task::JoinHandle<()>)> {
         let path: PathBuf = path.as_ref().to_path_buf();
         if let Some(dir) = path.parent() {
             if !dir.as_os_str().is_empty() {
@@ -202,8 +208,22 @@ mod tests {
     }
 
     fn tempfile_path() -> PathBuf {
+        // Unique per invocation: pid + nanos. Prior version reused the same
+        // path across runs in the same process, which made the test flaky
+        // when a stale empty file was present from a previous interrupted
+        // run (the read happened before the writer task flushed both lines).
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
         let mut p = std::env::temp_dir();
-        p.push(format!("gsx-events-{}.ndjson", std::process::id()));
+        p.push(format!(
+            "gsx-events-{}-{}.ndjson",
+            std::process::id(),
+            nanos
+        ));
+        // Make sure the file does not exist before the test runs.
+        let _ = std::fs::remove_file(&p);
         p
     }
 }

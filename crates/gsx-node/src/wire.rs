@@ -22,24 +22,23 @@
 //! proptest-only logic with no socket binding. Without a real wire, multi-
 //! region deployments measure zero.
 
-use std::collections::HashMap;
-use std::io;
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{collections::HashMap, io, net::SocketAddr, sync::Arc, time::Duration};
 
-use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, RwLock};
-use tokio::task::JoinHandle;
-use tracing::{debug, info, warn};
-
-use gsx_consensus::cert::{CertHash, Certificate};
-use gsx_consensus::joint::Vote;
+use gsx_consensus::{
+    cert::{CertHash, Certificate},
+    joint::Vote,
+};
 use gsx_execution::Intent;
 use gsx_fastpath::cert::FastPathCert;
 use gsx_ltp::attestation::CorridorAttestation;
+use serde::{Deserialize, Serialize};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    sync::{mpsc, RwLock},
+    task::JoinHandle,
+};
+use tracing::{debug, info, warn};
 
 /// Side-channel block payload referenced by a [`Certificate::payload_digest`].
 /// Mysticeti-C separates cert proposal from block dissemination — the cert
@@ -252,11 +251,7 @@ impl Wire {
     }
 }
 
-async fn accept_loop(
-    listener: TcpListener,
-    inbound_tx: mpsc::Sender<WireEvent>,
-    self_id: PeerId,
-) {
+async fn accept_loop(listener: TcpListener, inbound_tx: mpsc::Sender<WireEvent>, self_id: PeerId) {
     loop {
         match listener.accept().await {
             Ok((stream, addr)) => {
@@ -461,10 +456,7 @@ mod tests {
         let a = Wire::start(WireConfig {
             self_id: PeerId::new("a"),
             listen: a_addr,
-            peers: vec![
-                (PeerId::new("b"), b_addr),
-                (PeerId::new("c"), c_addr),
-            ],
+            peers: vec![(PeerId::new("b"), b_addr), (PeerId::new("c"), c_addr)],
         })
         .await
         .unwrap();
@@ -472,10 +464,7 @@ mod tests {
         let mut b = Wire::start(WireConfig {
             self_id: PeerId::new("b"),
             listen: b_addr,
-            peers: vec![
-                (PeerId::new("a"), a_addr),
-                (PeerId::new("c"), c_addr),
-            ],
+            peers: vec![(PeerId::new("a"), a_addr), (PeerId::new("c"), c_addr)],
         })
         .await
         .unwrap();
@@ -483,10 +472,7 @@ mod tests {
         let mut c = Wire::start(WireConfig {
             self_id: PeerId::new("c"),
             listen: c_addr,
-            peers: vec![
-                (PeerId::new("a"), a_addr),
-                (PeerId::new("b"), b_addr),
-            ],
+            peers: vec![(PeerId::new("a"), a_addr), (PeerId::new("b"), b_addr)],
         })
         .await
         .unwrap();

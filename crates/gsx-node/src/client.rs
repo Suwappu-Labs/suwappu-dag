@@ -20,21 +20,21 @@
 //! carries the sender's identity (`Intent::Transfer { from, .. }`); mainnet
 //! would gate this with an ML-DSA signature over the intent bytes.
 
-use std::collections::HashMap;
-use std::io;
-use std::net::SocketAddr;
-use std::sync::Arc;
-
-use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex;
-use tracing::{debug, info, warn};
+use std::{collections::HashMap, io, net::SocketAddr, sync::Arc};
 
 use gsx_execution::Intent;
+use serde::{Deserialize, Serialize};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    sync::Mutex,
+};
+use tracing::{debug, info, warn};
 
-use crate::daemon::State;
-use crate::events::{Event, EventLog, Lane};
+use crate::{
+    daemon::State,
+    events::{Event, EventLog, Lane},
+};
 
 /// Client → validator messages.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -124,17 +124,14 @@ async fn handle_conn(
         };
         match msg {
             ClientMessage::Submit(intent) => {
-                let intent_hash: [u8; 32] = blake3::hash(
-                    &bincode::serialize(&intent).expect("intent serialize"),
-                )
-                .into();
+                let intent_hash: [u8; 32] =
+                    blake3::hash(&bincode::serialize(&intent).expect("intent serialize")).into();
                 {
                     let mut s = state.lock().await;
                     s.pending_intents.push(intent);
                 }
                 log.emit(
-                    Event::now(&self_label, Lane::Client, "submitted")
-                        .with_tx_hash(&intent_hash),
+                    Event::now(&self_label, Lane::Client, "submitted").with_tx_hash(&intent_hash),
                 );
                 write_response(&mut stream, &ClientResponse::Ack { intent_hash }).await?;
             }
