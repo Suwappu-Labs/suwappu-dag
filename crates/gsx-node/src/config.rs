@@ -78,6 +78,40 @@ pub struct GenesisManifest {
 
     /// Ordered list of validators. Index = `authority_id`.
     pub validators: Vec<GenesisValidator>,
+
+    /// LTP corridor registry (DAG-S24). Each entry pins the 9 super-nodes
+    /// authorized to attest the (source_chain → target_chain) corridor.
+    /// Daemons use this to verify inbound `CorridorAttestation` BLS
+    /// aggregates against pinned super-node keys before accepting them.
+    ///
+    /// Optional for backward compatibility — manifests without a
+    /// `[[corridors]]` section accept attestations unverified (matches
+    /// pre-S24 MVP behavior).
+    #[serde(default)]
+    pub corridors: Vec<CorridorConfig>,
+}
+
+/// One LTP corridor — exactly 9 super-nodes attesting for a (source, target)
+/// chain pair. Paper §10.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CorridorConfig {
+    /// Corridor identifier. Unique within the manifest.
+    pub id: u32,
+    /// Source chain id observed by the super-nodes.
+    pub source_chain: u64,
+    /// Target chain id receiving attestations.
+    pub target_chain: u64,
+    /// Exactly `LTP_ATTESTATION_QUORUM_SIZE` (9) super-node entries.
+    pub members: Vec<SuperNodeConfig>,
+}
+
+/// One super-node entry inside a corridor.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SuperNodeConfig {
+    /// Authority ring id this super-node operates under.
+    pub authority: u32,
+    /// BLS12-381 public key, hex-encoded.
+    pub bls_public_key_hex: String,
 }
 
 /// One validator's public-key bundle in the genesis manifest.
@@ -217,6 +251,7 @@ mod tests {
                 validator_stake_gsx: 1,
                 authority_stake_gsx: 1,
             }],
+            corridors: Vec::new(),
         };
         let cfg = NodeConfig {
             self_id: "us-east-1".into(),
