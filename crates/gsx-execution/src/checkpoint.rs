@@ -305,10 +305,10 @@ mod tests {
             state_root: [0; 32],
             prev_checkpoint: [0; 32],
         };
-        // 4-member ring: quorum = ⌈8/3⌉+1 = 4. One signature is below.
+        // 4-member ring: quorum = 2f+1 = 3 (see IQ-001). One signature is below.
         let sig = sign_checkpoint(0, &sk, &ck).unwrap();
         match ratify_checkpoint(ck, vec![sig], &registry) {
-            Err(CheckpointError::BelowQuorum { have: 1, need: 4 }) => {}
+            Err(CheckpointError::BelowQuorum { have: 1, need: 3 }) => {}
             other => panic!("expected BelowQuorum, got {:?}", other),
         }
     }

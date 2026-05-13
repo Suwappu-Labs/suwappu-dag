@@ -87,12 +87,16 @@ proptest! {
         prop_assert!(is_main_lane_consistent(&cert, &main_lane));
     }
 
-    /// The fast-path quorum size formula matches paper §6.4 exactly.
+    /// The fast-path quorum size formula matches canonical BFT (Sui /
+    /// Mysticeti / Bullshark): `q = n − ⌊(n-1)/3⌋`. See IQ-001.
     #[test]
-    fn fast_path_quorum_matches_paper(n in 1u32..=200) {
+    fn fast_path_quorum_matches_canonical_bft(n in 1u32..=200) {
         let q = fast_path_quorum_size(n);
-        let expected = ((2 * n).div_ceil(3) + 1).min(n);
+        let expected = n - (n - 1) / 3;
         prop_assert_eq!(q, expected);
+        // Strict supermajority of 2/3 (Definition 2) must always hold.
+        prop_assert!(3 * q > 2 * n);
+        prop_assert!(q <= n);
     }
 
     /// A conflicting tx (same object, different payload) inside the

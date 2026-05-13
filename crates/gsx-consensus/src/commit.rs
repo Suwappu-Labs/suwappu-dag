@@ -44,14 +44,25 @@ use crate::{
 /// validator-set registry that publishes it lands in DAG-S6.
 pub type CommitteeSize = u32;
 
-/// The Byzantine-fault-tolerant supermajority threshold for an Authority
-/// Ring of size `n`: `q = ⌈2n/3⌉ + 1`. Matches Definition 2 of the paper.
+/// Byzantine-fault-tolerant supermajority threshold for an Authority Ring
+/// of size `n`: `q = 2f + 1` where `f = ⌊(n-1)/3⌋` — equivalently
+/// `q = n − ⌊(n-1)/3⌋`. This is the canonical Mysticeti / Bullshark /
+/// DAG-Rider threshold and is what Sui Lutris ships
+/// (`consensus/config/src/committee.rs`).
 ///
-/// For small `n` we cap at `n` so single-authority test configurations
-/// still admit a quorum.
+/// **Divergence from paper §6.4.** The paper writes `q = ⌈2n/3⌉ + 1`, but
+/// for `n` where `2n mod 3 = 2` (n ∈ {1, 4, 7, …}) that formula collapses
+/// to unanimity, which has no Byzantine fault tolerance. The May-13 perf
+/// testnet (n=4) committed exactly once in 9 hours because of this. See
+/// `docs/iq/IQ-001-quorum-formula.md` for the resolution.
+///
+/// Definition 2's "strict majority of 2/3" inequality is satisfied by
+/// `2f+1` for any `n = 3f + 1`, so Theorem 2's safety proof is unchanged.
 pub fn quorum_threshold(n: CommitteeSize) -> u32 {
-    let q = (2 * n).div_ceil(3) + 1;
-    q.min(n.max(1))
+    if n == 0 {
+        return 1;
+    }
+    n - (n - 1) / 3
 }
 
 /// Deterministic round-robin leader for `round` given `n` authorities.
@@ -177,11 +188,26 @@ mod tests {
     }
 
     #[test]
-    fn quorum_threshold_matches_paper() {
-        assert_eq!(quorum_threshold(4), 4); // ⌈8/3⌉+1 = 3+1 = 4
-        assert_eq!(quorum_threshold(7), 6); // ⌈14/3⌉+1 = 5+1 = 6
-        assert_eq!(quorum_threshold(10), 8); // ⌈20/3⌉+1 = 7+1 = 8
-        assert_eq!(quorum_threshold(1), 1); // capped at n
+    fn quorum_matches_canonical_bft() {
+        // q = 2f+1, f = ⌊(n-1)/3⌋. Matches Sui / Mysticeti / Bullshark.
+        // See IQ-001 for divergence from paper §6.4's `⌈2n/3⌉+1`.
+        assert_eq!(quorum_threshold(1), 1); // f=0, 2f+1=1
+        assert_eq!(quorum_threshold(3), 3); // f=0
+        assert_eq!(quorum_threshold(4), 3); // f=1, 2f+1=3 (was 4 under paper)
+        assert_eq!(quorum_threshold(6), 5); // f=1
+        assert_eq!(quorum_threshold(7), 5); // f=2 (was 6 under paper)
+        assert_eq!(quorum_threshold(10), 7); // f=3 (was 8 under paper)
+        assert_eq!(quorum_threshold(13), 9); // f=4 (was 10 under paper)
+
+        // Property: q > 2n/3 (strict supermajority — Definition 2) for all n.
+        for n in 1u32..=64 {
+            let q = quorum_threshold(n);
+            assert!(
+                3 * q > 2 * n,
+                "n={n}: q={q} fails strict 2/3 majority"
+            );
+            assert!(q <= n, "n={n}: q={q} exceeds committee size");
+        }
     }
 
     #[test]
@@ -213,15 +239,13 @@ mod tests {
 
     #[test]
     fn insufficient_supporters_is_not_committed() {
-        // n = 4, q = 4. Insert 4 genesis certs, but only 2 round-1
-        // supporters → no commit.
+        // n = 4, q = 3 (2f+1 with f=1). Two supporters → below quorum.
         let mut dag = DagStore::new();
         let mut g_hashes = Vec::new();
         for a in 0..4 {
             g_hashes.push(dag.insert(genesis(a)).unwrap());
         }
         let leader_hash = g_hashes[0];
-        // Two supporters at round 1.
         dag.insert(child(1, 1, vec![leader_hash], 0x11)).unwrap();
         dag.insert(child(2, 1, vec![leader_hash], 0x22)).unwrap();
         assert_eq!(commit_leader(&dag, 0, 4), None);
@@ -229,14 +253,14 @@ mod tests {
 
     #[test]
     fn sufficient_supporters_commits() {
-        // n = 4, q = 4. Four supporters at round 1 → commit.
+        // n = 4, q = 3. Three supporters → commit. Tolerates one offline.
         let mut dag = DagStore::new();
         let mut g_hashes = Vec::new();
         for a in 0..4 {
             g_hashes.push(dag.insert(genesis(a)).unwrap());
         }
         let leader_hash = g_hashes[0];
-        for a in 0..4 {
+        for a in 0..3 {
             dag.insert(child(a, 1, vec![leader_hash], a as u8)).unwrap();
         }
         assert_eq!(commit_leader(&dag, 0, 4), Some(leader_hash));

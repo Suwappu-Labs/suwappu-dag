@@ -128,17 +128,16 @@ impl AuthorityRegistry {
         self.members.values()
     }
 
-    /// BFT supermajority quorum count: `⌈2n/3⌉ + 1`, capped at `n` for
-    /// small-`n` test envelopes. Matches paper Definition 2 and the
-    /// in-memory `gsx_consensus::quorum_threshold` used by the commit
-    /// rule.
+    /// BFT supermajority quorum count: `q = n − ⌊(n-1)/3⌋` (equivalently
+    /// `2f+1` when `n = 3f+1`). Matches `gsx_consensus::quorum_threshold`
+    /// and Sui Lutris. See `docs/iq/IQ-001-quorum-formula.md` for the
+    /// divergence from paper §6.4's literal `⌈2n/3⌉ + 1`.
     pub fn quorum_threshold(&self) -> u32 {
         let n = self.members.len() as u32;
         if n == 0 {
             return 1;
         }
-        let q = (2 * n).div_ceil(3) + 1;
-        q.min(n)
+        n - (n - 1) / 3
     }
 }
 
@@ -203,19 +202,19 @@ mod tests {
     }
 
     #[test]
-    fn quorum_threshold_matches_paper() {
+    fn quorum_threshold_matches_canonical_bft() {
         let mut r = AuthorityRegistry::new();
-        // 30 authorities: ⌈60/3⌉ + 1 = 20 + 1 = 21.
+        // 30 authorities: n − ⌊29/3⌋ = 30 − 9 = 21 (unchanged from paper).
         for i in 0..30 {
             r.admit(member(i, AUTHORITY_STAKE_THRESHOLD_GSX)).unwrap();
         }
         assert_eq!(r.quorum_threshold(), 21);
 
-        // 50 authorities: ⌈100/3⌉ + 1 = 34 + 1 = 35.
+        // 50 authorities: n − ⌊49/3⌋ = 50 − 16 = 34 (was 35 under paper).
         for i in 30..50 {
             r.admit(member(i, AUTHORITY_STAKE_THRESHOLD_GSX)).unwrap();
         }
-        assert_eq!(r.quorum_threshold(), 35);
+        assert_eq!(r.quorum_threshold(), 34);
     }
 
     #[test]
