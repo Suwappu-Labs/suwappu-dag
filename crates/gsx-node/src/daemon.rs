@@ -51,11 +51,11 @@ pub(crate) struct State {
     pub(crate) blocks: HashMap<CertHash, BlockPayload>,
     pub(crate) committed: HashSet<CertHash>,
     pub(crate) last_authored_round: Option<u64>,
-    /// Highest round number observed in any cert inserted into the local DAG
-    /// — own or peer. The round driver snaps `target_round` up to this value
-    /// + 1 (Mysticeti-C "max observed round" pattern) so a slow validator
-    /// catches up by skipping rounds rather than stalling at R+1 of its own
-    /// last authored round.
+    /// Highest round number observed in any cert inserted into the local
+    /// DAG — own or peer. The round driver snaps `target_round` up to this
+    /// value + 1 (Mysticeti-C "max observed round" pattern) so a slow
+    /// validator catches up by skipping rounds rather than stalling at R+1
+    /// of its own last authored round.
     pub(crate) max_observed_round: u64,
     pub(crate) pending_intents: Vec<gsx_execution::Intent>,
     pub(crate) n_authorities: u32,
