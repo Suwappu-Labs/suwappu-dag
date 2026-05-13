@@ -89,6 +89,14 @@ pub struct GenesisManifest {
     /// pre-S24 MVP behavior).
     #[serde(default)]
     pub corridors: Vec<CorridorConfig>,
+
+    /// Number of rounds per epoch (DAG-S25 Phase G). Governance actions
+    /// (authority admission, exit, ejection) queue during the epoch and
+    /// apply atomically when the round driver crosses a boundary. Default
+    /// 1024 — short enough for testnet iteration, long enough that
+    /// boundary work doesn't dominate the round budget.
+    #[serde(default = "default_rounds_per_epoch")]
+    pub rounds_per_epoch: u64,
 }
 
 /// One LTP corridor — exactly 9 super-nodes attesting for a (source, target)
@@ -140,6 +148,10 @@ fn default_round_ms() -> u64 {
 
 fn default_checkpoint_cadence() -> u32 {
     1
+}
+
+fn default_rounds_per_epoch() -> u64 {
+    1024
 }
 
 /// Errors from loading config / genesis off disk.
@@ -252,6 +264,7 @@ mod tests {
                 authority_stake_gsx: 1,
             }],
             corridors: Vec::new(),
+            rounds_per_epoch: 1024,
         };
         let cfg = NodeConfig {
             self_id: "us-east-1".into(),
