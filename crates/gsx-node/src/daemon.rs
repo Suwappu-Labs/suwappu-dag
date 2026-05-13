@@ -100,6 +100,19 @@ impl State {
             .filter_map(|a| cert_at(&self.dag, round - 1, a))
             .collect()
     }
+
+    /// Highest round R in [0, max_observed_round] at which the local DAG
+    /// already has at least `threshold` distinct authors. Returns None if
+    /// no round satisfies it. Used by the round driver's snap-up: rather
+    /// than jumping to `max_observed_round + 1` (where we may have only
+    /// one author's cert), we jump to the highest round where the parents
+    /// gate is actually satisfiable.
+    fn highest_round_with(&self, threshold: u32) -> Option<u64> {
+        let max = self.max_observed_round;
+        (0..=max)
+            .rev()
+            .find(|r| self.distinct_authors_at(*r) >= threshold)
+    }
 }
 
 /// Running daemon handle. Drop to stop all background tasks.
@@ -358,11 +371,17 @@ async fn run_round_driver(
         tick.tick().await;
         let mut s = state.lock().await;
         let n = s.n_authorities;
-        // Snap-up: the next round is max(our last + 1, observed leading edge).
-        // If we're behind, jump forward instead of stalling. Otherwise keep
-        // marching one round at a time.
+        // Snap-up: jump to the highest round R such that we have at least
+        // f+1 parents at R, then author at R+1. This ensures the
+        // parents-at-prev-round gate is satisfiable when we advance —
+        // jumping naively to max_observed_round + 1 strands the snap-up at
+        // the leading edge where we typically have only the one peer's
+        // cert that informed us of the new round.
         let next_own = s.last_authored_round.map(|p| p + 1).unwrap_or(0);
-        let next_snap = s.max_observed_round.saturating_add(1);
+        let next_snap = s
+            .highest_round_with(f_plus_one(n))
+            .map(|r| r + 1)
+            .unwrap_or(0);
         let candidate_round = next_own.max(next_snap);
         let prev_round = candidate_round.saturating_sub(1);
 
