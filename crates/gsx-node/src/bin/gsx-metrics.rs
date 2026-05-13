@@ -313,14 +313,7 @@ fn emit_tps_mode(events: &[Event], bucket_ms: u64) {
     for (start, (certs, intents)) in buckets {
         let end = start + bucket_ms;
         let tps = intents as f64 / (bucket_ms as f64 / 1000.0);
-        println!(
-            "{},{},{},{},{:.2}",
-            start,
-            end,
-            certs.len(),
-            intents,
-            tps
-        );
+        println!("{},{},{},{},{:.2}", start, end, certs.len(), intents, tps);
     }
 }
 
