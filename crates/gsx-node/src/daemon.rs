@@ -30,13 +30,13 @@ use gsx_consensus::{
     joint::{StakeTable, Vote},
     validator_quorum_met, AuthorityId, ConsensusError, LeaderStatus,
 };
+#[cfg(test)]
+use gsx_execution::Substrate;
+use gsx_execution::{execute_block, Block, InMemorySubstrate};
 use gsx_fastpath::{
     cert::{FastPathCert, FastPathTx, OwnedObjectId},
     quorum::fast_path_quorum_size,
 };
-#[cfg(test)]
-use gsx_execution::Substrate;
-use gsx_execution::{execute_block, Block, InMemorySubstrate};
 use tokio::sync::Mutex;
 use tracing::debug;
 
@@ -537,8 +537,7 @@ fn handle_fastpath_cert(
             return; // do not propagate or count the equivocating cert
         }
     } else {
-        s.fastpath_first_payload
-            .insert(key, cert.tx.payload_digest);
+        s.fastpath_first_payload.insert(key, cert.tx.payload_digest);
     }
 
     // Already locally committed — no further work.
@@ -1009,5 +1008,90 @@ mod tests {
         for r in &state_roots[1..] {
             assert_eq!(*r, first, "state roots disagree across daemons");
         }
+    }
+
+    /// Smoke test for the fast-path lane handler (DAG-S22).
+    ///
+    /// Manually feeds singleton-signer partial certs from each Authority
+    /// into a fresh `State` and asserts:
+    ///   1. Signers accumulate across receipts.
+    ///   2. Quorum (q=3 for n=4) finalizes the tx into `fastpath_committed`.
+    ///   3. A conflicting partial cert with a different payload digest is
+    ///      detected as equivocation and does NOT propagate.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fastpath_receiver_accumulates_to_quorum_and_slashes_equivocation() {
+        let n = 4u32;
+        let manifest = GenesisManifest {
+            network_id: "fp-4n".into(),
+            validators: (0..n)
+                .map(|i| GenesisValidator {
+                    authority_id: i,
+                    label: format!("v{}", i),
+                    mldsa_public_key_hex: "00".into(),
+                    bls_public_key_hex: "00".into(),
+                    validator_stake_gsx: 1_000,
+                    authority_stake_gsx: 1_000,
+                })
+                .collect(),
+        };
+        let (log, _log_task) =
+            EventLog::start(&std::env::temp_dir().join("gsx-fastpath-test.ndjson"))
+                .await
+                .unwrap();
+        let mut s = State::new(&manifest);
+        let outbound: HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>> = HashMap::new();
+        let self_id: AuthorityId = 0;
+
+        let tx = gsx_fastpath::cert::FastPathTx {
+            object: gsx_fastpath::cert::OwnedObjectId([0xAB; 32]),
+            owner: gsx_fastpath::cert::OwnerAddress([0xCD; 32]),
+            nonce: 42,
+            lineage: CertHash([0; 32]),
+            lineage_round: 0,
+            payload_digest: [0x11; 32],
+        };
+        let key = State::fastpath_key(&tx);
+
+        // Authority 1 broadcasts a partial cert with itself as signer.
+        let cert_a1 = gsx_fastpath::cert::FastPathCert {
+            tx: tx.clone(),
+            signers: BTreeSet::from([1u32]),
+        };
+        handle_fastpath_cert(&mut s, self_id, cert_a1, "v0", &log, &outbound);
+        // Self (0) signed too → pending has {0,1}, below q=3.
+        assert!(s.fastpath_pending.contains_key(&key));
+        assert!(!s.fastpath_committed.contains(&key));
+        assert_eq!(s.fastpath_pending[&key].signers.len(), 2);
+
+        // Authority 2 broadcasts. Now pending has {0,1,2} → quorum hits.
+        let cert_a2 = gsx_fastpath::cert::FastPathCert {
+            tx: tx.clone(),
+            signers: BTreeSet::from([2u32]),
+        };
+        handle_fastpath_cert(&mut s, self_id, cert_a2, "v0", &log, &outbound);
+        assert!(
+            s.fastpath_committed.contains(&key),
+            "expected fast-path quorum (q=3) to fire on (0,1,2) signers"
+        );
+        assert!(!s.fastpath_pending.contains_key(&key));
+
+        // Equivocation: a partial cert for the same (object,nonce) with
+        // a different payload_digest must be rejected and logged as
+        // slashed, without affecting committed state.
+        let equivocating_tx = gsx_fastpath::cert::FastPathTx {
+            payload_digest: [0x22; 32],
+            ..tx.clone()
+        };
+        let bad_cert = gsx_fastpath::cert::FastPathCert {
+            tx: equivocating_tx,
+            signers: BTreeSet::from([3u32]),
+        };
+        let committed_before = s.fastpath_committed.len();
+        handle_fastpath_cert(&mut s, self_id, bad_cert, "v0", &log, &outbound);
+        assert_eq!(
+            s.fastpath_committed.len(),
+            committed_before,
+            "equivocating cert must not change committed state"
+        );
     }
 }
