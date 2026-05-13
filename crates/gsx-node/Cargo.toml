@@ -41,6 +41,9 @@ bincode.workspace = true
 blake3.workspace = true
 clap.workspace = true
 hex.workspace = true
+# Pull the vendored-openssl flag into the linker graph so the musl build
+# bundles OpenSSL from source (reqwest -> openssl-sys transitive dep).
+openssl-sys.workspace = true
 rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true

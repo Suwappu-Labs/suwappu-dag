@@ -81,6 +81,12 @@ proptest = "1.5"
 rand = "0.8"
 rand_chacha = "0.3"
 
+# Transitive feature unlock for musl cross-compile: openssl-sys is pulled in
+# by reqwest (via gsxdb-bridge). Without the `vendored` feature, openssl-sys
+# fails on musl because there's no system OpenSSL with musl-compatible libs.
+# Activating the workspace feature pins it on for every build.
+openssl-sys = { version = "0.9", features = ["vendored"] }
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
