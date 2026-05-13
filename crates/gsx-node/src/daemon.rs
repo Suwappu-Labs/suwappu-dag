@@ -123,7 +123,6 @@ impl State {
             .filter_map(|a| cert_at(&self.dag, round - 1, a))
             .collect()
     }
-
 }
 
 /// Running daemon handle. Drop to stop all background tasks.
@@ -432,10 +431,7 @@ async fn run_sync_sweeper(
 /// cluster's progress. `try_send` matches the "best-effort gossip" model
 /// the wire transport advertises — retries happen via natural cert
 /// re-broadcast at the next round.
-fn broadcast(
-    outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
-    msg: WireMessage,
-) {
+fn broadcast(outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>, msg: WireMessage) {
     for tx in outbound.values() {
         let _ = tx.try_send(msg.clone());
     }
@@ -635,6 +631,7 @@ mod tests {
         assert_eq!(f_plus_one(6), 2); // f=1 — perf testnet
         assert_eq!(f_plus_one(7), 3); // f=2 — 7-of-9 LTP corridor
         assert_eq!(f_plus_one(10), 4); // f=3
+
         // Strict quorum threshold should always exceed f+1.
         for n in 3u32..=20 {
             assert!(
