@@ -93,7 +93,11 @@ resource "aws_codebuild_project" "musl" {
 
   environment {
     compute_type                = "BUILD_GENERAL1_LARGE"
-    image                       = "public.ecr.aws/codebuild/amazonlinux2-x86_64-standard:5.0"
+    # Ubuntu-based standard image: Amazon Linux 2 lacks musl-tools in its
+    # default repos and adding EPEL adds complexity. Standard:7.0 has
+    # musl-tools, build-essential, etc. via apt and is also pulled from
+    # public.ecr.aws (not Docker Hub).
+    image = "public.ecr.aws/codebuild/standard:7.0"
     type                        = "LINUX_CONTAINER"
     image_pull_credentials_type = "CODEBUILD"
     privileged_mode             = false

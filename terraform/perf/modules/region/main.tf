@@ -77,7 +77,7 @@ resource "aws_route_table_association" "public" {
 #   socket layer. Open ports keep the geographic-latency measurement clean.
 resource "aws_security_group" "this" {
   name        = "gsx-perf-${var.region_label}-sg"
-  description = "GSX perf testnet — validator ingress"
+  description = "GSX perf testnet - validator ingress"
   vpc_id      = aws_vpc.this.id
 
   ingress {

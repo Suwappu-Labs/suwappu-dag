@@ -21,11 +21,11 @@ env:
 
 phases:
   install:
-    # Skipping runtime-versions: the amazonlinux2-x86_64-standard:5.0 image
-    # ships a rust toolchain that may be stale. We rustup-install the latest
-    # stable below and add the musl target.
+    # Skipping runtime-versions: the standard:7.0 image ships rust but we
+    # rustup-install the latest stable below for predictable behavior.
     commands:
-      - yum install -y musl-gcc musl-libc-static gcc-c++ openssl-devel pkgconfig zip jq
+      - apt-get update -qq
+      - apt-get install -y musl-tools build-essential pkg-config libssl-dev zip jq
       - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
       - source $CARGO_HOME/env
       - rustup target add x86_64-unknown-linux-musl
