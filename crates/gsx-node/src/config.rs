@@ -91,10 +91,13 @@ pub struct GenesisValidator {
     pub mldsa_public_key_hex: String,
     /// BLS12-381 public key, hex-encoded.
     pub bls_public_key_hex: String,
-    /// Validator-Ring stake in GSX (paper Definition 1).
-    pub validator_stake_gsx: u128,
-    /// Authority-Ring stake in GSX (paper Definition 1).
-    pub authority_stake_gsx: u128,
+    /// Validator-Ring stake in GSX (paper Definition 1). `u64` rather than
+    /// `u128` because the `toml` crate doesn't deserialize `u128`; widened
+    /// to `u128` at the `StakeTable` boundary which matches the consensus
+    /// crate's `Stake` type.
+    pub validator_stake_gsx: u64,
+    /// Authority-Ring stake in GSX (paper Definition 1). Same `u64` rationale.
+    pub authority_stake_gsx: u64,
 }
 
 fn default_round_ms() -> u64 {

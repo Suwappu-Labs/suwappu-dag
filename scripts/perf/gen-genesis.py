@@ -59,13 +59,13 @@ def main() -> int:
         "--validator-stake-gsx",
         type=int,
         default=1_000_000,
-        help="Per-validator stake in GSX (paper Definition 1).",
+        help="Per-validator stake in GSX (paper Definition 1). u64 in the manifest.",
     )
     ap.add_argument(
         "--authority-stake-gsx",
         type=int,
         default=1_000_000,
-        help="Per-validator Authority Ring stake in GSX.",
+        help="Per-validator Authority Ring stake in GSX. u64 in the manifest.",
     )
     args = ap.parse_args()
 

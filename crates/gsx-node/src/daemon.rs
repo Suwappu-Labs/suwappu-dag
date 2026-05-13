@@ -59,7 +59,7 @@ impl State {
     fn new(manifest: &GenesisManifest) -> Self {
         let mut stake_table = StakeTable::new();
         for v in &manifest.validators {
-            stake_table.insert(v.authority_id, v.validator_stake_gsx);
+            stake_table.insert(v.authority_id, v.validator_stake_gsx as u128);
         }
         let n = manifest.validators.len() as u32;
         Self {
