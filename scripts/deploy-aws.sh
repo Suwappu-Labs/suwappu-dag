@@ -57,7 +57,10 @@ fi
 TF_VARS=()
 if [[ "${STACK}" == "perf" && ( "${CMD}" == "plan" || "${CMD}" == "apply" || "${CMD}" == "destroy" ) ]]; then
     if [[ -z "${OPERATOR_CIDR:-}" ]]; then
-        OPERATOR_CIDR="$(curl -fsS ifconfig.me)/32"
+        # checkip.amazonaws.com is IPv4-only — the security group's
+        # cidr_blocks field requires a v4 CIDR, and ifconfig.me returns v6
+        # on dual-stack hosts even with curl -4.
+        OPERATOR_CIDR="$(curl -fsS https://checkip.amazonaws.com)/32"
         echo "[deploy-aws] detected operator IP: ${OPERATOR_CIDR}"
     fi
     SSH_PUB="${SSH_PUB:-$HOME/.ssh/id_ed25519.pub}"

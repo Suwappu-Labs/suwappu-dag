@@ -65,9 +65,7 @@ provider "aws" {
   default_tags { tags = local.common_tags }
 }
 
-provider "aws" {
-  alias   = "af_south_1"
-  profile = "gsn"
-  region  = "af-south-1"
-  default_tags { tags = local.common_tags }
-}
+# af-south-1 provider intentionally omitted — region requires AWS account
+# opt-in and the gsn account is not currently enrolled. See main.tf for the
+# commented-out module block. Restoring this provider is the first step of
+# the re-enable procedure.

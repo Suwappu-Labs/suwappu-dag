@@ -59,7 +59,7 @@ echo "[provision] 5/7 — render per-region node.toml from terraform outputs"
 
 echo "[provision] 6/7 — upload genesis + configs + keys to S3"
 aws s3 cp "$ROOT/target/perf/keys/genesis.toml" "s3://$BUCKET/genesis/genesis.toml" --region us-east-1
-for region in us-east-1 us-west-2 eu-west-1 ap-northeast-1 ap-southeast-2 sa-east-1 af-south-1; do
+for region in us-east-1 us-west-2 eu-west-1 ap-northeast-1 ap-southeast-2 sa-east-1; do
   aws s3 cp "$ROOT/target/perf/configs/$region/node.toml" "s3://$BUCKET/configs/$region/node.toml" --region us-east-1
   aws s3 cp "$ROOT/target/perf/keys/$region/mldsa.sk" "s3://$BUCKET/keys/$region/mldsa.sk" --region us-east-1
   aws s3 cp "$ROOT/target/perf/keys/$region/bls.sk" "s3://$BUCKET/keys/$region/bls.sk" --region us-east-1

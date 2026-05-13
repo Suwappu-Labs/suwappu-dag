@@ -111,18 +111,25 @@ module "sa_east_1" {
   artifact_bucket  = aws_s3_bucket.artifacts.id
 }
 
-# af-south-1 requires manual region opt-in on the AWS account before this
-# applies. If `terraform apply` errors with `OptInRequired`, enable the
-# region in the AWS console once; subsequent applies will work.
-module "af_south_1" {
-  source           = "./modules/region"
-  providers        = { aws = aws.af_south_1 }
-  region_label     = "af-south-1"
-  authority_id     = 6
-  instance_type    = var.instance_type
-  ssh_public_key   = var.ssh_public_key
-  operator_ip_cidr = var.operator_ip_cidr
-  consensus_port   = var.consensus_port
-  client_port      = var.client_port
-  artifact_bucket  = aws_s3_bucket.artifacts.id
-}
+# af-south-1 is intentionally NOT instantiated. The region requires a manual
+# one-time opt-in via the AWS console / `aws account enable-region`, and the
+# gsn account is not currently opted in. The current campaign runs with the
+# 6 always-on regions (us-east-1, us-west-2, eu-west-1, ap-northeast-1,
+# ap-southeast-2, sa-east-1) which still provide ~300 ms cross-region RTT
+# worst case.
+#
+# To re-enable: opt the region in once, then uncomment this block and bump
+# the genesis manifest validator count from 6 to 7 in scripts/perf/gen-genesis.py.
+#
+# module "af_south_1" {
+#   source           = "./modules/region"
+#   providers        = { aws = aws.af_south_1 }
+#   region_label     = "af-south-1"
+#   authority_id     = 6
+#   instance_type    = var.instance_type
+#   ssh_public_key   = var.ssh_public_key
+#   operator_ip_cidr = var.operator_ip_cidr
+#   consensus_port   = var.consensus_port
+#   client_port      = var.client_port
+#   artifact_bucket  = aws_s3_bucket.artifacts.id
+# }

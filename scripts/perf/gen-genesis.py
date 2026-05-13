@@ -36,7 +36,7 @@ REGIONS = [
     ("ap-northeast-1", 3),
     ("ap-southeast-2", 4),
     ("sa-east-1", 5),
-    ("af-south-1", 6),
+    # ("af-south-1", 6),  # disabled: requires AWS account region opt-in.
 ]
 
 
