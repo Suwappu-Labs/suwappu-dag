@@ -1178,10 +1178,9 @@ mod tests {
                 })
                 .collect(),
         };
-        let (log, _log_task) =
-            EventLog::start(&std::env::temp_dir().join("gsx-ltp-test.ndjson"))
-                .await
-                .unwrap();
+        let (log, _log_task) = EventLog::start(&std::env::temp_dir().join("gsx-ltp-test.ndjson"))
+            .await
+            .unwrap();
         let mut s = State::new(&manifest);
 
         let payload = gsx_ltp::AttestationPayload {
