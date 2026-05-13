@@ -908,6 +908,17 @@ fn try_commit(s: &mut State, self_label: &str, log: &EventLog) {
                 .get(&h)
                 .map(|b| b.intents.clone())
                 .unwrap_or_default();
+            // DAG-S26.1: capture intent hashes for compliance trace
+            // before the intents are moved into the block. Same blake3
+            // the load generator records in its CSV — lets gsx-metrics
+            // join intent submission → finality across regions.
+            let intent_hashes: Vec<String> = intents
+                .iter()
+                .map(|i| {
+                    let bytes = bincode::serialize(i).expect("intent serialize");
+                    hex::encode(blake3::hash(&bytes).as_bytes())
+                })
+                .collect();
             let block = Block {
                 round: cert_round,
                 intents,
@@ -916,7 +927,8 @@ fn try_commit(s: &mut State, self_label: &str, log: &EventLog) {
             log.emit(
                 Event::now(self_label, Lane::Main, "committed")
                     .with_round(cert_round)
-                    .with_cert_hash(&h.0),
+                    .with_cert_hash(&h.0)
+                    .with_intent_hashes(intent_hashes),
             );
             s.votes.remove(&h);
 
