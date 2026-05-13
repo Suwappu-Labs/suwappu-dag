@@ -33,6 +33,10 @@ use gsx_consensus::{
 #[cfg(test)]
 use gsx_execution::Substrate;
 use gsx_execution::{execute_block, Block, InMemorySubstrate};
+use gsx_fastpath::{
+    cert::{FastPathCert, FastPathTx, OwnedObjectId},
+    quorum::fast_path_quorum_size,
+};
 use tokio::sync::Mutex;
 use tracing::debug;
 
@@ -70,7 +74,25 @@ pub(crate) struct State {
     /// missing parent and lets the periodic sweeper re-issue requests
     /// without unbounded multiplicity.
     pub(crate) inflight_fetches: HashSet<CertHash>,
+    /// Fast-path lane (paper §6.4 / IQ-003, DAG-S22) — accumulating
+    /// partial certs keyed by `(object, nonce)`. Each entry's
+    /// `signers` set unions across received broadcasts; quorum
+    /// reaches when `|signers| >= fast_path_quorum_size(n)`.
+    pub(crate) fastpath_pending: HashMap<FastPathKey, FastPathCert>,
+    /// Fast-path txs that reached quorum locally. Subsequent peer
+    /// broadcasts for the same key are deduped against this set.
+    pub(crate) fastpath_committed: HashSet<FastPathKey>,
+    /// First payload digest seen per `(object, nonce)`. Equivocation
+    /// detection: if a later broadcast for the same key carries a
+    /// different payload digest, the signers of the conflicting cert
+    /// have equivocated (paper §6.4 Invariant 5 — 100% slashing).
+    pub(crate) fastpath_first_payload: HashMap<FastPathKey, [u8; 32]>,
 }
+
+/// `(object, nonce)` uniqueness key for a fast-path transaction.
+/// Two FastPathCerts with the same key MUST agree on `payload_digest`;
+/// disagreement is the equivocation slashing trigger.
+pub(crate) type FastPathKey = (OwnedObjectId, u64);
 
 /// Soft cap on orphan-buffer size. A Byzantine peer could otherwise
 /// flood unresolvable certs and OOM the node. 4096 ≈ 16 MB of
@@ -102,7 +124,15 @@ impl State {
             n_authorities: n,
             orphans: HashMap::new(),
             inflight_fetches: HashSet::new(),
+            fastpath_pending: HashMap::new(),
+            fastpath_committed: HashSet::new(),
+            fastpath_first_payload: HashMap::new(),
         }
+    }
+
+    /// Compute the `(object, nonce)` key for a fast-path tx.
+    pub(crate) fn fastpath_key(tx: &FastPathTx) -> FastPathKey {
+        (tx.object, tx.nonce)
     }
 
     /// Count distinct authors that have a cert at `round` in the local DAG.
@@ -295,8 +325,12 @@ async fn run_inbox(
                     }
                 }
             }
-            WireMessage::FastPath(_) | WireMessage::Ltp(_) => {
-                // Lanes handled in follow-on commits (S22 / S23).
+            WireMessage::FastPath(cert) => {
+                let mut s = state.lock().await;
+                handle_fastpath_cert(&mut s, self_id, cert, &self_label, &log, &outbound);
+            }
+            WireMessage::Ltp(_) => {
+                // LTP lane handled in follow-on commit (S23).
             }
             WireMessage::Ping(t) => {
                 if let Some(tx) = outbound.get(&from) {
@@ -392,6 +426,195 @@ fn fetch_cert_from_peers(
                 return;
             }
         }
+    }
+}
+
+/// Propose a fast-path transaction from this node: emit a singleton-signer
+/// `FastPathCert { signers = {self_id} }` into the cluster. Peers will
+/// observe via `handle_fastpath_cert`, sign + re-broadcast, and we
+/// converge on quorum.
+///
+/// Used by the client listener (load generator submits a `FastPathTx`
+/// over a separate socket) and by integration tests.
+#[allow(dead_code)]
+pub(crate) fn propose_fastpath_tx(
+    s: &mut State,
+    self_id: AuthorityId,
+    tx: FastPathTx,
+    self_label: &str,
+    log: &EventLog,
+    outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
+) {
+    let key = State::fastpath_key(&tx);
+    if s.fastpath_committed.contains(&key) {
+        return;
+    }
+    // Record first-seen payload for this key (used by equivocation
+    // detection on the receive side).
+    s.fastpath_first_payload
+        .entry(key)
+        .or_insert(tx.payload_digest);
+    let mut signers = BTreeSet::new();
+    signers.insert(self_id);
+    let cert = FastPathCert {
+        tx: tx.clone(),
+        signers: signers.clone(),
+    };
+    s.fastpath_pending.insert(key, cert.clone());
+    log.emit(
+        Event::now(self_label, Lane::FastPath, "proposed")
+            .with_cert_hash(&tx.payload_digest)
+            .with_round(tx.lineage_round),
+    );
+    for out in outbound.values() {
+        let _ = out.try_send(WireMessage::FastPath(cert.clone()));
+    }
+    // Single-authority committees commit immediately.
+    let q = fast_path_quorum_size(s.n_authorities);
+    if signers.len() as u32 >= q {
+        s.fastpath_pending.remove(&key);
+        s.fastpath_committed.insert(key);
+        log.emit(
+            Event::now(self_label, Lane::FastPath, "committed")
+                .with_cert_hash(&tx.payload_digest)
+                .with_round(tx.lineage_round),
+        );
+    }
+}
+
+/// Handle one inbound fast-path certificate. The fast-path lane uses
+/// "partial certs": each Authority that signs broadcasts a
+/// `FastPathCert { tx, signers = {self_id} }`. Receivers union signer
+/// sets across received partials keyed by `(object, nonce)`. When
+/// `|signers| >= fast_path_quorum_size(n)`, the tx is locally
+/// committed.
+///
+/// Equivocation detection (paper §6.4 Invariant 5): two partials for
+/// the same `(object, nonce)` carrying different `payload_digest`
+/// values prove the signers of the second cert equivocated. We log a
+/// `slashed` event with the conflicting signer set; the slashing
+/// pipeline (`gsx_fastpath::slashing`) consumes this for 100% bonded
+/// stake forfeiture.
+///
+/// Re-broadcast: if we haven't signed this tx yet AND the cert is
+/// eligible AND not equivocating, we add our signer and re-broadcast
+/// so peers union our signature in too. This is the gossip-amplify
+/// step that drives quorum convergence.
+fn handle_fastpath_cert(
+    s: &mut State,
+    self_id: AuthorityId,
+    cert: FastPathCert,
+    self_label: &str,
+    log: &EventLog,
+    outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
+) {
+    let key = State::fastpath_key(&cert.tx);
+
+    // Reject if any signer is outside committee bounds — Byzantine input.
+    for &s_id in &cert.signers {
+        if s_id >= s.n_authorities {
+            debug!(signer = s_id, "fastpath: signer outside committee");
+            return;
+        }
+    }
+
+    // Equivocation check: if we've seen this key with a different
+    // payload digest, the new signers have equivocated.
+    if let Some(first_payload) = s.fastpath_first_payload.get(&key).copied() {
+        if first_payload != cert.tx.payload_digest {
+            let slashed: Vec<AuthorityId> = cert.signers.iter().copied().collect();
+            log.emit(
+                Event::now(self_label, Lane::FastPath, "slashed")
+                    .with_cert_hash(&cert.tx.payload_digest)
+                    .with_round(cert.tx.lineage_round),
+            );
+            tracing::warn!(
+                object = ?cert.tx.object.0,
+                nonce = cert.tx.nonce,
+                conflicting_signers = ?slashed,
+                "fastpath: equivocation detected — 100% slashing"
+            );
+            return; // do not propagate or count the equivocating cert
+        }
+    } else {
+        s.fastpath_first_payload.insert(key, cert.tx.payload_digest);
+    }
+
+    // Already locally committed — no further work.
+    if s.fastpath_committed.contains(&key) {
+        return;
+    }
+
+    // Union into the pending entry.
+    let entry = s
+        .fastpath_pending
+        .entry(key)
+        .or_insert_with(|| FastPathCert {
+            tx: cert.tx.clone(),
+            signers: BTreeSet::new(),
+        });
+    let was_signed_by_self_before = entry.signers.contains(&self_id);
+    let pre_count = entry.signers.len();
+    for s_id in &cert.signers {
+        entry.signers.insert(*s_id);
+    }
+    let post_count = entry.signers.len();
+
+    // First time we observe this tx → log "received". The proposer
+    // event is logged by `propose_fastpath` instead.
+    if pre_count == 0 {
+        log.emit(
+            Event::now(self_label, Lane::FastPath, "received")
+                .with_cert_hash(&cert.tx.payload_digest)
+                .with_round(cert.tx.lineage_round),
+        );
+    }
+
+    // If we haven't signed yet, sign and re-broadcast so peers can
+    // union our signature in.
+    if !was_signed_by_self_before {
+        entry.signers.insert(self_id);
+        log.emit(
+            Event::now(self_label, Lane::FastPath, "signed")
+                .with_cert_hash(&cert.tx.payload_digest)
+                .with_round(cert.tx.lineage_round),
+        );
+        let our_partial = FastPathCert {
+            tx: cert.tx.clone(),
+            signers: entry.signers.clone(),
+        };
+        for tx in outbound.values() {
+            let _ = tx.try_send(WireMessage::FastPath(our_partial.clone()));
+        }
+    }
+
+    // Quorum check.
+    let q = fast_path_quorum_size(s.n_authorities);
+    if entry.signers.len() as u32 >= q {
+        let signers_count = entry.signers.len() as u32;
+        // Move from pending to committed.
+        s.fastpath_pending.remove(&key);
+        s.fastpath_committed.insert(key);
+        log.emit(
+            Event::now(self_label, Lane::FastPath, "committed")
+                .with_cert_hash(&cert.tx.payload_digest)
+                .with_round(cert.tx.lineage_round),
+        );
+        tracing::info!(
+            object = ?cert.tx.object.0,
+            nonce = cert.tx.nonce,
+            signers = signers_count,
+            quorum = q,
+            "fastpath: quorum reached"
+        );
+    } else if post_count > pre_count {
+        debug!(
+            object = ?cert.tx.object.0,
+            nonce = cert.tx.nonce,
+            signers = post_count,
+            quorum = q,
+            "fastpath: accumulating signers"
+        );
     }
 }
 
@@ -785,5 +1008,90 @@ mod tests {
         for r in &state_roots[1..] {
             assert_eq!(*r, first, "state roots disagree across daemons");
         }
+    }
+
+    /// Smoke test for the fast-path lane handler (DAG-S22).
+    ///
+    /// Manually feeds singleton-signer partial certs from each Authority
+    /// into a fresh `State` and asserts:
+    ///   1. Signers accumulate across receipts.
+    ///   2. Quorum (q=3 for n=4) finalizes the tx into `fastpath_committed`.
+    ///   3. A conflicting partial cert with a different payload digest is
+    ///      detected as equivocation and does NOT propagate.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fastpath_receiver_accumulates_to_quorum_and_slashes_equivocation() {
+        let n = 4u32;
+        let manifest = GenesisManifest {
+            network_id: "fp-4n".into(),
+            validators: (0..n)
+                .map(|i| GenesisValidator {
+                    authority_id: i,
+                    label: format!("v{}", i),
+                    mldsa_public_key_hex: "00".into(),
+                    bls_public_key_hex: "00".into(),
+                    validator_stake_gsx: 1_000,
+                    authority_stake_gsx: 1_000,
+                })
+                .collect(),
+        };
+        let (log, _log_task) =
+            EventLog::start(&std::env::temp_dir().join("gsx-fastpath-test.ndjson"))
+                .await
+                .unwrap();
+        let mut s = State::new(&manifest);
+        let outbound: HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>> = HashMap::new();
+        let self_id: AuthorityId = 0;
+
+        let tx = gsx_fastpath::cert::FastPathTx {
+            object: gsx_fastpath::cert::OwnedObjectId([0xAB; 32]),
+            owner: gsx_fastpath::cert::OwnerAddress([0xCD; 32]),
+            nonce: 42,
+            lineage: CertHash([0; 32]),
+            lineage_round: 0,
+            payload_digest: [0x11; 32],
+        };
+        let key = State::fastpath_key(&tx);
+
+        // Authority 1 broadcasts a partial cert with itself as signer.
+        let cert_a1 = gsx_fastpath::cert::FastPathCert {
+            tx: tx.clone(),
+            signers: BTreeSet::from([1u32]),
+        };
+        handle_fastpath_cert(&mut s, self_id, cert_a1, "v0", &log, &outbound);
+        // Self (0) signed too → pending has {0,1}, below q=3.
+        assert!(s.fastpath_pending.contains_key(&key));
+        assert!(!s.fastpath_committed.contains(&key));
+        assert_eq!(s.fastpath_pending[&key].signers.len(), 2);
+
+        // Authority 2 broadcasts. Now pending has {0,1,2} → quorum hits.
+        let cert_a2 = gsx_fastpath::cert::FastPathCert {
+            tx: tx.clone(),
+            signers: BTreeSet::from([2u32]),
+        };
+        handle_fastpath_cert(&mut s, self_id, cert_a2, "v0", &log, &outbound);
+        assert!(
+            s.fastpath_committed.contains(&key),
+            "expected fast-path quorum (q=3) to fire on (0,1,2) signers"
+        );
+        assert!(!s.fastpath_pending.contains_key(&key));
+
+        // Equivocation: a partial cert for the same (object,nonce) with
+        // a different payload_digest must be rejected and logged as
+        // slashed, without affecting committed state.
+        let equivocating_tx = gsx_fastpath::cert::FastPathTx {
+            payload_digest: [0x22; 32],
+            ..tx.clone()
+        };
+        let bad_cert = gsx_fastpath::cert::FastPathCert {
+            tx: equivocating_tx,
+            signers: BTreeSet::from([3u32]),
+        };
+        let committed_before = s.fastpath_committed.len();
+        handle_fastpath_cert(&mut s, self_id, bad_cert, "v0", &log, &outbound);
+        assert_eq!(
+            s.fastpath_committed.len(),
+            committed_before,
+            "equivocating cert must not change committed state"
+        );
     }
 }
