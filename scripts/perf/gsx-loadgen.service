@@ -1,0 +1,30 @@
+[Unit]
+# gsx-loadgen — continuous load against all perf-testnet validators.
+# Installed on one host (usually us-east-1) by scripts/perf/provision.sh
+# during DAG-S26.3. Drives sustained TPS so SLA observation is
+# meaningful (per ~/.claude/plans/eventual-juggling-oasis.md).
+Description=GSX DAG continuous load generator (compliance)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gsx
+Group=gsx
+WorkingDirectory=/opt/gsx
+# --targets is rendered at install time by render-configs.sh; the
+# rate is a tunable per environment (perf testnet defaults to 100
+# TPS aggregate across 4 validators = 25 TPS per peer).
+EnvironmentFile=/etc/gsx/loadgen.env
+ExecStart=/opt/gsx/gsx-loadgen --targets ${TARGETS} --rate ${RATE} --continuous --seed ${SEED}
+StandardOutput=append:/var/log/gsx/loadgen.csv
+StandardError=append:/var/log/gsx/loadgen.stderr
+Restart=always
+RestartSec=5
+# Graceful shutdown — the binary handles SIGTERM and flushes its
+# CSV before exiting.
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target
