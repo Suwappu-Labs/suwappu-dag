@@ -71,6 +71,19 @@ pub struct Event {
     /// Optional remote peer label (set for `"received"` events).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub peer: Option<String>,
+    /// Optional list of intent (transaction) hashes carried by a
+    /// committed certificate (DAG-S26.1). Hex-encoded blake3 of each
+    /// bincoded intent — same value the client load generator
+    /// records in its CSV, so compliance metrics can join intent
+    /// submission → finality across regions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intent_hashes: Option<Vec<String>>,
+    /// Optional per-peer received-cert count over the last 60s
+    /// window (DAG-S26.1 `peer_health` event). Pairs with the `peer`
+    /// field so a regulator can audit every validator-to-validator
+    /// edge in the n×(n-1) mesh.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub received_60s: Option<u64>,
 }
 
 impl Event {
@@ -89,6 +102,8 @@ impl Event {
             cert_hash: None,
             tx_hash: None,
             peer: None,
+            intent_hashes: None,
+            received_60s: None,
         }
     }
 
@@ -113,6 +128,20 @@ impl Event {
     /// Builder: attach a peer label.
     pub fn with_peer(mut self, peer: impl Into<String>) -> Self {
         self.peer = Some(peer.into());
+        self
+    }
+
+    /// Builder: attach the list of intent hashes carried by a
+    /// committed certificate (DAG-S26.1 compliance trace).
+    pub fn with_intent_hashes(mut self, hashes: Vec<String>) -> Self {
+        self.intent_hashes = Some(hashes);
+        self
+    }
+
+    /// Builder: attach a per-peer 60-second received count
+    /// (DAG-S26.1 `peer_health` event).
+    pub fn with_received_60s(mut self, count: u64) -> Self {
+        self.received_60s = Some(count);
         self
     }
 }
