@@ -26,8 +26,9 @@ use gsx_consensus::{
     cert::{CertHash, Certificate},
     commit::{cert_at, leader as round_leader, quorum_threshold},
     dag::DagStore,
-    joint::{joint_commit, StakeTable, Vote},
-    AuthorityId,
+    decide_slot,
+    joint::{StakeTable, Vote},
+    validator_quorum_met, AuthorityId, LeaderStatus,
 };
 #[cfg(test)]
 use gsx_execution::Substrate;
@@ -287,37 +288,72 @@ fn broadcast(
 }
 
 fn try_commit(s: &mut State, self_label: &str, log: &EventLog) {
-    // Find rounds with at least one voted-on cert. For each such round, ask
-    // joint_commit whether the round's leader fires.
-    let candidate_rounds: BTreeSet<u64> = s
-        .votes
-        .keys()
-        .filter_map(|h| s.dag.get(h).map(|c| c.round))
-        .collect();
+    // Build the votes view once — re-derived inside loops would multiply
+    // work for no benefit; this function holds the State mutex.
+    let votes_flat: Vec<Vote> = s.votes.values().flatten().copied().collect();
+    let n = s.n_authorities;
+
+    // Try direct + indirect decision on every round we have seen at
+    // least one cert at. Indirect commit may pull in slots we haven't
+    // explicitly received votes for as long as their leader cert is in
+    // a later directly-decided anchor's causal history.
+    let candidate_rounds: BTreeSet<u64> = {
+        let mut rounds = BTreeSet::new();
+        for h in s.dag.linearize() {
+            if let Some(c) = s.dag.get(&h) {
+                rounds.insert(c.round);
+            }
+        }
+        rounds
+    };
 
     for round in candidate_rounds {
-        let votes_flat: Vec<Vote> = s.votes.values().flatten().copied().collect();
-        let Some(committed) =
-            joint_commit(&s.dag, round, s.n_authorities, &s.stake_table, &votes_flat)
-        else {
-            continue;
+        let status = decide_slot(&s.dag, round, n);
+        let leader_hash = match status {
+            LeaderStatus::Direct(h) => h,
+            LeaderStatus::Skip | LeaderStatus::Undecided => continue,
         };
-        if !s.committed.insert(committed) {
+
+        if s.committed.contains(&leader_hash) {
             continue;
         }
-        let intents = s
-            .blocks
-            .get(&committed)
-            .map(|b| b.intents.clone())
-            .unwrap_or_default();
-        let block = Block { round, intents };
-        let _ = execute_block(&mut s.substrate, &block);
-        log.emit(
-            Event::now(self_label, Lane::Main, "committed")
-                .with_round(round)
-                .with_cert_hash(&committed.0),
-        );
-        s.votes.remove(&committed);
+
+        // Joint-quorum AND-gate: Authority side already passed via
+        // decide_slot. Validator-Ring stake side must also pass before
+        // we can finalize.
+        if !validator_quorum_met(&s.stake_table, leader_hash, &votes_flat) {
+            continue;
+        }
+
+        // Commit the directly-decided leader plus every cert in its
+        // causal history — this is where indirect-decided earlier slots
+        // become observable. Walk the linearized history (deterministic
+        // order) and execute each.
+        for h in gsx_consensus::causal_history(&s.dag, leader_hash) {
+            if !s.committed.insert(h) {
+                continue;
+            }
+            let cert_round = match s.dag.get(&h) {
+                Some(c) => c.round,
+                None => continue,
+            };
+            let intents = s
+                .blocks
+                .get(&h)
+                .map(|b| b.intents.clone())
+                .unwrap_or_default();
+            let block = Block {
+                round: cert_round,
+                intents,
+            };
+            let _ = execute_block(&mut s.substrate, &block);
+            log.emit(
+                Event::now(self_label, Lane::Main, "committed")
+                    .with_round(cert_round)
+                    .with_cert_hash(&h.0),
+            );
+            s.votes.remove(&h);
+        }
     }
 }
 
