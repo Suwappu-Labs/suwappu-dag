@@ -1291,7 +1291,7 @@ mod tests {
             aggregate_signature: vec![0u8; 96],
             signers: (0..7u32).collect(),
         };
-        let corridor_id = corridor_id_from_payload(&payload);
+        let corridor_id = corridor_id_fallback(&payload);
 
         assert_eq!(s.ltp_received_count, 0);
         assert!(s.ltp_latest.is_empty());
