@@ -24,7 +24,7 @@ use std::{
 
 use gsx_consensus::{
     cert::{CertHash, Certificate},
-    commit::{cert_at, leader as round_leader, quorum_threshold},
+    commit::{cert_at, quorum_threshold},
     dag::DagStore,
     decide_slot,
     joint::{StakeTable, Vote},
