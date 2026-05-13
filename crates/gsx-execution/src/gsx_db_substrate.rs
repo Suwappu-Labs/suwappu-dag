@@ -105,8 +105,9 @@ impl Substrate for GsxDbSubstrate {
 
     fn apply_intent(&mut self, intent: &Intent) -> Result<(), ExecutionError> {
         let mut bridge = Bridge::new(&mut self.state);
-        match *intent {
+        match intent {
             Intent::Transfer { from, to, amount } => {
+                let (from, to, amount) = (*from, *to, *amount);
                 let result = bridge.submit(GsxIntent::Transfer {
                     from: GsxAddress(from),
                     to: GsxAddress(to),
@@ -136,6 +137,11 @@ impl Substrate for GsxDbSubstrate {
                     }
                 }
             }
+            // Governance variants are no-ops on the gsx-db substrate;
+            // see DAG-S25.2 in `substrate.rs::apply_intent`.
+            Intent::AdmitAuthority { .. }
+            | Intent::ExitAuthority { .. }
+            | Intent::EjectAuthority { .. } => Ok(()),
         }
     }
 
