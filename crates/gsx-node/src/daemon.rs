@@ -28,7 +28,7 @@ use gsx_consensus::{
     dag::DagStore,
     decide_slot,
     joint::{StakeTable, Vote},
-    validator_quorum_met, AuthorityId, LeaderStatus,
+    validator_quorum_met, AuthorityId, ConsensusError, LeaderStatus,
 };
 #[cfg(test)]
 use gsx_execution::Substrate;
@@ -60,7 +60,27 @@ pub(crate) struct State {
     pub(crate) max_observed_round: u64,
     pub(crate) pending_intents: Vec<gsx_execution::Intent>,
     pub(crate) n_authorities: u32,
+    /// Certs received whose parents aren't yet in the local DAG. Keyed
+    /// by the missing parent hash — when that hash later inserts,
+    /// every orphan waiting on it is retried in a work-queue cascade.
+    /// See [`ingest_cert`] and [`run_sync_sweeper`].
+    pub(crate) orphans: HashMap<CertHash, Vec<Certificate>>,
+    /// Cert hashes for which a `GetCert` request is outstanding.
+    /// Prevents fan-out storms when many orphans reference the same
+    /// missing parent and lets the periodic sweeper re-issue requests
+    /// without unbounded multiplicity.
+    pub(crate) inflight_fetches: HashSet<CertHash>,
 }
+
+/// Soft cap on orphan-buffer size. A Byzantine peer could otherwise
+/// flood unresolvable certs and OOM the node. 4096 ≈ 16 MB of
+/// bincode-serialized certs — far more than any honest reconvergence.
+const MAX_ORPHAN_CERTS: usize = 4096;
+
+/// Interval at which the synchronizer re-issues `GetCert` for any
+/// missing parents still in `inflight_fetches`. Matches Sui's
+/// `synchronizer.rs` periodic scheduler cadence.
+const SYNC_SWEEPER_INTERVAL_MS: u64 = 1_000;
 
 impl State {
     fn new(manifest: &GenesisManifest) -> Self {
@@ -80,6 +100,8 @@ impl State {
             max_observed_round: 0,
             pending_intents: Vec::new(),
             n_authorities: n,
+            orphans: HashMap::new(),
+            inflight_fetches: HashSet::new(),
         }
     }
 
@@ -177,6 +199,17 @@ impl Daemon {
             }));
         }
 
+        // Synchronizer sweeper — re-issues `GetCert` for hashes still
+        // in `inflight_fetches` (S21.3). Without this, a single dropped
+        // GetCert leaves the orphan stuck forever.
+        {
+            let state = state.clone();
+            let outbound = outbound.clone();
+            tasks.push(tokio::spawn(async move {
+                run_sync_sweeper(state, outbound).await;
+            }));
+        }
+
         // Take ownership of the wire's accept/dialer tasks so they're aborted
         // when this daemon is dropped.
         tasks.append(&mut wire_tasks);
@@ -222,28 +255,24 @@ async fn run_inbox(
                         .with_peer(from.0.clone()),
                 );
                 let mut s = state.lock().await;
-                if s.dag.insert(cert).is_err() {
-                    debug!(peer = %from.0, "inbox: duplicate or invalid cert");
-                    continue;
-                }
-                if round > s.max_observed_round {
-                    s.max_observed_round = round;
-                }
-                let vote = Vote {
-                    validator: self_id,
-                    candidate: h,
-                };
-                s.votes.entry(h).or_default().push(vote);
+                let inserted = ingest_cert(&mut s, cert, &from, &outbound);
                 drop(s);
-
-                log.emit(
-                    Event::now(&self_label, Lane::Main, "voted")
-                        .with_round(round)
-                        .with_cert_hash(&h.0),
-                );
-                broadcast(&outbound, WireMessage::Vote(vote));
-                // After voting we may have just enabled a commit ourselves
-                // (e.g. quorum_threshold reached on the round-0 leader).
+                for ic in inserted {
+                    let vote = Vote {
+                        validator: self_id,
+                        candidate: ic.hash,
+                    };
+                    {
+                        let mut s = state.lock().await;
+                        s.votes.entry(ic.hash).or_default().push(vote);
+                    }
+                    log.emit(
+                        Event::now(&self_label, Lane::Main, "voted")
+                            .with_round(ic.round)
+                            .with_cert_hash(&ic.hash.0),
+                    );
+                    broadcast(&outbound, WireMessage::Vote(vote));
+                }
                 let mut s = state.lock().await;
                 try_commit(&mut s, &self_label, &log);
             }
@@ -256,8 +285,19 @@ async fn run_inbox(
                 s.votes.entry(vote.candidate).or_default().push(vote);
                 try_commit(&mut s, &self_label, &log);
             }
+            WireMessage::GetCert(hash) => {
+                let cert_opt = {
+                    let s = state.lock().await;
+                    s.dag.get(&hash).cloned()
+                };
+                if let Some(cert) = cert_opt {
+                    if let Some(tx) = outbound.get(&from) {
+                        let _ = tx.try_send(WireMessage::Cert(cert));
+                    }
+                }
+            }
             WireMessage::FastPath(_) | WireMessage::Ltp(_) => {
-                // Lanes handled in follow-on commit. Ignored on the main lane.
+                // Lanes handled in follow-on commits (S22 / S23).
             }
             WireMessage::Ping(t) => {
                 if let Some(tx) = outbound.get(&from) {
@@ -265,6 +305,120 @@ async fn run_inbox(
                 }
             }
             WireMessage::Pong(_) => {}
+        }
+    }
+}
+
+/// One successful cert ingestion. The inbox handler emits a `voted`
+/// event and broadcasts a `Vote` for each.
+struct IngestedCert {
+    hash: CertHash,
+    round: u64,
+}
+
+/// Insert `cert` into the DAG, cascading through any orphans that were
+/// waiting on certs we just admitted. On `UnknownParent`, buffer the
+/// orphan keyed by the missing parent and ask up to two peers for it
+/// (sender first, then one other) — avoids single-peer dependency.
+///
+/// This is the synchronous-fetch leg of S21.3. The periodic sweeper
+/// (`run_sync_sweeper`) handles requests that never get answered.
+fn ingest_cert(
+    s: &mut State,
+    cert: Certificate,
+    from: &PeerId,
+    outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
+) -> Vec<IngestedCert> {
+    let mut inserted = Vec::new();
+    let mut work: Vec<Certificate> = vec![cert];
+    while let Some(c) = work.pop() {
+        let h = c.hash();
+        let round = c.round;
+        match s.dag.insert(c.clone()) {
+            Ok(_) => {
+                if round > s.max_observed_round {
+                    s.max_observed_round = round;
+                }
+                s.inflight_fetches.remove(&h);
+                inserted.push(IngestedCert { hash: h, round });
+                if let Some(unblocked) = s.orphans.remove(&h) {
+                    work.extend(unblocked);
+                }
+            }
+            Err(ConsensusError::UnknownParent(missing)) => {
+                if s.orphans.values().map(|v| v.len()).sum::<usize>() >= MAX_ORPHAN_CERTS {
+                    debug!(peer = %from.0, "inbox: orphan buffer full, dropping cert");
+                    continue;
+                }
+                s.orphans.entry(missing).or_default().push(c);
+                if s.inflight_fetches.insert(missing) {
+                    fetch_cert_from_peers(missing, Some(from), outbound);
+                }
+            }
+            Err(e) => {
+                debug!(peer = %from.0, err = ?e, "inbox: dag rejected cert");
+            }
+        }
+    }
+    inserted
+}
+
+/// Unicast `GetCert(hash)` to up to two peers — `prefer` (if any,
+/// usually the cert sender) and one other. Two-peer fan-out matches
+/// Sui's `MAX_AUTHORITIES_TO_FETCH_PER_BLOCK = 2` so we don't depend on
+/// a single peer being live.
+fn fetch_cert_from_peers(
+    hash: CertHash,
+    prefer: Option<&PeerId>,
+    outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
+) {
+    let mut sent = 0usize;
+    if let Some(p) = prefer {
+        if let Some(tx) = outbound.get(p) {
+            if tx.try_send(WireMessage::GetCert(hash)).is_ok() {
+                sent += 1;
+            }
+        }
+    }
+    if sent >= 2 {
+        return;
+    }
+    for (peer, tx) in outbound.iter() {
+        if Some(peer) == prefer {
+            continue;
+        }
+        if tx.try_send(WireMessage::GetCert(hash)).is_ok() {
+            sent += 1;
+            if sent >= 2 {
+                return;
+            }
+        }
+    }
+}
+
+/// Periodic sweeper: every `SYNC_SWEEPER_INTERVAL_MS` re-issues
+/// `GetCert` for every hash still in `inflight_fetches`. A peer that
+/// dropped our first request (full channel, restart, …) gets a fresh
+/// chance to answer. Without this, a node that lost a single `GetCert`
+/// stays stuck on that orphan forever.
+///
+/// Re-issue is multi-peer (`fetch_cert_from_peers` with no preference)
+/// so we rotate naturally rather than re-asking the same dropped peer.
+async fn run_sync_sweeper(
+    state: Arc<Mutex<State>>,
+    outbound: Arc<HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>>,
+) {
+    let mut tick = tokio::time::interval(Duration::from_millis(SYNC_SWEEPER_INTERVAL_MS));
+    // Skip the first immediate tick.
+    tick.tick().await;
+    loop {
+        tick.tick().await;
+        let pending: Vec<CertHash> = {
+            let s = state.lock().await;
+            s.inflight_fetches.iter().copied().collect()
+        };
+        for h in pending {
+            fetch_cert_from_peers(h, None, &outbound);
         }
     }
 }

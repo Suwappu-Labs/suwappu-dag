@@ -82,6 +82,12 @@ pub enum WireMessage {
     Block(BlockPayload),
     /// Validator Ring ratification vote (joint quorum AND-gate).
     Vote(Vote),
+    /// Synchronizer: request a specific cert by hash. Sent when a
+    /// received cert references a parent not yet in the local DAG, or
+    /// re-issued periodically for stale inflight fetches. Receivers
+    /// respond with `Cert(...)` if they have it; otherwise silently
+    /// drop. See `gsx_node::sync` (S21.3).
+    GetCert(CertHash),
     /// Single-owner fast-path certificate (paper §6.4).
     FastPath(FastPathCert),
     /// LTP super-node corridor attestation (paper §10.2).
