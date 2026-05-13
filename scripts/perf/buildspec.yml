@@ -1,8 +1,9 @@
-# AWS CodeBuild spec for the musl cross-compile.
+# AWS CodeBuild spec for the perf testnet validator binaries.
 #
-# Image: aws/codebuild/standard:7.0 (Ubuntu 22.04). Ships with rust + cargo
-# pre-installed under /root/.cargo. We just `rustup target add` for musl
-# and install musl-tools via apt.
+# Image: aws/codebuild/standard:7.0 (Ubuntu 22.04). Ships with rust pre-
+# installed under /root/.cargo. Target is x86_64-unknown-linux-gnu (the
+# native target of the image); glibc 2.35 is forward-compatible with the
+# Ubuntu 24.04 (glibc 2.39+) AMI we deploy to.
 
 version: 0.2
 
@@ -12,13 +13,16 @@ env:
 
 phases:
   install:
+    # GNU target instead of musl: pqcrypto-mlkem's C-bundled pqclean code
+    # doesn't compile under musl-gcc (pqclean/common/compat.h breakage).
+    # Ubuntu 22.04 CodeBuild image has glibc 2.35; Ubuntu 24.04 EC2 targets
+    # have glibc 2.39+ which is forward-compatible, so a glibc-linked binary
+    # runs unmodified on the validators.
     commands:
       - apt-get update -qq
-      - apt-get install -y musl-tools build-essential pkg-config libssl-dev zip jq
-      # standard:7.0 has rust pre-installed; just confirm + add target.
+      - apt-get install -y build-essential pkg-config libssl-dev zip jq
       - rustc --version || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
       - export PATH="$HOME/.cargo/bin:$PATH"
-      - rustup target add x86_64-unknown-linux-musl
       - rustc --version
 
   pre_build:
@@ -42,14 +46,14 @@ phases:
     commands:
       - export PATH="$HOME/.cargo/bin:$PATH"
       - cd $CODEBUILD_SRC_DIR
-      - cargo build --release --target x86_64-unknown-linux-musl --bin gsx-node --bin gsx-loadgen --bin gsx-metrics
+      - cargo build --release --target x86_64-unknown-linux-gnu --bin gsx-node --bin gsx-loadgen --bin gsx-metrics
 
   post_build:
     commands:
       - mkdir -p $CODEBUILD_SRC_DIR/out
-      - cp target/x86_64-unknown-linux-musl/release/gsx-node $CODEBUILD_SRC_DIR/out/
-      - cp target/x86_64-unknown-linux-musl/release/gsx-loadgen $CODEBUILD_SRC_DIR/out/
-      - cp target/x86_64-unknown-linux-musl/release/gsx-metrics $CODEBUILD_SRC_DIR/out/
+      - cp target/x86_64-unknown-linux-gnu/release/gsx-node $CODEBUILD_SRC_DIR/out/
+      - cp target/x86_64-unknown-linux-gnu/release/gsx-loadgen $CODEBUILD_SRC_DIR/out/
+      - cp target/x86_64-unknown-linux-gnu/release/gsx-metrics $CODEBUILD_SRC_DIR/out/
       - strip $CODEBUILD_SRC_DIR/out/* || true
       - ls -lh $CODEBUILD_SRC_DIR/out/
       - file $CODEBUILD_SRC_DIR/out/gsx-node
