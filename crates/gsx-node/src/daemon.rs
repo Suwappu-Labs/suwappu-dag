@@ -17,11 +17,12 @@
 //! - `lane=main event=committed` — joint quorum fired; cert committed
 
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::Arc,
     time::Duration,
 };
 
+use gsx_authority::{AuthorityMember, AuthorityRegistry};
 use gsx_consensus::{
     cert::{CertHash, Certificate},
     commit::{cert_at, quorum_threshold},
@@ -32,12 +33,13 @@ use gsx_consensus::{
 };
 #[cfg(test)]
 use gsx_execution::Substrate;
-use gsx_execution::{execute_block, Block, InMemorySubstrate};
+use gsx_execution::{execute_block, Block, InMemorySubstrate, Intent};
 use gsx_fastpath::{
     cert::{FastPathCert, FastPathTx, OwnedObjectId},
     quorum::fast_path_quorum_size,
 };
 use gsx_ltp::{AttestationPayload, ChainId, Corridor, CorridorAttestation, CorridorId, SuperNode};
+use gsx_validator::{ValidatorMember, ValidatorRegistry};
 use tokio::sync::Mutex;
 use tracing::debug;
 
@@ -63,7 +65,14 @@ pub(crate) struct State {
     /// node always advances one round at a time from its own last
     /// authored round — see S21.5 / IQ-002).
     pub(crate) max_observed_round: u64,
-    pub(crate) pending_intents: Vec<gsx_execution::Intent>,
+    /// **DAG-S27.2 state split.** `pending_intents` is no longer a
+    /// field on `State`. It lived here pre-S27 and was the headline
+    /// throughput bottleneck: `client.rs::handle_conn` held this
+    /// `Arc<Mutex<State>>` to `.push()` an intent, contending with
+    /// `run_inbox` + `run_round_driver` + `run_sync_sweeper`. Now
+    /// intents flow over an `mpsc::unbounded_channel` whose sender
+    /// is given to `client::run` and whose receiver is drained by
+    /// the round driver — no lock contention with consensus surfaces.
     pub(crate) n_authorities: u32,
     /// Certs received whose parents aren't yet in the local DAG. Keyed
     /// by the missing parent hash — when that hash later inserts,
@@ -110,6 +119,27 @@ pub(crate) struct State {
     /// boundary cadence. Queued governance actions apply at
     /// `last_boundary_round + rounds_per_epoch`.
     pub(crate) epoch: EpochState,
+    /// Authority Ring registry (DAG-S27.3). Populated from the genesis
+    /// manifest at startup; mutated by `Intent::AdmitAuthority` /
+    /// `Intent::ExitAuthority` / `Intent::EjectAuthority` as they
+    /// land in committed blocks. Mirrored on every validator (the
+    /// committed block stream is the canonical source of truth).
+    pub(crate) authority_registry: AuthorityRegistry,
+    /// Validator Ring registry (DAG-S27.3). Same lifecycle as
+    /// `authority_registry`. MVP keeps the two rings 1:1 (one validator
+    /// per authority) — paper §4.1 allows them to diverge but no
+    /// production traffic exercises a split today.
+    pub(crate) validator_registry: ValidatorRegistry,
+    /// Stake values for authorities admitted via `Intent::AdmitAuthority`
+    /// that have not yet authored their first cert (DAG-S27.7). Held
+    /// off `stake_table` to keep the joint-quorum *denominator* from
+    /// inflating before the new authority can vote — otherwise a
+    /// single admit permanently stalls the cluster (joint-quorum
+    /// threshold rises by 2 × admitted_stake / 3, but achievable vote
+    /// stake stays unchanged until the new authority comes online).
+    /// Stake is promoted into `stake_table` on first-cert insertion
+    /// in `ingest_cert`.
+    pub(crate) pending_stake: BTreeMap<AuthorityId, gsx_consensus::Stake>,
 }
 
 /// Round-based epoch counter for validator-set governance (DAG-S25).
@@ -205,8 +235,36 @@ fn load_corridors(manifest: &GenesisManifest) -> HashMap<(ChainId, ChainId), Cor
 impl State {
     fn new(manifest: &GenesisManifest) -> Self {
         let mut stake_table = StakeTable::new();
+        let mut authority_registry = AuthorityRegistry::new();
+        let mut validator_registry = ValidatorRegistry::new();
         for v in &manifest.validators {
             stake_table.insert(v.authority_id, v.validator_stake_gsx as u128);
+            // Best-effort admission. Genesis manifests are operator-signed,
+            // so admission failures here mean a malformed manifest — emit a
+            // warning rather than panic so the node still boots in dev.
+            let mldsa_bytes = hex::decode(&v.mldsa_public_key_hex).unwrap_or_default();
+            let _bls_bytes = hex::decode(&v.bls_public_key_hex).unwrap_or_default();
+            if let Err(e) = authority_registry.admit(AuthorityMember {
+                id: v.authority_id,
+                stake_gsx: v.authority_stake_gsx,
+                public_key_bytes: mldsa_bytes,
+            }) {
+                tracing::warn!(
+                    auth = v.authority_id,
+                    err = %e,
+                    "genesis: skipping malformed authority"
+                );
+            }
+            if let Err(e) = validator_registry.admit(ValidatorMember {
+                id: v.authority_id,
+                stake_gsx: v.validator_stake_gsx as u128,
+            }) {
+                tracing::warn!(
+                    val = v.authority_id,
+                    err = %e,
+                    "genesis: skipping malformed validator"
+                );
+            }
         }
         let n = manifest.validators.len() as u32;
         Self {
@@ -218,7 +276,6 @@ impl State {
             committed: HashSet::new(),
             last_authored_round: None,
             max_observed_round: 0,
-            pending_intents: Vec::new(),
             n_authorities: n,
             orphans: HashMap::new(),
             inflight_fetches: HashSet::new(),
@@ -233,6 +290,9 @@ impl State {
                 rounds_per_epoch: manifest.rounds_per_epoch,
                 last_boundary_round: 0,
             },
+            authority_registry,
+            validator_registry,
+            pending_stake: BTreeMap::new(),
         }
     }
 
@@ -310,6 +370,13 @@ impl Daemon {
         let outbound = Arc::new(outbound);
         let state = Arc::new(Mutex::new(State::new(&manifest)));
 
+        // DAG-S27.2: client intent submissions flow over an unbounded
+        // mpsc instead of contending on the State mutex. Sender goes
+        // to the client listener; receiver lives inside the round
+        // driver task (single owner; no Arc/Mutex needed).
+        let (intent_tx, intent_rx) =
+            tokio::sync::mpsc::unbounded_channel::<gsx_execution::Intent>();
+
         let mut tasks = Vec::new();
 
         // Inbox handler: per-message dispatch.
@@ -323,14 +390,18 @@ impl Daemon {
             }));
         }
 
-        // Round driver.
+        // Round driver — owns `intent_rx` since it's the only consumer
+        // (drains the queue at block-build time).
         {
             let state = state.clone();
             let outbound = outbound.clone();
             let log = log.clone();
             let self_label = self_label.clone();
             tasks.push(tokio::spawn(async move {
-                run_round_driver(self_label, self_id, round_ms, state, outbound, log).await;
+                run_round_driver(
+                    self_label, self_id, round_ms, state, outbound, log, intent_rx,
+                )
+                .await;
             }));
         }
 
@@ -349,12 +420,16 @@ impl Daemon {
         // when this daemon is dropped.
         tasks.append(&mut wire_tasks);
 
-        // Client listener: load generator submits intents over this socket.
+        // Client listener: load generator submits intents over this
+        // socket. Pre-S27.2 this took `state` and pushed onto
+        // `pending_intents` under the global mutex. Now it takes
+        // `intent_tx` and sends over the mpsc — no consensus-lock
+        // contention.
         {
             let client_task = crate::client::run(
                 cfg.client_listen,
                 self_label.clone(),
-                state.clone(),
+                intent_tx,
                 log.clone(),
             )
             .await?;
@@ -480,6 +555,13 @@ fn ingest_cert(
                     s.max_observed_round = round;
                 }
                 s.inflight_fetches.remove(&h);
+                // DAG-S27.7: promote pending stake for this author on
+                // their first cert. The new authority has demonstrated
+                // liveness (signed a cert), so it's safe to add their
+                // stake to the joint-quorum denominator now.
+                if let Some(stake) = s.pending_stake.remove(&c.author) {
+                    s.stake_table.insert(c.author, stake);
+                }
                 inserted.push(IngestedCert { hash: h, round });
                 if let Some(unblocked) = s.orphans.remove(&h) {
                     work.extend(unblocked);
@@ -921,9 +1003,93 @@ fn try_commit(s: &mut State, self_label: &str, log: &EventLog) {
                 .collect();
             let block = Block {
                 round: cert_round,
-                intents,
+                intents: intents.clone(),
             };
             let _ = execute_block(&mut s.substrate, &block);
+
+            // DAG-S27.3: apply Phase G governance intents at commit time.
+            // The block has been substrate-executed (which currently no-ops
+            // governance variants — see gsx-execution/src/substrate.rs:189);
+            // the registry mutation is layered on top. Apply per-commit
+            // (not queued-until-boundary) so the registry stays consistent
+            // with the DAG and every validator that replays the same
+            // committed sequence converges to the same ring composition.
+            for intent in &intents {
+                match intent {
+                    Intent::AdmitAuthority {
+                        authority_id,
+                        stake_gsx,
+                        mldsa_public_key,
+                        bls_public_key: _bls,
+                    } => {
+                        match s.authority_registry.admit(AuthorityMember {
+                            id: *authority_id,
+                            stake_gsx: *stake_gsx,
+                            public_key_bytes: mldsa_public_key.clone(),
+                        }) {
+                            Ok(()) => {
+                                // DAG-S27.7: park stake in pending_stake;
+                                // promotion into stake_table happens on the
+                                // new authority's first cert (ingest_cert).
+                                // Bumping stake_table here without bumping
+                                // achievable voting stake would inflate the
+                                // joint-quorum denominator and permanently
+                                // stall the cluster until the new authority
+                                // joined the mesh.
+                                s.pending_stake.insert(*authority_id, *stake_gsx as u128);
+                                let _ = s.validator_registry.admit(ValidatorMember {
+                                    id: *authority_id,
+                                    stake_gsx: *stake_gsx as u128,
+                                });
+                                s.n_authorities = s.authority_registry.len() as u32;
+                                log.emit(
+                                    Event::now(self_label, Lane::Main, "authority_admitted")
+                                        .with_round(cert_round)
+                                        .with_authority_id(*authority_id),
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    auth = authority_id,
+                                    err = %e,
+                                    "admit rejected"
+                                );
+                            }
+                        }
+                    }
+                    Intent::ExitAuthority { authority_id } => {
+                        if s.authority_registry.remove(*authority_id).is_some() {
+                            s.validator_registry.remove(*authority_id);
+                            s.stake_table.remove(authority_id);
+                            s.pending_stake.remove(authority_id);
+                            s.n_authorities = s.authority_registry.len() as u32;
+                            log.emit(
+                                Event::now(self_label, Lane::Main, "authority_exited")
+                                    .with_round(cert_round)
+                                    .with_authority_id(*authority_id),
+                            );
+                        }
+                    }
+                    Intent::EjectAuthority {
+                        authority_id,
+                        proof_ref: _proof,
+                    } => {
+                        if s.authority_registry.remove(*authority_id).is_some() {
+                            s.validator_registry.remove(*authority_id);
+                            s.stake_table.remove(authority_id);
+                            s.pending_stake.remove(authority_id);
+                            s.n_authorities = s.authority_registry.len() as u32;
+                            log.emit(
+                                Event::now(self_label, Lane::Main, "authority_ejected")
+                                    .with_round(cert_round)
+                                    .with_authority_id(*authority_id),
+                            );
+                        }
+                    }
+                    Intent::Transfer { .. } => {}
+                }
+            }
+
             log.emit(
                 Event::now(self_label, Lane::Main, "committed")
                     .with_round(cert_round)
@@ -934,9 +1100,10 @@ fn try_commit(s: &mut State, self_label: &str, log: &EventLog) {
 
             // Epoch boundary detection (DAG-S25 Phase G). A commit
             // landing at or past the next boundary advances the epoch
-            // and emits an `epoch_boundary` event. Future commits in
-            // this sprint will trigger queued governance-action
-            // application here (S25.3).
+            // and emits an `epoch_boundary` event. DAG-S27.3 applies
+            // registry mutations per-commit (above), so the boundary
+            // event today is informational — historical campaigns can
+            // still align reports to the per-epoch cadence.
             if s.epoch.boundary_crossed_by(cert_round) {
                 let new_epoch = s.epoch.epoch_for(cert_round);
                 s.epoch.current = new_epoch;
@@ -952,6 +1119,40 @@ fn try_commit(s: &mut State, self_label: &str, log: &EventLog) {
             }
         }
     }
+
+    // DAG-S27.4: slashing-triggered ejection. After processing all newly
+    // committed certs, run the equivocation detectors and auto-eject any
+    // authority that signed conflicting certs at the same round (paper
+    // Invariant 5 — 100% slashing). Detectors are library code that's
+    // tested at 10k proptest cases (DAG-S7); this just wires them up.
+    let auth_equivs = gsx_consensus::detect_authority_equivocation(&s.dag);
+    for proof in auth_equivs {
+        let id = proof.author;
+        if s.authority_registry.contains(id) {
+            s.authority_registry.remove(id);
+            s.validator_registry.remove(id);
+            s.stake_table.remove(&id);
+            s.pending_stake.remove(&id);
+            s.n_authorities = s.authority_registry.len() as u32;
+            log.emit(Event::now(self_label, Lane::Main, "slashing_evidence").with_authority_id(id));
+            log.emit(Event::now(self_label, Lane::Main, "authority_ejected").with_authority_id(id));
+            tracing::warn!(
+                authority = id,
+                "auto-ejected on detected authority equivocation"
+            );
+        }
+    }
+    // NOTE: `detect_validator_double_vote` is intentionally NOT called
+    // here against the daemon's full vote set. That function flags any
+    // validator that voted for ≥2 distinct candidates, but the
+    // daemon's `votes` accumulates votes across *every cert in the
+    // DAG* — every validator legitimately votes for hundreds of
+    // distinct candidates over time. Calling the detector here would
+    // (and did, in pre-S27.7) eject every genesis validator on the
+    // first commit attempt. The detector is correct for per-round
+    // vote slices, which the wave-anchor logic doesn't yet expose.
+    // Move to a follow-on sprint that maintains a per-round vote
+    // map and runs the detector on each round's slice in isolation.
 }
 
 /// Byzantine fault tolerance: f = floor((n-1)/3). The minimum number of
@@ -977,6 +1178,7 @@ async fn run_round_driver(
     state: Arc<Mutex<State>>,
     outbound: Arc<HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>>,
     log: EventLog,
+    mut intent_rx: tokio::sync::mpsc::UnboundedReceiver<gsx_execution::Intent>,
 ) {
     let mut tick = tokio::time::interval(Duration::from_millis(round_ms));
     // Per-round leader timeout: if we haven't advanced after this much
@@ -1028,7 +1230,15 @@ async fn run_round_driver(
         }
         round_started_at = tokio::time::Instant::now();
         let parents = s.parents_for_round(target_round);
-        let intents = std::mem::take(&mut s.pending_intents);
+        // DAG-S27.2: drain queued intents from the mpsc receiver. The
+        // receiver lives in this task (single owner), so no lock is
+        // taken on the consensus State for this — pushing into the
+        // channel from `client::handle_conn` is now lock-free w.r.t.
+        // run_inbox / run_round_driver / run_sync_sweeper.
+        let mut intents: Vec<gsx_execution::Intent> = Vec::new();
+        while let Ok(intent) = intent_rx.try_recv() {
+            intents.push(intent);
+        }
         let payload_digest: [u8; 32] =
             blake3::hash(&bincode::serialize(&intents).expect("intents serialize")).into();
         let cert = Certificate {
@@ -1097,8 +1307,11 @@ mod tests {
     // verified in production via the `f+1 fallback engaged` warning in
     // tracing output during partial-network conditions.
 
-    /// Submit one transfer intent over the client listener, give it time to
-    /// land in `state.pending_intents`, and verify it was queued.
+    /// Submit one transfer intent over the client listener, give the round
+    /// driver a tick to drain the mpsc queue and produce a block, and verify
+    /// the intent landed in a block. Pre-S27.2 this test poked
+    /// `state.pending_intents` directly; that field no longer exists since
+    /// intents flow over a lock-free mpsc to the round driver.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn client_listener_accepts_intent() {
         let n = 1u32;
@@ -1143,20 +1356,19 @@ mod tests {
             amount: 42,
         };
         let _hash = client.submit(intent).await.unwrap();
-        // Give the daemon a moment to process the submission.
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Give the round driver a full tick to drain the mpsc + propose.
+        tokio::time::sleep(Duration::from_millis(700)).await;
 
-        // The intent is briefly in pending_intents before being drained by the
-        // next round tick. Either we catch it before the tick, or the next
-        // round (within 500ms) carries it into the block cache.
+        // Post-S27.2: intents are visible once they land in a proposed block.
+        // Since we run a single-node cluster, that block is guaranteed within
+        // one round_ms tick of the submit landing on the mpsc.
         let s = d.state.lock().await;
-        let queued_or_committed = !s.pending_intents.is_empty()
-            || s.blocks.values().any(|b| {
-                b.intents
-                    .iter()
-                    .any(|i| matches!(i, gsx_execution::Intent::Transfer { amount: 42, .. }))
-            });
-        assert!(queued_or_committed, "intent was not queued or blocked");
+        let in_block = s.blocks.values().any(|b| {
+            b.intents
+                .iter()
+                .any(|i| matches!(i, gsx_execution::Intent::Transfer { amount: 42, .. }))
+        });
+        assert!(in_block, "intent was not carried into any block");
     }
 
     /// 4 daemons on loopback, all dialing each other. Within 3 seconds at
@@ -1235,6 +1447,197 @@ mod tests {
         let first = state_roots[0];
         for r in &state_roots[1..] {
             assert_eq!(*r, first, "state roots disagree across daemons");
+        }
+    }
+
+    /// Phase G integration test (DAG-S27.5).
+    ///
+    /// Spins up a 4-node loopback cluster with above-threshold stakes so
+    /// the genesis admission populates both registries on every node.
+    /// Submits an `AdmitAuthority` intent for a new id=4, waits for it
+    /// to commit across the mesh, then submits an `EjectAuthority` for
+    /// the same id. Asserts the registries converge to size 5 → size 4
+    /// on every validator, which is the end-to-end guarantee Phase G
+    /// claims (paper §4.1 + Invariant 5 for the eject path).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn phase_g_admit_and_eject() {
+        let n = 4u32;
+        let base_port: u16 = 19_700;
+
+        let manifest = GenesisManifest {
+            network_id: "phase-g-4n".into(),
+            validators: (0..n)
+                .map(|i| GenesisValidator {
+                    authority_id: i,
+                    label: format!("v{}", i),
+                    mldsa_public_key_hex: "00".into(),
+                    bls_public_key_hex: "00".into(),
+                    validator_stake_gsx: 30_000, // ≥ VALIDATOR_STAKE_THRESHOLD_GSX
+                    authority_stake_gsx: 150_000, // ≥ AUTHORITY_STAKE_THRESHOLD_GSX
+                })
+                .collect(),
+            corridors: Vec::new(),
+            rounds_per_epoch: 1024,
+        };
+
+        let mut daemons = Vec::new();
+        for i in 0..n {
+            let peers: Vec<Peer> = (0..n)
+                .filter(|j| *j != i)
+                .map(|j| Peer {
+                    id: format!("v{}", j),
+                    addr: format!("127.0.0.1:{}", base_port + j as u16)
+                        .parse::<SocketAddr>()
+                        .unwrap(),
+                })
+                .collect();
+            let cfg = NodeConfig {
+                self_id: format!("v{}", i),
+                authority_id: i,
+                listen: format!("127.0.0.1:{}", base_port + i as u16)
+                    .parse::<SocketAddr>()
+                    .unwrap(),
+                client_listen: format!("127.0.0.1:{}", base_port + 100 + i as u16)
+                    .parse::<SocketAddr>()
+                    .unwrap(),
+                peers,
+                round_ms: 100,
+                checkpoint_cadence_rounds: 1,
+                mldsa_secret_key_path: "/dev/null".into(),
+                bls_secret_key_path: "/dev/null".into(),
+                genesis_manifest_path: "/dev/null".into(),
+                event_log_path: std::env::temp_dir().join(format!("gsx-phaseg-test-v{}.ndjson", i)),
+            };
+            let d = Daemon::start(cfg, manifest.clone()).await.unwrap();
+            daemons.push(d);
+        }
+
+        // Wait for the mesh to come up and produce a few rounds (matches
+        // the warm-up cadence of `four_node_main_lane_commits`).
+        tokio::time::sleep(Duration::from_secs(3)).await;
+
+        // Sanity: genesis admission populated all 4 registries on every node.
+        for (i, d) in daemons.iter().enumerate() {
+            let s = d.state.lock().await;
+            assert_eq!(
+                s.authority_registry.len(),
+                4,
+                "node v{} genesis admission size",
+                i
+            );
+        }
+
+        // Submit AdmitAuthority for a new id=4 via v0's client port.
+        let admit_addr = format!("127.0.0.1:{}", base_port + 100)
+            .parse::<SocketAddr>()
+            .unwrap();
+        let mut client = crate::client::LoadGenClient::connect(admit_addr)
+            .await
+            .unwrap();
+        let admit = gsx_execution::Intent::AdmitAuthority {
+            authority_id: 4,
+            stake_gsx: 150_000,
+            mldsa_public_key: vec![0u8; 32],
+            bls_public_key: vec![0u8; 48],
+        };
+        client.submit(admit).await.unwrap();
+
+        // Poll for convergence rather than sleeping a fixed wall-clock
+        // window. CI runners (2-core, many parallel daemon tests) can
+        // starve commit progress for several seconds; a fixed sleep
+        // misses the deadline whereas a poll passes as soon as the
+        // registry reflects the new admission on every node.
+        let admit_deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let all_at_5 = {
+                let mut ok = true;
+                for d in &daemons {
+                    let s = d.state.lock().await;
+                    if s.authority_registry.len() != 5 || !s.authority_registry.contains(4) {
+                        ok = false;
+                        break;
+                    }
+                }
+                ok
+            };
+            if all_at_5 {
+                break;
+            }
+            if std::time::Instant::now() >= admit_deadline {
+                // Capture per-node state for a diagnostic panic message.
+                let mut diag = Vec::new();
+                for (i, d) in daemons.iter().enumerate() {
+                    let s = d.state.lock().await;
+                    let last_authored = s.last_authored_round.unwrap_or(u64::MAX);
+                    let committed_n = s.committed.len();
+                    let blocks_n = s.blocks.len();
+                    let reg_size = s.authority_registry.len();
+                    let has_id4 = s.authority_registry.contains(4);
+                    let intent_in_block = s.blocks.values().any(|b| {
+                        b.intents.iter().any(|x| {
+                            matches!(
+                                x,
+                                Intent::AdmitAuthority {
+                                    authority_id: 4,
+                                    ..
+                                }
+                            )
+                        })
+                    });
+                    let n_auth = s.n_authorities;
+                    let votes_total: usize = s.votes.values().map(|v| v.len()).sum();
+                    let votes_keys = s.votes.len();
+                    let stake_total = s.stake_table.total();
+                    let stake_thresh =
+                        gsx_consensus::joint::validator_quorum_threshold(&s.stake_table);
+                    let auth_equiv = gsx_consensus::detect_authority_equivocation(&s.dag).len();
+                    diag.push(format!(
+                        "v{}: reg={} has4={} n={} last_authored={} committed={} blocks={} admit_in_block={} votes(k={},tot={}) stake(tot={},thr={}) equiv={}",
+                        i, reg_size, has_id4, n_auth, last_authored, committed_n, blocks_n,
+                        intent_in_block, votes_keys, votes_total, stake_total, stake_thresh,
+                        auth_equiv
+                    ));
+                }
+                panic!("phase G admit timed out (30s):\n  {}", diag.join("\n  "));
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+
+        // Eject the new authority.
+        let eject = gsx_execution::Intent::EjectAuthority {
+            authority_id: 4,
+            proof_ref: [0u8; 32],
+        };
+        client.submit(eject).await.unwrap();
+
+        let eject_deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let all_at_4 = {
+                let mut ok = true;
+                for d in &daemons {
+                    let s = d.state.lock().await;
+                    if s.authority_registry.len() != 4 || s.authority_registry.contains(4) {
+                        ok = false;
+                        break;
+                    }
+                }
+                ok
+            };
+            if all_at_4 {
+                break;
+            }
+            if std::time::Instant::now() >= eject_deadline {
+                let mut sizes = Vec::new();
+                for d in &daemons {
+                    let s = d.state.lock().await;
+                    sizes.push(s.authority_registry.len());
+                }
+                panic!(
+                    "phase G eject timed out (30s); registry sizes by node = {:?}",
+                    sizes
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
         }
     }
 

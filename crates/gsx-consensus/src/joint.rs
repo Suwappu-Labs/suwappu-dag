@@ -77,6 +77,14 @@ impl StakeTable {
         self.weights.insert(id, stake);
     }
 
+    /// Remove a validator from the stake table. Returns the prior stake
+    /// if the id was seated, otherwise `None`. Used by the daemon at
+    /// commit time to reflect `ExitAuthority` / `EjectAuthority` intents
+    /// and slashing ejections (DAG-S27.3 / S27.4).
+    pub fn remove(&mut self, id: &ValidatorId) -> Option<Stake> {
+        self.weights.remove(id)
+    }
+
     /// Total stake across the Validator Ring.
     pub fn total(&self) -> Stake {
         self.weights.values().copied().sum()

@@ -124,7 +124,19 @@ async fn main() -> anyhow::Result<()> {
 
     let interval = Duration::from_micros(1_000_000 / args.rate.max(1) as u64);
     let mut rng = StdRng::seed_from_u64(args.seed);
-    let mut next_send = Instant::now();
+    let run_start = Instant::now();
+    let mut next_send = run_start;
+
+    // Wall-clock deadline (DAG-S27.1). Pre-S27.1 the loop was
+    // intent-count-based (`while sent < total_planned`); when the
+    // cluster was slow, wall-clock exceeded --duration because the
+    // count was never reached. Now `--duration` is a true wall-clock
+    // cap; `--continuous` disables it.
+    let deadline: Option<Instant> = if args.continuous {
+        None
+    } else {
+        Some(run_start + Duration::from_secs(args.duration))
+    };
 
     // CSV header on stdout. gsx-metrics joins client_submitted_ms by
     // tx_hash; `target_idx` lets per-validator load attribution.
@@ -148,6 +160,13 @@ async fn main() -> anyhow::Result<()> {
     tokio::pin!(shutdown);
 
     while sent < total_planned {
+        // Wall-clock deadline check (DAG-S27.1).
+        if let Some(d) = deadline {
+            if Instant::now() >= d {
+                eprintln!("gsx-loadgen: wall-clock deadline reached");
+                break;
+            }
+        }
         // Bail out on signal between intents.
         if tokio::time::timeout(Duration::from_millis(0), &mut shutdown)
             .await

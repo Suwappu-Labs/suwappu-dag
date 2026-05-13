@@ -11,30 +11,29 @@
 //! Protocol:
 //!
 //! 1. Client connects, sends one or more [`ClientMessage::Submit`] frames.
-//! 2. Validator pushes each intent into `state.pending_intents` (picked up
-//!    by the round driver in the next tick) and replies with
-//!    [`ClientResponse::Ack`] containing the intent hash + the round into
-//!    which it was queued.
+//! 2. Validator pushes each intent onto a `tokio::sync::mpsc::UnboundedSender`
+//!    (drained by the round driver each tick — DAG-S27.2) and replies with
+//!    [`ClientResponse::Ack`] containing the intent hash. Pre-S27.2 this
+//!    path locked the global `Arc<Mutex<State>>` and serialized at the
+//!    consensus loop's pace (~6/sec); the mpsc path is lock-free w.r.t. the
+//!    consensus tasks (`run_inbox`, `run_round_driver`, `run_sync_sweeper`).
 //!
 //! Auth: none at the wire level for the perf testnet. The intent itself
 //! carries the sender's identity (`Intent::Transfer { from, .. }`); mainnet
 //! would gate this with an ML-DSA signature over the intent bytes.
 
-use std::{collections::HashMap, io, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, io, net::SocketAddr};
 
 use gsx_execution::Intent;
 use serde::{Deserialize, Serialize};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::Mutex,
+    sync::mpsc,
 };
 use tracing::{debug, info, warn};
 
-use crate::{
-    daemon::State,
-    events::{Event, EventLog, Lane},
-};
+use crate::events::{Event, EventLog, Lane};
 
 /// Client → validator messages.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -72,7 +71,7 @@ pub enum ClientResponse {
 pub(crate) async fn run(
     listen: SocketAddr,
     self_label: String,
-    state: Arc<Mutex<State>>,
+    intent_tx: mpsc::UnboundedSender<Intent>,
     log: EventLog,
 ) -> io::Result<tokio::task::JoinHandle<()>> {
     let listener = TcpListener::bind(listen).await?;
@@ -83,11 +82,11 @@ pub(crate) async fn run(
                 Ok((stream, addr)) => {
                     debug!(remote = %addr, "client: inbound");
                     let _ = stream.set_nodelay(true);
-                    let state = state.clone();
+                    let intent_tx = intent_tx.clone();
                     let log = log.clone();
                     let self_label = self_label.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_conn(stream, self_label, state, log).await {
+                        if let Err(e) = handle_conn(stream, self_label, intent_tx, log).await {
                             debug!(remote = %addr, err = %e, "client: conn closed");
                         }
                     });
@@ -105,7 +104,7 @@ pub(crate) async fn run(
 async fn handle_conn(
     mut stream: TcpStream,
     self_label: String,
-    state: Arc<Mutex<State>>,
+    intent_tx: mpsc::UnboundedSender<Intent>,
     log: EventLog,
 ) -> io::Result<()> {
     loop {
@@ -126,9 +125,13 @@ async fn handle_conn(
             ClientMessage::Submit(intent) => {
                 let intent_hash: [u8; 32] =
                     blake3::hash(&bincode::serialize(&intent).expect("intent serialize")).into();
-                {
-                    let mut s = state.lock().await;
-                    s.pending_intents.push(intent);
+                // DAG-S27.2: push onto the lock-free mpsc instead of locking
+                // the global State. The round driver drains via try_recv at
+                // block-building time.
+                if intent_tx.send(intent).is_err() {
+                    let resp = ClientResponse::Err("intent channel closed".to_string());
+                    let _ = write_response(&mut stream, &resp).await;
+                    return Ok(());
                 }
                 log.emit(
                     Event::now(&self_label, Lane::Client, "submitted").with_tx_hash(&intent_hash),

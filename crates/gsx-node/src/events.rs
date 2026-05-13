@@ -84,6 +84,12 @@ pub struct Event {
     /// edge in the n×(n-1) mesh.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub received_60s: Option<u64>,
+    /// Optional Authority Ring identifier (DAG-S27.3) — set on
+    /// validator-set governance events (`authority_admitted`,
+    /// `authority_exited`, `authority_ejected`, `slashing_evidence`)
+    /// so compliance reports can track ring membership over time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authority_id: Option<u32>,
 }
 
 impl Event {
@@ -104,6 +110,7 @@ impl Event {
             peer: None,
             intent_hashes: None,
             received_60s: None,
+            authority_id: None,
         }
     }
 
@@ -142,6 +149,13 @@ impl Event {
     /// (DAG-S26.1 `peer_health` event).
     pub fn with_received_60s(mut self, count: u64) -> Self {
         self.received_60s = Some(count);
+        self
+    }
+
+    /// Builder: attach an Authority Ring identifier (DAG-S27.3
+    /// governance + slashing events).
+    pub fn with_authority_id(mut self, id: u32) -> Self {
+        self.authority_id = Some(id);
         self
     }
 }
