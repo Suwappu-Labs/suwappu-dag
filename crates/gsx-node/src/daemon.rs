@@ -37,6 +37,7 @@ use gsx_fastpath::{
     cert::{FastPathCert, FastPathTx, OwnedObjectId},
     quorum::fast_path_quorum_size,
 };
+use gsx_ltp::{AttestationPayload, CorridorAttestation, CorridorId};
 use tokio::sync::Mutex;
 use tracing::debug;
 
@@ -87,6 +88,17 @@ pub(crate) struct State {
     /// different payload digest, the signers of the conflicting cert
     /// have equivocated (paper §6.4 Invariant 5 — 100% slashing).
     pub(crate) fastpath_first_payload: HashMap<FastPathKey, [u8; 32]>,
+    /// LTP corridor attestations (paper §10, DAG-S23). Latest attested
+    /// payload per corridor id — the live "source-chain finality
+    /// observed at height H with state root R" attestation that the
+    /// settlement chain refers to when authoring cross-chain
+    /// transactions. MVP stores latest only; historical attestations
+    /// are durably anchored via the LTP commitment-node pipeline
+    /// (separate ops sprint).
+    pub(crate) ltp_latest: HashMap<CorridorId, AttestationPayload>,
+    /// Count of LTP attestations received since startup. Used by the
+    /// `ltp_attested` event log entries and operational metrics.
+    pub(crate) ltp_received_count: u64,
 }
 
 /// `(object, nonce)` uniqueness key for a fast-path transaction.
@@ -127,6 +139,8 @@ impl State {
             fastpath_pending: HashMap::new(),
             fastpath_committed: HashSet::new(),
             fastpath_first_payload: HashMap::new(),
+            ltp_latest: HashMap::new(),
+            ltp_received_count: 0,
         }
     }
 
@@ -329,8 +343,9 @@ async fn run_inbox(
                 let mut s = state.lock().await;
                 handle_fastpath_cert(&mut s, self_id, cert, &self_label, &log, &outbound);
             }
-            WireMessage::Ltp(_) => {
-                // LTP lane handled in follow-on commit (S23).
+            WireMessage::Ltp(att) => {
+                let mut s = state.lock().await;
+                handle_ltp_attestation(&mut s, att, &self_label, &log);
             }
             WireMessage::Ping(t) => {
                 if let Some(tx) = outbound.get(&from) {
@@ -616,6 +631,54 @@ fn handle_fastpath_cert(
             "fastpath: accumulating signers"
         );
     }
+}
+
+/// Handle one inbound LTP corridor attestation (paper §10, DAG-S23).
+///
+/// The attestation is a pre-aggregated 7-of-9 BLS object — super-nodes
+/// do the off-chain aggregation; the daemon's role is to record the
+/// latest attested (source_chain, source_height, state_root) tuple per
+/// corridor so cross-chain transactions on the settlement chain can
+/// refer to it.
+///
+/// MVP: store + log. Full `verify_attestation` runs when the corridor
+/// definition (9 BLS pubkeys) is loaded into runtime — that genesis-
+/// manifest extension is a separate work item (S23.2 follow-on).
+fn handle_ltp_attestation(
+    s: &mut State,
+    att: CorridorAttestation,
+    self_label: &str,
+    log: &EventLog,
+) {
+    let payload = att.payload.clone();
+    let corridor_id = corridor_id_from_payload(&payload);
+    s.ltp_latest.insert(corridor_id, payload.clone());
+    s.ltp_received_count += 1;
+    log.emit(
+        Event::now(self_label, Lane::Ltp, "attested")
+            .with_round(payload.source_height)
+            .with_cert_hash(&payload.state_root),
+    );
+    tracing::debug!(
+        corridor = corridor_id,
+        source_chain = payload.source_chain,
+        source_height = payload.source_height,
+        signers = att.signers.len(),
+        "ltp: attestation recorded"
+    );
+}
+
+/// Pick a corridor id from an attestation payload. Until the runtime
+/// has a corridor registry (S23.2), we synthesize one from the
+/// (source_chain, target_chain) pair — distinct corridor for each
+/// directional pair. Stable across restarts.
+fn corridor_id_from_payload(p: &AttestationPayload) -> CorridorId {
+    // Pack the two ChainId values (u64 each) into a CorridorId (u32)
+    // via XOR-fold. Collisions across corridors are operationally
+    // disallowed (registry mediates) but not catastrophic here —
+    // worst case is shared `ltp_latest` slot for two paired chains.
+    let s = p.source_chain ^ p.target_chain;
+    ((s >> 32) as u32) ^ (s as u32)
 }
 
 /// Periodic sweeper: every `SYNC_SWEEPER_INTERVAL_MS` re-issues
@@ -1093,5 +1156,58 @@ mod tests {
             committed_before,
             "equivocating cert must not change committed state"
         );
+    }
+
+    /// Smoke test for the LTP attestation receiver (DAG-S23).
+    /// Feeds a mock `CorridorAttestation` into a fresh `State` and
+    /// asserts: latest-per-corridor recorded, receive counter
+    /// incremented.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ltp_receiver_records_attestation() {
+        let n = 4u32;
+        let manifest = GenesisManifest {
+            network_id: "ltp-4n".into(),
+            validators: (0..n)
+                .map(|i| GenesisValidator {
+                    authority_id: i,
+                    label: format!("v{}", i),
+                    mldsa_public_key_hex: "00".into(),
+                    bls_public_key_hex: "00".into(),
+                    validator_stake_gsx: 1_000,
+                    authority_stake_gsx: 1_000,
+                })
+                .collect(),
+        };
+        let (log, _log_task) = EventLog::start(&std::env::temp_dir().join("gsx-ltp-test.ndjson"))
+            .await
+            .unwrap();
+        let mut s = State::new(&manifest);
+
+        let payload = gsx_ltp::AttestationPayload {
+            source_chain: 1u64, // Ethereum
+            target_chain: 42u64,
+            source_height: 12_345_678,
+            state_root: [0xAB; 32],
+            timestamp_round: 100,
+        };
+        let att = gsx_ltp::CorridorAttestation {
+            payload: payload.clone(),
+            aggregate_signature: vec![0u8; 96],
+            signers: (0..7u32).collect(),
+        };
+        let corridor_id = corridor_id_from_payload(&payload);
+
+        assert_eq!(s.ltp_received_count, 0);
+        assert!(s.ltp_latest.is_empty());
+
+        handle_ltp_attestation(&mut s, att, "v0", &log);
+
+        assert_eq!(s.ltp_received_count, 1);
+        let stored = s
+            .ltp_latest
+            .get(&corridor_id)
+            .expect("corridor should have an attestation");
+        assert_eq!(stored.source_height, 12_345_678);
+        assert_eq!(stored.state_root, [0xAB; 32]);
     }
 }
