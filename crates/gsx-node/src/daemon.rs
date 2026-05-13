@@ -163,10 +163,7 @@ fn load_corridors(manifest: &GenesisManifest) -> HashMap<(ChainId, ChainId), Cor
         if bad {
             continue;
         }
-        let corridor = Corridor {
-            id: c.id,
-            members,
-        };
+        let corridor = Corridor { id: c.id, members };
         out.insert((c.source_chain, c.target_chain), corridor);
     }
     out
