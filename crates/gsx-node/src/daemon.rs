@@ -105,6 +105,39 @@ pub(crate) struct State {
     /// pubkeys via `gsx_ltp::verify_attestation`. Empty map = MVP
     /// pre-S24 mode (accept unverified).
     pub(crate) corridors: HashMap<(ChainId, ChainId), Corridor>,
+    /// Validator-set governance epoch state (DAG-S25 Phase G).
+    /// `current` is the epoch number, `rounds_per_epoch` defines the
+    /// boundary cadence. Queued governance actions apply at
+    /// `last_boundary_round + rounds_per_epoch`.
+    pub(crate) epoch: EpochState,
+}
+
+/// Round-based epoch counter for validator-set governance (DAG-S25).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct EpochState {
+    /// Current epoch number. Starts at 0; increments at each boundary.
+    pub(crate) current: u64,
+    /// How many rounds per epoch — copied from `GenesisManifest::rounds_per_epoch`.
+    pub(crate) rounds_per_epoch: u64,
+    /// Round number at which the current epoch began. The next boundary
+    /// fires when a commit lands at `last_boundary_round + rounds_per_epoch`
+    /// or beyond.
+    pub(crate) last_boundary_round: u64,
+}
+
+impl EpochState {
+    /// Return the epoch a given round belongs to.
+    pub(crate) fn epoch_for(&self, round: u64) -> u64 {
+        if self.rounds_per_epoch == 0 {
+            return self.current;
+        }
+        round / self.rounds_per_epoch
+    }
+
+    /// Should a commit at `round` trigger an epoch boundary transition?
+    pub(crate) fn boundary_crossed_by(&self, round: u64) -> bool {
+        self.epoch_for(round) > self.current
+    }
 }
 
 /// `(object, nonce)` uniqueness key for a fast-path transaction.
@@ -195,6 +228,11 @@ impl State {
             ltp_latest: HashMap::new(),
             ltp_received_count: 0,
             corridors: load_corridors(manifest),
+            epoch: EpochState {
+                current: 0,
+                rounds_per_epoch: manifest.rounds_per_epoch,
+                last_boundary_round: 0,
+            },
         }
     }
 
@@ -881,6 +919,25 @@ fn try_commit(s: &mut State, self_label: &str, log: &EventLog) {
                     .with_cert_hash(&h.0),
             );
             s.votes.remove(&h);
+
+            // Epoch boundary detection (DAG-S25 Phase G). A commit
+            // landing at or past the next boundary advances the epoch
+            // and emits an `epoch_boundary` event. Future commits in
+            // this sprint will trigger queued governance-action
+            // application here (S25.3).
+            if s.epoch.boundary_crossed_by(cert_round) {
+                let new_epoch = s.epoch.epoch_for(cert_round);
+                s.epoch.current = new_epoch;
+                s.epoch.last_boundary_round = cert_round;
+                log.emit(
+                    Event::now(self_label, Lane::Main, "epoch_boundary").with_round(cert_round),
+                );
+                tracing::info!(
+                    epoch = new_epoch,
+                    round = cert_round,
+                    "epoch boundary crossed"
+                );
+            }
         }
     }
 }
@@ -1047,6 +1104,7 @@ mod tests {
                 })
                 .collect(),
             corridors: Vec::new(),
+            rounds_per_epoch: 1024,
         };
         let cfg = NodeConfig {
             self_id: "v0".into(),
@@ -1111,6 +1169,7 @@ mod tests {
                 })
                 .collect(),
             corridors: Vec::new(),
+            rounds_per_epoch: 1024,
         };
 
         let mut daemons = Vec::new();
@@ -1191,6 +1250,7 @@ mod tests {
                 })
                 .collect(),
             corridors: Vec::new(),
+            rounds_per_epoch: 1024,
         };
         let (log, _log_task) =
             EventLog::start(&std::env::temp_dir().join("gsx-fastpath-test.ndjson"))
@@ -1273,6 +1333,7 @@ mod tests {
                 })
                 .collect(),
             corridors: Vec::new(),
+            rounds_per_epoch: 1024,
         };
         let (log, _log_task) = EventLog::start(&std::env::temp_dir().join("gsx-ltp-test.ndjson"))
             .await
@@ -1307,6 +1368,48 @@ mod tests {
         assert_eq!(stored.state_root, [0xAB; 32]);
     }
 
+    /// S25.1 smoke: `EpochState` boundary detection at the right round.
+    /// `rounds_per_epoch = 10` → boundary at round 10, 20, 30, ...
+    #[test]
+    fn epoch_boundary_detected_at_period_rounds() {
+        let mut e = EpochState {
+            current: 0,
+            rounds_per_epoch: 10,
+            last_boundary_round: 0,
+        };
+        // Rounds 0-9 are epoch 0.
+        for r in 0u64..10 {
+            assert_eq!(e.epoch_for(r), 0, "round {r} should be epoch 0");
+            assert!(!e.boundary_crossed_by(r), "round {r} should not cross");
+        }
+        // Round 10 crosses into epoch 1.
+        assert_eq!(e.epoch_for(10), 1);
+        assert!(e.boundary_crossed_by(10));
+        // Simulate the daemon's update.
+        e.current = e.epoch_for(10);
+        e.last_boundary_round = 10;
+        // Subsequent rounds within epoch 1 don't re-trigger.
+        for r in 10u64..20 {
+            assert!(!e.boundary_crossed_by(r), "round {r} should not re-cross");
+        }
+        // Round 20 crosses to epoch 2.
+        assert!(e.boundary_crossed_by(20));
+        assert_eq!(e.epoch_for(20), 2);
+    }
+
+    /// `rounds_per_epoch = 0` is a degenerate config — should not
+    /// trigger boundaries (avoids div-by-zero in production).
+    #[test]
+    fn epoch_zero_rounds_per_epoch_is_safe() {
+        let e = EpochState {
+            current: 5,
+            rounds_per_epoch: 0,
+            last_boundary_round: 0,
+        };
+        assert_eq!(e.epoch_for(1_000_000), 5);
+        assert!(!e.boundary_crossed_by(1_000_000));
+    }
+
     /// S24 smoke: when no corridor is registered for the
     /// `(source_chain, target_chain)` pair, the handler falls back to
     /// pre-S24 MVP "accept unverified" behavior. Manifest with no
@@ -1326,6 +1429,7 @@ mod tests {
                 })
                 .collect(),
             corridors: Vec::new(),
+            rounds_per_epoch: 1024,
         };
         let (log, _log_task) = EventLog::start(&std::env::temp_dir().join("gsx-ltp-unreg.ndjson"))
             .await
