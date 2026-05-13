@@ -17,3 +17,8 @@ output "artifact_bucket" {
   description = "Name of the S3 bucket holding binary + genesis + configs."
   value       = aws_s3_bucket.artifacts.id
 }
+
+output "codebuild_project" {
+  description = "CodeBuild project name. Used by scripts/perf/build.sh to start builds."
+  value       = aws_codebuild_project.musl.name
+}

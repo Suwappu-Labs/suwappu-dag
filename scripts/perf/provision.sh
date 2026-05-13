@@ -1,78 +1,81 @@
 #!/usr/bin/env bash
-# End-to-end provision: build binaries, generate keys + genesis, terraform
-# apply, render per-region configs, upload artifacts to S3, kick the
-# instances' gsx-bootstrap.service so they pull the configs they were
-# missing during cloud-init.
+# End-to-end provision of the 7-region perf testnet.
 #
-# Idempotent: re-running with no source changes does almost nothing.
+# Order matters:
+#   1. Generate placeholder keys + genesis manifest locally.
+#   2. terraform apply via scripts/deploy-aws.sh — creates S3 bucket,
+#      CodeBuild project, and 7 region VPCs/EC2s/EIPs.
+#   3. Ensure the gsx-db SSH deploy key is in SSM (CodeBuild needs it for
+#      the private cargo dep).
+#   4. CodeBuild compiles gsx-node binaries on AWS.
+#   5. Render per-region node.toml using the now-known EIPs.
+#   6. Upload binaries / configs / keys to S3.
+#   7. SSH-restart each validator's gsx-bootstrap.service so cloud-init
+#      pulls the just-uploaded config and starts gsx-node.
 #
-# Cost guard: this is the script that actually starts the EC2 meter. It
-# prompts for confirmation before the terraform apply unless --yes is
-# passed.
+# This script is idempotent — rerun if anything fails.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TF="$ROOT/terraform/perf"
+export AWS_PROFILE=gsn
 
-CONFIRM=true
-for arg in "$@"; do
-  case "$arg" in
-    --yes) CONFIRM=false ;;
-  esac
-done
-
-if [ -z "${OPERATOR_CIDR:-}" ]; then
-  OPERATOR_CIDR="$(curl -fsS ifconfig.me)/32"
-  echo "[provision] detected operator IP: $OPERATOR_CIDR"
-fi
-SSH_PUB="${SSH_PUB:-$HOME/.ssh/id_ed25519.pub}"
-if [ ! -f "$SSH_PUB" ]; then
-  echo "error: SSH public key not found at $SSH_PUB. Set SSH_PUB=/path/to/key.pub." >&2
-  exit 1
-fi
-SSH_PUB_CONTENT="$(cat "$SSH_PUB")"
-
-echo "[provision] 1/4 — build binaries"
-"$ROOT/scripts/perf/build.sh"
-
-echo "[provision] 2/4 — generate keys + genesis"
+echo "[provision] 1/7 — generate keys + genesis manifest"
 "$ROOT/scripts/perf/gen-genesis.py" --out-dir "$ROOT/target/perf/keys"
 
-echo "[provision] 3/4 — terraform apply"
-if [ "$CONFIRM" = true ]; then
-  cat <<EOF
-ABOUT TO SPEND MONEY. This terraform apply will:
-  - Create a VPC + t3.small + EIP in 7 AWS regions (~\$3.50/day)
-  - Create a versioned S3 bucket (gsx-dag-perf-artifacts)
-  - Open consensus + client ports to 0.0.0.0/0 (auth happens at message layer)
-Operator IP: $OPERATOR_CIDR
+echo "[provision] 2/7 — terraform apply via deploy-aws.sh"
+"$ROOT/scripts/deploy-aws.sh" apply perf
 
-Continue? [y/N]
-EOF
-  read -r answer
-  [ "$answer" = "y" ] || [ "$answer" = "Y" ] || { echo "aborted"; exit 1; }
+# After apply, harvest the bucket name once. Used by every subsequent step.
+BUCKET="$(cd "$TF" && terraform output -raw artifact_bucket)"
+echo "[provision] artifact bucket: $BUCKET"
+
+echo "[provision] 3/7 — ensure gsx-db deploy key in SSM"
+if ! aws ssm get-parameter --name /gsx-perf/gsx-db-deploy-key --region us-east-1 >/dev/null 2>&1; then
+  KEY_PATH="${GSX_DB_DEPLOY_KEY:-$HOME/.ssh/gsx-db-deploy}"
+  if [ ! -f "$KEY_PATH" ]; then
+    echo "error: SSM parameter /gsx-perf/gsx-db-deploy-key not present and" >&2
+    echo "       no key file at $KEY_PATH to upload. Either set" >&2
+    echo "       GSX_DB_DEPLOY_KEY=/path/to/private-key, or upload manually:" >&2
+    echo "  aws ssm put-parameter --name /gsx-perf/gsx-db-deploy-key \\" >&2
+    echo "    --type SecureString --value \"\$(cat ~/.ssh/gsx-db-deploy)\" \\" >&2
+    echo "    --profile gsn --region us-east-1" >&2
+    exit 1
+  fi
+  echo "[provision]   uploading deploy key from $KEY_PATH"
+  aws ssm put-parameter \
+    --name /gsx-perf/gsx-db-deploy-key \
+    --type SecureString \
+    --value "$(cat "$KEY_PATH")" \
+    --region us-east-1 \
+    --overwrite >/dev/null
 fi
 
-cd "$TF"
-terraform init -upgrade
-terraform apply -auto-approve \
-  -var "operator_ip_cidr=$OPERATOR_CIDR" \
-  -var "ssh_public_key=$SSH_PUB_CONTENT"
+echo "[provision] 4/7 — run CodeBuild musl build"
+"$ROOT/scripts/perf/build.sh"
 
-echo "[provision] 4/4 — render configs and upload to S3"
+echo "[provision] 5/7 — render per-region node.toml from terraform outputs"
 "$ROOT/scripts/perf/render-configs.sh"
 
-BUCKET="$(terraform output -raw artifact_bucket)"
-cd "$ROOT"
-
-aws s3 cp target/perf/gsx-node "s3://$BUCKET/bin/gsx-node" --profile gsn
-aws s3 cp target/perf/keys/genesis.toml "s3://$BUCKET/genesis/genesis.toml" --profile gsn
-
+echo "[provision] 6/7 — upload genesis + configs + keys to S3"
+aws s3 cp "$ROOT/target/perf/keys/genesis.toml" "s3://$BUCKET/genesis/genesis.toml" --region us-east-1
 for region in us-east-1 us-west-2 eu-west-1 ap-northeast-1 ap-southeast-2 sa-east-1 af-south-1; do
-  aws s3 cp "target/perf/configs/$region/node.toml" "s3://$BUCKET/configs/$region/node.toml" --profile gsn
-  aws s3 cp "target/perf/keys/$region/mldsa.sk" "s3://$BUCKET/keys/$region/mldsa.sk" --profile gsn
-  aws s3 cp "target/perf/keys/$region/bls.sk" "s3://$BUCKET/keys/$region/bls.sk" --profile gsn
+  aws s3 cp "$ROOT/target/perf/configs/$region/node.toml" "s3://$BUCKET/configs/$region/node.toml" --region us-east-1
+  aws s3 cp "$ROOT/target/perf/keys/$region/mldsa.sk" "s3://$BUCKET/keys/$region/mldsa.sk" --region us-east-1
+  aws s3 cp "$ROOT/target/perf/keys/$region/bls.sk" "s3://$BUCKET/keys/$region/bls.sk" --region us-east-1
 done
 
-echo "[provision] done. SSH to a validator with:"
-echo "  ssh ubuntu@\$(cd terraform/perf && terraform output -json validators | jq -r '.\"us-east-1\".public_ip')"
+echo "[provision] 7/7 — kick gsx-bootstrap.service on every validator"
+SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_ed25519}"
+VAL_JSON="$(cd "$TF" && terraform output -json validators)"
+for region in $(echo "$VAL_JSON" | jq -r 'keys[]'); do
+  ip=$(echo "$VAL_JSON" | jq -r --arg r "$region" '.[$r].public_ip')
+  echo "[provision]   $region @ $ip"
+  ssh -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 \
+    "ubuntu@$ip" \
+    "sudo systemctl restart gsx-bootstrap && sudo systemctl restart gsx-node" \
+    || echo "[provision]   WARN: ssh to $region failed; retry after cloud-init finishes"
+done
+
+echo "[provision] done. SSH check:"
+echo "  ssh -i $SSH_KEY ubuntu@\$(scripts/deploy-aws.sh output perf -json validators | jq -r '.\"us-east-1\".public_ip') sudo journalctl -u gsx-node -n 50"
