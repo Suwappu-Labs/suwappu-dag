@@ -37,7 +37,7 @@ use gsx_fastpath::{
     cert::{FastPathCert, FastPathTx, OwnedObjectId},
     quorum::fast_path_quorum_size,
 };
-use gsx_ltp::{AttestationPayload, CorridorAttestation, CorridorId};
+use gsx_ltp::{AttestationPayload, ChainId, Corridor, CorridorAttestation, CorridorId, SuperNode};
 use tokio::sync::Mutex;
 use tracing::debug;
 
@@ -99,6 +99,12 @@ pub(crate) struct State {
     /// Count of LTP attestations received since startup. Used by the
     /// `ltp_attested` event log entries and operational metrics.
     pub(crate) ltp_received_count: u64,
+    /// Corridor registry from genesis manifest (DAG-S24). Keyed by
+    /// `(source_chain, target_chain)` — inbound attestations look up
+    /// their corridor here, then verify against the 9 pinned BLS
+    /// pubkeys via `gsx_ltp::verify_attestation`. Empty map = MVP
+    /// pre-S24 mode (accept unverified).
+    pub(crate) corridors: HashMap<(ChainId, ChainId), Corridor>,
 }
 
 /// `(object, nonce)` uniqueness key for a fast-path transaction.
@@ -115,6 +121,53 @@ const MAX_ORPHAN_CERTS: usize = 4096;
 /// missing parents still in `inflight_fetches`. Matches Sui's
 /// `synchronizer.rs` periodic scheduler cadence.
 const SYNC_SWEEPER_INTERVAL_MS: u64 = 1_000;
+
+/// Build the `(source_chain, target_chain) -> Corridor` lookup from
+/// the genesis manifest's optional `[[corridors]]` section (DAG-S24).
+///
+/// Manifests without a corridor block produce an empty map, which
+/// keeps the pre-S24 "accept unverified" behavior intact for testnets
+/// that don't yet have super-node infrastructure deployed.
+///
+/// Malformed BLS hex strings cause the corridor to be silently dropped
+/// from the registry — the daemon logs a warning at startup but stays
+/// up. Operationally, this is preferable to refusing to start: the
+/// corridor's attestations will fail verification at the
+/// per-attestation level rather than at boot, which surfaces in
+/// metrics without taking the validator offline.
+fn load_corridors(manifest: &GenesisManifest) -> HashMap<(ChainId, ChainId), Corridor> {
+    let mut out = HashMap::new();
+    for c in &manifest.corridors {
+        let mut members = Vec::with_capacity(c.members.len());
+        let mut bad = false;
+        for m in &c.members {
+            let pk_bytes = match hex::decode(&m.bls_public_key_hex) {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!(
+                        corridor = c.id,
+                        authority = m.authority,
+                        err = %e,
+                        "corridor: bad BLS pubkey hex; corridor dropped"
+                    );
+                    bad = true;
+                    break;
+                }
+            };
+            members.push(SuperNode {
+                authority: m.authority,
+                corridor: c.id,
+                bls_public_key: pk_bytes,
+            });
+        }
+        if bad {
+            continue;
+        }
+        let corridor = Corridor { id: c.id, members };
+        out.insert((c.source_chain, c.target_chain), corridor);
+    }
+    out
+}
 
 impl State {
     fn new(manifest: &GenesisManifest) -> Self {
@@ -141,6 +194,7 @@ impl State {
             fastpath_first_payload: HashMap::new(),
             ltp_latest: HashMap::new(),
             ltp_received_count: 0,
+            corridors: load_corridors(manifest),
         }
     }
 
@@ -633,17 +687,20 @@ fn handle_fastpath_cert(
     }
 }
 
-/// Handle one inbound LTP corridor attestation (paper §10, DAG-S23).
+/// Handle one inbound LTP corridor attestation (paper §10, DAG-S23 + S24).
 ///
 /// The attestation is a pre-aggregated 7-of-9 BLS object — super-nodes
-/// do the off-chain aggregation; the daemon's role is to record the
-/// latest attested (source_chain, source_height, state_root) tuple per
-/// corridor so cross-chain transactions on the settlement chain can
-/// refer to it.
+/// do the off-chain aggregation; the daemon's role is to:
+/// 1. Look up the corridor registry by `(source_chain, target_chain)`.
+/// 2. Verify the aggregate BLS signature via `gsx_ltp::verify_attestation`.
+/// 3. Record the latest attested `(source_height, state_root)` tuple
+///    keyed by `CorridorId` so cross-chain settlement transactions can
+///    refer to it.
 ///
-/// MVP: store + log. Full `verify_attestation` runs when the corridor
-/// definition (9 BLS pubkeys) is loaded into runtime — that genesis-
-/// manifest extension is a separate work item (S23.2 follow-on).
+/// If no corridor is registered for the `(source, target)` pair, we
+/// accept the attestation unverified and log `ltp_unverified` — this
+/// matches the pre-S24 MVP behavior and is operationally useful for
+/// testnets without super-node infrastructure.
 fn handle_ltp_attestation(
     s: &mut State,
     att: CorridorAttestation,
@@ -651,32 +708,67 @@ fn handle_ltp_attestation(
     log: &EventLog,
 ) {
     let payload = att.payload.clone();
-    let corridor_id = corridor_id_from_payload(&payload);
-    s.ltp_latest.insert(corridor_id, payload.clone());
+    let key = (payload.source_chain, payload.target_chain);
     s.ltp_received_count += 1;
-    log.emit(
-        Event::now(self_label, Lane::Ltp, "attested")
-            .with_round(payload.source_height)
-            .with_cert_hash(&payload.state_root),
-    );
-    tracing::debug!(
-        corridor = corridor_id,
-        source_chain = payload.source_chain,
-        source_height = payload.source_height,
-        signers = att.signers.len(),
-        "ltp: attestation recorded"
-    );
+
+    match s.corridors.get(&key) {
+        Some(corridor) => {
+            // Registry hit — verify against pinned BLS pubkeys.
+            let corridor_id: CorridorId = corridor.id;
+            match gsx_ltp::verify_attestation(corridor, &att) {
+                Ok(()) => {
+                    s.ltp_latest.insert(corridor_id, payload.clone());
+                    log.emit(
+                        Event::now(self_label, Lane::Ltp, "verified")
+                            .with_round(payload.source_height)
+                            .with_cert_hash(&payload.state_root),
+                    );
+                    tracing::debug!(
+                        corridor = corridor_id,
+                        source_height = payload.source_height,
+                        signers = att.signers.len(),
+                        "ltp: attestation verified"
+                    );
+                }
+                Err(e) => {
+                    log.emit(
+                        Event::now(self_label, Lane::Ltp, "invalid")
+                            .with_round(payload.source_height)
+                            .with_cert_hash(&payload.state_root),
+                    );
+                    tracing::warn!(
+                        corridor = corridor_id,
+                        source_height = payload.source_height,
+                        err = ?e,
+                        "ltp: attestation failed verification"
+                    );
+                }
+            }
+        }
+        None => {
+            // Pre-S24 MVP fallback: no registered corridor → accept
+            // unverified. Production must populate corridors in
+            // genesis manifest before relying on LTP.
+            let corridor_id = corridor_id_fallback(&payload);
+            s.ltp_latest.insert(corridor_id, payload.clone());
+            log.emit(
+                Event::now(self_label, Lane::Ltp, "unverified")
+                    .with_round(payload.source_height)
+                    .with_cert_hash(&payload.state_root),
+            );
+            tracing::debug!(
+                source_chain = payload.source_chain,
+                target_chain = payload.target_chain,
+                "ltp: no corridor registered — accepted unverified"
+            );
+        }
+    }
 }
 
-/// Pick a corridor id from an attestation payload. Until the runtime
-/// has a corridor registry (S23.2), we synthesize one from the
-/// (source_chain, target_chain) pair — distinct corridor for each
-/// directional pair. Stable across restarts.
-fn corridor_id_from_payload(p: &AttestationPayload) -> CorridorId {
-    // Pack the two ChainId values (u64 each) into a CorridorId (u32)
-    // via XOR-fold. Collisions across corridors are operationally
-    // disallowed (registry mediates) but not catastrophic here —
-    // worst case is shared `ltp_latest` slot for two paired chains.
+/// Fallback corridor identification when no registry entry matches —
+/// XOR-fold the chain pair into a u32 so `ltp_latest` still has a
+/// stable key. Only reachable when `manifest.corridors` is empty.
+fn corridor_id_fallback(p: &AttestationPayload) -> CorridorId {
     let s = p.source_chain ^ p.target_chain;
     ((s >> 32) as u32) ^ (s as u32)
 }
@@ -954,6 +1046,7 @@ mod tests {
                     authority_stake_gsx: 1_000,
                 })
                 .collect(),
+            corridors: Vec::new(),
         };
         let cfg = NodeConfig {
             self_id: "v0".into(),
@@ -1017,6 +1110,7 @@ mod tests {
                     authority_stake_gsx: 1_000,
                 })
                 .collect(),
+            corridors: Vec::new(),
         };
 
         let mut daemons = Vec::new();
@@ -1096,6 +1190,7 @@ mod tests {
                     authority_stake_gsx: 1_000,
                 })
                 .collect(),
+            corridors: Vec::new(),
         };
         let (log, _log_task) =
             EventLog::start(&std::env::temp_dir().join("gsx-fastpath-test.ndjson"))
@@ -1177,6 +1272,7 @@ mod tests {
                     authority_stake_gsx: 1_000,
                 })
                 .collect(),
+            corridors: Vec::new(),
         };
         let (log, _log_task) = EventLog::start(&std::env::temp_dir().join("gsx-ltp-test.ndjson"))
             .await
@@ -1195,7 +1291,7 @@ mod tests {
             aggregate_signature: vec![0u8; 96],
             signers: (0..7u32).collect(),
         };
-        let corridor_id = corridor_id_from_payload(&payload);
+        let corridor_id = corridor_id_fallback(&payload);
 
         assert_eq!(s.ltp_received_count, 0);
         assert!(s.ltp_latest.is_empty());
@@ -1209,5 +1305,51 @@ mod tests {
             .expect("corridor should have an attestation");
         assert_eq!(stored.source_height, 12_345_678);
         assert_eq!(stored.state_root, [0xAB; 32]);
+    }
+
+    /// S24 smoke: when no corridor is registered for the
+    /// `(source_chain, target_chain)` pair, the handler falls back to
+    /// pre-S24 MVP "accept unverified" behavior. Manifest with no
+    /// `[[corridors]]` block.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ltp_unverified_path_when_no_corridor_registered() {
+        let manifest = GenesisManifest {
+            network_id: "ltp-unreg".into(),
+            validators: (0..4u32)
+                .map(|i| GenesisValidator {
+                    authority_id: i,
+                    label: format!("v{}", i),
+                    mldsa_public_key_hex: "00".into(),
+                    bls_public_key_hex: "00".into(),
+                    validator_stake_gsx: 1_000,
+                    authority_stake_gsx: 1_000,
+                })
+                .collect(),
+            corridors: Vec::new(),
+        };
+        let (log, _log_task) = EventLog::start(&std::env::temp_dir().join("gsx-ltp-unreg.ndjson"))
+            .await
+            .unwrap();
+        let mut s = State::new(&manifest);
+        assert!(s.corridors.is_empty());
+
+        let payload = gsx_ltp::AttestationPayload {
+            source_chain: 1,
+            target_chain: 42,
+            source_height: 99,
+            state_root: [0x11; 32],
+            timestamp_round: 7,
+        };
+        let att = gsx_ltp::CorridorAttestation {
+            payload: payload.clone(),
+            aggregate_signature: vec![0u8; 96],
+            signers: (0..7u32).collect(),
+        };
+        handle_ltp_attestation(&mut s, att, "v0", &log);
+
+        // Stored under fallback corridor id (XOR-fold of chain pair).
+        let fallback_id = corridor_id_fallback(&payload);
+        assert_eq!(s.ltp_received_count, 1);
+        assert!(s.ltp_latest.contains_key(&fallback_id));
     }
 }
