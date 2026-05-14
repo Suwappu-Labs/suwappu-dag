@@ -2156,12 +2156,27 @@ mod tests {
                 //     eject never drains.
                 let mut diag = Vec::new();
                 for (i, d) in daemons.iter().enumerate() {
-                    let (committed_n, blocks_n, eject_in_block, votes_total, votes_keys) = {
+                    let (
+                        committed_n,
+                        blocks_n,
+                        eject_in_block,
+                        votes_total,
+                        votes_keys,
+                        eject_cert_hash,
+                        eject_block_round,
+                        eject_cert_committed,
+                    ) = {
                         let committed = d.state.committed.lock();
                         let blocks = d.state.blocks.lock();
                         let votes = d.state.votes.lock();
-                        let eject_in_block = blocks.values().any(|b| {
-                            b.intents.iter().any(|x| {
+                        // Locate the block carrying the eject intent so we
+                        // can answer the binary question: was that cert
+                        // actually committed?
+                        let mut eject_in_block = false;
+                        let mut eject_cert_hash: Option<CertHash> = None;
+                        let mut eject_block_round: Option<u64> = None;
+                        for (h, b) in blocks.iter() {
+                            if b.intents.iter().any(|x| {
                                 matches!(
                                     x,
                                     Intent::EjectAuthority {
@@ -2169,8 +2184,14 @@ mod tests {
                                         ..
                                     }
                                 )
-                            })
-                        });
+                            }) {
+                                eject_in_block = true;
+                                eject_cert_hash = Some(*h);
+                                eject_block_round = Some(b.round);
+                                break;
+                            }
+                        }
+                        let eject_cert_committed = eject_cert_hash.map(|h| committed.contains(&h));
                         let votes_total: usize = votes.values().map(|v| v.len()).sum();
                         (
                             committed.len(),
@@ -2178,6 +2199,9 @@ mod tests {
                             eject_in_block,
                             votes_total,
                             votes.len(),
+                            eject_cert_hash,
+                            eject_block_round,
+                            eject_cert_committed,
                         )
                     };
                     let inner = d.state.inner.lock().await;
@@ -2203,11 +2227,19 @@ mod tests {
                     let epoch_cur = inner.epoch.current;
                     let epoch_last_bd = inner.epoch.last_boundary_round;
                     let max_round = inner.max_observed_round;
+                    let eject_round_str = eject_block_round
+                        .map(|r| r.to_string())
+                        .unwrap_or_else(|| "-".into());
+                    let eject_committed_str = eject_cert_committed
+                        .map(|b| b.to_string())
+                        .unwrap_or_else(|| "-".into());
+                    let _ = eject_cert_hash; // hash itself is too noisy
                     diag.push(format!(
-                        "v{}: reg={} has4={} n={} last_authored={} max_round={} committed={} blocks={} eject_in_block={} votes(k={},tot={}) stake(tot={},thr={}) pending_gov(n={},eject={}) epoch(cur={},last_bd={})",
+                        "v{}: reg={} has4={} n={} last_authored={} max_round={} committed={} blocks={} eject_in_block={} eject_block_round={} eject_cert_committed={} votes(k={},tot={}) stake(tot={},thr={}) pending_gov(n={},eject={}) epoch(cur={},last_bd={})",
                         i, reg_size, has_id4, n_auth, last_authored, max_round, committed_n,
-                        blocks_n, eject_in_block, votes_keys, votes_total, stake_total,
-                        stake_thresh, pending_gov, pending_gov_has_eject, epoch_cur, epoch_last_bd
+                        blocks_n, eject_in_block, eject_round_str, eject_committed_str,
+                        votes_keys, votes_total, stake_total, stake_thresh, pending_gov,
+                        pending_gov_has_eject, epoch_cur, epoch_last_bd
                     ));
                 }
                 panic!("phase G eject timed out (60s):\n  {}", diag.join("\n  "));
