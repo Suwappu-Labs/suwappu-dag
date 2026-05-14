@@ -65,9 +65,15 @@ use crate::{
 /// Daemon holds `Arc<State>` directly (no outer mutex).
 pub(crate) struct State {
     pub(crate) dag: tokio::sync::RwLock<DagStore>,
-    pub(crate) votes: tokio::sync::Mutex<HashMap<CertHash, Vec<Vote>>>,
-    pub(crate) blocks: tokio::sync::Mutex<HashMap<CertHash, BlockPayload>>,
-    pub(crate) committed: tokio::sync::Mutex<HashSet<CertHash>>,
+    // DAG-S31.3: parking_lot::Mutex for short critical sections — these
+    // three maps see only sub-microsecond HashMap/HashSet operations
+    // (insert/contains/remove/clone) and were previously paying the
+    // async-yield overhead of tokio::sync::Mutex for no benefit. Holding
+    // these guards across .await is forbidden; every call site uses
+    // them in-statement and drops the guard before the next .await.
+    pub(crate) votes: parking_lot::Mutex<HashMap<CertHash, Vec<Vote>>>,
+    pub(crate) blocks: parking_lot::Mutex<HashMap<CertHash, BlockPayload>>,
+    pub(crate) committed: parking_lot::Mutex<HashSet<CertHash>>,
     pub(crate) stake_table: tokio::sync::RwLock<StakeTable>,
     pub(crate) authority_registry: tokio::sync::RwLock<AuthorityRegistry>,
     pub(crate) validator_registry: tokio::sync::RwLock<ValidatorRegistry>,
@@ -226,9 +232,9 @@ impl State {
         let n = manifest.validators.len() as u32;
         Self {
             dag: tokio::sync::RwLock::new(DagStore::new()),
-            votes: tokio::sync::Mutex::new(HashMap::new()),
-            blocks: tokio::sync::Mutex::new(HashMap::new()),
-            committed: tokio::sync::Mutex::new(HashSet::new()),
+            votes: parking_lot::Mutex::new(HashMap::new()),
+            blocks: parking_lot::Mutex::new(HashMap::new()),
+            committed: parking_lot::Mutex::new(HashSet::new()),
             stake_table: tokio::sync::RwLock::new(stake_table),
             authority_registry: tokio::sync::RwLock::new(authority_registry),
             validator_registry: tokio::sync::RwLock::new(validator_registry),
@@ -439,13 +445,7 @@ async fn run_inbox(
                         validator: self_id,
                         candidate: ic.hash,
                     };
-                    state
-                        .votes
-                        .lock()
-                        .await
-                        .entry(ic.hash)
-                        .or_default()
-                        .push(vote);
+                    state.votes.lock().entry(ic.hash).or_default().push(vote);
                     log.emit(
                         Event::now(&self_label, Lane::Main, "voted")
                             .with_round(ic.round)
@@ -456,13 +456,12 @@ async fn run_inbox(
                 try_commit(&state, &self_label, &log).await;
             }
             WireMessage::Block(block) => {
-                state.blocks.lock().await.insert(block.cert_hash, block);
+                state.blocks.lock().insert(block.cert_hash, block);
             }
             WireMessage::Vote(vote) => {
                 state
                     .votes
                     .lock()
-                    .await
                     .entry(vote.candidate)
                     .or_default()
                     .push(vote);
@@ -958,14 +957,7 @@ fn wire_msg_kind(msg: &WireMessage) -> &'static str {
 async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
     // Snapshot votes + n_authorities + candidate_rounds in brief locks
     // up-front so the rest of the function operates on owned data.
-    let votes_flat: Vec<Vote> = state
-        .votes
-        .lock()
-        .await
-        .values()
-        .flatten()
-        .copied()
-        .collect();
+    let votes_flat: Vec<Vote> = state.votes.lock().values().flatten().copied().collect();
     let n = state.inner.lock().await.n_authorities;
     let candidate_rounds: BTreeSet<u64> = {
         let dag = state.dag.read().await;
@@ -988,7 +980,7 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
             LeaderStatus::Skip | LeaderStatus::Undecided => continue,
         };
 
-        if state.committed.lock().await.contains(&leader_hash) {
+        if state.committed.lock().contains(&leader_hash) {
             continue;
         }
 
@@ -1006,7 +998,7 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
             gsx_consensus::causal_history(&dag, leader_hash)
         };
         for h in history {
-            if !state.committed.lock().await.insert(h) {
+            if !state.committed.lock().insert(h) {
                 continue;
             }
             let cert_round = match state.dag.read().await.get(&h) {
@@ -1016,7 +1008,6 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
             let intents = state
                 .blocks
                 .lock()
-                .await
                 .get(&h)
                 .map(|b| b.intents.clone())
                 .unwrap_or_default();
@@ -1049,7 +1040,7 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
                     .with_cert_hash(&h.0)
                     .with_intent_hashes(intent_hashes),
             );
-            state.votes.lock().await.remove(&h);
+            state.votes.lock().remove(&h);
 
             // Epoch boundary detection (DAG-S25 Phase G).
             let mut inner = state.inner.lock().await;
@@ -1335,7 +1326,7 @@ async fn run_round_driver(
             }
         }
         let _ = state.dag.write().await.insert(cert.clone());
-        state.blocks.lock().await.insert(cert_hash, block.clone());
+        state.blocks.lock().insert(cert_hash, block.clone());
 
         // Phase 4 (unlocked): event log emit + cluster broadcast. No
         // state access, pure I/O.
@@ -1438,7 +1429,7 @@ mod tests {
         // Post-S27.2: intents are visible once they land in a proposed block.
         // Since we run a single-node cluster, that block is guaranteed within
         // one round_ms tick of the submit landing on the mpsc.
-        let blocks = d.state.blocks.lock().await;
+        let blocks = d.state.blocks.lock();
         let in_block = blocks.values().any(|b| {
             b.intents
                 .iter()
@@ -1506,7 +1497,7 @@ mod tests {
         // Give the round driver a tick to drain + propose.
         tokio::time::sleep(Duration::from_millis(700)).await;
 
-        let blocks = d.state.blocks.lock().await;
+        let blocks = d.state.blocks.lock();
         let total_intents_in_blocks: usize = blocks
             .values()
             .map(|b| {
@@ -1588,10 +1579,10 @@ mod tests {
         // the substrate state root.
         let mut state_roots = Vec::new();
         for d in &daemons {
-            let committed = d.state.committed.lock().await;
+            let committed_empty = d.state.committed.lock().is_empty();
             let inner = d.state.inner.lock().await;
             assert!(
-                !committed.is_empty(),
+                !committed_empty,
                 "daemon {:?} did not commit any cert",
                 inner.last_authored_round
             );
@@ -1713,34 +1704,43 @@ mod tests {
             }
             if std::time::Instant::now() >= admit_deadline {
                 // Capture per-node state for a diagnostic panic message.
+                // parking_lot guards must NOT cross .await — snapshot
+                // out of them into owned scalars first, then acquire
+                // the tokio async guards.
                 let mut diag = Vec::new();
                 for (i, d) in daemons.iter().enumerate() {
+                    let (committed_n, blocks_n, intent_in_block, votes_total, votes_keys) = {
+                        let committed = d.state.committed.lock();
+                        let blocks = d.state.blocks.lock();
+                        let votes = d.state.votes.lock();
+                        let intent_in_block = blocks.values().any(|b| {
+                            b.intents.iter().any(|x| {
+                                matches!(
+                                    x,
+                                    Intent::AdmitAuthority {
+                                        authority_id: 4,
+                                        ..
+                                    }
+                                )
+                            })
+                        });
+                        let votes_total: usize = votes.values().map(|v| v.len()).sum();
+                        (
+                            committed.len(),
+                            blocks.len(),
+                            intent_in_block,
+                            votes_total,
+                            votes.len(),
+                        )
+                    };
                     let inner = d.state.inner.lock().await;
-                    let committed = d.state.committed.lock().await;
-                    let blocks = d.state.blocks.lock().await;
                     let reg = d.state.authority_registry.read().await;
-                    let votes = d.state.votes.lock().await;
                     let stake_table = d.state.stake_table.read().await;
                     let dag = d.state.dag.read().await;
                     let last_authored = inner.last_authored_round.unwrap_or(u64::MAX);
-                    let committed_n = committed.len();
-                    let blocks_n = blocks.len();
                     let reg_size = reg.len();
                     let has_id4 = reg.contains(4);
-                    let intent_in_block = blocks.values().any(|b| {
-                        b.intents.iter().any(|x| {
-                            matches!(
-                                x,
-                                Intent::AdmitAuthority {
-                                    authority_id: 4,
-                                    ..
-                                }
-                            )
-                        })
-                    });
                     let n_auth = inner.n_authorities;
-                    let votes_total: usize = votes.values().map(|v| v.len()).sum();
-                    let votes_keys = votes.len();
                     let stake_total = stake_table.total();
                     let stake_thresh =
                         gsx_consensus::joint::validator_quorum_threshold(&stake_table);
