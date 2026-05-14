@@ -6,9 +6,9 @@ variable "instance_type" {
   default     = "t3.small"
 }
 
-variable "operator_ip_cidr" {
-  description = "CIDR allowed SSH access. Set to your home IP /32 — do not leave as 0.0.0.0/0."
-  type        = string
+variable "operator_ip_cidrs" {
+  description = "CIDRs allowed SSH access. Pass each operator IP as a /32 — do not include 0.0.0.0/0. Multiple entries let the same operator SSH from different networks (e.g. home + mobile hotspot) without locking the previous one out on every re-apply."
+  type        = list(string)
 }
 
 variable "ssh_public_key" {

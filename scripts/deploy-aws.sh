@@ -53,23 +53,38 @@ if [[ "${ACTUAL_ACCOUNT}" != "${EXPECTED_ACCOUNT}" ]]; then
     exit 1
 fi
 
-# Per-stack variable assembly. The perf stack needs operator IP + SSH pubkey.
+# Per-stack variable assembly. The perf stack needs operator IPs + SSH pubkey.
 TF_VARS=()
 if [[ "${STACK}" == "perf" && ( "${CMD}" == "plan" || "${CMD}" == "apply" || "${CMD}" == "destroy" ) ]]; then
-    if [[ -z "${OPERATOR_CIDR:-}" ]]; then
+    # Operator IP allowlist. By default the script auto-detects the current
+    # public IP and uses that as the only entry. Override with
+    # OPERATOR_CIDRS="1.2.3.4/32,5.6.7.8/32" (comma-separated) to keep
+    # multiple networks reachable across re-applies — useful when the same
+    # operator works from home + mobile hotspot + office.
+    if [[ -z "${OPERATOR_CIDRS:-}" ]]; then
         # checkip.amazonaws.com is IPv4-only — the security group's
         # cidr_blocks field requires a v4 CIDR, and ifconfig.me returns v6
         # on dual-stack hosts even with curl -4.
-        OPERATOR_CIDR="$(curl -fsS https://checkip.amazonaws.com)/32"
-        echo "[deploy-aws] detected operator IP: ${OPERATOR_CIDR}"
+        OPERATOR_CIDRS="$(curl -fsS https://checkip.amazonaws.com)/32"
+        echo "[deploy-aws] detected operator IP: ${OPERATOR_CIDRS}"
     fi
+    # Convert the comma-separated env value into a HCL list literal.
+    CIDR_LIST="["
+    OLDIFS="${IFS}"
+    IFS=','
+    for c in ${OPERATOR_CIDRS}; do
+        CIDR_LIST+="\"${c}\","
+    done
+    IFS="${OLDIFS}"
+    CIDR_LIST="${CIDR_LIST%,}]"
+
     SSH_PUB="${SSH_PUB:-$HOME/.ssh/id_ed25519.pub}"
     if [[ ! -f "${SSH_PUB}" ]]; then
         echo "error: SSH public key not found at ${SSH_PUB}" >&2
         echo "  generate one with: ssh-keygen -t ed25519 -f \$HOME/.ssh/gsx-perf -N \"\"" >&2
         exit 1
     fi
-    TF_VARS+=(-var "operator_ip_cidr=${OPERATOR_CIDR}")
+    TF_VARS+=(-var "operator_ip_cidrs=${CIDR_LIST}")
     TF_VARS+=(-var "ssh_public_key=$(cat "${SSH_PUB}")")
 fi
 

@@ -101,7 +101,7 @@ resource "aws_security_group" "this" {
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = [var.operator_ip_cidr]
+    cidr_blocks = var.operator_ip_cidrs
   }
   ingress {
     description = "Consensus peer traffic"

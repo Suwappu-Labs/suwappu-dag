@@ -18,9 +18,9 @@ variable "ssh_public_key" {
   type        = string
 }
 
-variable "operator_ip_cidr" {
-  description = "CIDR allowed SSH access."
-  type        = string
+variable "operator_ip_cidrs" {
+  description = "CIDRs allowed SSH access (list of /32s)."
+  type        = list(string)
 }
 
 variable "consensus_port" {
