@@ -37,7 +37,7 @@ serde_json = { workspace = true }
 hex = { workspace = true }
 
 tokio = { workspace = true }
-clap = { workspace = true }
+clap = { workspace = true, features = ["env"] }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
