@@ -8,8 +8,7 @@
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::context::StateView;
-use crate::error::RpcError;
+use crate::{context::StateView, error::RpcError};
 
 /// `gsx_getEpoch` — no params; returns `EpochView`.
 pub async fn get_epoch<S: StateView>(state: &S, params: &Value) -> Result<Value, RpcError> {
@@ -73,6 +72,52 @@ pub async fn get_stake<S: StateView>(state: &S, params: &Value) -> Result<Value,
             p.authority_id
         ))),
     }
+}
+
+#[derive(Deserialize)]
+struct GetBalanceParams {
+    /// Hex-encoded 20-byte address. Accepts with or without `0x` prefix
+    /// (case-insensitive). Anything that doesn't decode to exactly
+    /// 20 bytes returns InvalidParams.
+    address: String,
+}
+
+/// `gsx_getBalance` — params `{ address: hex }` or positional `[hex]`.
+/// Returns `{ address: "0x..", balance: "<decimal>" }`. A zero balance
+/// is a valid response (the substrate doesn't distinguish "absent"
+/// from "explicit zero") — clients should not interpret it as NotFound.
+pub async fn get_balance<S: StateView>(state: &S, params: &Value) -> Result<Value, RpcError> {
+    let p: GetBalanceParams = match params {
+        Value::Object(_) => serde_json::from_value(params.clone())
+            .map_err(|e| RpcError::InvalidParams(e.to_string()))?,
+        Value::Array(arr) if arr.len() == 1 => {
+            let hex_addr: String = serde_json::from_value(arr[0].clone())
+                .map_err(|e| RpcError::InvalidParams(e.to_string()))?;
+            GetBalanceParams { address: hex_addr }
+        }
+        _ => {
+            return Err(RpcError::InvalidParams(
+                "expected `{address: hex}` or `[hex]`".into(),
+            ))
+        }
+    };
+
+    let trimmed = p
+        .address
+        .strip_prefix("0x")
+        .or_else(|| p.address.strip_prefix("0X"))
+        .unwrap_or(&p.address);
+    let bytes =
+        hex::decode(trimmed).map_err(|e| RpcError::InvalidParams(format!("address hex: {}", e)))?;
+    let addr: [u8; 20] = bytes.as_slice().try_into().map_err(|_| {
+        RpcError::InvalidParams(format!("address must be 20 bytes, got {}", bytes.len()))
+    })?;
+
+    let balance = state.balance_for(addr).await;
+    Ok(serde_json::json!({
+        "address": format!("0x{}", hex::encode(addr)),
+        "balance": balance.to_string(),
+    }))
 }
 
 fn expect_no_params(params: &Value) -> Result<(), RpcError> {

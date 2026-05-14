@@ -63,4 +63,10 @@ impl StateView for NodeStateView {
         let reg = self.state.authority_registry.read().await;
         reg.get(authority_id).map(|m| m.stake_gsx as u128)
     }
+
+    async fn balance_for(&self, address: [u8; 20]) -> u128 {
+        use gsx_execution::Substrate;
+        let inner = self.state.inner.lock().await;
+        inner.substrate.balance(&address)
+    }
 }

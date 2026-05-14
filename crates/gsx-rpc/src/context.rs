@@ -40,6 +40,21 @@ pub struct ValidatorMemberView {
     pub stake_gsx: String,
 }
 
+/// JSON-safe projection of a substrate balance lookup. The address is
+/// hex-encoded (20 bytes → 40 hex chars, prefixed with `0x`); the
+/// balance follows the same u128-as-decimal-string convention as
+/// `ValidatorMemberView::stake_gsx`. A zero balance is a valid
+/// response — the server only returns NotFound if the underlying
+/// substrate is unable to answer the lookup at all (which it never
+/// is for `InMemorySubstrate`, but might be for future substrates).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BalanceView {
+    /// Hex-encoded 20-byte address with `0x` prefix.
+    pub address: String,
+    /// Balance in the substrate's smallest unit, as a decimal string.
+    pub balance: String,
+}
+
 /// Read-only view over the node state needed by the JSON-RPC methods.
 ///
 /// Implementers must guarantee:
@@ -63,6 +78,13 @@ pub trait StateView: Send + Sync + 'static {
         &self,
         authority_id: u32,
     ) -> impl std::future::Future<Output = Option<u128>> + Send;
+
+    /// Look up the substrate balance for `address` (20-byte EVM-style
+    /// account id). Returns `0` for any address the substrate has
+    /// never seen — the substrate does not distinguish "absent" from
+    /// "explicitly zero." Adapters MUST NOT treat a zero return as
+    /// NotFound.
+    fn balance_for(&self, address: [u8; 20]) -> impl std::future::Future<Output = u128> + Send;
 }
 
 /// Concrete context handle passed into the router. Wraps an

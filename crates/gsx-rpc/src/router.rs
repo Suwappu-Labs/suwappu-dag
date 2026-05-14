@@ -12,10 +12,12 @@ use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::po
 use serde_json::Value;
 use tracing::warn;
 
-use crate::context::{RpcContext, StateView};
-use crate::error::RpcError;
-use crate::methods;
-use crate::types::{JsonRpcRequest, JsonRpcResponse};
+use crate::{
+    context::{RpcContext, StateView},
+    error::RpcError,
+    methods,
+    types::{JsonRpcRequest, JsonRpcResponse},
+};
 
 /// Build the axum router. Caller is responsible for `axum::serve`-ing it.
 pub fn router<S: StateView>(ctx: Arc<RpcContext<S>>) -> Router {
@@ -68,6 +70,7 @@ async fn dispatch<S: StateView>(
         "gsx_getAuthorityRegistry" => methods::get_authority_registry(state, params).await,
         "gsx_getValidatorRegistry" => methods::get_validator_registry(state, params).await,
         "gsx_getStake" => methods::get_stake(state, params).await,
+        "gsx_getBalance" => methods::get_balance(state, params).await,
         unknown => Err(RpcError::MethodNotFound(unknown.into())),
     }
 }

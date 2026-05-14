@@ -39,7 +39,7 @@ mod error;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub use error::Error;
-pub use gsx_rpc::context::{AuthorityMemberView, EpochView, ValidatorMemberView};
+pub use gsx_rpc::context::{AuthorityMemberView, BalanceView, EpochView, ValidatorMemberView};
 use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::{json, Value};
 
@@ -101,6 +101,16 @@ impl Client {
             Err(Error::Rpc { code: -32000, .. }) => Ok(None),
             Err(e) => Err(e),
         }
+    }
+
+    /// Substrate balance for `address`. Always returns `Ok(BalanceView)` —
+    /// unknown addresses surface as `balance == "0"` (the substrate
+    /// doesn't distinguish absent from explicit-zero). Use
+    /// [`Client::get_stake`] if you need the NotFound translation pattern.
+    pub async fn get_balance(&self, address: [u8; 20]) -> Result<BalanceView, Error> {
+        let hex_addr = format!("0x{}", hex::encode(address));
+        self.call::<BalanceView>("gsx_getBalance", json!({ "address": hex_addr }))
+            .await
     }
 
     /// Generic JSON-RPC call. Public so callers can drive any method

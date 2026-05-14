@@ -7,7 +7,9 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use axum::{routing::post, Json, Router};
-use gsx_client::{AuthorityMemberView, Client, EpochView, Error, StakeEntry, ValidatorMemberView};
+use gsx_client::{
+    AuthorityMemberView, BalanceView, Client, EpochView, Error, StakeEntry, ValidatorMemberView,
+};
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
 
@@ -48,6 +50,16 @@ async fn spawn_mock_server() -> SocketAddr {
                             }
                         }));
                     }
+                }
+                "gsx_getBalance" => {
+                    let params = &req["params"];
+                    let addr_hex = params["address"].as_str().unwrap_or("");
+                    let bal = if addr_hex == format!("0x{}", "aa".repeat(20)) {
+                        "1000"
+                    } else {
+                        "0"
+                    };
+                    Some(json!({"address": addr_hex, "balance": bal}))
                 }
                 _ => {
                     return Json(json!({
@@ -146,6 +158,27 @@ async fn get_stake_none_on_not_found() {
     // the error code themselves.
     let s: Option<StakeEntry> = client.get_stake(999).await.unwrap();
     assert!(s.is_none());
+}
+
+#[tokio::test]
+async fn get_balance_known_address() {
+    let addr = spawn_mock_server().await;
+    let client = client_for(addr);
+
+    let b: BalanceView = client.get_balance([0xAA; 20]).await.unwrap();
+    assert_eq!(b.address, format!("0x{}", "aa".repeat(20)));
+    assert_eq!(b.balance, "1000");
+}
+
+#[tokio::test]
+async fn get_balance_unknown_address_returns_zero() {
+    let addr = spawn_mock_server().await;
+    let client = client_for(addr);
+
+    // Substrate doesn't distinguish absent from explicit-zero; an
+    // unknown address must round-trip as balance="0", not Err.
+    let b: BalanceView = client.get_balance([0xCD; 20]).await.unwrap();
+    assert_eq!(b.balance, "0");
 }
 
 #[tokio::test]
