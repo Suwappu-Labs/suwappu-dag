@@ -199,6 +199,84 @@ pub async fn get_transaction<S: StateView>(state: &S, params: &Value) -> Result<
     }
 }
 
+#[derive(Deserialize)]
+struct SubmitIntentParams {
+    /// Bincode-serialized `gsx_execution::Intent`, hex-encoded.
+    /// Accepts with or without `0x` prefix.
+    intent: String,
+    /// ML-DSA-65 signature over `intent_signing_digest(network_id, intent)`,
+    /// hex-encoded.
+    signature: String,
+    /// `blake3(public_key_bytes)`, 32 bytes hex.
+    signer_pubkey_hash: String,
+}
+
+/// `gsx_submitIntent` — params `{intent: hex, signature: hex,
+/// signer_pubkey_hash: hex}` or positional `[intent, signature, hash]`.
+/// Returns `{tx_hash: 0x..}` on accept.
+///
+/// The SDK is expected to bincode-serialize the typed Intent locally
+/// (same wire form the TCP/bincode path uses) so the same signed
+/// payload works through either ingress wire.
+pub async fn submit_intent<S: StateView>(state: &S, params: &Value) -> Result<Value, RpcError> {
+    let p: SubmitIntentParams =
+        match params {
+            Value::Object(_) => serde_json::from_value(params.clone())
+                .map_err(|e| RpcError::InvalidParams(e.to_string()))?,
+            Value::Array(arr) if arr.len() == 3 => SubmitIntentParams {
+                intent: serde_json::from_value(arr[0].clone())
+                    .map_err(|e| RpcError::InvalidParams(e.to_string()))?,
+                signature: serde_json::from_value(arr[1].clone())
+                    .map_err(|e| RpcError::InvalidParams(e.to_string()))?,
+                signer_pubkey_hash: serde_json::from_value(arr[2].clone())
+                    .map_err(|e| RpcError::InvalidParams(e.to_string()))?,
+            },
+            _ => return Err(RpcError::InvalidParams(
+                "expected `{intent, signature, signer_pubkey_hash}` (all hex) or 3-element array"
+                    .into(),
+            )),
+        };
+
+    let intent_bytes = decode_hex_field("intent", &p.intent)?;
+    let signature = decode_hex_field("signature", &p.signature)?;
+    let pkh_bytes = decode_hex_field("signer_pubkey_hash", &p.signer_pubkey_hash)?;
+    let pkh: [u8; 32] = pkh_bytes.as_slice().try_into().map_err(|_| {
+        RpcError::InvalidParams(format!(
+            "signer_pubkey_hash must be 32 bytes, got {}",
+            pkh_bytes.len()
+        ))
+    })?;
+
+    use crate::context::SubmitIntentError;
+    match state.submit_intent(intent_bytes, signature, pkh).await {
+        Ok(hash) => Ok(serde_json::json!({
+            "tx_hash": format!("0x{}", hex::encode(hash)),
+        })),
+        Err(SubmitIntentError::BadIntentEncoding(msg)) => {
+            Err(RpcError::InvalidParams(format!("intent decode: {}", msg)))
+        }
+        Err(SubmitIntentError::UnknownSigner) => Err(RpcError::UnknownSigner(
+            "signer_pubkey_hash not in Authority Ring".into(),
+        )),
+        Err(SubmitIntentError::BadSignature) => {
+            Err(RpcError::BadSignature("ML-DSA-65 verify failed".into()))
+        }
+        Err(SubmitIntentError::EnqueueFull) => Err(RpcError::EnqueueFull(
+            "intent channel full or closed; retry".into(),
+        )),
+    }
+}
+
+/// Strip optional `0x` / `0X` prefix and hex-decode. Used by every
+/// hex-bearing param path in this module.
+fn decode_hex_field(field: &str, value: &str) -> Result<Vec<u8>, RpcError> {
+    let trimmed = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+        .unwrap_or(value);
+    hex::decode(trimmed).map_err(|e| RpcError::InvalidParams(format!("{} hex: {}", field, e)))
+}
+
 fn expect_no_params(params: &Value) -> Result<(), RpcError> {
     match params {
         Value::Null => Ok(()),

@@ -273,3 +273,64 @@ test("getTransaction returns null on NotFound (-32000)", async () => {
     null,
   );
 });
+
+test("submitIntentRaw round-trips the tx_hash and serializes hex params", async () => {
+  const { fetch, captured } = makeFetchMock(() => ({
+    jsonrpc: "2.0",
+    id: 1,
+    result: { tx_hash: `0x${"ee".repeat(32)}` },
+  }));
+  const client = new Client("http://localhost:0", { fetch });
+  const intent = new Uint8Array([0xde, 0xad, 0xbe, 0xef]);
+  const sig = new Uint8Array(3309).fill(0xab);
+  const pkh = new Uint8Array(32).fill(0x55);
+  const hash = await client.submitIntentRaw(intent, sig, pkh);
+  assert.equal(hash.length, 32);
+  assert.equal(hash[0], 0xee);
+  assert.equal(hash[31], 0xee);
+
+  // Params must be 0x-prefixed lowercase hex regardless of input type.
+  const body = JSON.parse(captured[0]!.init.body as string);
+  assert.equal(body.params.intent, "0xdeadbeef");
+  assert.equal(body.params.signature, `0x${"ab".repeat(3309)}`);
+  assert.equal(body.params.signer_pubkey_hash, `0x${"55".repeat(32)}`);
+});
+
+test("submitIntentRaw surfaces RpcError on UnknownSigner (-32001)", async () => {
+  const { fetch } = makeFetchMock(() => ({
+    jsonrpc: "2.0",
+    id: 1,
+    error: {
+      code: -32001,
+      message: "signer_pubkey_hash not in Authority Ring",
+    },
+  }));
+  const client = new Client("http://localhost:0", { fetch });
+  await assert.rejects(
+    () =>
+      client.submitIntentRaw(
+        new Uint8Array([0xde]),
+        new Uint8Array(0),
+        new Uint8Array(32),
+      ),
+    (err: unknown) =>
+      err instanceof RpcError && (err as RpcError).code === -32001,
+  );
+});
+
+test("submitIntentRaw accepts hex string inputs", async () => {
+  const { fetch, captured } = makeFetchMock(() => ({
+    jsonrpc: "2.0",
+    id: 1,
+    result: { tx_hash: `0x${"ee".repeat(32)}` },
+  }));
+  const client = new Client("http://localhost:0", { fetch });
+  await client.submitIntentRaw(
+    "0xdeadbeef",
+    "ab".repeat(3309), // no prefix — should still be normalized
+    "0x" + "55".repeat(32),
+  );
+  const body = JSON.parse(captured[0]!.init.body as string);
+  assert.equal(body.params.intent, "0xdeadbeef");
+  assert.equal(body.params.signature, `0x${"ab".repeat(3309)}`);
+});

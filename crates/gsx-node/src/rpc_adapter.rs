@@ -15,11 +15,15 @@ use std::sync::Arc;
 
 use gsx_execution::Intent;
 use gsx_rpc::context::{
-    AuthorityMemberView, BlockView, EpochView, IntentView, StateView, TransactionView,
-    ValidatorMemberView,
+    AuthorityMemberView, BlockView, EpochView, IntentView, StateView, SubmitIntentError,
+    TransactionView, ValidatorMemberView,
 };
+use tokio::sync::mpsc::UnboundedSender;
 
-use crate::daemon::State;
+use crate::{
+    client::{verify_signed_intent, AuthOutcome},
+    daemon::State,
+};
 
 /// Translate a daemon `Intent` into the JSON-safe `IntentView`
 /// projection. Pure function; no state access. Address + stake +
@@ -56,14 +60,29 @@ fn intent_to_view(intent: &Intent) -> IntentView {
     }
 }
 
-/// Read-only adapter wrapping the daemon's shared `Arc<State>`.
+/// Adapter wrapping the daemon's shared `Arc<State>` plus the
+/// write-path machinery (`intent_tx` mpsc + `network_id`) needed for
+/// `gsx_submitIntent`. The TCP/bincode client wire and this adapter
+/// fan into the SAME sender, so the two ingress paths share order
+/// guarantees and the round driver doesn't notice which wire an
+/// intent arrived on.
 pub struct NodeStateView {
     state: Arc<State>,
+    intent_tx: UnboundedSender<Intent>,
+    network_id: String,
 }
 
 impl NodeStateView {
-    pub(crate) fn new(state: Arc<State>) -> Self {
-        Self { state }
+    pub(crate) fn new(
+        state: Arc<State>,
+        intent_tx: UnboundedSender<Intent>,
+        network_id: String,
+    ) -> Self {
+        Self {
+            state,
+            intent_tx,
+            network_id,
+        }
     }
 }
 
@@ -150,5 +169,48 @@ impl StateView for NodeStateView {
             index,
             intent: intent_to_view(&intent),
         })
+    }
+
+    async fn submit_intent(
+        &self,
+        intent_bincode: Vec<u8>,
+        signature: Vec<u8>,
+        signer_pubkey_hash: [u8; 32],
+    ) -> Result<[u8; 32], SubmitIntentError> {
+        // 1. Decode the bincode-serialized Intent. SDK clients build
+        //    this exact form before signing, so we can reuse the same
+        //    bytes for both the digest and the channel send.
+        let intent: Intent = bincode::deserialize(&intent_bincode)
+            .map_err(|e| SubmitIntentError::BadIntentEncoding(e.to_string()))?;
+
+        // 2. Verify the signature using the same gate the TCP wire uses.
+        match verify_signed_intent(
+            &self.state,
+            &self.network_id,
+            &intent,
+            &signature,
+            &signer_pubkey_hash,
+        )
+        .await
+        {
+            AuthOutcome::Ok => {}
+            AuthOutcome::UnknownSigner => return Err(SubmitIntentError::UnknownSigner),
+            AuthOutcome::BadSignature => return Err(SubmitIntentError::BadSignature),
+        }
+
+        // 3. Compute the canonical intent hash — same blake3 over the
+        //    bincode bytes the round driver will use when it indexes
+        //    this intent into `tx_to_block`. Reusing the bytes (rather
+        //    than re-serializing) guarantees the SDK's hash matches.
+        let intent_hash: [u8; 32] = *blake3::hash(&intent_bincode).as_bytes();
+
+        // 4. Enqueue. `UnboundedSender::send` only fails if the receiver
+        //    has been dropped (round driver task died). Either way the
+        //    caller should treat it as a transient failure to retry.
+        self.intent_tx
+            .send(intent)
+            .map_err(|_| SubmitIntentError::EnqueueFull)?;
+
+        Ok(intent_hash)
     }
 }

@@ -455,6 +455,11 @@ impl Daemon {
         // clone of `state` + the genesis `network_id` so it can verify
         // ML-DSA-65 signatures on every inbound intent against the
         // seated `AuthorityRegistry`.
+        // T2: clone the sender so the JSON-RPC write path
+        // (`gsx_submitIntent`) shares the same single mpsc as the
+        // TCP/bincode wire — both ingress wires fan into the round
+        // driver's single consumer.
+        let intent_tx_for_rpc = intent_tx.clone();
         {
             let client_task = crate::client::run(
                 cfg.client_listen,
@@ -468,12 +473,19 @@ impl Daemon {
             tasks.push(client_task);
         }
 
-        // Issue #27: optional JSON-RPC query API. Not bound unless the
+        // Issue #27 / T2: optional JSON-RPC API. Not bound unless the
         // operator configures `rpc_listen` in NodeConfig — perf testnet
         // leaves it off so peer-to-peer latency measurements aren't
-        // perturbed by an external read API.
+        // perturbed by an external read API. T2 added the write path
+        // (`gsx_submitIntent`), so the adapter now also gets the
+        // cloned intent sender + network_id to drive the same
+        // verify+enqueue gate the TCP wire uses.
         if let Some(rpc_addr) = cfg.rpc_listen {
-            let view = crate::rpc_adapter::NodeStateView::new(state.clone());
+            let view = crate::rpc_adapter::NodeStateView::new(
+                state.clone(),
+                intent_tx_for_rpc,
+                manifest.network_id.clone(),
+            );
             let ctx = std::sync::Arc::new(gsx_rpc::RpcContext::new(std::sync::Arc::new(view)));
             let rpc_task = gsx_rpc::start(rpc_addr, ctx).await?;
             tasks.push(rpc_task);
@@ -2866,5 +2878,195 @@ mod tests {
                 idx,
             );
         }
+    }
+
+    /// T2: end-to-end `gsx_submitIntent`. Bind a single-validator
+    /// daemon with `rpc_listen` set, sign an intent client-side using
+    /// the same digest format the TCP wire uses, POST to the RPC, and
+    /// assert (1) Ack response carries the intent hash, (2) the intent
+    /// lands in a committed block, (3) `tx_to_block` indexes it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rpc_submit_intent_round_trips_through_consensus() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        use crate::client::{intent_signing_digest, signer_pubkey_hash};
+
+        let base_port: u16 = 21_500;
+        let network_id = "rpc-submit-1n".to_string();
+        let (pk, sk) = gsx_crypto::mldsa::keypair();
+        let pk_hex = hex::encode(pk.as_bytes());
+        let manifest = GenesisManifest {
+            network_id: network_id.clone(),
+            validators: vec![GenesisValidator {
+                authority_id: 0,
+                label: "v0".into(),
+                mldsa_public_key_hex: pk_hex,
+                bls_public_key_hex: "00".into(),
+                validator_stake_gsx: 30_000,
+                authority_stake_gsx: 150_000,
+            }],
+            corridors: Vec::new(),
+            rounds_per_epoch: 1024,
+        };
+        let cfg = NodeConfig {
+            self_id: "v0".into(),
+            authority_id: 0,
+            listen: format!("127.0.0.1:{}", base_port).parse().unwrap(),
+            client_listen: format!("127.0.0.1:{}", base_port + 100).parse().unwrap(),
+            rpc_listen: Some(format!("127.0.0.1:{}", base_port + 200).parse().unwrap()),
+            peers: vec![],
+            round_ms: 500,
+            checkpoint_cadence_rounds: 1,
+            mldsa_secret_key_path: "/dev/null".into(),
+            bls_secret_key_path: "/dev/null".into(),
+            genesis_manifest_path: "/dev/null".into(),
+            event_log_path: std::env::temp_dir().join("gsx-rpc-submit-test.ndjson"),
+        };
+        let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Sign client-side using the same primitives the TCP wire uses.
+        let intent = Intent::Transfer {
+            from: [1u8; 20],
+            to: [2u8; 20],
+            amount: 42,
+        };
+        let intent_bincode = bincode::serialize(&intent).unwrap();
+        let digest = intent_signing_digest(&network_id, &intent);
+        let signature = gsx_crypto::mldsa::sign(&digest, &sk).unwrap();
+        let pkh = signer_pubkey_hash(pk.as_bytes());
+
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "gsx_submitIntent",
+            "params": {
+                "intent": format!("0x{}", hex::encode(&intent_bincode)),
+                "signature": format!("0x{}", hex::encode(signature.as_bytes())),
+                "signer_pubkey_hash": format!("0x{}", hex::encode(pkh)),
+            },
+        });
+        let body_bytes = serde_json::to_vec(&body).unwrap();
+        let req = format!(
+            "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body_bytes.len()
+        );
+
+        let rpc_addr = cfg.rpc_listen.unwrap();
+        let mut stream = tokio::net::TcpStream::connect(rpc_addr).await.unwrap();
+        let _ = stream.set_nodelay(true);
+        stream.write_all(req.as_bytes()).await.unwrap();
+        stream.write_all(&body_bytes).await.unwrap();
+        stream.flush().await.unwrap();
+
+        let mut resp_bytes = Vec::new();
+        stream.read_to_end(&mut resp_bytes).await.unwrap();
+        let resp_text = String::from_utf8(resp_bytes).unwrap();
+        let body_start = resp_text.find("\r\n\r\n").unwrap() + 4;
+        let parsed: serde_json::Value =
+            serde_json::from_str(resp_text[body_start..].trim_end()).unwrap();
+
+        // Ack must carry the blake3 hash of the bincode bytes.
+        let expected_hash: [u8; 32] = *blake3::hash(&intent_bincode).as_bytes();
+        let tx_hash_hex = parsed["result"]["tx_hash"]
+            .as_str()
+            .expect("tx_hash present");
+        assert_eq!(tx_hash_hex, format!("0x{}", hex::encode(expected_hash)));
+
+        // Wait for the round driver to author + commit a block carrying
+        // this intent, then check tx_to_block is populated.
+        let mut found = false;
+        for _ in 0..30 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let inner = d.state.inner.lock().await;
+            if inner.tx_to_block.contains_key(&expected_hash) {
+                found = true;
+                break;
+            }
+        }
+        assert!(
+            found,
+            "intent submitted via RPC never landed in tx_to_block"
+        );
+    }
+
+    /// T2: rejection paths through the RPC ingress. UnknownSigner
+    /// surfaces as -32001 in the JSON-RPC envelope.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rpc_submit_intent_unknown_signer() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let base_port: u16 = 21_600;
+        let network_id = "rpc-submit-bad-1n".to_string();
+        let (pk, _sk) = gsx_crypto::mldsa::keypair();
+        let pk_hex = hex::encode(pk.as_bytes());
+        let manifest = GenesisManifest {
+            network_id,
+            validators: vec![GenesisValidator {
+                authority_id: 0,
+                label: "v0".into(),
+                mldsa_public_key_hex: pk_hex,
+                bls_public_key_hex: "00".into(),
+                validator_stake_gsx: 30_000,
+                authority_stake_gsx: 150_000,
+            }],
+            corridors: Vec::new(),
+            rounds_per_epoch: 1024,
+        };
+        let cfg = NodeConfig {
+            self_id: "v0".into(),
+            authority_id: 0,
+            listen: format!("127.0.0.1:{}", base_port).parse().unwrap(),
+            client_listen: format!("127.0.0.1:{}", base_port + 100).parse().unwrap(),
+            rpc_listen: Some(format!("127.0.0.1:{}", base_port + 200).parse().unwrap()),
+            peers: vec![],
+            round_ms: 500,
+            checkpoint_cadence_rounds: 1,
+            mldsa_secret_key_path: "/dev/null".into(),
+            bls_secret_key_path: "/dev/null".into(),
+            genesis_manifest_path: "/dev/null".into(),
+            event_log_path: std::env::temp_dir().join("gsx-rpc-submit-bad-test.ndjson"),
+        };
+        let _d = Daemon::start(cfg.clone(), manifest).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Submit with a pubkey hash that doesn't match anyone seated.
+        let intent = Intent::Transfer {
+            from: [3u8; 20],
+            to: [4u8; 20],
+            amount: 7,
+        };
+        let intent_bincode = bincode::serialize(&intent).unwrap();
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "gsx_submitIntent",
+            "params": {
+                "intent": format!("0x{}", hex::encode(&intent_bincode)),
+                "signature": format!("0x{}", "00".repeat(3309)),
+                "signer_pubkey_hash": format!("0x{}", "ee".repeat(32)),
+            },
+        });
+        let body_bytes = serde_json::to_vec(&body).unwrap();
+        let req = format!(
+            "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body_bytes.len()
+        );
+
+        let rpc_addr = cfg.rpc_listen.unwrap();
+        let mut stream = tokio::net::TcpStream::connect(rpc_addr).await.unwrap();
+        let _ = stream.set_nodelay(true);
+        stream.write_all(req.as_bytes()).await.unwrap();
+        stream.write_all(&body_bytes).await.unwrap();
+        stream.flush().await.unwrap();
+
+        let mut resp_bytes = Vec::new();
+        stream.read_to_end(&mut resp_bytes).await.unwrap();
+        let resp_text = String::from_utf8(resp_bytes).unwrap();
+        let body_start = resp_text.find("\r\n\r\n").unwrap() + 4;
+        let parsed: serde_json::Value =
+            serde_json::from_str(resp_text[body_start..].trim_end()).unwrap();
+
+        assert_eq!(parsed["error"]["code"], -32001);
     }
 }

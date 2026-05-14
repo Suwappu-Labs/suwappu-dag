@@ -73,6 +73,7 @@ async fn dispatch<S: StateView>(
         "gsx_getBalance" => methods::get_balance(state, params).await,
         "gsx_getBlock" => methods::get_block(state, params).await,
         "gsx_getTransaction" => methods::get_transaction(state, params).await,
+        "gsx_submitIntent" => methods::submit_intent(state, params).await,
         unknown => Err(RpcError::MethodNotFound(unknown.into())),
     }
 }

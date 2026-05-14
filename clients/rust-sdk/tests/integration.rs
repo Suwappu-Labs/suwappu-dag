@@ -110,6 +110,21 @@ async fn spawn_mock_server() -> SocketAddr {
                         }));
                     }
                 }
+                "gsx_submitIntent" => {
+                    let params = &req["params"];
+                    let pkh = params["signer_pubkey_hash"].as_str().unwrap_or("");
+                    if pkh == format!("0x{}", "00".repeat(32)) {
+                        return Json(json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "error": {"code": -32001, "message": "unknown signer"}
+                        }));
+                    }
+                    // Mock returns a deterministic hash so the SDK test
+                    // can verify the round-trip decoding.
+                    let hash_hex = format!("0x{}", "ee".repeat(32));
+                    Some(json!({ "tx_hash": hash_hex }))
+                }
                 _ => {
                     return Json(json!({
                         "jsonrpc": "2.0",
@@ -305,4 +320,31 @@ async fn client_is_cheap_to_clone_and_id_sequences_are_shared() {
     let (a, b) = tokio::join!(client.get_epoch(), client2.get_epoch());
     a.unwrap();
     b.unwrap();
+}
+
+#[tokio::test]
+async fn submit_intent_raw_round_trips_hash() {
+    let addr = spawn_mock_server().await;
+    let client = client_for(addr);
+    let mut pkh = [0u8; 32];
+    pkh.fill(0xab); // not the all-zero sentinel
+    let h: [u8; 32] = client
+        .submit_intent_raw(&[0xde, 0xad, 0xbe, 0xef], &[0u8; 3309], pkh)
+        .await
+        .unwrap();
+    assert_eq!(h, [0xeeu8; 32]);
+}
+
+#[tokio::test]
+async fn submit_intent_raw_unknown_signer_surfaces_rpc_error() {
+    let addr = spawn_mock_server().await;
+    let client = client_for(addr);
+    let err = client
+        .submit_intent_raw(&[0xde, 0xad], &[0u8; 3309], [0u8; 32])
+        .await
+        .expect_err("unknown signer must surface as Error::Rpc(-32001)");
+    match err {
+        Error::Rpc { code, .. } => assert_eq!(code, -32001),
+        other => panic!("expected Rpc(-32001), got {:?}", other),
+    }
 }

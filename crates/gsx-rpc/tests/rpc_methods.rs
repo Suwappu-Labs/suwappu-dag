@@ -12,7 +12,7 @@ use axum::{
 use gsx_rpc::{
     context::{
         AuthorityMemberView, BlockView, EpochView, IntentView, RpcContext, StateView,
-        TransactionView, ValidatorMemberView,
+        SubmitIntentError, TransactionView, ValidatorMemberView,
     },
     router,
 };
@@ -52,6 +52,33 @@ impl StateView for MockState {
     }
     async fn transaction_by_hash(&self, tx_hash: [u8; 32]) -> Option<TransactionView> {
         self.tx_by_hash.get(&tx_hash).cloned()
+    }
+    async fn submit_intent(
+        &self,
+        intent_bincode: Vec<u8>,
+        _signature: Vec<u8>,
+        signer_pubkey_hash: [u8; 32],
+    ) -> Result<[u8; 32], SubmitIntentError> {
+        // Mock policy:
+        //  - First byte 0xFE → BadIntentEncoding (simulates bad bincode)
+        //  - signer_pubkey_hash all zeros → UnknownSigner
+        //  - signer_pubkey_hash all 0x11 → BadSignature
+        //  - otherwise OK; returns blake3(intent_bincode) as the hash.
+        if intent_bincode.first() == Some(&0xFE) {
+            return Err(SubmitIntentError::BadIntentEncoding(
+                "mock: first byte == 0xFE".into(),
+            ));
+        }
+        if signer_pubkey_hash == [0u8; 32] {
+            return Err(SubmitIntentError::UnknownSigner);
+        }
+        if signer_pubkey_hash == [0x11u8; 32] {
+            return Err(SubmitIntentError::BadSignature);
+        }
+        // Compute the same hash the daemon would: blake3 over the
+        // bincode payload. SDK can predict this client-side.
+        let hash = blake3::hash(&intent_bincode);
+        Ok(*hash.as_bytes())
     }
 }
 
@@ -492,6 +519,142 @@ async fn get_transaction_bad_hash_is_invalid_params() {
             "id": 25,
             "method": "gsx_getTransaction",
             "params": { "tx_hash": "0xdeadbeef" },  // 4 bytes, not 32
+        }),
+    )
+    .await;
+
+    assert_eq!(resp["error"]["code"], -32602);
+}
+
+#[tokio::test]
+async fn submit_intent_ok() {
+    let ctx = fixture();
+    let intent_hex = "deadbeefcafef00d";
+    let sig_hex = format!("0x{}", "ab".repeat(3309)); // ML-DSA-65 sig length
+    let pkh_hex = format!("0x{}", "55".repeat(32));
+    let resp = post_rpc(
+        ctx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 100,
+            "method": "gsx_submitIntent",
+            "params": {
+                "intent": intent_hex,
+                "signature": sig_hex,
+                "signer_pubkey_hash": pkh_hex,
+            },
+        }),
+    )
+    .await;
+
+    // Mock returns blake3(intent_bytes) as the tx_hash. Recompute and
+    // assert it matches.
+    let intent_bytes = hex::decode(intent_hex).unwrap();
+    let expected = blake3::hash(&intent_bytes);
+    assert_eq!(
+        resp["result"]["tx_hash"],
+        format!("0x{}", hex::encode(expected.as_bytes()))
+    );
+}
+
+#[tokio::test]
+async fn submit_intent_unknown_signer() {
+    let ctx = fixture();
+    let resp = post_rpc(
+        ctx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 101,
+            "method": "gsx_submitIntent",
+            "params": {
+                "intent": "deadbeef",
+                "signature": "00",
+                "signer_pubkey_hash": format!("0x{}", "00".repeat(32)),
+            },
+        }),
+    )
+    .await;
+
+    assert_eq!(resp["error"]["code"], -32001);
+}
+
+#[tokio::test]
+async fn submit_intent_bad_signature() {
+    let ctx = fixture();
+    let resp = post_rpc(
+        ctx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 102,
+            "method": "gsx_submitIntent",
+            "params": {
+                "intent": "deadbeef",
+                "signature": "00",
+                "signer_pubkey_hash": format!("0x{}", "11".repeat(32)),
+            },
+        }),
+    )
+    .await;
+
+    assert_eq!(resp["error"]["code"], -32002);
+}
+
+#[tokio::test]
+async fn submit_intent_bad_encoding_is_invalid_params() {
+    let ctx = fixture();
+    let resp = post_rpc(
+        ctx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 103,
+            "method": "gsx_submitIntent",
+            "params": {
+                "intent": "fe00",  // mock returns BadIntentEncoding for leading 0xFE
+                "signature": "00",
+                "signer_pubkey_hash": format!("0x{}", "ab".repeat(32)),
+            },
+        }),
+    )
+    .await;
+
+    assert_eq!(resp["error"]["code"], -32602);
+}
+
+#[tokio::test]
+async fn submit_intent_positional_params() {
+    let ctx = fixture();
+    let resp = post_rpc(
+        ctx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 104,
+            "method": "gsx_submitIntent",
+            "params": [
+                "deadbeef",
+                "00",
+                format!("0x{}", "ab".repeat(32)),
+            ],
+        }),
+    )
+    .await;
+
+    assert!(resp["result"]["tx_hash"].is_string());
+}
+
+#[tokio::test]
+async fn submit_intent_short_pkh_is_invalid_params() {
+    let ctx = fixture();
+    let resp = post_rpc(
+        ctx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 105,
+            "method": "gsx_submitIntent",
+            "params": {
+                "intent": "deadbeef",
+                "signature": "00",
+                "signer_pubkey_hash": "0xdeadbeef",  // 4 bytes, not 32
+            },
         }),
     )
     .await;
