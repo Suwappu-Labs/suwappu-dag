@@ -31,11 +31,13 @@
 
 use std::{
     net::SocketAddr,
+    path::PathBuf,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::bail;
+use anyhow::{bail, Context};
 use clap::Parser;
+use gsx_crypto::mldsa;
 use gsx_execution::Intent;
 use gsx_node::client::LoadGenClient;
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -95,11 +97,93 @@ struct Args {
     /// the pre-S29 one-intent-one-ack behaviour.
     #[arg(long, default_value_t = 100)]
     batch_size: u32,
+
+    /// Path to a raw ML-DSA-65 secret key on disk. Required (with
+    /// `--mldsa-public-key`) for the new Phase 2.6 signed-intent wire
+    /// (Issue #28). Mutually exclusive with `--mldsa-secret-key-hex`.
+    /// The keypair MUST correspond to a seated Authority Ring member
+    /// in the target validators' genesis manifest — otherwise every
+    /// submission is rejected with `auth: unknown signer`.
+    #[arg(long)]
+    mldsa_secret_key: Option<PathBuf>,
+
+    /// Path to the matching ML-DSA-65 public key on disk.
+    #[arg(long)]
+    mldsa_public_key: Option<PathBuf>,
+
+    /// Hex-encoded ML-DSA-65 secret key. Convenient for CI / inline
+    /// configuration; do not use in production (key material ends up
+    /// in shell history and process listings). Mutually exclusive
+    /// with `--mldsa-secret-key`.
+    #[arg(long)]
+    mldsa_secret_key_hex: Option<String>,
+
+    /// Hex-encoded ML-DSA-65 public key matching `--mldsa-secret-key-hex`.
+    #[arg(long)]
+    mldsa_public_key_hex: Option<String>,
+
+    /// Genesis `network_id` mixed into every intent's signing digest
+    /// (Issue #28). Must exactly match the validators' manifest
+    /// `network_id`, otherwise verification fails.
+    #[arg(long)]
+    network_id: String,
+}
+
+/// Resolve a ML-DSA-65 keypair from the CLI flags. The two accepted
+/// shapes are file-pair (`--mldsa-secret-key path --mldsa-public-key path`)
+/// or hex-pair (`--mldsa-secret-key-hex hex --mldsa-public-key-hex hex`).
+/// Mixing the two is rejected.
+fn resolve_keypair(args: &Args) -> anyhow::Result<(mldsa::SecretKey, mldsa::PublicKey)> {
+    let from_files = args.mldsa_secret_key.is_some() && args.mldsa_public_key.is_some();
+    let from_hex = args.mldsa_secret_key_hex.is_some() && args.mldsa_public_key_hex.is_some();
+    match (from_files, from_hex) {
+        (true, true) => bail!("specify either --mldsa-*-key OR --mldsa-*-key-hex, not both"),
+        (false, false) => bail!(
+            "Issue #28: must supply ML-DSA-65 key material. \
+             Use --mldsa-secret-key <path> --mldsa-public-key <path>, \
+             or --mldsa-secret-key-hex <hex> --mldsa-public-key-hex <hex>."
+        ),
+        (true, false) => {
+            let sk_path = args.mldsa_secret_key.as_ref().unwrap();
+            let pk_path = args.mldsa_public_key.as_ref().unwrap();
+            let sk_bytes = std::fs::read(sk_path)
+                .with_context(|| format!("read --mldsa-secret-key {:?}", sk_path))?;
+            let pk_bytes = std::fs::read(pk_path)
+                .with_context(|| format!("read --mldsa-public-key {:?}", pk_path))?;
+            let sk = mldsa::SecretKey::from_bytes(&sk_bytes)
+                .map_err(|e| anyhow::anyhow!("decode ML-DSA secret key: {:?}", e))?;
+            let pk = mldsa::PublicKey::from_bytes(&pk_bytes)
+                .map_err(|e| anyhow::anyhow!("decode ML-DSA public key: {:?}", e))?;
+            Ok((sk, pk))
+        }
+        (false, true) => {
+            let sk_bytes = hex::decode(args.mldsa_secret_key_hex.as_ref().unwrap())
+                .context("decode --mldsa-secret-key-hex")?;
+            let pk_bytes = hex::decode(args.mldsa_public_key_hex.as_ref().unwrap())
+                .context("decode --mldsa-public-key-hex")?;
+            let sk = mldsa::SecretKey::from_bytes(&sk_bytes)
+                .map_err(|e| anyhow::anyhow!("decode ML-DSA secret key hex: {:?}", e))?;
+            let pk = mldsa::PublicKey::from_bytes(&pk_bytes)
+                .map_err(|e| anyhow::anyhow!("decode ML-DSA public key hex: {:?}", e))?;
+            Ok((sk, pk))
+        }
+    }
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+
+    // Issue #28: resolve the ML-DSA-65 keypair before any TCP work
+    // happens. A missing or malformed key is a config error and
+    // should fail fast rather than after the test rig has spun up
+    // every per-target task.
+    let (signer_sk, signer_pk) = resolve_keypair(&args)?;
+    let signer_pkh = blake3::hash(signer_pk.as_bytes());
+    eprintln!(
+        "gsx-loadgen: signing with ML-DSA-65, pubkey_hash={}",
+        hex::encode(signer_pkh.as_bytes())
+    );
 
     // Resolve target list — accept either `--target` (single) or
     // `--targets` (multi). Reject both for clarity.
@@ -224,14 +308,18 @@ async fn main() -> anyhow::Result<()> {
         let interval = per_target_interval;
         let planned = per_target_planned;
         let batch = batch_size;
+        let signer_sk = signer_sk.clone();
+        let signer_pk = signer_pk.clone();
+        let network_id = args.network_id.clone();
         task_set.spawn(async move {
-            let mut client = match LoadGenClient::connect(addr).await {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("gsx-loadgen: target {} connect failed: {:#}", idx, e);
-                    return;
-                }
-            };
+            let mut client =
+                match LoadGenClient::connect(addr, signer_sk, signer_pk, network_id).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("gsx-loadgen: target {} connect failed: {:#}", idx, e);
+                        return;
+                    }
+                };
             let mut rng = StdRng::seed_from_u64(seed);
             let mut next_send = Instant::now();
             let mut sent_local: u64 = 0;
