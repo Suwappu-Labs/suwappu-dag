@@ -36,6 +36,7 @@ use gsx_consensus::{
 use gsx_execution::Substrate;
 use gsx_execution::{execute_block, Block, InMemorySubstrate, Intent};
 use gsx_fastpath::{
+    binding::{is_main_lane_consistent, MainLaneTx, FAST_PATH_CONFIRMATION_K},
     cert::{FastPathCert, FastPathTx, OwnedObjectId},
     quorum::fast_path_quorum_size,
 };
@@ -103,6 +104,13 @@ pub(crate) struct StateInner {
     pub(crate) fastpath_pending: HashMap<FastPathKey, FastPathCert>,
     pub(crate) fastpath_committed: HashSet<FastPathKey>,
     pub(crate) fastpath_first_payload: HashMap<FastPathKey, [u8; 32]>,
+    /// IQ-003: main-lane index for fast-path K-binding cross-check.
+    /// Every `Intent::Transfer` committed on the main lane is translated
+    /// into a `MainLaneTx` and appended here; the receiver consults this
+    /// when a fast-path cert reaches quorum to enforce paper §6.4
+    /// Invariant 5 (100% slashing for fast-path equivocation observable
+    /// via main-lane ordering within the K=4 binding window).
+    pub(crate) main_lane_index: Vec<MainLaneTx>,
     /// LTP corridor attestations (DAG-S23). Latest attested payload
     /// per corridor id.
     pub(crate) ltp_latest: HashMap<CorridorId, AttestationPayload>,
@@ -269,6 +277,7 @@ impl State {
                 fastpath_pending: HashMap::new(),
                 fastpath_committed: HashSet::new(),
                 fastpath_first_payload: HashMap::new(),
+                main_lane_index: Vec::new(),
                 ltp_latest: HashMap::new(),
                 ltp_received_count: 0,
                 corridors: load_corridors(manifest),
@@ -733,7 +742,8 @@ async fn handle_fastpath_cert(
         }
     }
 
-    // Equivocation check.
+    // Equivocation check (internal): two fast-path certs for the same
+    // (object, nonce) key with different payload digests.
     if let Some(first_payload) = inner.fastpath_first_payload.get(&key).copied() {
         if first_payload != cert.tx.payload_digest {
             let slashed: Vec<AuthorityId> = cert.signers.iter().copied().collect();
@@ -754,6 +764,43 @@ async fn handle_fastpath_cert(
         inner
             .fastpath_first_payload
             .insert(key, cert.tx.payload_digest);
+    }
+
+    // IQ-003: K-binding cross-check against the main lane (paper §6.4).
+    // If a main-lane tx in the window (lineage_round, lineage_round+K]
+    // touches the same object with a different payload digest, the
+    // fast-path signers equivocated against the main-lane order. Emit
+    // a slashing event and refuse to accumulate. The receiver re-runs
+    // this check at every fast-path cert arrival; if the main-lane
+    // confirmation hasn't yet caught up to lineage_round+K, the window
+    // simply has fewer txs to compare against, and a later main-lane
+    // commit may surface a conflict on the next arrival of this key.
+    let window_snapshot: Vec<MainLaneTx> = inner
+        .main_lane_index
+        .iter()
+        .copied()
+        .filter(|ml| {
+            ml.round > cert.tx.lineage_round
+                && ml.round <= cert.tx.lineage_round + FAST_PATH_CONFIRMATION_K as Round
+        })
+        .collect();
+    if !is_main_lane_consistent(&cert, &window_snapshot) {
+        let slashed: Vec<AuthorityId> = cert.signers.iter().copied().collect();
+        log.emit(
+            Event::now(self_label, Lane::FastPath, "slashed")
+                .with_cert_hash(&cert.tx.payload_digest)
+                .with_round(cert.tx.lineage_round),
+        );
+        tracing::warn!(
+            object = ?cert.tx.object.0,
+            nonce = cert.tx.nonce,
+            conflicting_signers = ?slashed,
+            "fastpath: K-binding violation — main-lane conflict in window \
+             ({}, {}] — 100% slashing",
+            cert.tx.lineage_round,
+            cert.tx.lineage_round + FAST_PATH_CONFIRMATION_K as Round,
+        );
+        return;
     }
 
     if inner.fastpath_committed.contains(&key) {
@@ -1080,6 +1127,15 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
             {
                 let mut inner = state.inner.lock().await;
                 let _ = execute_block(&mut inner.substrate, &block);
+                // IQ-003: index single-owner-equivalent main-lane txs so
+                // the fast-path receiver can K-binding cross-check.
+                // Skip governance/admin intents — only state-touching
+                // transfers can conflict with a fast-path cert.
+                for intent in &intents {
+                    if let Some(ml_tx) = intent_to_main_lane_tx(intent, cert_round, h) {
+                        inner.main_lane_index.push(ml_tx);
+                    }
+                }
             }
 
             // DAG-S27.3: apply Phase G governance intents at commit time.
@@ -1140,6 +1196,38 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
                 "auto-ejected on detected authority equivocation"
             );
         }
+    }
+}
+
+/// IQ-003: translate a main-lane `Intent` to a `MainLaneTx` for the
+/// fast-path binding window cross-check. Returns `None` for intents
+/// that can't conflict with a fast-path cert (governance, etc.).
+///
+/// The translation models `Transfer { from, to, amount }` as a
+/// single-owner state change on object `from`: the `OwnedObjectId` is
+/// the sender's 20-byte address zero-padded to 32 bytes, the
+/// `payload_digest` is `blake3(bincode((to, amount)))`. The fast-path
+/// proposer must compute the same digest for the matching transaction
+/// so the cross-check is symmetric.
+fn intent_to_main_lane_tx(intent: &Intent, round: Round, lineage: CertHash) -> Option<MainLaneTx> {
+    match intent {
+        Intent::Transfer { from, to, amount } => {
+            let mut object_bytes = [0u8; 32];
+            object_bytes[..from.len()].copy_from_slice(from);
+            let payload_bytes = bincode::serialize(&(to, amount)).ok()?;
+            let payload_digest: [u8; 32] = blake3::hash(&payload_bytes).into();
+            Some(MainLaneTx {
+                round,
+                object: OwnedObjectId(object_bytes),
+                payload_digest,
+                lineage,
+            })
+        }
+        // Governance / admission / ejection intents don't touch a
+        // single-owner object; they can't conflict with a fast-path cert.
+        Intent::AdmitAuthority { .. }
+        | Intent::ExitAuthority { .. }
+        | Intent::EjectAuthority { .. } => None,
     }
 }
 
@@ -1970,6 +2058,122 @@ mod tests {
             committed_before,
             "equivocating cert must not change committed state"
         );
+    }
+
+    /// IQ-003 — K-binding cross-check (paper §6.4 / Invariant 5).
+    ///
+    /// Drives `handle_fastpath_cert` against a pre-seeded `main_lane_index`
+    /// to exercise both branches of the new check at the unit level (no
+    /// multi-daemon spin-up — that variant lives in the perf testbed):
+    ///
+    /// 1. **Slash path:** a fast-path cert whose `(object, payload_digest)`
+    ///    conflicts with a main-lane tx in the binding window
+    ///    `(lineage_round, lineage_round + K]` is rejected and produces no
+    ///    pending or committed state. This is the equivocation signal the
+    ///    paper requires the receiver to surface.
+    /// 2. **Consistent path:** a fast-path cert for a different object
+    ///    (no main-lane conflict) accumulates normally. Confirms the
+    ///    K-binding check is not a blanket reject.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fastpath_k_binding_slashes_on_main_lane_conflict() {
+        let n = 4u32;
+        let manifest = GenesisManifest {
+            network_id: "fp-k-binding-4n".into(),
+            validators: (0..n)
+                .map(|i| GenesisValidator {
+                    authority_id: i,
+                    label: format!("v{}", i),
+                    mldsa_public_key_hex: "00".into(),
+                    bls_public_key_hex: "00".into(),
+                    validator_stake_gsx: 1_000,
+                    authority_stake_gsx: 1_000,
+                })
+                .collect(),
+            corridors: Vec::new(),
+            rounds_per_epoch: 1024,
+        };
+        let (log, _log_task) =
+            EventLog::start(&std::env::temp_dir().join("gsx-fp-k-binding-test.ndjson"))
+                .await
+                .unwrap();
+        let state = Arc::new(State::new(&manifest));
+        let outbound: HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>> = HashMap::new();
+        let self_id: AuthorityId = 0;
+
+        // ── Pre-seed the main-lane index with a tx for OBJECT_A at
+        // round 5 with payload P_main. The fast-path cert below will
+        // carry the same object but payload P_fp != P_main, within the
+        // K=4 binding window.
+        let object_a = OwnedObjectId([0xAA; 32]);
+        let main_payload: [u8; 32] = [0x11; 32];
+        {
+            let mut inner = state.inner.lock().await;
+            inner.main_lane_index.push(MainLaneTx {
+                round: 5,
+                object: object_a,
+                payload_digest: main_payload,
+                lineage: CertHash([0xDE; 32]),
+            });
+        }
+
+        // ── Conflicting cert: same object, different payload, lineage at
+        // round 3 (window = (3, 7], which includes the seeded round 5).
+        let conflicting_tx = gsx_fastpath::cert::FastPathTx {
+            object: object_a,
+            owner: gsx_fastpath::cert::OwnerAddress([0xCD; 32]),
+            nonce: 1,
+            lineage: CertHash([0; 32]),
+            lineage_round: 3,
+            payload_digest: [0x22; 32], // != main_payload
+        };
+        let conflicting_key = State::fastpath_key(&conflicting_tx);
+        let conflicting_cert = gsx_fastpath::cert::FastPathCert {
+            tx: conflicting_tx,
+            signers: BTreeSet::from([1u32]),
+        };
+
+        handle_fastpath_cert(&state, self_id, conflicting_cert, "v0", &log, &outbound).await;
+
+        {
+            let inner = state.inner.lock().await;
+            assert!(
+                !inner.fastpath_pending.contains_key(&conflicting_key),
+                "K-binding violator must not accumulate into fastpath_pending"
+            );
+            assert!(
+                !inner.fastpath_committed.contains(&conflicting_key),
+                "K-binding violator must not reach fastpath_committed"
+            );
+        }
+
+        // ── Positive control: a cert for a DIFFERENT object should
+        // accumulate normally (the K-binding check is per-object, not a
+        // blanket reject).
+        let object_b = OwnedObjectId([0xBB; 32]);
+        let consistent_tx = gsx_fastpath::cert::FastPathTx {
+            object: object_b,
+            owner: gsx_fastpath::cert::OwnerAddress([0xCD; 32]),
+            nonce: 1,
+            lineage: CertHash([0; 32]),
+            lineage_round: 3,
+            payload_digest: [0x33; 32],
+        };
+        let consistent_key = State::fastpath_key(&consistent_tx);
+        let consistent_cert = gsx_fastpath::cert::FastPathCert {
+            tx: consistent_tx,
+            signers: BTreeSet::from([1u32]),
+        };
+
+        handle_fastpath_cert(&state, self_id, consistent_cert, "v0", &log, &outbound).await;
+
+        {
+            let inner = state.inner.lock().await;
+            assert!(
+                inner.fastpath_pending.contains_key(&consistent_key)
+                    || inner.fastpath_committed.contains(&consistent_key),
+                "consistent cert must accumulate or commit (no spurious K-binding reject)"
+            );
+        }
     }
 
     /// Smoke test for the LTP attestation receiver (DAG-S23).
