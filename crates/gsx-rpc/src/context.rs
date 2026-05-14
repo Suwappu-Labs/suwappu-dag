@@ -55,6 +55,72 @@ pub struct BalanceView {
     pub balance: String,
 }
 
+/// JSON-safe projection of an Intent — the daemon's typed enum,
+/// translated to a polymorphic shape so the SDK doesn't need to know
+/// about the Rust-side enum discriminants. Each Intent kind sets
+/// `kind` to the discriminant name in snake_case and includes its own
+/// fields. Wallets/explorers should switch on `kind`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum IntentView {
+    /// `Intent::Transfer { from, to, amount }`. Addresses are 20-byte
+    /// hex (0x-prefixed). Amount is a decimal string (u128).
+    Transfer {
+        from: String,
+        to: String,
+        amount: String,
+    },
+    /// `Intent::AdmitAuthority`. Stake is a decimal string for u128
+    /// future-compat; the underlying field is u64.
+    AdmitAuthority {
+        authority_id: u32,
+        stake_gsx: String,
+        /// ML-DSA-65 public key bytes, hex-encoded.
+        mldsa_public_key_hex: String,
+        /// BLS12-381 G1 public key bytes, hex-encoded.
+        bls_public_key_hex: String,
+    },
+    /// `Intent::ExitAuthority { authority_id }`.
+    ExitAuthority { authority_id: u32 },
+    /// `Intent::EjectAuthority { authority_id, proof_ref }`. proof_ref
+    /// is 32-byte hex (0x-prefixed).
+    EjectAuthority {
+        authority_id: u32,
+        proof_ref: String,
+    },
+}
+
+/// JSON-safe projection of a committed block. `cert_hash` is the
+/// authoritative key — clients can fetch a block by round (which
+/// resolves via the round index) and the response includes the cert
+/// hash so a follow-up by-hash request stays consistent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockView {
+    /// DAG round this block was committed at.
+    pub round: u64,
+    /// 32-byte cert hash (0x-prefixed hex). Identity for cross-API joins.
+    pub cert_hash: String,
+    /// Ordered intents in this block. `[]` for empty blocks (governance-only).
+    pub intents: Vec<IntentView>,
+}
+
+/// JSON-safe projection of a single committed transaction (one
+/// intent inside its block). The `index` is the position within
+/// `BlockView.intents` so a paginated fetch can navigate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransactionView {
+    /// 32-byte intent hash (0x-prefixed hex).
+    pub tx_hash: String,
+    /// DAG round of the committing block.
+    pub round: u64,
+    /// 32-byte committing cert hash (0x-prefixed hex).
+    pub cert_hash: String,
+    /// Position within `block.intents`.
+    pub index: usize,
+    /// The intent payload itself.
+    pub intent: IntentView,
+}
+
 /// Read-only view over the node state needed by the JSON-RPC methods.
 ///
 /// Implementers must guarantee:
@@ -85,6 +151,22 @@ pub trait StateView: Send + Sync + 'static {
     /// "explicitly zero." Adapters MUST NOT treat a zero return as
     /// NotFound.
     fn balance_for(&self, address: [u8; 20]) -> impl std::future::Future<Output = u128> + Send;
+
+    /// Look up a committed block by round. Returns `None` if no block
+    /// has been committed at that round yet (either because the round
+    /// is in the future or because the leader was skipped under the
+    /// indirect commit rule).
+    fn block_at_round(
+        &self,
+        round: u64,
+    ) -> impl std::future::Future<Output = Option<BlockView>> + Send;
+
+    /// Look up a committed transaction by its intent hash. Returns
+    /// `None` if the hash has never been observed in a committed block.
+    fn transaction_by_hash(
+        &self,
+        tx_hash: [u8; 32],
+    ) -> impl std::future::Future<Output = Option<TransactionView>> + Send;
 }
 
 /// Concrete context handle passed into the router. Wraps an

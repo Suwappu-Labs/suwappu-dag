@@ -71,6 +71,8 @@ async fn dispatch<S: StateView>(
         "gsx_getValidatorRegistry" => methods::get_validator_registry(state, params).await,
         "gsx_getStake" => methods::get_stake(state, params).await,
         "gsx_getBalance" => methods::get_balance(state, params).await,
+        "gsx_getBlock" => methods::get_block(state, params).await,
+        "gsx_getTransaction" => methods::get_transaction(state, params).await,
         unknown => Err(RpcError::MethodNotFound(unknown.into())),
     }
 }

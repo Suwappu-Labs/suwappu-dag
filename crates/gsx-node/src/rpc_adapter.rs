@@ -13,9 +13,48 @@
 
 use std::sync::Arc;
 
-use gsx_rpc::context::{AuthorityMemberView, EpochView, StateView, ValidatorMemberView};
+use gsx_execution::Intent;
+use gsx_rpc::context::{
+    AuthorityMemberView, BlockView, EpochView, IntentView, StateView, TransactionView,
+    ValidatorMemberView,
+};
 
 use crate::daemon::State;
+
+/// Translate a daemon `Intent` into the JSON-safe `IntentView`
+/// projection. Pure function; no state access. Address + stake +
+/// proof_ref bytes are hex-encoded with `0x` prefix to match the rest
+/// of the RPC surface (BalanceView, BlockView.cert_hash, etc).
+fn intent_to_view(intent: &Intent) -> IntentView {
+    match intent {
+        Intent::Transfer { from, to, amount } => IntentView::Transfer {
+            from: format!("0x{}", hex::encode(from)),
+            to: format!("0x{}", hex::encode(to)),
+            amount: amount.to_string(),
+        },
+        Intent::AdmitAuthority {
+            authority_id,
+            stake_gsx,
+            mldsa_public_key,
+            bls_public_key,
+        } => IntentView::AdmitAuthority {
+            authority_id: *authority_id,
+            stake_gsx: stake_gsx.to_string(),
+            mldsa_public_key_hex: hex::encode(mldsa_public_key),
+            bls_public_key_hex: hex::encode(bls_public_key),
+        },
+        Intent::ExitAuthority { authority_id } => IntentView::ExitAuthority {
+            authority_id: *authority_id,
+        },
+        Intent::EjectAuthority {
+            authority_id,
+            proof_ref,
+        } => IntentView::EjectAuthority {
+            authority_id: *authority_id,
+            proof_ref: format!("0x{}", hex::encode(proof_ref)),
+        },
+    }
+}
 
 /// Read-only adapter wrapping the daemon's shared `Arc<State>`.
 pub struct NodeStateView {
@@ -68,5 +107,48 @@ impl StateView for NodeStateView {
         use gsx_execution::Substrate;
         let inner = self.state.inner.lock().await;
         inner.substrate.balance(&address)
+    }
+
+    async fn block_at_round(&self, round: u64) -> Option<BlockView> {
+        // Resolve round → cert hash via the O(log n) index. Then look
+        // up the block payload from state.blocks. Two locks, but no
+        // guard held across .await — snapshot the cert hash, drop the
+        // inner guard, then take the blocks lock (parking_lot, sync).
+        let cert_hash = {
+            let inner = self.state.inner.lock().await;
+            inner.blocks_by_round.get(&round).copied()
+        }?;
+        let block_intents = {
+            let blocks = self.state.blocks.lock();
+            blocks.get(&cert_hash).map(|b| b.intents.clone())
+        }?;
+        Some(BlockView {
+            round,
+            cert_hash: format!("0x{}", hex::encode(cert_hash.0)),
+            intents: block_intents.iter().map(intent_to_view).collect(),
+        })
+    }
+
+    async fn transaction_by_hash(&self, tx_hash: [u8; 32]) -> Option<TransactionView> {
+        // Resolve tx-hash → (round, cert, index) via the O(1) index,
+        // then load the block and slice out the specific intent. Same
+        // lock-discipline as block_at_round.
+        let (round, cert_hash, index) = {
+            let inner = self.state.inner.lock().await;
+            inner.tx_to_block.get(&tx_hash).copied()
+        }?;
+        let intent = {
+            let blocks = self.state.blocks.lock();
+            blocks
+                .get(&cert_hash)
+                .and_then(|b| b.intents.get(index).cloned())
+        }?;
+        Some(TransactionView {
+            tx_hash: format!("0x{}", hex::encode(tx_hash)),
+            round,
+            cert_hash: format!("0x{}", hex::encode(cert_hash.0)),
+            index,
+            intent: intent_to_view(&intent),
+        })
     }
 }

@@ -33,10 +33,12 @@ import {
 import type {
   AuthorityMemberView,
   BalanceView,
+  BlockView,
   EpochView,
   JsonRpcRequest,
   JsonRpcResponse,
   StakeEntry,
+  TransactionView,
   ValidatorMemberView,
 } from "./types.js";
 
@@ -136,6 +138,47 @@ export class Client {
           : `0x${address}`
         : `0x${bytesToHex(address)}`;
     return this.call<BalanceView>("gsx_getBalance", { address: hexAddr });
+  }
+
+  /**
+   * Committed block at `round`. Returns `null` for the application-level
+   * NotFound (no block at that round); throws on other errors. Switch
+   * on each `intent.kind` to access variant-specific fields.
+   */
+  async getBlock(round: number): Promise<BlockView | null> {
+    try {
+      return await this.call<BlockView>("gsx_getBlock", { round });
+    } catch (err) {
+      if (err instanceof RpcError && err.code === -32000) return null;
+      throw err;
+    }
+  }
+
+  /**
+   * Committed transaction by intent hash. The hash may be:
+   *   - a 32-byte `Uint8Array`, or
+   *   - a hex string (with or without `0x` prefix).
+   *
+   * Returns `null` for the application-level NotFound; throws on
+   * other errors.
+   */
+  async getTransaction(
+    txHash: Uint8Array | string,
+  ): Promise<TransactionView | null> {
+    const hexHash =
+      typeof txHash === "string"
+        ? txHash.startsWith("0x") || txHash.startsWith("0X")
+          ? txHash
+          : `0x${txHash}`
+        : `0x${bytesToHex(txHash)}`;
+    try {
+      return await this.call<TransactionView>("gsx_getTransaction", {
+        tx_hash: hexHash,
+      });
+    } catch (err) {
+      if (err instanceof RpcError && err.code === -32000) return null;
+      throw err;
+    }
   }
 
   /**

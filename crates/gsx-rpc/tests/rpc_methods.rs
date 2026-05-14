@@ -10,7 +10,10 @@ use axum::{
     http::{Request, StatusCode},
 };
 use gsx_rpc::{
-    context::{AuthorityMemberView, EpochView, RpcContext, StateView, ValidatorMemberView},
+    context::{
+        AuthorityMemberView, BlockView, EpochView, IntentView, RpcContext, StateView,
+        TransactionView, ValidatorMemberView,
+    },
     router,
 };
 use http_body_util::BodyExt;
@@ -24,6 +27,8 @@ struct MockState {
     validators: Vec<ValidatorMemberView>,
     stakes: std::collections::BTreeMap<u32, u128>,
     balances: std::collections::BTreeMap<[u8; 20], u128>,
+    blocks_by_round: std::collections::BTreeMap<u64, BlockView>,
+    tx_by_hash: std::collections::BTreeMap<[u8; 32], TransactionView>,
 }
 
 impl StateView for MockState {
@@ -42,6 +47,12 @@ impl StateView for MockState {
     async fn balance_for(&self, address: [u8; 20]) -> u128 {
         self.balances.get(&address).copied().unwrap_or(0)
     }
+    async fn block_at_round(&self, round: u64) -> Option<BlockView> {
+        self.blocks_by_round.get(&round).cloned()
+    }
+    async fn transaction_by_hash(&self, tx_hash: [u8; 32]) -> Option<TransactionView> {
+        self.tx_by_hash.get(&tx_hash).cloned()
+    }
 }
 
 fn fixture() -> Arc<RpcContext<MockState>> {
@@ -51,6 +62,34 @@ fn fixture() -> Arc<RpcContext<MockState>> {
     let mut balances = std::collections::BTreeMap::new();
     balances.insert([0xAA; 20], 1_000u128);
     balances.insert([0xBB; 20], 2_500u128);
+
+    // Block index fixture: round 42 has a single Transfer intent.
+    let cert_hex = format!("0x{}", "ab".repeat(32));
+    let tx_hex = format!("0x{}", "cd".repeat(32));
+    let transfer_view = IntentView::Transfer {
+        from: format!("0x{}", "11".repeat(20)),
+        to: format!("0x{}", "22".repeat(20)),
+        amount: "42".into(),
+    };
+    let block_42 = BlockView {
+        round: 42,
+        cert_hash: cert_hex.clone(),
+        intents: vec![transfer_view.clone()],
+    };
+    let mut blocks_by_round = std::collections::BTreeMap::new();
+    blocks_by_round.insert(42u64, block_42);
+    let tx_view = TransactionView {
+        tx_hash: tx_hex.clone(),
+        round: 42,
+        cert_hash: cert_hex.clone(),
+        index: 0,
+        intent: transfer_view,
+    };
+    let mut tx_hash_bytes = [0u8; 32];
+    tx_hash_bytes.fill(0xCD);
+    let mut tx_by_hash = std::collections::BTreeMap::new();
+    tx_by_hash.insert(tx_hash_bytes, tx_view);
+
     Arc::new(RpcContext::new(Arc::new(MockState {
         epoch: EpochView {
             current: 7,
@@ -81,6 +120,8 @@ fn fixture() -> Arc<RpcContext<MockState>> {
         ],
         stakes,
         balances,
+        blocks_by_round,
+        tx_by_hash,
     })))
 }
 
@@ -337,6 +378,120 @@ async fn get_balance_wrong_length_is_invalid_params() {
             "id": 14,
             "method": "gsx_getBalance",
             "params": { "address": "0xdeadbeef" },  // 4 bytes, not 20
+        }),
+    )
+    .await;
+
+    assert_eq!(resp["error"]["code"], -32602);
+}
+
+#[tokio::test]
+async fn get_block_object_params() {
+    let ctx = fixture();
+    let resp = post_rpc(
+        ctx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 20,
+            "method": "gsx_getBlock",
+            "params": { "round": 42 },
+        }),
+    )
+    .await;
+
+    assert_eq!(resp["result"]["round"], 42);
+    assert_eq!(
+        resp["result"]["cert_hash"],
+        format!("0x{}", "ab".repeat(32))
+    );
+    let intents = resp["result"]["intents"].as_array().unwrap();
+    assert_eq!(intents.len(), 1);
+    assert_eq!(intents[0]["kind"], "transfer");
+    assert_eq!(intents[0]["amount"], "42");
+}
+
+#[tokio::test]
+async fn get_block_positional_params() {
+    let ctx = fixture();
+    let resp = post_rpc(
+        ctx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 21,
+            "method": "gsx_getBlock",
+            "params": [42],
+        }),
+    )
+    .await;
+
+    assert_eq!(resp["result"]["round"], 42);
+}
+
+#[tokio::test]
+async fn get_block_not_found() {
+    let ctx = fixture();
+    let resp = post_rpc(
+        ctx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 22,
+            "method": "gsx_getBlock",
+            "params": { "round": 999 },
+        }),
+    )
+    .await;
+
+    // -32000 application-level NotFound (consistent with gsx_getStake).
+    assert_eq!(resp["error"]["code"], -32000);
+}
+
+#[tokio::test]
+async fn get_transaction_by_hash() {
+    let ctx = fixture();
+    let resp = post_rpc(
+        ctx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 23,
+            "method": "gsx_getTransaction",
+            "params": { "tx_hash": format!("0x{}", "cd".repeat(32)) },
+        }),
+    )
+    .await;
+
+    assert_eq!(resp["result"]["tx_hash"], format!("0x{}", "cd".repeat(32)));
+    assert_eq!(resp["result"]["round"], 42);
+    assert_eq!(resp["result"]["index"], 0);
+    assert_eq!(resp["result"]["intent"]["kind"], "transfer");
+}
+
+#[tokio::test]
+async fn get_transaction_not_found() {
+    let ctx = fixture();
+    let resp = post_rpc(
+        ctx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 24,
+            "method": "gsx_getTransaction",
+            "params": { "tx_hash": format!("0x{}", "ff".repeat(32)) },
+        }),
+    )
+    .await;
+
+    assert_eq!(resp["error"]["code"], -32000);
+}
+
+#[tokio::test]
+async fn get_transaction_bad_hash_is_invalid_params() {
+    let ctx = fixture();
+    let resp = post_rpc(
+        ctx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 25,
+            "method": "gsx_getTransaction",
+            "params": { "tx_hash": "0xdeadbeef" },  // 4 bytes, not 32
         }),
     )
     .await;

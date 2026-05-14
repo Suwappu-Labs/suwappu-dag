@@ -71,6 +71,71 @@ export interface BalanceView {
 }
 
 /**
+ * Polymorphic intent shape. The `kind` discriminant tells you which
+ * variant you got; switch on it to access variant-specific fields.
+ * Hex fields are `0x`-prefixed lowercase. u128 fields are decimal
+ * strings (same convention as `ValidatorMemberView.stake_gsx`).
+ */
+export type IntentView =
+  | {
+      kind: "transfer";
+      /** 20-byte sender address, `0x`-prefixed hex. */
+      from: string;
+      /** 20-byte recipient address, `0x`-prefixed hex. */
+      to: string;
+      /** u128 amount, decimal string. */
+      amount: string;
+    }
+  | {
+      kind: "admit_authority";
+      authority_id: number;
+      /** Stake as a decimal string. */
+      stake_gsx: string;
+      /** ML-DSA-65 public key, hex-encoded (no `0x` prefix). */
+      mldsa_public_key_hex: string;
+      /** BLS12-381 G1 public key, hex-encoded (no `0x` prefix). */
+      bls_public_key_hex: string;
+    }
+  | {
+      kind: "exit_authority";
+      authority_id: number;
+    }
+  | {
+      kind: "eject_authority";
+      authority_id: number;
+      /** 32-byte slashing-proof reference, `0x`-prefixed hex. */
+      proof_ref: string;
+    };
+
+/**
+ * Return shape for {@link Client.getBlock}.
+ */
+export interface BlockView {
+  /** DAG round this block was committed at. */
+  round: number;
+  /** 32-byte cert hash (`0x`-prefixed hex). */
+  cert_hash: string;
+  /** Ordered intents in this block. Empty for governance-only blocks. */
+  intents: IntentView[];
+}
+
+/**
+ * Return shape for {@link Client.getTransaction}.
+ */
+export interface TransactionView {
+  /** 32-byte intent hash (`0x`-prefixed hex). */
+  tx_hash: string;
+  /** DAG round of the committing block. */
+  round: number;
+  /** 32-byte committing cert hash (`0x`-prefixed hex). */
+  cert_hash: string;
+  /** Position within `BlockView.intents`. */
+  index: number;
+  /** The intent payload itself. */
+  intent: IntentView;
+}
+
+/**
  * JSON-RPC 2.0 request envelope.
  *
  * The SDK builds this internally — callers don't normally construct one
