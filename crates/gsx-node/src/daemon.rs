@@ -2802,39 +2802,51 @@ mod tests {
         let hashes = client.submit_batch(intents.clone()).await.unwrap();
         assert_eq!(hashes.len(), 3);
 
-        // Wait for the round driver to author + commit the block carrying
-        // these intents. Single-node cluster commits every tick, so a
-        // few ticks is plenty.
+        // Wait for the round driver to author + commit blocks carrying
+        // these intents. They may land in one block or split across
+        // adjacent rounds depending on mpsc-drain vs tick scheduling;
+        // either is correct.
+        let intent_hashes: Vec<[u8; 32]> = intents
+            .iter()
+            .map(|i| *blake3::hash(&bincode::serialize(i).unwrap()).as_bytes())
+            .collect();
         let mut found = false;
         for _ in 0..30 {
             tokio::time::sleep(Duration::from_millis(100)).await;
             let inner = d.state.inner.lock().await;
-            if intents.iter().enumerate().all(|(idx, intent)| {
-                let bytes = bincode::serialize(intent).unwrap();
-                let h: [u8; 32] = *blake3::hash(&bytes).as_bytes();
-                inner.tx_to_block.get(&h).is_some_and(|(_, _, i)| *i == idx)
-            }) {
+            if intent_hashes
+                .iter()
+                .all(|h| inner.tx_to_block.contains_key(h))
+            {
                 found = true;
                 break;
             }
         }
         assert!(found, "tx_to_block did not index every submitted intent");
 
-        // Cross-check the round-keyed index agrees with tx_to_block on
-        // the (round, cert) pair.
+        // For every indexed intent: the round-keyed index must agree on
+        // the cert hash, and the block whose cert is committed must
+        // contain the intent at the recorded position.
         let inner = d.state.inner.lock().await;
-        let h0 = blake3::hash(&bincode::serialize(&intents[0]).unwrap());
-        let (round, cert_hash, _) = inner.tx_to_block.get(h0.as_bytes()).copied().unwrap();
-        assert_eq!(inner.blocks_by_round.get(&round).copied(), Some(cert_hash));
-
-        // Every intent landed in the same block (single-node, single-tick).
-        for (idx, intent) in intents.iter().enumerate() {
-            let bytes = bincode::serialize(intent).unwrap();
-            let h: [u8; 32] = *blake3::hash(&bytes).as_bytes();
-            let (r, c, i) = inner.tx_to_block.get(&h).copied().unwrap();
-            assert_eq!(r, round, "round mismatch for intent {}", idx);
-            assert_eq!(c, cert_hash, "cert mismatch for intent {}", idx);
-            assert_eq!(i, idx, "index mismatch for intent {}", idx);
+        let blocks = d.state.blocks.lock();
+        for h in &intent_hashes {
+            let (round, cert_hash, idx) = inner.tx_to_block.get(h).copied().unwrap();
+            assert_eq!(
+                inner.blocks_by_round.get(&round).copied(),
+                Some(cert_hash),
+                "blocks_by_round disagrees with tx_to_block at round {}",
+                round,
+            );
+            let block = blocks
+                .get(&cert_hash)
+                .expect("cert hash from tx_to_block must resolve in state.blocks");
+            let stored = bincode::serialize(&block.intents[idx]).unwrap();
+            let stored_hash: [u8; 32] = *blake3::hash(&stored).as_bytes();
+            assert_eq!(
+                &stored_hash, h,
+                "intent at block.intents[{}] does not match tx_to_block key",
+                idx,
+            );
         }
     }
 }
