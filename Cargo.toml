@@ -13,6 +13,7 @@ members = [
     "crates/gsx-node",
     "crates/gsx-rpc",
     "crates/gsx-indexer",
+    "crates/gsx-mempool",
     "clients/rust-sdk",
 ]
 
@@ -45,6 +46,7 @@ gsx-ltp = { path = "crates/gsx-ltp" }
 gsx-transport = { path = "crates/gsx-transport" }
 gsx-rpc = { path = "crates/gsx-rpc" }
 gsx-indexer = { path = "crates/gsx-indexer" }
+gsx-mempool = { path = "crates/gsx-mempool" }
 
 # Post-quantum primitives (FIPS 203 / 204)
 pqcrypto-mldsa = "0.1"
