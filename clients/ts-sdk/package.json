@@ -1,0 +1,49 @@
+{
+  "name": "@gsx/client",
+  "version": "0.1.0",
+  "description": "TypeScript client SDK for the gsx-dag JSON-RPC query API.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --experimental-test-coverage test/*.test.ts",
+    "clean": "rm -rf dist"
+  },
+  "keywords": [
+    "gsx",
+    "blockchain",
+    "json-rpc",
+    "client",
+    "sdk"
+  ],
+  "author": "Global Settlement Network <eng@globalsettlement.com>",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/GlobalSettlementNetwork/gsx-dag.git",
+    "directory": "clients/ts-sdk"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "typescript": "^5.6"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
