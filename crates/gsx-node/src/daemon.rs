@@ -1616,8 +1616,13 @@ mod tests {
                     label: format!("v{}", i),
                     mldsa_public_key_hex: pk_hex.clone(),
                     bls_public_key_hex: "00".into(),
-                    validator_stake_gsx: 1_000,
-                    authority_stake_gsx: 1_000,
+                    // Issue #28: stakes must clear AUTHORITY_STAKE_THRESHOLD_GSX
+                    // (100_000) and VALIDATOR_STAKE_THRESHOLD_GSX (25_000) so
+                    // AuthorityRegistry::admit succeeds — otherwise the registry
+                    // stays empty and the new signature-verify path rejects
+                    // every submit with `unknown signer`.
+                    validator_stake_gsx: 150_000,
+                    authority_stake_gsx: 150_000,
                 })
                 .collect(),
             corridors: Vec::new(),
@@ -1689,8 +1694,10 @@ mod tests {
                     label: format!("v{}", i),
                     mldsa_public_key_hex: pk_hex.clone(),
                     bls_public_key_hex: "00".into(),
-                    validator_stake_gsx: 1_000,
-                    authority_stake_gsx: 1_000,
+                    // See #28 note on the first client test — stakes must
+                    // clear both ring thresholds for the registry to populate.
+                    validator_stake_gsx: 150_000,
+                    authority_stake_gsx: 150_000,
                 })
                 .collect(),
             corridors: Vec::new(),
@@ -2103,8 +2110,10 @@ mod tests {
                     label: format!("v{}", i),
                     mldsa_public_key_hex: pk_hex.clone(),
                     bls_public_key_hex: "00".into(),
-                    validator_stake_gsx: 1_000,
-                    authority_stake_gsx: 1_000,
+                    // See #28 note on the first client test — stakes must
+                    // clear both ring thresholds for the registry to populate.
+                    validator_stake_gsx: 150_000,
+                    authority_stake_gsx: 150_000,
                 })
                 .collect(),
             corridors: Vec::new(),
