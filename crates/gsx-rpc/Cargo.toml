@@ -1,0 +1,31 @@
+[package]
+name = "gsx-rpc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+description = "JSON-RPC query API for the gsx-dag node. Phase 2.1 read-only MVP."
+
+[dependencies]
+gsx-consensus = { workspace = true }
+gsx-authority = { workspace = true }
+gsx-validator = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+
+tokio = { workspace = true }
+axum = "0.7"
+
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
