@@ -572,6 +572,19 @@ async fn ingest_cert(
                     inner.inflight_fetch_history.remove(&h);
                     // DAG-S27.7: promote pending stake on first cert.
                     promote_stake = inner.pending_stake.remove(&c.author).map(|s| (c.author, s));
+                    // Issue #18 (deferred activation): if this is the
+                    // first cert from a newly-admitted authority, bump
+                    // `n_authorities` now. Until this moment, the new
+                    // authority was in the registry (so its certs are
+                    // recognized) but didn't count toward the quorum
+                    // denominator — `quorum_threshold` and round-robin
+                    // `leader` rotation continued using the pre-admit
+                    // `n`. Pairing this bump with the pending_stake
+                    // promotion guarantees the bump happens iff the
+                    // authority has actually shown up on the wire.
+                    if promote_stake.is_some() {
+                        inner.n_authorities = inner.n_authorities.saturating_add(1);
+                    }
                     // DAG-S30.1: incremental equivocation detection.
                     let key = (c.author, round);
                     match inner.seen_at.get(&key).copied() {
@@ -1321,8 +1334,21 @@ async fn apply_governance_intent(
                             id: *authority_id,
                             stake_gsx: *stake_gsx as u128,
                         });
-                    let new_n = state.authority_registry.read().await.len() as u32;
-                    state.inner.lock().await.n_authorities = new_n;
+                    // Issue #18 (deferred activation): the registries are
+                    // grown to the new size so the new authority's certs
+                    // are recognized when they arrive, but
+                    // `inner.n_authorities` is INTENTIONALLY NOT bumped
+                    // here. Bumping it now would (a) collapse the
+                    // `quorum_threshold(n)` jump that the post-admit
+                    // cluster can't meet under jitter, and (b) shift the
+                    // round-robin `leader(round, n)` rotation onto an
+                    // authority that hasn't yet produced any cert. We
+                    // defer the bump to the first-cert ingest site
+                    // (`ingest_cert`, next to the existing pending_stake
+                    // promotion), where we have proof the new authority
+                    // is actually participating. See the
+                    // `bft-stake-denominator-deadlock-on-admit` skill for
+                    // the full class of bug this avoids.
                     log.emit(
                         Event::now(self_label, Lane::Main, "authority_admitted")
                             .with_round(cert_round)
