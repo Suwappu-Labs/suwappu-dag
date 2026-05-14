@@ -30,7 +30,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use tokio::{
     io::AsyncWriteExt,
-    sync::{mpsc, Mutex},
+    sync::{broadcast, mpsc, Mutex},
 };
 
 /// Which lane a given event belongs to. Matches the paper's three on-chain
@@ -179,9 +179,16 @@ impl Event {
 /// The writer task buffers up to 4096 events; if it can't keep up, oldest
 /// events are dropped (matches the "best-effort metrics" model — we'd rather
 /// keep the validator running than block consensus on log flushing).
+///
+/// T6: `EventLog` ALSO fans every emitted event out on a `broadcast::Sender`
+/// so the JSON-RPC `gsx_subscribeEvents` WebSocket can stream live without
+/// re-reading the file. Same best-effort semantics: a slow subscriber gets
+/// `Lagged` from `recv()` and can decide whether to skip or reconnect. The
+/// disk-write mpsc path is unchanged.
 #[derive(Clone)]
 pub struct EventLog {
     tx: mpsc::Sender<Event>,
+    broadcast_tx: broadcast::Sender<Event>,
 }
 
 impl EventLog {
@@ -204,6 +211,11 @@ impl EventLog {
         let file = Arc::new(Mutex::new(file));
 
         let (tx, mut rx) = mpsc::channel::<Event>(4096);
+        // T6: a bounded ring buffer for live subscribers. 1024 slots ≈
+        // a few seconds of events at peak rate; a subscriber that falls
+        // further behind gets `Lagged` and must reconnect (matches the
+        // disk-side "drop on backpressure" semantics).
+        let (broadcast_tx, _) = broadcast::channel::<Event>(1024);
         let handle = tokio::spawn(async move {
             while let Some(ev) = rx.recv().await {
                 let mut line = match serde_json::to_string(&ev) {
@@ -221,12 +233,26 @@ impl EventLog {
             }
         });
 
-        Ok((Self { tx }, handle))
+        Ok((Self { tx, broadcast_tx }, handle))
     }
 
     /// Send an event. Non-blocking; drops if the writer is back-pressured.
+    /// T6: also fans out on the broadcast channel so live WebSocket
+    /// subscribers see the event without re-reading the file. A
+    /// broadcast `send` with no active receivers returns `Err(_)` —
+    /// we ignore that exactly like the mpsc-full case.
     pub fn emit(&self, ev: Event) {
+        let _ = self.broadcast_tx.send(ev.clone());
         let _ = self.tx.try_send(ev);
+    }
+
+    /// T6: subscribe to live events. The returned receiver gets every
+    /// event emitted from this moment forward (no replay of past
+    /// events — see the indexer's checkpoint-and-resume pattern for
+    /// catch-up). Slow consumers eventually return `RecvError::Lagged`
+    /// and should reconnect.
+    pub fn subscribe(&self) -> broadcast::Receiver<Event> {
+        self.broadcast_tx.subscribe()
     }
 }
 

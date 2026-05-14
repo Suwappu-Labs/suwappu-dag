@@ -1,32 +1,37 @@
-//! JSON-RPC 2.0 query API for the gsx-dag node (Phase 2.1 MVP).
+//! JSON-RPC 2.0 query API for the gsx-dag node.
 //!
-//! The transport is a single POST endpoint at `/` accepting a JSON-RPC
-//! request body and returning a JSON-RPC response body. WebSocket /
-//! subscription transport is out of scope for this MVP — `subscribeEvents`
-//! lands in a follow-on PR with `axum::extract::ws`.
+//! Two transports:
 //!
-//! Methods (read-only, P1 surface for tooling + indexer bootstrap):
+//! - `POST /` — JSON-RPC request/response for all unary methods
+//!   (read + write).
+//! - `GET /ws` — WebSocket subscription for `gsx_subscribeEvents`
+//!   live event stream (T6).
 //!
-//! - `gsx_getEpoch` — current epoch + last boundary round + rounds_per_epoch
-//! - `gsx_getAuthorityRegistry` — ordered list of Authority Ring members
-//! - `gsx_getValidatorRegistry` — ordered list of Validator Ring members
-//! - `gsx_getStake { authority_id }` — stake for a specific authority id
+//! Method surface (current):
 //!
-//! Deferred to follow-on PRs (each touches state not currently indexed
-//! for fast lookup, or duplicates an existing write path):
+//! Read:
+//! - `gsx_getEpoch`
+//! - `gsx_getAuthorityRegistry`
+//! - `gsx_getValidatorRegistry`
+//! - `gsx_getStake { authority_id }`
+//! - `gsx_getBalance { address: hex }`
+//! - `gsx_getBlock { round }`
+//! - `gsx_getTransaction { tx_hash: hex }`
 //!
-//! - `gsx_getBlock`, `gsx_getTransaction` — need a queryable index over
-//!   `state.blocks` (round → block, tx-hash → block).
-//! - `gsx_getBalance` — needs a substrate-state read API.
-//! - `gsx_submitIntent` — duplicates the existing `ClientMessage::Submit`
-//!   write path; merging the two needs careful design.
-//! - `gsx_subscribeEvents` (WS) — needs WebSocket transport.
+//! Write:
+//! - `gsx_submitIntent { intent: hex, signature: hex, signer_pubkey_hash: hex }`
+//!
+//! Streaming (WebSocket):
+//! - `gsx_subscribeEvents` — live stream of every emitted event
+//!   (one JSON `EventView` per text frame; `{"error":"lagged",...}`
+//!   on backpressure).
 
 pub mod context;
 pub mod error;
 pub mod methods;
 pub mod router;
 pub mod types;
+pub mod ws;
 
 use std::{net::SocketAddr, sync::Arc};
 

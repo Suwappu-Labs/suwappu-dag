@@ -104,6 +104,42 @@ pub struct BlockView {
     pub intents: Vec<IntentView>,
 }
 
+/// JSON-safe projection of a single emitted event (T6). The shape
+/// mirrors `gsx_node::events::Event` field-for-field, kept in
+/// `gsx-rpc` so the trait doesn't drag in a dependency on `gsx-node`.
+/// The lane discriminant uses `serde(rename_all = "lowercase")` to
+/// match the on-disk NDJSON values (`"main"`, `"fastpath"`, `"ltp"`,
+/// `"client"`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventView {
+    /// Unix milliseconds.
+    pub t_ms: u64,
+    /// Validator label (matches `NodeConfig::self_id`).
+    pub region: String,
+    /// Lane name as a lowercase string.
+    pub lane: String,
+    /// Action verb (e.g. `"proposed"`, `"committed"`, `"submitted"`).
+    pub event: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub round: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cert_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intent_hashes: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authority_id: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Rolling 60-second receive count (set on synthetic
+    /// `wire_metrics` events from the daemon).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub received_60s: Option<u64>,
+}
+
 /// JSON-safe projection of a single committed transaction (one
 /// intent inside its block). The `index` is the position within
 /// `BlockView.intents` so a paginated fetch can navigate.
@@ -185,6 +221,17 @@ pub trait StateView: Send + Sync + 'static {
         signature: Vec<u8>,
         signer_pubkey_hash: [u8; 32],
     ) -> impl std::future::Future<Output = Result<[u8; 32], SubmitIntentError>> + Send;
+
+    /// T6: subscribe to live events. The receiver gets every event
+    /// emitted from this moment forward — no replay of historical
+    /// events. Indexers should catch up by querying `gsx_getBlock`
+    /// from the last known round before subscribing.
+    ///
+    /// Sync (non-`Future`) because `tokio::sync::broadcast::Sender::subscribe`
+    /// is already sync and doesn't need state-lock acquisition. The
+    /// returned receiver is per-subscriber: dropping it cancels the
+    /// subscription cleanly.
+    fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<EventView>;
 }
 
 /// Error taxonomy returned by `StateView::submit_intent`. Maps directly
