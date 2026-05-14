@@ -41,7 +41,6 @@ use gsx_fastpath::{
 };
 use gsx_ltp::{AttestationPayload, ChainId, Corridor, CorridorAttestation, CorridorId, SuperNode};
 use gsx_validator::{ValidatorMember, ValidatorRegistry};
-use tokio::sync::Mutex;
 use tracing::debug;
 
 use crate::{
@@ -50,108 +49,64 @@ use crate::{
     wire::{BlockPayload, PeerId, Wire, WireConfig, WireEvent, WireMessage, WireSplit},
 };
 
-/// Pending main-lane state. Shared between the inbox handler and the round
-/// driver, both of which mutate it.
+/// DAG-S31.2 shared validator state with per-field locking.
+///
+/// Pre-S31 every code path took one `Arc<State>` lock,
+/// serialising run_inbox + run_round_driver + try_commit at the same
+/// point. S30 perf-testnet measurement on ap-northeast-1 showed the
+/// round driver couldn't acquire the lock often enough to author
+/// rounds; commits collapsed cluster-wide.
+///
+/// S31.2 splits the hot fields into individual locks. Lock
+/// acquisition order to avoid deadlocks:
+///   `inner → dag → stake_table → authority_registry →
+///    validator_registry → votes → blocks → committed`.
+///
+/// Daemon holds `Arc<State>` directly (no outer mutex).
 pub(crate) struct State {
-    pub(crate) dag: DagStore,
+    pub(crate) dag: tokio::sync::RwLock<DagStore>,
+    pub(crate) votes: tokio::sync::Mutex<HashMap<CertHash, Vec<Vote>>>,
+    pub(crate) blocks: tokio::sync::Mutex<HashMap<CertHash, BlockPayload>>,
+    pub(crate) committed: tokio::sync::Mutex<HashSet<CertHash>>,
+    pub(crate) stake_table: tokio::sync::RwLock<StakeTable>,
+    pub(crate) authority_registry: tokio::sync::RwLock<AuthorityRegistry>,
+    pub(crate) validator_registry: tokio::sync::RwLock<ValidatorRegistry>,
+    pub(crate) inner: tokio::sync::Mutex<StateInner>,
+}
+
+/// Cold-path fields. Pre-S31 these lived on `State` directly; now
+/// grouped under one `Mutex<StateInner>` because access frequency
+/// doesn't warrant individual locks.
+pub(crate) struct StateInner {
     pub(crate) substrate: InMemorySubstrate,
-    pub(crate) stake_table: StakeTable,
-    pub(crate) votes: HashMap<CertHash, Vec<Vote>>,
-    pub(crate) blocks: HashMap<CertHash, BlockPayload>,
-    pub(crate) committed: HashSet<CertHash>,
     pub(crate) last_authored_round: Option<u64>,
-    /// Highest round number observed in any cert inserted into the local
-    /// DAG — own or peer. The synchronizer (S21.3) uses this to detect
-    /// catch-up gaps; the round driver does not consult it directly (a
-    /// node always advances one round at a time from its own last
-    /// authored round — see S21.5 / IQ-002).
+    /// Highest round observed across own + peer certs. Used by the
+    /// synchronizer (S21.3) to detect catch-up gaps.
     pub(crate) max_observed_round: u64,
-    /// **DAG-S27.2 state split.** `pending_intents` is no longer a
-    /// field on `State`. It lived here pre-S27 and was the headline
-    /// throughput bottleneck: `client.rs::handle_conn` held this
-    /// `Arc<Mutex<State>>` to `.push()` an intent, contending with
-    /// `run_inbox` + `run_round_driver` + `run_sync_sweeper`. Now
-    /// intents flow over an `mpsc::unbounded_channel` whose sender
-    /// is given to `client::run` and whose receiver is drained by
-    /// the round driver — no lock contention with consensus surfaces.
     pub(crate) n_authorities: u32,
-    /// Certs received whose parents aren't yet in the local DAG. Keyed
-    /// by the missing parent hash — when that hash later inserts,
-    /// every orphan waiting on it is retried in a work-queue cascade.
-    /// See [`ingest_cert`] and [`run_sync_sweeper`].
+    /// Certs received whose parents aren't yet in the local DAG.
     pub(crate) orphans: HashMap<CertHash, Vec<Certificate>>,
     /// Cert hashes for which a `GetCert` request is outstanding.
-    /// Prevents fan-out storms when many orphans reference the same
-    /// missing parent and lets the periodic sweeper re-issue requests
-    /// without unbounded multiplicity.
     pub(crate) inflight_fetches: HashSet<CertHash>,
-    /// Fast-path lane (paper §6.4 / IQ-003, DAG-S22) — accumulating
-    /// partial certs keyed by `(object, nonce)`. Each entry's
-    /// `signers` set unions across received broadcasts; quorum
-    /// reaches when `|signers| >= fast_path_quorum_size(n)`.
+    /// Fast-path lane (DAG-S22) — accumulating partial certs.
     pub(crate) fastpath_pending: HashMap<FastPathKey, FastPathCert>,
-    /// Fast-path txs that reached quorum locally. Subsequent peer
-    /// broadcasts for the same key are deduped against this set.
     pub(crate) fastpath_committed: HashSet<FastPathKey>,
-    /// First payload digest seen per `(object, nonce)`. Equivocation
-    /// detection: if a later broadcast for the same key carries a
-    /// different payload digest, the signers of the conflicting cert
-    /// have equivocated (paper §6.4 Invariant 5 — 100% slashing).
     pub(crate) fastpath_first_payload: HashMap<FastPathKey, [u8; 32]>,
-    /// LTP corridor attestations (paper §10, DAG-S23). Latest attested
-    /// payload per corridor id — the live "source-chain finality
-    /// observed at height H with state root R" attestation that the
-    /// settlement chain refers to when authoring cross-chain
-    /// transactions. MVP stores latest only; historical attestations
-    /// are durably anchored via the LTP commitment-node pipeline
-    /// (separate ops sprint).
+    /// LTP corridor attestations (DAG-S23). Latest attested payload
+    /// per corridor id.
     pub(crate) ltp_latest: HashMap<CorridorId, AttestationPayload>,
-    /// Count of LTP attestations received since startup. Used by the
-    /// `ltp_attested` event log entries and operational metrics.
     pub(crate) ltp_received_count: u64,
-    /// Corridor registry from genesis manifest (DAG-S24). Keyed by
-    /// `(source_chain, target_chain)` — inbound attestations look up
-    /// their corridor here, then verify against the 9 pinned BLS
-    /// pubkeys via `gsx_ltp::verify_attestation`. Empty map = MVP
-    /// pre-S24 mode (accept unverified).
     pub(crate) corridors: HashMap<(ChainId, ChainId), Corridor>,
-    /// Validator-set governance epoch state (DAG-S25 Phase G).
-    /// `current` is the epoch number, `rounds_per_epoch` defines the
-    /// boundary cadence. Queued governance actions apply at
-    /// `last_boundary_round + rounds_per_epoch`.
     pub(crate) epoch: EpochState,
-    /// Authority Ring registry (DAG-S27.3). Populated from the genesis
-    /// manifest at startup; mutated by `Intent::AdmitAuthority` /
-    /// `Intent::ExitAuthority` / `Intent::EjectAuthority` as they
-    /// land in committed blocks. Mirrored on every validator (the
-    /// committed block stream is the canonical source of truth).
-    pub(crate) authority_registry: AuthorityRegistry,
-    /// Validator Ring registry (DAG-S27.3). Same lifecycle as
-    /// `authority_registry`. MVP keeps the two rings 1:1 (one validator
-    /// per authority) — paper §4.1 allows them to diverge but no
-    /// production traffic exercises a split today.
-    pub(crate) validator_registry: ValidatorRegistry,
-    /// Stake values for authorities admitted via `Intent::AdmitAuthority`
-    /// that have not yet authored their first cert (DAG-S27.7). Held
-    /// off `stake_table` to keep the joint-quorum *denominator* from
-    /// inflating before the new authority can vote — otherwise a
-    /// single admit permanently stalls the cluster (joint-quorum
-    /// threshold rises by 2 × admitted_stake / 3, but achievable vote
-    /// stake stays unchanged until the new authority comes online).
-    /// Stake is promoted into `stake_table` on first-cert insertion
-    /// in `ingest_cert`.
+    /// Stake parked for newly-admitted authorities (DAG-S27.7);
+    /// promoted into `state.stake_table` on first-cert insertion.
     pub(crate) pending_stake: BTreeMap<AuthorityId, gsx_consensus::Stake>,
-    /// **DAG-S30.1 incremental slashing scan.** `(author, round) →
-    /// first cert hash observed` so equivocation detection becomes
-    /// O(1) per cert insertion instead of O(dag) per try_commit. The
-    /// pre-S30 code called `detect_authority_equivocation(&s.dag)` on
-    /// every try_commit invocation (~16/sec/node), each walk
-    /// linearising the entire DAG. At 9.6k certs that's ~150k
-    /// ops/sec just for slashing checks — enough to starve the
-    /// round driver under cross-region load.
+    /// `(author, round) → first cert hash observed` (DAG-S30.1).
+    /// Equivocation detection O(1) per insert instead of O(dag)
+    /// per try_commit.
     pub(crate) seen_at: BTreeMap<(AuthorityId, Round), CertHash>,
-    /// Equivocations detected at insertion time (DAG-S30.1).
-    /// `try_commit` drains this queue instead of re-scanning the DAG.
+    /// Equivocations detected at insertion time. `try_commit`
+    /// drains this queue instead of re-scanning the DAG.
     pub(crate) detected_equivocations: Vec<EquivocationProof>,
 }
 
@@ -252,9 +207,6 @@ impl State {
         let mut validator_registry = ValidatorRegistry::new();
         for v in &manifest.validators {
             stake_table.insert(v.authority_id, v.validator_stake_gsx as u128);
-            // Best-effort admission. Genesis manifests are operator-signed,
-            // so admission failures here mean a malformed manifest — emit a
-            // warning rather than panic so the node still boots in dev.
             let mldsa_bytes = hex::decode(&v.mldsa_public_key_hex).unwrap_or_default();
             let _bls_bytes = hex::decode(&v.bls_public_key_hex).unwrap_or_default();
             if let Err(e) = authority_registry.admit(AuthorityMember {
@@ -262,52 +214,46 @@ impl State {
                 stake_gsx: v.authority_stake_gsx,
                 public_key_bytes: mldsa_bytes,
             }) {
-                tracing::warn!(
-                    auth = v.authority_id,
-                    err = %e,
-                    "genesis: skipping malformed authority"
-                );
+                tracing::warn!(auth = v.authority_id, err = %e, "genesis: skipping malformed authority");
             }
             if let Err(e) = validator_registry.admit(ValidatorMember {
                 id: v.authority_id,
                 stake_gsx: v.validator_stake_gsx as u128,
             }) {
-                tracing::warn!(
-                    val = v.authority_id,
-                    err = %e,
-                    "genesis: skipping malformed validator"
-                );
+                tracing::warn!(val = v.authority_id, err = %e, "genesis: skipping malformed validator");
             }
         }
         let n = manifest.validators.len() as u32;
         Self {
-            dag: DagStore::new(),
-            substrate: InMemorySubstrate::new(),
-            stake_table,
-            votes: HashMap::new(),
-            blocks: HashMap::new(),
-            committed: HashSet::new(),
-            last_authored_round: None,
-            max_observed_round: 0,
-            n_authorities: n,
-            orphans: HashMap::new(),
-            inflight_fetches: HashSet::new(),
-            fastpath_pending: HashMap::new(),
-            fastpath_committed: HashSet::new(),
-            fastpath_first_payload: HashMap::new(),
-            ltp_latest: HashMap::new(),
-            ltp_received_count: 0,
-            corridors: load_corridors(manifest),
-            epoch: EpochState {
-                current: 0,
-                rounds_per_epoch: manifest.rounds_per_epoch,
-                last_boundary_round: 0,
-            },
-            authority_registry,
-            validator_registry,
-            pending_stake: BTreeMap::new(),
-            seen_at: BTreeMap::new(),
-            detected_equivocations: Vec::new(),
+            dag: tokio::sync::RwLock::new(DagStore::new()),
+            votes: tokio::sync::Mutex::new(HashMap::new()),
+            blocks: tokio::sync::Mutex::new(HashMap::new()),
+            committed: tokio::sync::Mutex::new(HashSet::new()),
+            stake_table: tokio::sync::RwLock::new(stake_table),
+            authority_registry: tokio::sync::RwLock::new(authority_registry),
+            validator_registry: tokio::sync::RwLock::new(validator_registry),
+            inner: tokio::sync::Mutex::new(StateInner {
+                substrate: InMemorySubstrate::new(),
+                last_authored_round: None,
+                max_observed_round: 0,
+                n_authorities: n,
+                orphans: HashMap::new(),
+                inflight_fetches: HashSet::new(),
+                fastpath_pending: HashMap::new(),
+                fastpath_committed: HashSet::new(),
+                fastpath_first_payload: HashMap::new(),
+                ltp_latest: HashMap::new(),
+                ltp_received_count: 0,
+                corridors: load_corridors(manifest),
+                epoch: EpochState {
+                    current: 0,
+                    rounds_per_epoch: manifest.rounds_per_epoch,
+                    last_boundary_round: 0,
+                },
+                pending_stake: BTreeMap::new(),
+                seen_at: BTreeMap::new(),
+                detected_equivocations: Vec::new(),
+            }),
         }
     }
 
@@ -315,25 +261,26 @@ impl State {
     pub(crate) fn fastpath_key(tx: &FastPathTx) -> FastPathKey {
         (tx.object, tx.nonce)
     }
+}
 
-    /// Count distinct authors that have a cert at `round` in the local DAG.
-    /// Mysticeti-C admits a cert at round R+1 once `quorum_threshold(n)`
-    /// distinct authors are observed at round R.
-    fn distinct_authors_at(&self, round: u64) -> u32 {
-        (0..self.n_authorities)
-            .filter(|a| cert_at(&self.dag, round, *a).is_some())
-            .count() as u32
-    }
+/// Count distinct authors with a cert at `round` in the local DAG.
+/// Mysticeti-C admits round R+1 once `quorum_threshold(n)` distinct
+/// authors are observed at round R. Free function (was on `&State`
+/// pre-S31.2) because the caller now passes the DAG read guard.
+fn distinct_authors_at(dag: &DagStore, round: u64, n_authorities: u32) -> u32 {
+    (0..n_authorities)
+        .filter(|a| cert_at(dag, round, *a).is_some())
+        .count() as u32
+}
 
-    /// Round R parents = every cert at round R-1 the local DAG has observed.
-    fn parents_for_round(&self, round: u64) -> Vec<CertHash> {
-        if round == 0 {
-            return Vec::new();
-        }
-        (0..self.n_authorities)
-            .filter_map(|a| cert_at(&self.dag, round - 1, a))
-            .collect()
+/// Round R parents = every cert at round R-1 the local DAG has observed.
+fn parents_for_round(dag: &DagStore, round: u64, n_authorities: u32) -> Vec<CertHash> {
+    if round == 0 {
+        return Vec::new();
     }
+    (0..n_authorities)
+        .filter_map(|a| cert_at(dag, round - 1, a))
+        .collect()
 }
 
 /// Running daemon handle. Drop to stop all background tasks.
@@ -345,7 +292,7 @@ pub struct Daemon {
     /// the upcoming load-generator + metrics modules that will read commit
     /// progress and inject intents).
     #[allow(dead_code)]
-    pub(crate) state: Arc<Mutex<State>>,
+    pub(crate) state: Arc<State>,
 }
 
 impl Drop for Daemon {
@@ -383,7 +330,7 @@ impl Daemon {
             tasks: mut wire_tasks,
         } = wire.split();
         let outbound = Arc::new(outbound);
-        let state = Arc::new(Mutex::new(State::new(&manifest)));
+        let state = Arc::new(State::new(&manifest));
 
         // DAG-S27.2: client intent submissions flow over an unbounded
         // mpsc instead of contending on the State mutex. Sender goes
@@ -462,7 +409,7 @@ impl Daemon {
 async fn run_inbox(
     self_label: String,
     self_id: AuthorityId,
-    state: Arc<Mutex<State>>,
+    state: Arc<State>,
     outbound: Arc<HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>>,
     log: EventLog,
     mut inbox: tokio::sync::mpsc::Receiver<WireEvent>,
@@ -479,18 +426,19 @@ async fn run_inbox(
                         .with_cert_hash(&h.0)
                         .with_peer(from.0.clone()),
                 );
-                let mut s = state.lock().await;
-                let inserted = ingest_cert(&mut s, cert, &from, &outbound);
-                drop(s);
+                let inserted = ingest_cert(&state, cert, &from, &outbound).await;
                 for ic in inserted {
                     let vote = Vote {
                         validator: self_id,
                         candidate: ic.hash,
                     };
-                    {
-                        let mut s = state.lock().await;
-                        s.votes.entry(ic.hash).or_default().push(vote);
-                    }
+                    state
+                        .votes
+                        .lock()
+                        .await
+                        .entry(ic.hash)
+                        .or_default()
+                        .push(vote);
                     log.emit(
                         Event::now(&self_label, Lane::Main, "voted")
                             .with_round(ic.round)
@@ -498,23 +446,23 @@ async fn run_inbox(
                     );
                     broadcast(&outbound, WireMessage::Vote(vote));
                 }
-                let mut s = state.lock().await;
-                try_commit(&mut s, &self_label, &log);
+                try_commit(&state, &self_label, &log).await;
             }
             WireMessage::Block(block) => {
-                let mut s = state.lock().await;
-                s.blocks.insert(block.cert_hash, block);
+                state.blocks.lock().await.insert(block.cert_hash, block);
             }
             WireMessage::Vote(vote) => {
-                let mut s = state.lock().await;
-                s.votes.entry(vote.candidate).or_default().push(vote);
-                try_commit(&mut s, &self_label, &log);
+                state
+                    .votes
+                    .lock()
+                    .await
+                    .entry(vote.candidate)
+                    .or_default()
+                    .push(vote);
+                try_commit(&state, &self_label, &log).await;
             }
             WireMessage::GetCert(hash) => {
-                let cert_opt = {
-                    let s = state.lock().await;
-                    s.dag.get(&hash).cloned()
-                };
+                let cert_opt = state.dag.read().await.get(&hash).cloned();
                 if let Some(cert) = cert_opt {
                     if let Some(tx) = outbound.get(&from) {
                         let _ = tx.try_send(WireMessage::Cert(cert));
@@ -522,12 +470,10 @@ async fn run_inbox(
                 }
             }
             WireMessage::FastPath(cert) => {
-                let mut s = state.lock().await;
-                handle_fastpath_cert(&mut s, self_id, cert, &self_label, &log, &outbound);
+                handle_fastpath_cert(&state, self_id, cert, &self_label, &log, &outbound).await;
             }
             WireMessage::Ltp(att) => {
-                let mut s = state.lock().await;
-                handle_ltp_attestation(&mut s, att, &self_label, &log);
+                handle_ltp_attestation(&state, att, &self_label, &log).await;
             }
             WireMessage::Ping(t) => {
                 if let Some(tx) = outbound.get(&from) {
@@ -553,8 +499,8 @@ struct IngestedCert {
 ///
 /// This is the synchronous-fetch leg of S21.3. The periodic sweeper
 /// (`run_sync_sweeper`) handles requests that never get answered.
-fn ingest_cert(
-    s: &mut State,
+async fn ingest_cert(
+    state: &State,
     cert: Certificate,
     from: &PeerId,
     outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
@@ -564,56 +510,59 @@ fn ingest_cert(
     while let Some(c) = work.pop() {
         let h = c.hash();
         let round = c.round;
-        match s.dag.insert(c.clone()) {
+        // Acquire dag write lock briefly for the insert.
+        let insert_result = state.dag.write().await.insert(c.clone());
+        match insert_result {
             Ok(_) => {
-                if round > s.max_observed_round {
-                    s.max_observed_round = round;
-                }
-                s.inflight_fetches.remove(&h);
-                // DAG-S27.7: promote pending stake for this author on
-                // their first cert. The new authority has demonstrated
-                // liveness (signed a cert), so it's safe to add their
-                // stake to the joint-quorum denominator now.
-                if let Some(stake) = s.pending_stake.remove(&c.author) {
-                    s.stake_table.insert(c.author, stake);
-                }
-                // DAG-S30.1: incremental equivocation detection. Record
-                // the first cert hash for (author, round); if we ever
-                // see a second distinct hash for the same slot, that
-                // author has equivocated. O(log n) per insert vs the
-                // O(dag) full-rescan that pre-S30 ran on every
-                // try_commit. The queued proof is consumed in
-                // try_commit's slashing section. (No `Entry` API here
-                // because the Occupied arm would hold a mutable borrow
-                // of `s.seen_at` while we need to push onto
-                // `s.detected_equivocations`.)
-                let key = (c.author, round);
-                match s.seen_at.get(&key).copied() {
-                    None => {
-                        s.seen_at.insert(key, h);
+                // Update cold-path inner state.
+                let promote_stake: Option<(AuthorityId, gsx_consensus::Stake)>;
+                let unblocked: Option<Vec<Certificate>>;
+                {
+                    let mut inner = state.inner.lock().await;
+                    if round > inner.max_observed_round {
+                        inner.max_observed_round = round;
                     }
-                    Some(prev) if prev != h => {
-                        s.detected_equivocations.push(EquivocationProof {
-                            author: c.author,
-                            round,
-                            cert_a: prev,
-                            cert_b: h,
-                        });
+                    inner.inflight_fetches.remove(&h);
+                    // DAG-S27.7: promote pending stake on first cert.
+                    promote_stake = inner.pending_stake.remove(&c.author).map(|s| (c.author, s));
+                    // DAG-S30.1: incremental equivocation detection.
+                    let key = (c.author, round);
+                    match inner.seen_at.get(&key).copied() {
+                        None => {
+                            inner.seen_at.insert(key, h);
+                        }
+                        Some(prev) if prev != h => {
+                            inner.detected_equivocations.push(EquivocationProof {
+                                author: c.author,
+                                round,
+                                cert_a: prev,
+                                cert_b: h,
+                            });
+                        }
+                        _ => {}
                     }
-                    _ => {}
+                    unblocked = inner.orphans.remove(&h);
+                }
+                if let Some((id, stake)) = promote_stake {
+                    state.stake_table.write().await.insert(id, stake);
                 }
                 inserted.push(IngestedCert { hash: h, round });
-                if let Some(unblocked) = s.orphans.remove(&h) {
+                if let Some(unblocked) = unblocked {
                     work.extend(unblocked);
                 }
             }
             Err(ConsensusError::UnknownParent(missing)) => {
-                if s.orphans.values().map(|v| v.len()).sum::<usize>() >= MAX_ORPHAN_CERTS {
-                    debug!(peer = %from.0, "inbox: orphan buffer full, dropping cert");
-                    continue;
+                let send_fetch;
+                {
+                    let mut inner = state.inner.lock().await;
+                    if inner.orphans.values().map(|v| v.len()).sum::<usize>() >= MAX_ORPHAN_CERTS {
+                        debug!(peer = %from.0, "inbox: orphan buffer full, dropping cert");
+                        continue;
+                    }
+                    inner.orphans.entry(missing).or_default().push(c);
+                    send_fetch = inner.inflight_fetches.insert(missing);
                 }
-                s.orphans.entry(missing).or_default().push(c);
-                if s.inflight_fetches.insert(missing) {
+                if send_fetch {
                     fetch_cert_from_peers(missing, Some(from), outbound);
                 }
             }
@@ -666,8 +615,8 @@ fn fetch_cert_from_peers(
 /// Used by the client listener (load generator submits a `FastPathTx`
 /// over a separate socket) and by integration tests.
 #[allow(dead_code)]
-pub(crate) fn propose_fastpath_tx(
-    s: &mut State,
+pub(crate) async fn propose_fastpath_tx(
+    state: &State,
     self_id: AuthorityId,
     tx: FastPathTx,
     self_label: &str,
@@ -675,12 +624,12 @@ pub(crate) fn propose_fastpath_tx(
     outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
 ) {
     let key = State::fastpath_key(&tx);
-    if s.fastpath_committed.contains(&key) {
+    let mut inner = state.inner.lock().await;
+    if inner.fastpath_committed.contains(&key) {
         return;
     }
-    // Record first-seen payload for this key (used by equivocation
-    // detection on the receive side).
-    s.fastpath_first_payload
+    inner
+        .fastpath_first_payload
         .entry(key)
         .or_insert(tx.payload_digest);
     let mut signers = BTreeSet::new();
@@ -689,7 +638,7 @@ pub(crate) fn propose_fastpath_tx(
         tx: tx.clone(),
         signers: signers.clone(),
     };
-    s.fastpath_pending.insert(key, cert.clone());
+    inner.fastpath_pending.insert(key, cert.clone());
     log.emit(
         Event::now(self_label, Lane::FastPath, "proposed")
             .with_cert_hash(&tx.payload_digest)
@@ -698,11 +647,10 @@ pub(crate) fn propose_fastpath_tx(
     for out in outbound.values() {
         let _ = out.try_send(WireMessage::FastPath(cert.clone()));
     }
-    // Single-authority committees commit immediately.
-    let q = fast_path_quorum_size(s.n_authorities);
+    let q = fast_path_quorum_size(inner.n_authorities);
     if signers.len() as u32 >= q {
-        s.fastpath_pending.remove(&key);
-        s.fastpath_committed.insert(key);
+        inner.fastpath_pending.remove(&key);
+        inner.fastpath_committed.insert(key);
         log.emit(
             Event::now(self_label, Lane::FastPath, "committed")
                 .with_cert_hash(&tx.payload_digest)
@@ -729,8 +677,8 @@ pub(crate) fn propose_fastpath_tx(
 /// eligible AND not equivocating, we add our signer and re-broadcast
 /// so peers union our signature in too. This is the gossip-amplify
 /// step that drives quorum convergence.
-fn handle_fastpath_cert(
-    s: &mut State,
+async fn handle_fastpath_cert(
+    state: &State,
     self_id: AuthorityId,
     cert: FastPathCert,
     self_label: &str,
@@ -738,18 +686,18 @@ fn handle_fastpath_cert(
     outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
 ) {
     let key = State::fastpath_key(&cert.tx);
+    let mut inner = state.inner.lock().await;
 
     // Reject if any signer is outside committee bounds — Byzantine input.
     for &s_id in &cert.signers {
-        if s_id >= s.n_authorities {
+        if s_id >= inner.n_authorities {
             debug!(signer = s_id, "fastpath: signer outside committee");
             return;
         }
     }
 
-    // Equivocation check: if we've seen this key with a different
-    // payload digest, the new signers have equivocated.
-    if let Some(first_payload) = s.fastpath_first_payload.get(&key).copied() {
+    // Equivocation check.
+    if let Some(first_payload) = inner.fastpath_first_payload.get(&key).copied() {
         if first_payload != cert.tx.payload_digest {
             let slashed: Vec<AuthorityId> = cert.signers.iter().copied().collect();
             log.emit(
@@ -763,19 +711,19 @@ fn handle_fastpath_cert(
                 conflicting_signers = ?slashed,
                 "fastpath: equivocation detected — 100% slashing"
             );
-            return; // do not propagate or count the equivocating cert
+            return;
         }
     } else {
-        s.fastpath_first_payload.insert(key, cert.tx.payload_digest);
+        inner
+            .fastpath_first_payload
+            .insert(key, cert.tx.payload_digest);
     }
 
-    // Already locally committed — no further work.
-    if s.fastpath_committed.contains(&key) {
+    if inner.fastpath_committed.contains(&key) {
         return;
     }
 
-    // Union into the pending entry.
-    let entry = s
+    let entry = inner
         .fastpath_pending
         .entry(key)
         .or_insert_with(|| FastPathCert {
@@ -789,8 +737,6 @@ fn handle_fastpath_cert(
     }
     let post_count = entry.signers.len();
 
-    // First time we observe this tx → log "received". The proposer
-    // event is logged by `propose_fastpath` instead.
     if pre_count == 0 {
         log.emit(
             Event::now(self_label, Lane::FastPath, "received")
@@ -799,8 +745,6 @@ fn handle_fastpath_cert(
         );
     }
 
-    // If we haven't signed yet, sign and re-broadcast so peers can
-    // union our signature in.
     if !was_signed_by_self_before {
         entry.signers.insert(self_id);
         log.emit(
@@ -817,13 +761,12 @@ fn handle_fastpath_cert(
         }
     }
 
-    // Quorum check.
-    let q = fast_path_quorum_size(s.n_authorities);
-    if entry.signers.len() as u32 >= q {
-        let signers_count = entry.signers.len() as u32;
-        // Move from pending to committed.
-        s.fastpath_pending.remove(&key);
-        s.fastpath_committed.insert(key);
+    let signers_len = entry.signers.len() as u32;
+    let q = fast_path_quorum_size(inner.n_authorities);
+    if signers_len >= q {
+        let signers_count = signers_len;
+        inner.fastpath_pending.remove(&key);
+        inner.fastpath_committed.insert(key);
         log.emit(
             Event::now(self_label, Lane::FastPath, "committed")
                 .with_cert_hash(&cert.tx.payload_digest)
@@ -861,23 +804,23 @@ fn handle_fastpath_cert(
 /// accept the attestation unverified and log `ltp_unverified` — this
 /// matches the pre-S24 MVP behavior and is operationally useful for
 /// testnets without super-node infrastructure.
-fn handle_ltp_attestation(
-    s: &mut State,
+async fn handle_ltp_attestation(
+    state: &State,
     att: CorridorAttestation,
     self_label: &str,
     log: &EventLog,
 ) {
     let payload = att.payload.clone();
     let key = (payload.source_chain, payload.target_chain);
-    s.ltp_received_count += 1;
+    let mut inner = state.inner.lock().await;
+    inner.ltp_received_count += 1;
 
-    match s.corridors.get(&key) {
+    match inner.corridors.get(&key).cloned() {
         Some(corridor) => {
-            // Registry hit — verify against pinned BLS pubkeys.
             let corridor_id: CorridorId = corridor.id;
-            match gsx_ltp::verify_attestation(corridor, &att) {
+            match gsx_ltp::verify_attestation(&corridor, &att) {
                 Ok(()) => {
-                    s.ltp_latest.insert(corridor_id, payload.clone());
+                    inner.ltp_latest.insert(corridor_id, payload.clone());
                     log.emit(
                         Event::now(self_label, Lane::Ltp, "verified")
                             .with_round(payload.source_height)
@@ -906,11 +849,8 @@ fn handle_ltp_attestation(
             }
         }
         None => {
-            // Pre-S24 MVP fallback: no registered corridor → accept
-            // unverified. Production must populate corridors in
-            // genesis manifest before relying on LTP.
             let corridor_id = corridor_id_fallback(&payload);
-            s.ltp_latest.insert(corridor_id, payload.clone());
+            inner.ltp_latest.insert(corridor_id, payload.clone());
             log.emit(
                 Event::now(self_label, Lane::Ltp, "unverified")
                     .with_round(payload.source_height)
@@ -942,7 +882,7 @@ fn corridor_id_fallback(p: &AttestationPayload) -> CorridorId {
 /// Re-issue is multi-peer (`fetch_cert_from_peers` with no preference)
 /// so we rotate naturally rather than re-asking the same dropped peer.
 async fn run_sync_sweeper(
-    state: Arc<Mutex<State>>,
+    state: Arc<State>,
     outbound: Arc<HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>>,
 ) {
     let mut tick = tokio::time::interval(Duration::from_millis(SYNC_SWEEPER_INTERVAL_MS));
@@ -950,10 +890,14 @@ async fn run_sync_sweeper(
     tick.tick().await;
     loop {
         tick.tick().await;
-        let pending: Vec<CertHash> = {
-            let s = state.lock().await;
-            s.inflight_fetches.iter().copied().collect()
-        };
+        let pending: Vec<CertHash> = state
+            .inner
+            .lock()
+            .await
+            .inflight_fetches
+            .iter()
+            .copied()
+            .collect();
         for h in pending {
             fetch_cert_from_peers(h, None, &outbound);
         }
@@ -975,20 +919,23 @@ fn broadcast(outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
     }
 }
 
-fn try_commit(s: &mut State, self_label: &str, log: &EventLog) {
-    // Build the votes view once — re-derived inside loops would multiply
-    // work for no benefit; this function holds the State mutex.
-    let votes_flat: Vec<Vote> = s.votes.values().flatten().copied().collect();
-    let n = s.n_authorities;
-
-    // Try direct + indirect decision on every round we have seen at
-    // least one cert at. Indirect commit may pull in slots we haven't
-    // explicitly received votes for as long as their leader cert is in
-    // a later directly-decided anchor's causal history.
+async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
+    // Snapshot votes + n_authorities + candidate_rounds in brief locks
+    // up-front so the rest of the function operates on owned data.
+    let votes_flat: Vec<Vote> = state
+        .votes
+        .lock()
+        .await
+        .values()
+        .flatten()
+        .copied()
+        .collect();
+    let n = state.inner.lock().await.n_authorities;
     let candidate_rounds: BTreeSet<u64> = {
+        let dag = state.dag.read().await;
         let mut rounds = BTreeSet::new();
-        for h in s.dag.linearize() {
-            if let Some(c) = s.dag.get(&h) {
+        for h in dag.linearize() {
+            if let Some(c) = dag.get(&h) {
                 rounds.insert(c.round);
             }
         }
@@ -996,44 +943,48 @@ fn try_commit(s: &mut State, self_label: &str, log: &EventLog) {
     };
 
     for round in candidate_rounds {
-        let status = decide_slot(&s.dag, round, n);
+        let status = {
+            let dag = state.dag.read().await;
+            decide_slot(&dag, round, n)
+        };
         let leader_hash = match status {
             LeaderStatus::Direct(h) => h,
             LeaderStatus::Skip | LeaderStatus::Undecided => continue,
         };
 
-        if s.committed.contains(&leader_hash) {
+        if state.committed.lock().await.contains(&leader_hash) {
             continue;
         }
 
-        // Joint-quorum AND-gate: Authority side already passed via
-        // decide_slot. Validator-Ring stake side must also pass before
-        // we can finalize.
-        if !validator_quorum_met(&s.stake_table, leader_hash, &votes_flat) {
+        // Joint-quorum AND-gate: validator-ring stake side.
+        let stake_ok = {
+            let st = state.stake_table.read().await;
+            validator_quorum_met(&st, leader_hash, &votes_flat)
+        };
+        if !stake_ok {
             continue;
         }
 
-        // Commit the directly-decided leader plus every cert in its
-        // causal history — this is where indirect-decided earlier slots
-        // become observable. Walk the linearized history (deterministic
-        // order) and execute each.
-        for h in gsx_consensus::causal_history(&s.dag, leader_hash) {
-            if !s.committed.insert(h) {
+        let history = {
+            let dag = state.dag.read().await;
+            gsx_consensus::causal_history(&dag, leader_hash)
+        };
+        for h in history {
+            if !state.committed.lock().await.insert(h) {
                 continue;
             }
-            let cert_round = match s.dag.get(&h) {
+            let cert_round = match state.dag.read().await.get(&h) {
                 Some(c) => c.round,
                 None => continue,
             };
-            let intents = s
+            let intents = state
                 .blocks
+                .lock()
+                .await
                 .get(&h)
                 .map(|b| b.intents.clone())
                 .unwrap_or_default();
-            // DAG-S26.1: capture intent hashes for compliance trace
-            // before the intents are moved into the block. Same blake3
-            // the load generator records in its CSV — lets gsx-metrics
-            // join intent submission → finality across regions.
+            // DAG-S26.1: capture intent hashes for compliance trace.
             let intent_hashes: Vec<String> = intents
                 .iter()
                 .map(|i| {
@@ -1045,89 +996,15 @@ fn try_commit(s: &mut State, self_label: &str, log: &EventLog) {
                 round: cert_round,
                 intents: intents.clone(),
             };
-            let _ = execute_block(&mut s.substrate, &block);
+            // Substrate execution under inner lock.
+            {
+                let mut inner = state.inner.lock().await;
+                let _ = execute_block(&mut inner.substrate, &block);
+            }
 
             // DAG-S27.3: apply Phase G governance intents at commit time.
-            // The block has been substrate-executed (which currently no-ops
-            // governance variants — see gsx-execution/src/substrate.rs:189);
-            // the registry mutation is layered on top. Apply per-commit
-            // (not queued-until-boundary) so the registry stays consistent
-            // with the DAG and every validator that replays the same
-            // committed sequence converges to the same ring composition.
             for intent in &intents {
-                match intent {
-                    Intent::AdmitAuthority {
-                        authority_id,
-                        stake_gsx,
-                        mldsa_public_key,
-                        bls_public_key: _bls,
-                    } => {
-                        match s.authority_registry.admit(AuthorityMember {
-                            id: *authority_id,
-                            stake_gsx: *stake_gsx,
-                            public_key_bytes: mldsa_public_key.clone(),
-                        }) {
-                            Ok(()) => {
-                                // DAG-S27.7: park stake in pending_stake;
-                                // promotion into stake_table happens on the
-                                // new authority's first cert (ingest_cert).
-                                // Bumping stake_table here without bumping
-                                // achievable voting stake would inflate the
-                                // joint-quorum denominator and permanently
-                                // stall the cluster until the new authority
-                                // joined the mesh.
-                                s.pending_stake.insert(*authority_id, *stake_gsx as u128);
-                                let _ = s.validator_registry.admit(ValidatorMember {
-                                    id: *authority_id,
-                                    stake_gsx: *stake_gsx as u128,
-                                });
-                                s.n_authorities = s.authority_registry.len() as u32;
-                                log.emit(
-                                    Event::now(self_label, Lane::Main, "authority_admitted")
-                                        .with_round(cert_round)
-                                        .with_authority_id(*authority_id),
-                                );
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    auth = authority_id,
-                                    err = %e,
-                                    "admit rejected"
-                                );
-                            }
-                        }
-                    }
-                    Intent::ExitAuthority { authority_id } => {
-                        if s.authority_registry.remove(*authority_id).is_some() {
-                            s.validator_registry.remove(*authority_id);
-                            s.stake_table.remove(authority_id);
-                            s.pending_stake.remove(authority_id);
-                            s.n_authorities = s.authority_registry.len() as u32;
-                            log.emit(
-                                Event::now(self_label, Lane::Main, "authority_exited")
-                                    .with_round(cert_round)
-                                    .with_authority_id(*authority_id),
-                            );
-                        }
-                    }
-                    Intent::EjectAuthority {
-                        authority_id,
-                        proof_ref: _proof,
-                    } => {
-                        if s.authority_registry.remove(*authority_id).is_some() {
-                            s.validator_registry.remove(*authority_id);
-                            s.stake_table.remove(authority_id);
-                            s.pending_stake.remove(authority_id);
-                            s.n_authorities = s.authority_registry.len() as u32;
-                            log.emit(
-                                Event::now(self_label, Lane::Main, "authority_ejected")
-                                    .with_round(cert_round)
-                                    .with_authority_id(*authority_id),
-                            );
-                        }
-                    }
-                    Intent::Transfer { .. } => {}
-                }
+                apply_governance_intent(state, intent, cert_round, self_label, log).await;
             }
 
             log.emit(
@@ -1136,18 +1013,14 @@ fn try_commit(s: &mut State, self_label: &str, log: &EventLog) {
                     .with_cert_hash(&h.0)
                     .with_intent_hashes(intent_hashes),
             );
-            s.votes.remove(&h);
+            state.votes.lock().await.remove(&h);
 
-            // Epoch boundary detection (DAG-S25 Phase G). A commit
-            // landing at or past the next boundary advances the epoch
-            // and emits an `epoch_boundary` event. DAG-S27.3 applies
-            // registry mutations per-commit (above), so the boundary
-            // event today is informational — historical campaigns can
-            // still align reports to the per-epoch cadence.
-            if s.epoch.boundary_crossed_by(cert_round) {
-                let new_epoch = s.epoch.epoch_for(cert_round);
-                s.epoch.current = new_epoch;
-                s.epoch.last_boundary_round = cert_round;
+            // Epoch boundary detection (DAG-S25 Phase G).
+            let mut inner = state.inner.lock().await;
+            if inner.epoch.boundary_crossed_by(cert_round) {
+                let new_epoch = inner.epoch.epoch_for(cert_round);
+                inner.epoch.current = new_epoch;
+                inner.epoch.last_boundary_round = cert_round;
                 log.emit(
                     Event::now(self_label, Lane::Main, "epoch_boundary").with_round(cert_round),
                 );
@@ -1160,24 +1033,26 @@ fn try_commit(s: &mut State, self_label: &str, log: &EventLog) {
         }
     }
 
-    // DAG-S30.1: drain the equivocation queue populated incrementally
-    // in `ingest_cert` and the round driver. Pre-S30 we called
-    // `gsx_consensus::detect_authority_equivocation(&s.dag)` here,
-    // which linearised the entire DAG (O(n)) on every try_commit
-    // invocation — ~150k operations/sec at a 9.6k-cert DAG with 16
-    // try_commits/sec/node. CPU-bound on the slowest node and
-    // starved the round driver. The new path is O(1) per drained
-    // proof, with detection itself amortised at O(log n) per cert
-    // insertion (BTreeMap::entry).
-    let proofs: Vec<EquivocationProof> = s.detected_equivocations.drain(..).collect();
+    // DAG-S30.1: drain the equivocation queue.
+    let proofs: Vec<EquivocationProof> = state
+        .inner
+        .lock()
+        .await
+        .detected_equivocations
+        .drain(..)
+        .collect();
     for proof in proofs {
         let id = proof.author;
-        if s.authority_registry.contains(id) {
-            s.authority_registry.remove(id);
-            s.validator_registry.remove(id);
-            s.stake_table.remove(&id);
-            s.pending_stake.remove(&id);
-            s.n_authorities = s.authority_registry.len() as u32;
+        if state.authority_registry.read().await.contains(id) {
+            state.authority_registry.write().await.remove(id);
+            state.validator_registry.write().await.remove(id);
+            state.stake_table.write().await.remove(&id);
+            let new_n = state.authority_registry.read().await.len() as u32;
+            {
+                let mut inner = state.inner.lock().await;
+                inner.pending_stake.remove(&id);
+                inner.n_authorities = new_n;
+            }
             log.emit(Event::now(self_label, Lane::Main, "slashing_evidence").with_authority_id(id));
             log.emit(Event::now(self_label, Lane::Main, "authority_ejected").with_authority_id(id));
             tracing::warn!(
@@ -1186,17 +1061,106 @@ fn try_commit(s: &mut State, self_label: &str, log: &EventLog) {
             );
         }
     }
-    // NOTE: `detect_validator_double_vote` is intentionally NOT called
-    // here against the daemon's full vote set. That function flags any
-    // validator that voted for ≥2 distinct candidates, but the
-    // daemon's `votes` accumulates votes across *every cert in the
-    // DAG* — every validator legitimately votes for hundreds of
-    // distinct candidates over time. Calling the detector here would
-    // (and did, in pre-S27.7) eject every genesis validator on the
-    // first commit attempt. The detector is correct for per-round
-    // vote slices, which the wave-anchor logic doesn't yet expose.
-    // Move to a follow-on sprint that maintains a per-round vote
-    // map and runs the detector on each round's slice in isolation.
+}
+
+/// Apply a single governance Intent to State (DAG-S27.3).
+/// Extracted from try_commit's body so the S31.2 per-field-lock
+/// pattern stays readable. Lock acquisition order respects the
+/// canonical: stake_table → authority_registry → validator_registry → inner.
+async fn apply_governance_intent(
+    state: &State,
+    intent: &Intent,
+    cert_round: u64,
+    self_label: &str,
+    log: &EventLog,
+) {
+    match intent {
+        Intent::AdmitAuthority {
+            authority_id,
+            stake_gsx,
+            mldsa_public_key,
+            bls_public_key: _bls,
+        } => {
+            let admit_result = state
+                .authority_registry
+                .write()
+                .await
+                .admit(AuthorityMember {
+                    id: *authority_id,
+                    stake_gsx: *stake_gsx,
+                    public_key_bytes: mldsa_public_key.clone(),
+                });
+            match admit_result {
+                Ok(()) => {
+                    // DAG-S27.7: park stake; activated on first cert.
+                    state
+                        .inner
+                        .lock()
+                        .await
+                        .pending_stake
+                        .insert(*authority_id, *stake_gsx as u128);
+                    let _ = state
+                        .validator_registry
+                        .write()
+                        .await
+                        .admit(ValidatorMember {
+                            id: *authority_id,
+                            stake_gsx: *stake_gsx as u128,
+                        });
+                    let new_n = state.authority_registry.read().await.len() as u32;
+                    state.inner.lock().await.n_authorities = new_n;
+                    log.emit(
+                        Event::now(self_label, Lane::Main, "authority_admitted")
+                            .with_round(cert_round)
+                            .with_authority_id(*authority_id),
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(auth = authority_id, err = %e, "admit rejected");
+                }
+            }
+        }
+        Intent::ExitAuthority { authority_id } => {
+            let removed = state.authority_registry.write().await.remove(*authority_id);
+            if removed.is_some() {
+                state.validator_registry.write().await.remove(*authority_id);
+                state.stake_table.write().await.remove(authority_id);
+                let new_n = state.authority_registry.read().await.len() as u32;
+                {
+                    let mut inner = state.inner.lock().await;
+                    inner.pending_stake.remove(authority_id);
+                    inner.n_authorities = new_n;
+                }
+                log.emit(
+                    Event::now(self_label, Lane::Main, "authority_exited")
+                        .with_round(cert_round)
+                        .with_authority_id(*authority_id),
+                );
+            }
+        }
+        Intent::EjectAuthority {
+            authority_id,
+            proof_ref: _proof,
+        } => {
+            let removed = state.authority_registry.write().await.remove(*authority_id);
+            if removed.is_some() {
+                state.validator_registry.write().await.remove(*authority_id);
+                state.stake_table.write().await.remove(authority_id);
+                let new_n = state.authority_registry.read().await.len() as u32;
+                {
+                    let mut inner = state.inner.lock().await;
+                    inner.pending_stake.remove(authority_id);
+                    inner.n_authorities = new_n;
+                }
+                log.emit(
+                    Event::now(self_label, Lane::Main, "authority_ejected")
+                        .with_round(cert_round)
+                        .with_authority_id(*authority_id),
+                );
+            }
+        }
+        Intent::Transfer { .. } => {}
+    }
 }
 
 /// Byzantine fault tolerance: f = floor((n-1)/3). The minimum number of
@@ -1219,7 +1183,7 @@ async fn run_round_driver(
     self_label: String,
     self_id: AuthorityId,
     round_ms: u64,
-    state: Arc<Mutex<State>>,
+    state: Arc<State>,
     outbound: Arc<HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>>,
     log: EventLog,
     mut intent_rx: tokio::sync::mpsc::UnboundedReceiver<gsx_execution::Intent>,
@@ -1250,12 +1214,13 @@ async fn run_round_driver(
         let prev_round;
         let parents;
         {
-            let s = state.lock().await;
-            let n = s.n_authorities;
-            target_round = s.last_authored_round.map(|r| r + 1).unwrap_or(0);
+            let inner = state.inner.lock().await;
+            let n = inner.n_authorities;
+            let dag = state.dag.read().await;
+            target_round = inner.last_authored_round.map(|r| r + 1).unwrap_or(0);
             prev_round = target_round.saturating_sub(1);
-            if s.last_authored_round.is_some() {
-                let parents_count = s.distinct_authors_at(prev_round);
+            if inner.last_authored_round.is_some() {
+                let parents_count = distinct_authors_at(&dag, prev_round, n);
                 let elapsed = round_started_at.elapsed();
                 let strict_ok = parents_count >= quorum_threshold(n);
                 let timeout_force = parents_count >= f_plus_one(n) && elapsed >= leader_timeout;
@@ -1280,7 +1245,7 @@ async fn run_round_driver(
                     );
                 }
             }
-            parents = s.parents_for_round(target_round);
+            parents = parents_for_round(&dag, target_round, n);
         }
         round_started_at = tokio::time::Instant::now();
 
@@ -1312,20 +1277,18 @@ async fn run_round_driver(
         // markers + record own (author, round) for S30.1 incremental
         // equivocation detection.
         {
-            let mut s = state.lock().await;
-            s.last_authored_round = Some(target_round);
-            if target_round > s.max_observed_round {
-                s.max_observed_round = target_round;
+            let mut inner = state.inner.lock().await;
+            inner.last_authored_round = Some(target_round);
+            if target_round > inner.max_observed_round {
+                inner.max_observed_round = target_round;
             }
-            let _ = s.dag.insert(cert.clone());
-            s.blocks.insert(cert_hash, block.clone());
             let key = (self_id, target_round);
-            match s.seen_at.get(&key).copied() {
+            match inner.seen_at.get(&key).copied() {
                 None => {
-                    s.seen_at.insert(key, cert_hash);
+                    inner.seen_at.insert(key, cert_hash);
                 }
                 Some(prev) if prev != cert_hash => {
-                    s.detected_equivocations.push(EquivocationProof {
+                    inner.detected_equivocations.push(EquivocationProof {
                         author: self_id,
                         round: target_round,
                         cert_a: prev,
@@ -1335,6 +1298,8 @@ async fn run_round_driver(
                 _ => {}
             }
         }
+        let _ = state.dag.write().await.insert(cert.clone());
+        state.blocks.lock().await.insert(cert_hash, block.clone());
 
         // Phase 4 (unlocked): event log emit + cluster broadcast. No
         // state access, pure I/O.
@@ -1437,8 +1402,8 @@ mod tests {
         // Post-S27.2: intents are visible once they land in a proposed block.
         // Since we run a single-node cluster, that block is guaranteed within
         // one round_ms tick of the submit landing on the mpsc.
-        let s = d.state.lock().await;
-        let in_block = s.blocks.values().any(|b| {
+        let blocks = d.state.blocks.lock().await;
+        let in_block = blocks.values().any(|b| {
             b.intents
                 .iter()
                 .any(|i| matches!(i, gsx_execution::Intent::Transfer { amount: 42, .. }))
@@ -1505,9 +1470,8 @@ mod tests {
         // Give the round driver a tick to drain + propose.
         tokio::time::sleep(Duration::from_millis(700)).await;
 
-        let s = d.state.lock().await;
-        let total_intents_in_blocks: usize = s
-            .blocks
+        let blocks = d.state.blocks.lock().await;
+        let total_intents_in_blocks: usize = blocks
             .values()
             .map(|b| {
                 b.intents
@@ -1588,13 +1552,14 @@ mod tests {
         // the substrate state root.
         let mut state_roots = Vec::new();
         for d in &daemons {
-            let s = d.state.lock().await;
+            let committed = d.state.committed.lock().await;
+            let inner = d.state.inner.lock().await;
             assert!(
-                !s.committed.is_empty(),
+                !committed.is_empty(),
                 "daemon {:?} did not commit any cert",
-                s.last_authored_round
+                inner.last_authored_round
             );
-            state_roots.push(s.substrate.state_root());
+            state_roots.push(inner.substrate.state_root());
         }
         let first = state_roots[0];
         for r in &state_roots[1..] {
@@ -1670,13 +1635,8 @@ mod tests {
 
         // Sanity: genesis admission populated all 4 registries on every node.
         for (i, d) in daemons.iter().enumerate() {
-            let s = d.state.lock().await;
-            assert_eq!(
-                s.authority_registry.len(),
-                4,
-                "node v{} genesis admission size",
-                i
-            );
+            let reg = d.state.authority_registry.read().await;
+            assert_eq!(reg.len(), 4, "node v{} genesis admission size", i);
         }
 
         // Submit AdmitAuthority for a new id=4 via v0's client port.
@@ -1704,8 +1664,8 @@ mod tests {
             let all_at_5 = {
                 let mut ok = true;
                 for d in &daemons {
-                    let s = d.state.lock().await;
-                    if s.authority_registry.len() != 5 || !s.authority_registry.contains(4) {
+                    let reg = d.state.authority_registry.read().await;
+                    if reg.len() != 5 || !reg.contains(4) {
                         ok = false;
                         break;
                     }
@@ -1719,13 +1679,19 @@ mod tests {
                 // Capture per-node state for a diagnostic panic message.
                 let mut diag = Vec::new();
                 for (i, d) in daemons.iter().enumerate() {
-                    let s = d.state.lock().await;
-                    let last_authored = s.last_authored_round.unwrap_or(u64::MAX);
-                    let committed_n = s.committed.len();
-                    let blocks_n = s.blocks.len();
-                    let reg_size = s.authority_registry.len();
-                    let has_id4 = s.authority_registry.contains(4);
-                    let intent_in_block = s.blocks.values().any(|b| {
+                    let inner = d.state.inner.lock().await;
+                    let committed = d.state.committed.lock().await;
+                    let blocks = d.state.blocks.lock().await;
+                    let reg = d.state.authority_registry.read().await;
+                    let votes = d.state.votes.lock().await;
+                    let stake_table = d.state.stake_table.read().await;
+                    let dag = d.state.dag.read().await;
+                    let last_authored = inner.last_authored_round.unwrap_or(u64::MAX);
+                    let committed_n = committed.len();
+                    let blocks_n = blocks.len();
+                    let reg_size = reg.len();
+                    let has_id4 = reg.contains(4);
+                    let intent_in_block = blocks.values().any(|b| {
                         b.intents.iter().any(|x| {
                             matches!(
                                 x,
@@ -1736,13 +1702,13 @@ mod tests {
                             )
                         })
                     });
-                    let n_auth = s.n_authorities;
-                    let votes_total: usize = s.votes.values().map(|v| v.len()).sum();
-                    let votes_keys = s.votes.len();
-                    let stake_total = s.stake_table.total();
+                    let n_auth = inner.n_authorities;
+                    let votes_total: usize = votes.values().map(|v| v.len()).sum();
+                    let votes_keys = votes.len();
+                    let stake_total = stake_table.total();
                     let stake_thresh =
-                        gsx_consensus::joint::validator_quorum_threshold(&s.stake_table);
-                    let auth_equiv = gsx_consensus::detect_authority_equivocation(&s.dag).len();
+                        gsx_consensus::joint::validator_quorum_threshold(&stake_table);
+                    let auth_equiv = gsx_consensus::detect_authority_equivocation(&dag).len();
                     diag.push(format!(
                         "v{}: reg={} has4={} n={} last_authored={} committed={} blocks={} admit_in_block={} votes(k={},tot={}) stake(tot={},thr={}) equiv={}",
                         i, reg_size, has_id4, n_auth, last_authored, committed_n, blocks_n,
@@ -1767,8 +1733,8 @@ mod tests {
             let all_at_4 = {
                 let mut ok = true;
                 for d in &daemons {
-                    let s = d.state.lock().await;
-                    if s.authority_registry.len() != 4 || s.authority_registry.contains(4) {
+                    let reg = d.state.authority_registry.read().await;
+                    if reg.len() != 4 || reg.contains(4) {
                         ok = false;
                         break;
                     }
@@ -1781,8 +1747,8 @@ mod tests {
             if std::time::Instant::now() >= eject_deadline {
                 let mut sizes = Vec::new();
                 for d in &daemons {
-                    let s = d.state.lock().await;
-                    sizes.push(s.authority_registry.len());
+                    let reg = d.state.authority_registry.read().await;
+                    sizes.push(reg.len());
                 }
                 panic!(
                     "phase G eject timed out (30s); registry sizes by node = {:?}",
@@ -1823,7 +1789,7 @@ mod tests {
             EventLog::start(&std::env::temp_dir().join("gsx-fastpath-test.ndjson"))
                 .await
                 .unwrap();
-        let mut s = State::new(&manifest);
+        let state = Arc::new(State::new(&manifest));
         let outbound: HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>> = HashMap::new();
         let self_id: AuthorityId = 0;
 
@@ -1842,23 +1808,29 @@ mod tests {
             tx: tx.clone(),
             signers: BTreeSet::from([1u32]),
         };
-        handle_fastpath_cert(&mut s, self_id, cert_a1, "v0", &log, &outbound);
+        handle_fastpath_cert(&state, self_id, cert_a1, "v0", &log, &outbound).await;
         // Self (0) signed too → pending has {0,1}, below q=3.
-        assert!(s.fastpath_pending.contains_key(&key));
-        assert!(!s.fastpath_committed.contains(&key));
-        assert_eq!(s.fastpath_pending[&key].signers.len(), 2);
+        {
+            let inner = state.inner.lock().await;
+            assert!(inner.fastpath_pending.contains_key(&key));
+            assert!(!inner.fastpath_committed.contains(&key));
+            assert_eq!(inner.fastpath_pending[&key].signers.len(), 2);
+        }
 
         // Authority 2 broadcasts. Now pending has {0,1,2} → quorum hits.
         let cert_a2 = gsx_fastpath::cert::FastPathCert {
             tx: tx.clone(),
             signers: BTreeSet::from([2u32]),
         };
-        handle_fastpath_cert(&mut s, self_id, cert_a2, "v0", &log, &outbound);
-        assert!(
-            s.fastpath_committed.contains(&key),
-            "expected fast-path quorum (q=3) to fire on (0,1,2) signers"
-        );
-        assert!(!s.fastpath_pending.contains_key(&key));
+        handle_fastpath_cert(&state, self_id, cert_a2, "v0", &log, &outbound).await;
+        {
+            let inner = state.inner.lock().await;
+            assert!(
+                inner.fastpath_committed.contains(&key),
+                "expected fast-path quorum (q=3) to fire on (0,1,2) signers"
+            );
+            assert!(!inner.fastpath_pending.contains_key(&key));
+        }
 
         // Equivocation: a partial cert for the same (object,nonce) with
         // a different payload_digest must be rejected and logged as
@@ -1871,10 +1843,10 @@ mod tests {
             tx: equivocating_tx,
             signers: BTreeSet::from([3u32]),
         };
-        let committed_before = s.fastpath_committed.len();
-        handle_fastpath_cert(&mut s, self_id, bad_cert, "v0", &log, &outbound);
+        let committed_before = state.inner.lock().await.fastpath_committed.len();
+        handle_fastpath_cert(&state, self_id, bad_cert, "v0", &log, &outbound).await;
         assert_eq!(
-            s.fastpath_committed.len(),
+            state.inner.lock().await.fastpath_committed.len(),
             committed_before,
             "equivocating cert must not change committed state"
         );
@@ -1905,7 +1877,7 @@ mod tests {
         let (log, _log_task) = EventLog::start(&std::env::temp_dir().join("gsx-ltp-test.ndjson"))
             .await
             .unwrap();
-        let mut s = State::new(&manifest);
+        let state = Arc::new(State::new(&manifest));
 
         let payload = gsx_ltp::AttestationPayload {
             source_chain: 1u64, // Ethereum
@@ -1921,13 +1893,17 @@ mod tests {
         };
         let corridor_id = corridor_id_fallback(&payload);
 
-        assert_eq!(s.ltp_received_count, 0);
-        assert!(s.ltp_latest.is_empty());
+        {
+            let inner = state.inner.lock().await;
+            assert_eq!(inner.ltp_received_count, 0);
+            assert!(inner.ltp_latest.is_empty());
+        }
 
-        handle_ltp_attestation(&mut s, att, "v0", &log);
+        handle_ltp_attestation(&state, att, "v0", &log).await;
 
-        assert_eq!(s.ltp_received_count, 1);
-        let stored = s
+        let inner = state.inner.lock().await;
+        assert_eq!(inner.ltp_received_count, 1);
+        let stored = inner
             .ltp_latest
             .get(&corridor_id)
             .expect("corridor should have an attestation");
@@ -2001,8 +1977,8 @@ mod tests {
         let (log, _log_task) = EventLog::start(&std::env::temp_dir().join("gsx-ltp-unreg.ndjson"))
             .await
             .unwrap();
-        let mut s = State::new(&manifest);
-        assert!(s.corridors.is_empty());
+        let state = Arc::new(State::new(&manifest));
+        assert!(state.inner.lock().await.corridors.is_empty());
 
         let payload = gsx_ltp::AttestationPayload {
             source_chain: 1,
@@ -2016,11 +1992,12 @@ mod tests {
             aggregate_signature: vec![0u8; 96],
             signers: (0..7u32).collect(),
         };
-        handle_ltp_attestation(&mut s, att, "v0", &log);
+        handle_ltp_attestation(&state, att, "v0", &log).await;
 
         // Stored under fallback corridor id (XOR-fold of chain pair).
         let fallback_id = corridor_id_fallback(&payload);
-        assert_eq!(s.ltp_received_count, 1);
-        assert!(s.ltp_latest.contains_key(&fallback_id));
+        let inner = state.inner.lock().await;
+        assert_eq!(inner.ltp_received_count, 1);
+        assert!(inner.ltp_latest.contains_key(&fallback_id));
     }
 }
