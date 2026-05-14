@@ -18,6 +18,7 @@ gsx-rpc = { workspace = true }
 # avoids dragging in a second TLS stack with webpki-related advisories
 # (RUSTSEC name-constraints family) that cargo-deny would reject.
 reqwest = { version = "0.11", features = ["json"] }
+hex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

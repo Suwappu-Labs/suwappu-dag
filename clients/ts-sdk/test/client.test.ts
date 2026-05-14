@@ -138,3 +138,55 @@ test("positional vs object params encode correctly via the generic call()", asyn
   assert.deepEqual(bodies[0]?.params, { authority_id: 0 });
   assert.deepEqual(bodies[1]?.params, [0]);
 });
+
+test("getBalance accepts Uint8Array and serializes as 0x-prefixed hex", async () => {
+  const { fetch, captured } = makeFetchMock(() => ({
+    jsonrpc: "2.0",
+    id: 1,
+    result: { address: `0x${"aa".repeat(20)}`, balance: "1000" },
+  }));
+  const client = new Client("http://localhost:0", { fetch });
+  const addr = new Uint8Array(20).fill(0xaa);
+  const view = await client.getBalance(addr);
+  assert.equal(view.balance, "1000");
+
+  const body = JSON.parse(captured[0]!.init.body as string);
+  assert.equal(body.params.address, `0x${"aa".repeat(20)}`);
+});
+
+test("getBalance passes through hex string with 0x prefix unchanged", async () => {
+  const { fetch, captured } = makeFetchMock(() => ({
+    jsonrpc: "2.0",
+    id: 1,
+    result: { address: `0x${"bb".repeat(20)}`, balance: "0" },
+  }));
+  const client = new Client("http://localhost:0", { fetch });
+  await client.getBalance(`0x${"bb".repeat(20)}`);
+  const body = JSON.parse(captured[0]!.init.body as string);
+  assert.equal(body.params.address, `0x${"bb".repeat(20)}`);
+});
+
+test("getBalance adds 0x prefix to bare hex string", async () => {
+  const { fetch, captured } = makeFetchMock(() => ({
+    jsonrpc: "2.0",
+    id: 1,
+    result: { address: `0x${"cc".repeat(20)}`, balance: "0" },
+  }));
+  const client = new Client("http://localhost:0", { fetch });
+  await client.getBalance("cc".repeat(20));
+  const body = JSON.parse(captured[0]!.init.body as string);
+  assert.equal(body.params.address, `0x${"cc".repeat(20)}`);
+});
+
+test("getBalance unknown address returns BalanceView with balance='0'", async () => {
+  // Substrate doesn't distinguish absent from explicit-zero — the SDK
+  // should NOT translate this into null the way getStake does.
+  const { fetch } = makeFetchMock(() => ({
+    jsonrpc: "2.0",
+    id: 1,
+    result: { address: `0x${"dd".repeat(20)}`, balance: "0" },
+  }));
+  const client = new Client("http://localhost:0", { fetch });
+  const view = await client.getBalance(new Uint8Array(20).fill(0xdd));
+  assert.equal(view.balance, "0");
+});

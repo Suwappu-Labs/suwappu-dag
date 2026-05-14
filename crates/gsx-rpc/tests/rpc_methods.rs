@@ -5,16 +5,17 @@
 
 use std::sync::Arc;
 
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
+};
+use gsx_rpc::{
+    context::{AuthorityMemberView, EpochView, RpcContext, StateView, ValidatorMemberView},
+    router,
+};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use tower::ServiceExt;
-
-use gsx_rpc::context::{
-    AuthorityMemberView, EpochView, RpcContext, StateView, ValidatorMemberView,
-};
-use gsx_rpc::router;
 
 /// Deterministic in-memory state for the test.
 struct MockState {
@@ -22,6 +23,7 @@ struct MockState {
     authorities: Vec<AuthorityMemberView>,
     validators: Vec<ValidatorMemberView>,
     stakes: std::collections::BTreeMap<u32, u128>,
+    balances: std::collections::BTreeMap<[u8; 20], u128>,
 }
 
 impl StateView for MockState {
@@ -37,12 +39,18 @@ impl StateView for MockState {
     async fn stake_for(&self, authority_id: u32) -> Option<u128> {
         self.stakes.get(&authority_id).copied()
     }
+    async fn balance_for(&self, address: [u8; 20]) -> u128 {
+        self.balances.get(&address).copied().unwrap_or(0)
+    }
 }
 
 fn fixture() -> Arc<RpcContext<MockState>> {
     let mut stakes = std::collections::BTreeMap::new();
     stakes.insert(0, 30_000u128);
     stakes.insert(1, 30_000u128);
+    let mut balances = std::collections::BTreeMap::new();
+    balances.insert([0xAA; 20], 1_000u128);
+    balances.insert([0xBB; 20], 2_500u128);
     Arc::new(RpcContext::new(Arc::new(MockState {
         epoch: EpochView {
             current: 7,
@@ -72,6 +80,7 @@ fn fixture() -> Arc<RpcContext<MockState>> {
             },
         ],
         stakes,
+        balances,
     })))
 }
 
@@ -226,6 +235,113 @@ async fn method_not_found() {
 
     assert_eq!(resp["error"]["code"], -32601);
     assert!(resp["result"].is_null());
+}
+
+#[tokio::test]
+async fn get_balance_with_0x_prefix() {
+    let ctx = fixture();
+    let resp = post_rpc(
+        ctx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "gsx_getBalance",
+            "params": { "address": format!("0x{}", "aa".repeat(20)) },
+        }),
+    )
+    .await;
+
+    assert_eq!(resp["result"]["address"], format!("0x{}", "aa".repeat(20)));
+    assert_eq!(resp["result"]["balance"], "1000");
+}
+
+#[tokio::test]
+async fn get_balance_without_0x_prefix() {
+    let ctx = fixture();
+    let resp = post_rpc(
+        ctx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 10,
+            "method": "gsx_getBalance",
+            "params": { "address": "bb".repeat(20) },
+        }),
+    )
+    .await;
+
+    assert_eq!(resp["result"]["balance"], "2500");
+}
+
+#[tokio::test]
+async fn get_balance_positional_params() {
+    let ctx = fixture();
+    let resp = post_rpc(
+        ctx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 11,
+            "method": "gsx_getBalance",
+            "params": [format!("0x{}", "aa".repeat(20))],
+        }),
+    )
+    .await;
+
+    assert_eq!(resp["result"]["balance"], "1000");
+}
+
+#[tokio::test]
+async fn get_balance_unknown_address_returns_zero() {
+    let ctx = fixture();
+    let resp = post_rpc(
+        ctx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 12,
+            "method": "gsx_getBalance",
+            "params": { "address": format!("0x{}", "cd".repeat(20)) },
+        }),
+    )
+    .await;
+
+    // Substrate doesn't distinguish absent from explicit-zero; an unknown
+    // address must return balance=0 (not a NotFound error).
+    assert_eq!(resp["result"]["balance"], "0");
+    assert!(resp["error"].is_null());
+}
+
+#[tokio::test]
+async fn get_balance_bad_hex_is_invalid_params() {
+    let ctx = fixture();
+    let resp = post_rpc(
+        ctx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 13,
+            "method": "gsx_getBalance",
+            "params": { "address": "0xzznotahexstring" },
+        }),
+    )
+    .await;
+
+    // -32602 == InvalidParams
+    assert_eq!(resp["error"]["code"], -32602);
+}
+
+#[tokio::test]
+async fn get_balance_wrong_length_is_invalid_params() {
+    let ctx = fixture();
+    let resp = post_rpc(
+        ctx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 14,
+            "method": "gsx_getBalance",
+            "params": { "address": "0xdeadbeef" },  // 4 bytes, not 20
+        }),
+    )
+    .await;
+
+    assert_eq!(resp["error"]["code"], -32602);
 }
 
 #[tokio::test]

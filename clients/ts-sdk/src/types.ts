@@ -55,6 +55,22 @@ export interface StakeEntry {
 }
 
 /**
+ * Return shape for {@link Client.getBalance}.
+ *
+ * `balance` is a decimal string (u128 on the Rust side; JS `number`
+ * tops out at 2^53). An unknown address surfaces here as
+ * `balance: "0"` — the substrate doesn't distinguish absent from
+ * explicit-zero. Parse with `BigInt(balance)` if you need to do
+ * arithmetic.
+ */
+export interface BalanceView {
+  /** Hex-encoded 20-byte address with `0x` prefix. */
+  address: string;
+  /** Balance in the substrate's smallest unit, as a decimal string. */
+  balance: string;
+}
+
+/**
  * JSON-RPC 2.0 request envelope.
  *
  * The SDK builds this internally — callers don't normally construct one

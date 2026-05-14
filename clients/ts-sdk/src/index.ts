@@ -32,6 +32,7 @@ import {
 } from "./errors.js";
 import type {
   AuthorityMemberView,
+  BalanceView,
   EpochView,
   JsonRpcRequest,
   JsonRpcResponse,
@@ -119,6 +120,25 @@ export class Client {
   }
 
   /**
+   * Substrate balance for `address`. The address may be:
+   *   - a 20-byte `Uint8Array`, or
+   *   - a hex string (with or without `0x` prefix).
+   *
+   * Always returns a `BalanceView` — unknown addresses surface as
+   * `balance: "0"` (the substrate doesn't distinguish absent from
+   * explicit zero). For arithmetic, lift with `BigInt(view.balance)`.
+   */
+  async getBalance(address: Uint8Array | string): Promise<BalanceView> {
+    const hexAddr =
+      typeof address === "string"
+        ? address.startsWith("0x") || address.startsWith("0X")
+          ? address
+          : `0x${address}`
+        : `0x${bytesToHex(address)}`;
+    return this.call<BalanceView>("gsx_getBalance", { address: hexAddr });
+  }
+
+  /**
    * Generic JSON-RPC call. Public so callers can drive any method
    * that doesn't yet have a typed wrapper here.
    *
@@ -182,4 +202,20 @@ export class Client {
     }
     return envelope.result;
   }
+}
+
+/**
+ * Lower-case hex encoder for `Uint8Array`. No `0x` prefix.
+ * Hand-rolled to keep `@gsx/client` zero-runtime-dep — `Buffer` is
+ * Node-only and we want browser compatibility.
+ */
+function bytesToHex(bytes: Uint8Array): string {
+  let out = "";
+  for (let i = 0; i < bytes.length; i++) {
+    const b = bytes[i];
+    if (b !== undefined) {
+      out += b.toString(16).padStart(2, "0");
+    }
+  }
+  return out;
 }

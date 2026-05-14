@@ -28,16 +28,14 @@ pub mod methods;
 pub mod router;
 pub mod types;
 
+use std::{net::SocketAddr, sync::Arc};
+
 pub use context::{RpcContext, StateView};
 pub use error::RpcError;
 pub use router::router;
-pub use types::{JsonRpcRequest, JsonRpcResponse};
-
-use std::net::SocketAddr;
-use std::sync::Arc;
-
 use tokio::task::JoinHandle;
 use tracing::info;
+pub use types::{JsonRpcRequest, JsonRpcResponse};
 
 /// Spawn the JSON-RPC server bound to `addr`. Returns a join handle on
 /// the listener task. The task runs until the process exits or the
