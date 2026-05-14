@@ -32,7 +32,6 @@ use axum::{
     },
     response::IntoResponse,
 };
-use futures_util::SinkExt;
 use tokio::sync::broadcast::error::RecvError;
 use tracing::{debug, warn};
 
@@ -44,10 +43,10 @@ pub async fn handle_ws_upgrade<S: StateView>(
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
     let rx = ctx.state.subscribe_events();
-    ws.on_upgrade(move |socket| pump_events::<S>(socket, rx))
+    ws.on_upgrade(move |socket| pump_events(socket, rx))
 }
 
-async fn pump_events<S: StateView>(
+async fn pump_events(
     mut socket: WebSocket,
     mut rx: tokio::sync::broadcast::Receiver<crate::context::EventView>,
 ) {

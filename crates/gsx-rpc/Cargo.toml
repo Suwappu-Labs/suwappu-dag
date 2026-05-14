@@ -24,7 +24,6 @@ tokio = { workspace = true }
 # doesn't need it, but adding to the dep is cheap (axum is already in
 # tree).
 axum = { version = "0.7", features = ["ws"] }
-futures-util = "0.3"
 
 thiserror = { workspace = true }
 anyhow = { workspace = true }
