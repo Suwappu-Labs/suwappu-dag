@@ -117,3 +117,15 @@ Ratified alongside IQ-001 in the same gsx-papers PR. Tracked at
 - Update `joint_commit` to consume `LeaderStatus`.
 - Update `commit_finality` proptest to cover indirect-commit append-only
   property (causal closure is monotone, so finality is preserved).
+
+## Addendum: governance application is epoch-boundary atomic (Issue #18, 2026-05-14)
+
+Phase G governance intents (`AdmitAuthority` / `ExitAuthority` /
+`EjectAuthority`) are no longer applied at commit time. They are
+queued in `StateInner::pending_governance` and drained when
+`EpochState::boundary_crossed_by(cert_round)` fires, so every daemon
+mutates the registries at the same boundary round. This closes the
+transitional quorum-threshold asymmetry window (most visible on the
+n=5→n=4 eject path where `quorum_threshold(5)=4 → quorum_threshold(4)=3`)
+that previously stalled commits across the mesh. Non-governance
+intents (`Transfer`) still execute at commit time via `execute_block`.

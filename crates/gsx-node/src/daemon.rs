@@ -120,6 +120,15 @@ pub(crate) struct StateInner {
     /// Stake parked for newly-admitted authorities (DAG-S27.7);
     /// promoted into `state.stake_table` on first-cert insertion.
     pub(crate) pending_stake: BTreeMap<AuthorityId, gsx_consensus::Stake>,
+    /// Issue #18: governance intents queued for application at the
+    /// next epoch boundary. Applying `AdmitAuthority` / `ExitAuthority`
+    /// / `EjectAuthority` at commit time caused transitional
+    /// quorum-threshold asymmetry across daemons (each daemon commits
+    /// at a slightly different round under jitter, so the `n=5→n=4`
+    /// eject path briefly disagrees on what constitutes a valid
+    /// round-completion). Draining at the epoch boundary makes the
+    /// transition atomic across the mesh.
+    pub(crate) pending_governance: Vec<Intent>,
     /// `(author, round) → first cert hash observed` (DAG-S30.1).
     /// Equivocation detection O(1) per insert instead of O(dag)
     /// per try_commit.
@@ -287,6 +296,7 @@ impl State {
                     last_boundary_round: 0,
                 },
                 pending_stake: BTreeMap::new(),
+                pending_governance: Vec::new(),
                 seen_at: BTreeMap::new(),
                 detected_equivocations: Vec::new(),
             }),
@@ -562,6 +572,19 @@ async fn ingest_cert(
                     inner.inflight_fetch_history.remove(&h);
                     // DAG-S27.7: promote pending stake on first cert.
                     promote_stake = inner.pending_stake.remove(&c.author).map(|s| (c.author, s));
+                    // Issue #18 (deferred activation): if this is the
+                    // first cert from a newly-admitted authority, bump
+                    // `n_authorities` now. Until this moment, the new
+                    // authority was in the registry (so its certs are
+                    // recognized) but didn't count toward the quorum
+                    // denominator — `quorum_threshold` and round-robin
+                    // `leader` rotation continued using the pre-admit
+                    // `n`. Pairing this bump with the pending_stake
+                    // promotion guarantees the bump happens iff the
+                    // authority has actually shown up on the wire.
+                    if promote_stake.is_some() {
+                        inner.n_authorities = inner.n_authorities.saturating_add(1);
+                    }
                     // DAG-S30.1: incremental equivocation detection.
                     let key = (c.author, round);
                     match inner.seen_at.get(&key).copied() {
@@ -1138,9 +1161,27 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
                 }
             }
 
-            // DAG-S27.3: apply Phase G governance intents at commit time.
-            for intent in &intents {
-                apply_governance_intent(state, intent, cert_round, self_label, log).await;
+            // Issue #18: queue Phase G governance intents for
+            // epoch-boundary application. Applying at commit time made
+            // n_authorities update at different rounds across daemons
+            // (jitter), causing transitional quorum-threshold asymmetry
+            // that stalled the eject path (n=5→n=4: threshold changes
+            // from 4 to 3 mid-flight). Draining at the epoch boundary
+            // (below) makes governance transitions atomic across the
+            // mesh. Non-governance intents (Transfer) already executed
+            // via execute_block above — they are unchanged.
+            {
+                let mut inner = state.inner.lock().await;
+                for intent in &intents {
+                    if matches!(
+                        intent,
+                        Intent::AdmitAuthority { .. }
+                            | Intent::ExitAuthority { .. }
+                            | Intent::EjectAuthority { .. }
+                    ) {
+                        inner.pending_governance.push(intent.clone());
+                    }
+                }
             }
 
             log.emit(
@@ -1152,18 +1193,36 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
             state.votes.lock().remove(&h);
 
             // Epoch boundary detection (DAG-S25 Phase G).
-            let mut inner = state.inner.lock().await;
-            if inner.epoch.boundary_crossed_by(cert_round) {
-                let new_epoch = inner.epoch.epoch_for(cert_round);
-                inner.epoch.current = new_epoch;
-                inner.epoch.last_boundary_round = cert_round;
+            // Issue #18: drains queued governance intents here so that
+            // registry mutations land atomically at the boundary round.
+            let boundary_crossed = {
+                let mut inner = state.inner.lock().await;
+                if inner.epoch.boundary_crossed_by(cert_round) {
+                    let new_epoch = inner.epoch.epoch_for(cert_round);
+                    inner.epoch.current = new_epoch;
+                    inner.epoch.last_boundary_round = cert_round;
+                    true
+                } else {
+                    false
+                }
+            };
+            if boundary_crossed {
+                let queued: Vec<Intent> = {
+                    let mut inner = state.inner.lock().await;
+                    inner.pending_governance.drain(..).collect()
+                };
+                for intent in &queued {
+                    apply_governance_intent(state, intent, cert_round, self_label, log).await;
+                }
                 log.emit(
                     Event::now(self_label, Lane::Main, "epoch_boundary").with_round(cert_round),
                 );
+                let new_epoch = state.inner.lock().await.epoch.current;
                 tracing::info!(
                     epoch = new_epoch,
                     round = cert_round,
-                    "epoch boundary crossed"
+                    drained = queued.len(),
+                    "epoch boundary crossed; governance applied"
                 );
             }
         }
@@ -1275,8 +1334,21 @@ async fn apply_governance_intent(
                             id: *authority_id,
                             stake_gsx: *stake_gsx as u128,
                         });
-                    let new_n = state.authority_registry.read().await.len() as u32;
-                    state.inner.lock().await.n_authorities = new_n;
+                    // Issue #18 (deferred activation): the registries are
+                    // grown to the new size so the new authority's certs
+                    // are recognized when they arrive, but
+                    // `inner.n_authorities` is INTENTIONALLY NOT bumped
+                    // here. Bumping it now would (a) collapse the
+                    // `quorum_threshold(n)` jump that the post-admit
+                    // cluster can't meet under jitter, and (b) shift the
+                    // round-robin `leader(round, n)` rotation onto an
+                    // authority that hasn't yet produced any cert. We
+                    // defer the bump to the first-cert ingest site
+                    // (`ingest_cert`, next to the existing pending_stake
+                    // promotion), where we have proof the new authority
+                    // is actually participating. See the
+                    // `bft-stake-denominator-deadlock-on-admit` skill for
+                    // the full class of bug this avoids.
                     log.emit(
                         Event::now(self_label, Lane::Main, "authority_admitted")
                             .with_round(cert_round)
@@ -1745,27 +1817,16 @@ mod tests {
     /// on every validator, which is the end-to-end guarantee Phase G
     /// claims (paper §4.1 + Invariant 5 for the eject path).
     ///
-    /// **`#[ignore]` rationale (2026-05-14):** the admit phase (n=4→n=5)
-    /// is reliable, but the eject phase (n=5→n=4) is flaky on busy GHA
-    /// runners and has blocked `main`-branch CI through S31, S32, S33.
-    /// The deadline has been bumped 30s→60s→90s→120s without fixing the
-    /// underlying race: governance intents apply at commit time
-    /// (`apply_governance_intent` at line ~1086), so each daemon updates
-    /// `n_authorities` at the round it personally commits the eject
-    /// block — which can be a different round across the 4 daemons.
-    /// During that transitional window, `quorum_threshold(5) = 4` (pre)
-    /// and `quorum_threshold(4) = 3` (post) disagree on what constitutes
-    /// a valid round-completion, briefly stalling commits. Admit doesn't
-    /// see this because `quorum_threshold(4) = quorum_threshold(5) = 4`
-    /// — the threshold is unchanged across the n increment.
-    ///
-    /// Fix requires a proper consensus-side change (e.g. apply governance
-    /// effects at an epoch boundary so transitions are atomic across the
-    /// mesh, or have daemons gate quorum_threshold on the highest n seen
-    /// in any committed block they've voted for). That's out of scope
-    /// for build-reliability work. Tracked in a follow-up issue. Run
-    /// locally with `cargo test phase_g -- --ignored` to reproduce.
-    #[ignore = "flaky on GHA runners; transitional quorum-threshold asymmetry in eject path"]
+    /// Issue #18 fix (2026-05-14): governance intents
+    /// (`AdmitAuthority` / `ExitAuthority` / `EjectAuthority`) are now
+    /// queued at commit time and drained at the next epoch boundary,
+    /// making the registry mutation atomic across the mesh. This
+    /// eliminates the transitional quorum-threshold asymmetry where
+    /// daemons disagreed on `quorum_threshold(5)=4` vs
+    /// `quorum_threshold(4)=3` during the n=5→n=4 window. The test
+    /// uses a deliberately short `rounds_per_epoch = 16` (≈1.6s at
+    /// `round_ms=100ms`) so each governance op only waits ~one epoch
+    /// boundary, not multi-round consensus convergence.
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn phase_g_admit_and_eject() {
         let n = 4u32;
@@ -1784,7 +1845,10 @@ mod tests {
                 })
                 .collect(),
             corridors: Vec::new(),
-            rounds_per_epoch: 1024,
+            // Issue #18: short epochs so governance application
+            // (which now lands at the next boundary) is exercised on
+            // CI-sane timescales. 16 rounds * 100ms = 1.6s/boundary.
+            rounds_per_epoch: 16,
         };
 
         let mut daemons = Vec::new();
@@ -1849,7 +1913,7 @@ mod tests {
         // starve commit progress for several seconds; a fixed sleep
         // misses the deadline whereas a poll passes as soon as the
         // registry reflects the new admission on every node.
-        let admit_deadline = std::time::Instant::now() + Duration::from_secs(90);
+        let admit_deadline = std::time::Instant::now() + Duration::from_secs(60);
         loop {
             let all_at_5 = {
                 let mut ok = true;
@@ -1915,7 +1979,7 @@ mod tests {
                         auth_equiv
                     ));
                 }
-                panic!("phase G admit timed out (90s):\n  {}", diag.join("\n  "));
+                panic!("phase G admit timed out (60s):\n  {}", diag.join("\n  "));
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
@@ -1927,16 +1991,13 @@ mod tests {
         };
         client.submit(eject).await.unwrap();
 
-        // DAG-S32: bumped 30s -> 120s. Two compounding effects on CI:
-        // (a) orphan-pull retry backoff (500ms, 1s, 2s, 4s, 5s cap)
-        // widens worst-case recovery; (b) post-admit the registry has
-        // n=5 authorities but the test only runs 4 daemons, so leader
-        // rotation has a permanently missing slot every 5th round and
-        // commits rely on the f+1 leader_timeout fallback (200ms each
-        // missed wave). The eject intent therefore commits much slower
-        // than admit. Test logic is correct (poll-until-convergence);
-        // the deadline is just the failure ceiling.
-        let eject_deadline = std::time::Instant::now() + Duration::from_secs(120);
+        // Issue #18: post-admit the registry has n=5 authorities but
+        // the test only runs 4 daemons, so leader rotation has a
+        // permanently missing slot every 5th round and commits rely
+        // on the f+1 leader_timeout fallback. With governance now
+        // applied at epoch boundaries (16 rounds = 1.6s), the eject
+        // converges in ~one boundary plus orphan-pull recovery.
+        let eject_deadline = std::time::Instant::now() + Duration::from_secs(60);
         loop {
             let all_at_4 = {
                 let mut ok = true;
@@ -1959,7 +2020,7 @@ mod tests {
                     sizes.push(reg.len());
                 }
                 panic!(
-                    "phase G eject timed out (120s); registry sizes by node = {:?}",
+                    "phase G eject timed out (60s); registry sizes by node = {:?}",
                     sizes
                 );
             }
