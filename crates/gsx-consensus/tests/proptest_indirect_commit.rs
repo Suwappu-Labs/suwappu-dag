@@ -1,10 +1,18 @@
-//! IQ-002 exit-gate property test.
+//! IQ-002 exit-gate property tests.
 //!
-//! Property: `indirect_commit_resolves_undecided_slots` — if a leader slot
-//! at round `R` fails the direct decision rule (fewer than
-//! `quorum_threshold(n)` supporters at round `R+1`) but is in the causal
-//! history of a later directly-decided anchor at round `R' >= R+2`, then
-//! `decide_slot` resolves `R` to `Direct(leader_R)`, not `Undecided`.
+//! Two complementary exit-gate properties cover both branches of the
+//! indirect decision rule:
+//!
+//! - `indirect_resolves_to_direct_when_leader_threaded` — when a leader
+//!   slot at round `R` fails the direct rule (insufficient supporters at
+//!   `R+1`) but at least one `R+1` cert keeps the leader in its parent
+//!   set (so the leader threads through to a dense `R+2`), the leader
+//!   *is* in the causal history of a later directly-decided anchor and
+//!   `decide_slot` must return `Direct(leader_R)`.
+//! - `indirect_resolves_to_skip_when_leader_orphaned` — when *no* `R+1`
+//!   cert references `R`'s leader (the leader is fully orphaned),
+//!   `decide_slot` must return `Skip` once any later directly-decided
+//!   anchor exists.
 //!
 //! Supporting properties:
 //!
@@ -112,31 +120,31 @@ proptest! {
         .. ProptestConfig::default()
     })]
 
-    /// EXIT GATE — a round whose direct rule returns `Undecided` but
-    /// whose leader is in the causal history of a later directly-decided
-    /// anchor must be resolved to `Direct` by `decide_slot`.
+    /// EXIT GATE A — a round whose direct rule returns `Undecided` but
+    /// whose leader IS in the causal history of a later directly-decided
+    /// anchor must be resolved to `Direct(leader_hash)` by `decide_slot`.
+    /// "In causal history" is ensured here by keeping at least one R+1
+    /// cert that still references the R-leader as parent.
     #[test]
-    fn indirect_commit_resolves_undecided_slots(
+    fn indirect_resolves_to_direct_when_leader_threaded(
         n_authorities in 4u32..=7,
-        // target = sparse_round - 1. We need an anchor at >= target+2,
-        // so we need n_rounds >= target+3 = sparse_round+2. Pick
-        // n_rounds in [sparse_round+2, sparse_round+5].
         sparse_round in 1u64..=3,
         extra_anchor_rounds in 2u64..=4,
-        sparse_support_fraction in 0u32..=2,
+        // n_supporters >= 1 so the leader threads into the dense (R+2)
+        // anchor's causal history via the surviving R+1 supporter(s);
+        // < quorum so the direct rule still fails.
+        support_offset in 0u32..=1,
         payload_seed in any::<u64>(),
     ) {
         let n = n_authorities;
         let quorum = quorum_threshold(n);
-        // Number of certs at sparse_round that DO support
-        // sparse_round - 1's leader: strictly fewer than quorum so
-        // the direct rule fails. We map sparse_support_fraction
-        // (0..=2) into [0, max(0, quorum-2)] inclusive.
-        let n_supporters = if quorum == 0 {
-            0
-        } else {
-            sparse_support_fraction.min(quorum.saturating_sub(1))
-        };
+        // Map support_offset (0..=1) to n_supporters in
+        // {1, max(1, quorum-1)}. For n=4, quorum=3, so n_supporters in
+        // {1, 2}, both < 3 = quorum. For n=7, quorum=5, n_supporters in
+        // {1, 4}. Always >= 1 (leader threaded), always < quorum
+        // (direct rule fails).
+        let n_supporters = 1u32.max(quorum.saturating_sub(1).min(1 + support_offset));
+        prop_assume!(n_supporters >= 1 && n_supporters < quorum);
 
         let n_rounds = sparse_round + 1 + extra_anchor_rounds;
         let target_round = sparse_round - 1;
@@ -150,12 +158,11 @@ proptest! {
         );
         let store = store_from(&certs);
 
-        // Sanity: the target round's leader cert exists in the DAG.
+        // Sanity: target leader cert exists.
         let target_leader_hash = cert_at(&store, target_round, leader(target_round, n))
             .expect("target round leader cert must exist in dense base");
 
-        // Direct rule MUST be Undecided for the target round (n_supporters
-        // < quorum is enforced above).
+        // Direct rule MUST be Undecided.
         prop_assert_eq!(
             try_direct_decide(&store, target_round, n),
             LeaderStatus::Undecided,
@@ -163,13 +170,11 @@ proptest! {
             target_round,
         );
 
-        // Find the lowest anchor round at >= target_round + 2 that is
-        // directly decided. The dense rounds after `sparse_round`
-        // (which is target_round + 1) should provide this.
-        let mut anchor: Option<(Round, CertHash)> = None;
+        // Sanity: there is a directly-decided anchor at >= target+2.
+        let mut anchor: Option<Round> = None;
         for r in (target_round + 2)..n_rounds {
-            if let LeaderStatus::Direct(h) = try_direct_decide(&store, r, n) {
-                anchor = Some((r, h));
+            if let LeaderStatus::Direct(_) = try_direct_decide(&store, r, n) {
+                anchor = Some(r);
                 break;
             }
         }
@@ -180,10 +185,6 @@ proptest! {
             n, target_round, n_rounds,
         );
 
-        // The top-level decide_slot must resolve target_round to Direct,
-        // and the resolved hash must equal the target leader's cert hash
-        // (causal history from the dense anchor reaches the target leader
-        // via the n_supporters >= 0 dense path from sparse_round+1 onward).
         match decide_slot(&store, target_round, n) {
             LeaderStatus::Direct(h) => {
                 prop_assert_eq!(
@@ -202,6 +203,65 @@ proptest! {
                 );
             }
         }
+    }
+
+    /// EXIT GATE B — a round whose leader is fully orphaned at R+1
+    /// (zero R+1 certs reference the leader as parent) must resolve to
+    /// `Skip` once any later directly-decided anchor exists. The leader
+    /// cert exists in the DAG but is unreachable from the anchor's
+    /// causal history, which is the structural condition for `Skip` per
+    /// `try_indirect_decide`.
+    #[test]
+    fn indirect_resolves_to_skip_when_leader_orphaned(
+        n_authorities in 4u32..=7,
+        sparse_round in 1u64..=3,
+        extra_anchor_rounds in 2u64..=4,
+        payload_seed in any::<u64>(),
+    ) {
+        let n = n_authorities;
+        let n_supporters = 0u32;
+        let n_rounds = sparse_round + 1 + extra_anchor_rounds;
+        let target_round = sparse_round - 1;
+
+        let certs = build_sparse_dag(
+            n_rounds,
+            n,
+            sparse_round,
+            n_supporters,
+            payload_seed,
+        );
+        let store = store_from(&certs);
+
+        // Direct rule MUST be Undecided.
+        prop_assert_eq!(
+            try_direct_decide(&store, target_round, n),
+            LeaderStatus::Undecided,
+            "construction error: direct rule should be Undecided at target round {}",
+            target_round,
+        );
+
+        // Sanity: anchor exists.
+        let mut anchor: Option<Round> = None;
+        for r in (target_round + 2)..n_rounds {
+            if let LeaderStatus::Direct(_) = try_direct_decide(&store, r, n) {
+                anchor = Some(r);
+                break;
+            }
+        }
+        prop_assert!(
+            anchor.is_some(),
+            "construction error: no directly-decided anchor at >= target+2 \
+             (n={}, target={}, n_rounds={})",
+            n, target_round, n_rounds,
+        );
+
+        prop_assert_eq!(
+            decide_slot(&store, target_round, n),
+            LeaderStatus::Skip,
+            "decide_slot did not Skip an orphaned leader at target round {} \
+             (n={}, sparse_round={}, n_rounds={})",
+            target_round, n, sparse_round, n_rounds,
+        );
     }
 
     /// Repeated calls to `decide_slot` on the same DAG return the same
