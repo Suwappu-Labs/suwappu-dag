@@ -59,12 +59,14 @@ declare -a VALIDATORS=(
 REGIONS=()
 for v in "${VALIDATORS[@]}"; do REGIONS+=("${v%%:*}"); done
 
-START_MS=$(date +%s%3N)
+# Use python3 for millisecond epoch — BSD `date` on macOS doesn't
+# support `%3N` (GNU coreutils only). python3 is always present.
+START_MS=$(python3 -c 'import time; print(int(time.time() * 1000))')
 echo "[$(date -u +%FT%TZ)] campaign $CAMPAIGN_ID — observing $DURATION_S s on ${#VALIDATORS[@]} validators"
 
 sleep "$DURATION_S"
 
-END_MS=$(date +%s%3N)
+END_MS=$(python3 -c 'import time; print(int(time.time() * 1000))')
 echo "[$(date -u +%FT%TZ)] observation window closed"
 
 # Step 4–5: collect logs from each validator via S3 push (DAG-S28.1).

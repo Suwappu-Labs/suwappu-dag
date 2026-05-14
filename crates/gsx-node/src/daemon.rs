@@ -1371,6 +1371,83 @@ mod tests {
         assert!(in_block, "intent was not carried into any block");
     }
 
+    /// DAG-S29.2: submit a batch of N intents in one wire roundtrip
+    /// and verify the daemon returns N hashes in order, and that the
+    /// intents land in proposed blocks.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn client_listener_accepts_intent_batch() {
+        let n = 1u32;
+        // Stay out of every other daemon test's range:
+        //   four_node_main_lane_commits   19_000-19_103
+        //   client_listener_accepts_intent 19_500 + 19_600
+        //   phase_g_admit_and_eject       19_700-19_803
+        // 20_000 base is well clear.
+        let base_port: u16 = 20_000;
+        let manifest = GenesisManifest {
+            network_id: "client-batch-1n".into(),
+            validators: (0..n)
+                .map(|i| GenesisValidator {
+                    authority_id: i,
+                    label: format!("v{}", i),
+                    mldsa_public_key_hex: "00".into(),
+                    bls_public_key_hex: "00".into(),
+                    validator_stake_gsx: 1_000,
+                    authority_stake_gsx: 1_000,
+                })
+                .collect(),
+            corridors: Vec::new(),
+            rounds_per_epoch: 1024,
+        };
+        let cfg = NodeConfig {
+            self_id: "v0".into(),
+            authority_id: 0,
+            listen: format!("127.0.0.1:{}", base_port).parse().unwrap(),
+            client_listen: format!("127.0.0.1:{}", base_port + 100).parse().unwrap(),
+            peers: vec![],
+            round_ms: 500,
+            checkpoint_cadence_rounds: 1,
+            mldsa_secret_key_path: "/dev/null".into(),
+            bls_secret_key_path: "/dev/null".into(),
+            genesis_manifest_path: "/dev/null".into(),
+            event_log_path: std::env::temp_dir().join("gsx-client-batch-test.ndjson"),
+        };
+        let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let mut client = crate::client::LoadGenClient::connect(cfg.client_listen)
+            .await
+            .unwrap();
+        let batch: Vec<gsx_execution::Intent> = (0..50u8)
+            .map(|i| gsx_execution::Intent::Transfer {
+                from: [i; 20],
+                to: [i.wrapping_add(1); 20],
+                amount: 99,
+            })
+            .collect();
+        let hashes = client.submit_batch(batch).await.unwrap();
+        assert_eq!(hashes.len(), 50, "ack hash count must match batch size");
+
+        // Give the round driver a tick to drain + propose.
+        tokio::time::sleep(Duration::from_millis(700)).await;
+
+        let s = d.state.lock().await;
+        let total_intents_in_blocks: usize = s
+            .blocks
+            .values()
+            .map(|b| {
+                b.intents
+                    .iter()
+                    .filter(|i| matches!(i, gsx_execution::Intent::Transfer { amount: 99, .. }))
+                    .count()
+            })
+            .sum();
+        assert!(
+            total_intents_in_blocks >= 50,
+            "expected ≥50 batch intents in blocks, got {}",
+            total_intents_in_blocks
+        );
+    }
+
     /// 4 daemons on loopback, all dialing each other. Within 3 seconds at
     /// 100 ms round cadence, every validator should have committed at least
     /// one round-0 cert, and all 4 substrates should agree on the post-commit

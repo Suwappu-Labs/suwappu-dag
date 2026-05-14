@@ -75,9 +75,26 @@ struct Args {
     #[arg(long, default_value_t = 1)]
     amount: u128,
 
-    /// Deterministic RNG seed for repeatable runs.
+    /// Deterministic RNG seed for repeatable runs. Default `0` is
+    /// treated specially: each campaign picks a fresh runtime entropy
+    /// seed (current unix nanos), so intent hashes don't collide
+    /// across consecutive campaigns sharing a long-lived daemon's
+    /// event log (DAG-S29.1 e2e join hazard). Pass any non-zero value
+    /// to opt in to a reproducible run — useful for debugging.
     #[arg(long, default_value_t = 0)]
     seed: u64,
+
+    /// Number of intents per batched `ClientMessage::SubmitBatch`
+    /// (DAG-S29.2). Pre-S29 the wire protocol acked every intent
+    /// individually, capping the loadgen at `n_targets / RTT` ≈ 88
+    /// TPS for 4 cross-region targets at 45 ms median ack RTT. With
+    /// N intents per ack, the ceiling becomes `N × n_targets / RTT`.
+    /// Default 100 lifts the ceiling to ~8,800 TPS; 500 lifts it to
+    /// ~44k TPS, beyond what a 4-cert/sec consensus cadence at 12k
+    /// intents/cert can commit (~48k TPS hard ceiling). Set to 1 for
+    /// the pre-S29 one-intent-one-ack behaviour.
+    #[arg(long, default_value_t = 100)]
+    batch_size: u32,
 }
 
 #[tokio::main]
@@ -161,12 +178,41 @@ async fn main() -> anyhow::Result<()> {
 
     // Per-task rate: split aggregate evenly across targets.
     let per_target_rate = (args.rate as u64 / targets.len() as u64).max(1);
-    let per_target_interval = Duration::from_micros(1_000_000 / per_target_rate);
+    // DAG-S29.2: in batched mode, each task fires `batch_size` intents
+    // per roundtrip. The sleep interval scales by batch_size so the
+    // overall TPS still matches `--rate`. With batch_size=100 and
+    // per_target_rate=200, each task does 2 batches/sec (=200 intents/
+    // sec/target × 4 targets = 800 TPS aggregate, RTT-amortised by 100).
+    let batch_size = args.batch_size.max(1) as u64;
+    let batches_per_sec = (per_target_rate / batch_size).max(1);
+    let per_target_interval = Duration::from_micros(1_000_000 / batches_per_sec);
     let per_target_planned = if args.continuous {
         u64::MAX
     } else {
         per_target_rate * args.duration
     };
+    eprintln!(
+        "gsx-loadgen: per-target {} intents/s in batches of {} ({} batches/s/target)",
+        per_target_rate, batch_size, batches_per_sec
+    );
+
+    // DAG-S29.1: when --seed is at its default (0), pick a runtime
+    // entropy seed so intent hashes don't collide with prior runs'
+    // committed events in the (long-lived) validator event log. Each
+    // task gets seed_base + target_idx so the 4 targets still emit
+    // distinct intent sequences within this campaign.
+    let seed_base = if args.seed == 0 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0)
+    } else {
+        args.seed
+    };
+    eprintln!(
+        "gsx-loadgen: seed_base = {} (from --seed {})",
+        seed_base, args.seed
+    );
 
     let mut task_set = tokio::task::JoinSet::new();
     for (idx, addr) in targets.iter().enumerate() {
@@ -174,9 +220,10 @@ async fn main() -> anyhow::Result<()> {
         let csv_tx = csv_tx.clone();
         let aggregate_sent = aggregate_sent.clone();
         let amount = args.amount;
-        let seed = args.seed.wrapping_add(idx as u64);
+        let seed = seed_base.wrapping_add(idx as u64);
         let interval = per_target_interval;
         let planned = per_target_planned;
+        let batch = batch_size;
         task_set.spawn(async move {
             let mut client = match LoadGenClient::connect(addr).await {
                 Ok(c) => c,
@@ -194,22 +241,35 @@ async fn main() -> anyhow::Result<()> {
                         break;
                     }
                 }
-                let from: [u8; 20] = rng.gen();
-                let to: [u8; 20] = rng.gen();
-                let intent = Intent::Transfer { from, to, amount };
+                // Build one batch of `batch_size` intents.
+                let mut intents: Vec<Intent> = Vec::with_capacity(batch as usize);
+                for _ in 0..batch {
+                    if sent_local + intents.len() as u64 >= planned {
+                        break;
+                    }
+                    let from: [u8; 20] = rng.gen();
+                    let to: [u8; 20] = rng.gen();
+                    intents.push(Intent::Transfer { from, to, amount });
+                }
+                if intents.is_empty() {
+                    break;
+                }
+                let n_in_batch = intents.len() as u64;
                 let send_ms = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map(|d| d.as_millis() as u64)
                     .unwrap_or(0);
-                match client.submit(intent).await {
-                    Ok(hash) => {
-                        let _ = csv_tx.send((send_ms, hash, idx));
-                        aggregate_sent.fetch_add(1, Ordering::Relaxed);
-                        sent_local += 1;
+                match client.submit_batch(intents).await {
+                    Ok(hashes) => {
+                        for hash in &hashes {
+                            let _ = csv_tx.send((send_ms, *hash, idx));
+                        }
+                        aggregate_sent.fetch_add(hashes.len() as u64, Ordering::Relaxed);
+                        sent_local += n_in_batch;
                     }
                     Err(e) => {
                         eprintln!(
-                            "gsx-loadgen: submit failed on target {} ({}): {:#}",
+                            "gsx-loadgen: submit_batch failed on target {} ({}): {:#}",
                             idx, addr, e
                         );
                     }

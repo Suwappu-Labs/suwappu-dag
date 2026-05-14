@@ -255,10 +255,34 @@ fn emit_e2e_mode(events: &[Event], loadgen_csv: &Option<PathBuf>) -> Result<()> 
         }
     }
 
+    // DAG-S29.1: drop rows where the matched committed_ms is BEFORE
+    // submitted_ms. Cause: gsx-loadgen seeds its RNG deterministically
+    // (`args.seed.wrapping_add(target_idx)`), so the same `--seed 0`
+    // produces identical intent payloads across campaign runs. The
+    // join then matches a CURRENT submit to an OLD commit from a
+    // previous run with the same hash, producing nonsensical negative
+    // latency that `saturating_sub` clamps to 0 (the visible symptom:
+    // every row in the report shows `e2e_latency_ms=0`).
+    //
+    // The right fix is bigger (campaign-unique nonce in Intent or
+    // runtime-entropy default seed); meanwhile, filtering matches by
+    // submitted_ms ≤ committed_ms keeps the per-tx e2e join honest.
+    // Rows with no matching submit (cluster-internal certs, no
+    // loadgen pairing) are still kept with submitted_ms=null.
+    let mut dropped_stale: u64 = 0;
     println!("tx_hash,submitted_ms,region,first_committed_ms,e2e_latency_ms");
     for ((tx_hash, region), committed_ms) in first_committed {
         let submitted_ms = submitted.get(&tx_hash).copied();
-        let latency = submitted_ms.map(|s| committed_ms.saturating_sub(s));
+        if let Some(s) = submitted_ms {
+            if committed_ms < s {
+                // Stale match from a prior campaign run. Skip the
+                // submit-paired column entirely so percentiles in
+                // report.py don't sum 0-ms latencies.
+                dropped_stale += 1;
+                continue;
+            }
+        }
+        let latency = submitted_ms.map(|s| committed_ms - s);
         println!(
             "{},{},{},{},{}",
             tx_hash,
@@ -266,6 +290,15 @@ fn emit_e2e_mode(events: &[Event], loadgen_csv: &Option<PathBuf>) -> Result<()> 
             region,
             committed_ms,
             opt(latency),
+        );
+    }
+    if dropped_stale > 0 {
+        eprintln!(
+            "gsx-metrics e2e: warning — dropped {} (tx_hash, region) pairs where \
+             committed_ms < submitted_ms (stale hash match from a prior \
+             campaign run with the same deterministic loadgen seed). \
+             Pass `--seed <unique>` to gsx-loadgen to suppress.",
+            dropped_stale
         );
     }
     Ok(())

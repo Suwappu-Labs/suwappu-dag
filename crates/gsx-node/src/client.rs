@@ -40,6 +40,12 @@ use crate::events::{Event, EventLog, Lane};
 pub enum ClientMessage {
     /// Submit one transfer intent for inclusion in the next block.
     Submit(Intent),
+    /// Submit many intents in a single roundtrip (DAG-S29.2). The
+    /// validator pushes every intent onto the same lock-free mpsc
+    /// that single `Submit` uses, then returns one `AckBatch` with
+    /// the full list of intent hashes. Amortises the 1-RTT-per-intent
+    /// ack cost that pre-S29 capped cross-region loadgens at ~88 TPS.
+    SubmitBatch(Vec<Intent>),
     /// No-op liveness probe.
     Ping(u64),
 }
@@ -54,6 +60,12 @@ pub enum ClientResponse {
         /// blake3 hash of the bincoded intent — same value the daemon writes
         /// as `tx_hash` on its `submitted` event log line.
         intent_hash: [u8; 32],
+    },
+    /// Response to `SubmitBatch` — one intent hash per input intent,
+    /// in the same order the client submitted them (DAG-S29.2).
+    AckBatch {
+        /// blake3 hashes of each intent in submission order.
+        intent_hashes: Vec<[u8; 32]>,
     },
     /// Bincode codec failure on the validator side. Client should retry or
     /// close the connection.
@@ -138,6 +150,34 @@ async fn handle_conn(
                 );
                 write_response(&mut stream, &ClientResponse::Ack { intent_hash }).await?;
             }
+            ClientMessage::SubmitBatch(intents) => {
+                // DAG-S29.2: same lock-free mpsc, just amortise the ack
+                // roundtrip across N intents.
+                let mut hashes: Vec<[u8; 32]> = Vec::with_capacity(intents.len());
+                for intent in intents {
+                    let intent_hash: [u8; 32] =
+                        blake3::hash(&bincode::serialize(&intent).expect("intent serialize"))
+                            .into();
+                    if intent_tx.send(intent).is_err() {
+                        let resp =
+                            ClientResponse::Err("intent channel closed mid-batch".to_string());
+                        let _ = write_response(&mut stream, &resp).await;
+                        return Ok(());
+                    }
+                    log.emit(
+                        Event::now(&self_label, Lane::Client, "submitted")
+                            .with_tx_hash(&intent_hash),
+                    );
+                    hashes.push(intent_hash);
+                }
+                write_response(
+                    &mut stream,
+                    &ClientResponse::AckBatch {
+                        intent_hashes: hashes,
+                    },
+                )
+                .await?;
+            }
             ClientMessage::Ping(t) => {
                 write_response(&mut stream, &ClientResponse::Pong(t)).await?;
             }
@@ -199,9 +239,34 @@ impl LoadGenClient {
         match resp {
             ClientResponse::Ack { intent_hash } => Ok(intent_hash),
             ClientResponse::Err(e) => Err(io::Error::new(io::ErrorKind::InvalidData, e)),
-            ClientResponse::Pong(_) => Err(io::Error::new(
+            ClientResponse::AckBatch { .. } | ClientResponse::Pong(_) => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "unexpected Pong for Submit",
+                "unexpected response for Submit",
+            )),
+        }
+    }
+
+    /// Submit N intents as a single batched roundtrip (DAG-S29.2).
+    /// Returns the per-intent hashes in submission order. Replaces N
+    /// individual `submit` calls with one length-prefixed wire roundtrip,
+    /// amortising the ack-RTT cost across the batch.
+    pub async fn submit_batch(&mut self, intents: Vec<Intent>) -> io::Result<Vec<[u8; 32]>> {
+        let bytes = bincode::serialize(&ClientMessage::SubmitBatch(intents))
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        let len = (bytes.len() as u32).to_be_bytes();
+        self.stream.write_all(&len).await?;
+        self.stream.write_all(&bytes).await?;
+        self.stream.flush().await?;
+
+        let resp_bytes = read_frame(&mut self.stream).await?;
+        let resp: ClientResponse = bincode::deserialize(&resp_bytes)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        match resp {
+            ClientResponse::AckBatch { intent_hashes } => Ok(intent_hashes),
+            ClientResponse::Err(e) => Err(io::Error::new(io::ErrorKind::InvalidData, e)),
+            ClientResponse::Ack { .. } | ClientResponse::Pong(_) => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unexpected response for SubmitBatch",
             )),
         }
     }
