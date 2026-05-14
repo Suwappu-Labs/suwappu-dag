@@ -479,7 +479,7 @@ impl LoadGenClient {
     pub async fn submit(&mut self, intent: Intent) -> io::Result<[u8; 32]> {
         let digest = intent_signing_digest(&self.network_id, &intent);
         let signature = mldsa::sign(&digest, &self.secret_key)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sign: {:?}", e)))?;
+            .map_err(|e| io::Error::other(format!("sign: {:?}", e)))?;
         let pkh = self.signer_pubkey_hash();
         let msg = ClientMessage::Submit {
             intent,
@@ -515,7 +515,7 @@ impl LoadGenClient {
         for intent in intents.iter() {
             let digest = intent_signing_digest(&self.network_id, intent);
             let signature = mldsa::sign(&digest, &self.secret_key)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sign: {:?}", e)))?;
+                .map_err(|e| io::Error::other(format!("sign: {:?}", e)))?;
             signatures.push(signature.as_bytes().to_vec());
         }
         let pkh = self.signer_pubkey_hash();
