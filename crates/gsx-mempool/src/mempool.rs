@@ -158,16 +158,13 @@ impl Mempool {
 
         // 2. Rate limit (only if peer label provided).
         if let Some(ref label) = peer {
-            let bucket = inner
-                .buckets
-                .entry(label.clone())
-                .or_insert_with(|| {
-                    LeakyBucket::new(
-                        self.config.per_peer_capacity,
-                        self.config.per_peer_refill_per_sec,
-                        now_ms,
-                    )
-                });
+            let bucket = inner.buckets.entry(label.clone()).or_insert_with(|| {
+                LeakyBucket::new(
+                    self.config.per_peer_capacity,
+                    self.config.per_peer_refill_per_sec,
+                    now_ms,
+                )
+            });
             if let Err(retry_after_ms) = bucket.take_one(now_ms) {
                 return Err(MempoolError::RateLimited { retry_after_ms });
             }
@@ -368,7 +365,9 @@ mod tests {
         assert_eq!(mp.stats().size, 3);
         let drained = mp.drain_for_block(3);
         // The 10-priority intent (amount=1) was evicted.
-        assert!(drained.iter().all(|i| !matches!(i, Intent::Transfer { amount: 1, .. })));
+        assert!(drained
+            .iter()
+            .all(|i| !matches!(i, Intent::Transfer { amount: 1, .. })));
     }
 
     #[test]
@@ -402,10 +401,13 @@ mod tests {
         for n in 0u128..3 {
             mp.submit(transfer(n), 1, Some("peerA".into()), 0).unwrap();
         }
-        let err = mp.submit(transfer(99), 1, Some("peerA".into()), 0).unwrap_err();
+        let err = mp
+            .submit(transfer(99), 1, Some("peerA".into()), 0)
+            .unwrap_err();
         assert!(matches!(err, MempoolError::RateLimited { .. }));
         // Different peer is unaffected.
-        mp.submit(transfer(1000), 1, Some("peerB".into()), 0).unwrap();
+        mp.submit(transfer(1000), 1, Some("peerB".into()), 0)
+            .unwrap();
     }
 
     #[test]
@@ -453,10 +455,12 @@ mod tests {
         mp.submit(transfer(1), 1, Some("active".into()), 0).unwrap();
         mp.submit(transfer(2), 1, Some("idle".into()), 0).unwrap();
         // Activity on "active" at t=10_000.
-        mp.submit(transfer(3), 1, Some("active".into()), 10_000).unwrap();
-        // GC at t=20_000 with threshold 5_000 → "idle" (last touched
-        // at 0) should drop; "active" (last touched at 10_000) stays.
-        let dropped = mp.gc_buckets(20_000, 5_000);
+        mp.submit(transfer(3), 1, Some("active".into()), 10_000)
+            .unwrap();
+        // GC at t=20_000 with threshold 15_000ms (15s):
+        //   - "active" last touched at 10_000 → 10s old, < 15s, keep
+        //   - "idle"   last touched at      0 → 20s old, > 15s, drop
+        let dropped = mp.gc_buckets(20_000, 15_000);
         assert_eq!(dropped, 1);
         assert_eq!(mp.stats().tracked_peers, 1);
     }
