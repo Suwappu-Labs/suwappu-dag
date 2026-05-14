@@ -11,6 +11,6 @@ mainnet readiness, see
 
 | IQ | Topic | Code status | Ratification |
 |---|---|---|---|
-| [IQ-001](./IQ-001-quorum-formula.md) | Commit-rule quorum formula (`⌈2n/3⌉+1` vs canonical `2f+1`) | Shipped — `crates/gsx-consensus/src/commit.rs:61-66` | Pending sign-off |
-| [IQ-002](./IQ-002-indirect-commit.md) | Indirect (retroactive) commit rule | Shipped — `crates/gsx-consensus/src/commit.rs:126-202` | Pending sign-off |
+| [IQ-001](./IQ-001-quorum-formula.md) | Commit-rule quorum formula (`⌈2n/3⌉+1` vs canonical `2f+1`) | Shipped — `crates/gsx-consensus/src/commit.rs:61-66` | **Ratified 2026-05-14** ([gsx-papers#1](https://github.com/GlobalSettlementNetwork/gsx-papers/pull/1)) |
+| [IQ-002](./IQ-002-indirect-commit.md) | Indirect (retroactive) commit rule | Shipped — `crates/gsx-consensus/src/commit.rs:126-202` | **Ratified 2026-05-14** ([gsx-papers#1](https://github.com/GlobalSettlementNetwork/gsx-papers/pull/1)) |
 | [IQ-003](./IQ-003-fast-path-architecture.md) | Fast-path lane architecture (parallel-lane vs per-tx metadata) | Handler + proposer wired (`crates/gsx-node/src/daemon.rs:499-820`); K-binding cross-check not wired | Pending sign-off |

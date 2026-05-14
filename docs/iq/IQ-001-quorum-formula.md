@@ -76,9 +76,16 @@ safety regression.
 
 ## Decision
 
-- [ ] Approved by: ______________
-- [ ] Date: ______________
-- [ ] Paper §6.4 + Definition 2 amendment landed in gsx-papers PR: ______
+- [x] Approved by: tomagsx (operator)
+- [x] Date: 2026-05-14
+- [x] Paper §6.4 + Definition 2 amendment landed in gsx-papers PR: [GlobalSettlementNetwork/gsx-papers#1](https://github.com/GlobalSettlementNetwork/gsx-papers/pull/1)
+
+**Ratification context.** Code shipped at `crates/gsx-consensus/src/commit.rs:61-66`
+(`quorum_threshold(n) = n - (n-1)/3`) with unit test at lines 293-310.
+Paper amendments append a paragraph to Definition 2 and replace the §6.4
+fast-path quorum formula with the canonical `2f_A + 1`. Ratified
+alongside IQ-002 in the same gsx-papers PR. Tracked at
+[GlobalSettlementNetwork/gsx-dag#23](https://github.com/GlobalSettlementNetwork/gsx-dag/issues/23).
 
 ## Implementation
 

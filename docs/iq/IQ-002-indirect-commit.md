@@ -95,8 +95,18 @@ total-order on the DAG, and the causal-closure walk is monotone.
 
 ## Decision
 
-- [ ] Approved by: ______________
-- [ ] Date: ______________
+- [x] Approved by: tomagsx (operator)
+- [x] Date: 2026-05-14
+- [x] Paper Theorem 2 amendment landed in gsx-papers PR: [GlobalSettlementNetwork/gsx-papers#1](https://github.com/GlobalSettlementNetwork/gsx-papers/pull/1)
+- [x] Property test `indirect_commit_resolves_undecided_slots` added (10k cases)
+
+**Ratification context.** Code shipped at `crates/gsx-consensus/src/commit.rs:107-202`
+(`LeaderStatus`, `try_direct_decide`, `try_indirect_decide`, `decide_slot`,
+`finalize`) with unit tests at lines 388 (inherited-Direct) and 465
+(permanent-Skip). Paper Theorem 2 proof sketch extended to cover both
+direct and indirect decision rules with a monotonicity argument.
+Ratified alongside IQ-001 in the same gsx-papers PR. Tracked at
+[GlobalSettlementNetwork/gsx-dag#24](https://github.com/GlobalSettlementNetwork/gsx-dag/issues/24).
 
 ## Implementation
 
