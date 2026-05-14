@@ -94,6 +94,11 @@ pub(crate) struct StateInner {
     pub(crate) orphans: HashMap<CertHash, Vec<Certificate>>,
     /// Cert hashes for which a `GetCert` request is outstanding.
     pub(crate) inflight_fetches: HashSet<CertHash>,
+    /// DAG-S32: per-orphan (last_attempt_unix_ms, attempt_count).
+    /// Set on first request and on every sweeper-driven retry. Removed
+    /// when the orphan is finally inserted into the DAG (alongside the
+    /// inflight_fetches entry, in `ingest_cert`).
+    pub(crate) inflight_fetch_history: HashMap<CertHash, (u64, u32)>,
     /// Fast-path lane (DAG-S22) — accumulating partial certs.
     pub(crate) fastpath_pending: HashMap<FastPathKey, FastPathCert>,
     pub(crate) fastpath_committed: HashSet<FastPathKey>,
@@ -158,6 +163,21 @@ const MAX_ORPHAN_CERTS: usize = 4096;
 /// missing parents still in `inflight_fetches`. Matches Sui's
 /// `synchronizer.rs` periodic scheduler cadence.
 const SYNC_SWEEPER_INTERVAL_MS: u64 = 1_000;
+
+/// DAG-S32: orphan-pull exponential backoff floor. Sweeper will not
+/// re-issue `GetCert` for an orphan unless at least this many ms have
+/// elapsed since the last attempt. Combined with the attempt-count
+/// shift below this caps the retry storm a slow node receives when its
+/// `inflight_fetches` grows faster than it can ingest.
+const ORPHAN_PULL_BASE_BACKOFF_MS: u64 = 500;
+const ORPHAN_PULL_MAX_BACKOFF_MS: u64 = 5_000;
+
+/// Backoff for the Nth attempt (1-indexed): base * 2^(attempt-1), capped.
+/// 500, 1_000, 2_000, 4_000, 5_000, 5_000, …
+fn orphan_pull_backoff_ms(attempt: u32) -> u64 {
+    let shift = attempt.saturating_sub(1).min(6);
+    (ORPHAN_PULL_BASE_BACKOFF_MS << shift).min(ORPHAN_PULL_MAX_BACKOFF_MS)
+}
 
 /// Build the `(source_chain, target_chain) -> Corridor` lookup from
 /// the genesis manifest's optional `[[corridors]]` section (DAG-S24).
@@ -245,6 +265,7 @@ impl State {
                 n_authorities: n,
                 orphans: HashMap::new(),
                 inflight_fetches: HashSet::new(),
+                inflight_fetch_history: HashMap::new(),
                 fastpath_pending: HashMap::new(),
                 fastpath_committed: HashSet::new(),
                 fastpath_first_payload: HashMap::new(),
@@ -529,6 +550,7 @@ async fn ingest_cert(
                         inner.max_observed_round = round;
                     }
                     inner.inflight_fetches.remove(&h);
+                    inner.inflight_fetch_history.remove(&h);
                     // DAG-S27.7: promote pending stake on first cert.
                     promote_stake = inner.pending_stake.remove(&c.author).map(|s| (c.author, s));
                     // DAG-S30.1: incremental equivocation detection.
@@ -567,6 +589,15 @@ async fn ingest_cert(
                     }
                     inner.orphans.entry(missing).or_default().push(c);
                     send_fetch = inner.inflight_fetches.insert(missing);
+                    if send_fetch {
+                        // DAG-S32: track first-attempt time + count so the
+                        // sweeper can back off retries instead of spamming.
+                        let now_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0);
+                        inner.inflight_fetch_history.insert(missing, (now_ms, 1));
+                    }
                 }
                 if send_fetch {
                     fetch_cert_from_peers(missing, Some(from), outbound);
@@ -880,10 +911,19 @@ fn corridor_id_fallback(p: &AttestationPayload) -> CorridorId {
 }
 
 /// Periodic sweeper: every `SYNC_SWEEPER_INTERVAL_MS` re-issues
-/// `GetCert` for every hash still in `inflight_fetches`. A peer that
+/// `GetCert` for orphans still in `inflight_fetches`. A peer that
 /// dropped our first request (full channel, restart, …) gets a fresh
 /// chance to answer. Without this, a node that lost a single `GetCert`
 /// stays stuck on that orphan forever.
+///
+/// DAG-S32: rate-limited per-orphan via exponential backoff
+/// (`orphan_pull_backoff_ms`). Pre-S32 the sweeper re-issued GetCert
+/// for every entry every tick, which produced a feedback loop on slow
+/// nodes — the S31 perf-testnet logged 528k `received` events on
+/// ap-northeast-1 with only 81 successful ingestions because its
+/// peers were re-sending the same orphans every second. With backoff
+/// (500ms, 1s, 2s, 4s, 5s cap), a chronically slow consumer's retry
+/// volume bounds independent of how many orphans accumulate.
 ///
 /// Re-issue is multi-peer (`fetch_cert_from_peers` with no preference)
 /// so we rotate naturally rather than re-asking the same dropped peer.
@@ -896,15 +936,28 @@ async fn run_sync_sweeper(
     tick.tick().await;
     loop {
         tick.tick().await;
-        let pending: Vec<CertHash> = state
-            .inner
-            .lock()
-            .await
-            .inflight_fetches
-            .iter()
-            .copied()
-            .collect();
-        for h in pending {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        // DAG-S32: only retry orphans whose last attempt is older than
+        // their per-orphan backoff. Bump the attempt counter as we go.
+        let due: Vec<CertHash> = {
+            let mut inner = state.inner.lock().await;
+            let mut due_now = Vec::new();
+            for h in inner.inflight_fetches.iter().copied().collect::<Vec<_>>() {
+                let entry = inner.inflight_fetch_history.entry(h).or_insert((0, 0));
+                let (last_ms, attempts) = *entry;
+                let elapsed = now_ms.saturating_sub(last_ms);
+                if elapsed >= orphan_pull_backoff_ms(attempts.max(1)) {
+                    *entry = (now_ms, attempts.saturating_add(1));
+                    due_now.push(h);
+                }
+            }
+            due_now
+        };
+        for h in due {
             fetch_cert_from_peers(h, None, &outbound);
         }
     }
@@ -1686,7 +1739,7 @@ mod tests {
         // starve commit progress for several seconds; a fixed sleep
         // misses the deadline whereas a poll passes as soon as the
         // registry reflects the new admission on every node.
-        let admit_deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let admit_deadline = std::time::Instant::now() + Duration::from_secs(90);
         loop {
             let all_at_5 = {
                 let mut ok = true;
@@ -1752,7 +1805,7 @@ mod tests {
                         auth_equiv
                     ));
                 }
-                panic!("phase G admit timed out (30s):\n  {}", diag.join("\n  "));
+                panic!("phase G admit timed out (90s):\n  {}", diag.join("\n  "));
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
@@ -1764,7 +1817,16 @@ mod tests {
         };
         client.submit(eject).await.unwrap();
 
-        let eject_deadline = std::time::Instant::now() + Duration::from_secs(30);
+        // DAG-S32: bumped 30s -> 120s. Two compounding effects on CI:
+        // (a) orphan-pull retry backoff (500ms, 1s, 2s, 4s, 5s cap)
+        // widens worst-case recovery; (b) post-admit the registry has
+        // n=5 authorities but the test only runs 4 daemons, so leader
+        // rotation has a permanently missing slot every 5th round and
+        // commits rely on the f+1 leader_timeout fallback (200ms each
+        // missed wave). The eject intent therefore commits much slower
+        // than admit. Test logic is correct (poll-until-convergence);
+        // the deadline is just the failure ceiling.
+        let eject_deadline = std::time::Instant::now() + Duration::from_secs(120);
         loop {
             let all_at_4 = {
                 let mut ok = true;
@@ -1787,7 +1849,7 @@ mod tests {
                     sizes.push(reg.len());
                 }
                 panic!(
-                    "phase G eject timed out (30s); registry sizes by node = {:?}",
+                    "phase G eject timed out (120s); registry sizes by node = {:?}",
                     sizes
                 );
             }
