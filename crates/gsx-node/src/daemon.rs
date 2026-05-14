@@ -120,6 +120,15 @@ pub(crate) struct StateInner {
     /// Stake parked for newly-admitted authorities (DAG-S27.7);
     /// promoted into `state.stake_table` on first-cert insertion.
     pub(crate) pending_stake: BTreeMap<AuthorityId, gsx_consensus::Stake>,
+    /// Issue #18: governance intents queued for application at the
+    /// next epoch boundary. Applying `AdmitAuthority` / `ExitAuthority`
+    /// / `EjectAuthority` at commit time caused transitional
+    /// quorum-threshold asymmetry across daemons (each daemon commits
+    /// at a slightly different round under jitter, so the `n=5→n=4`
+    /// eject path briefly disagrees on what constitutes a valid
+    /// round-completion). Draining at the epoch boundary makes the
+    /// transition atomic across the mesh.
+    pub(crate) pending_governance: Vec<Intent>,
     /// `(author, round) → first cert hash observed` (DAG-S30.1).
     /// Equivocation detection O(1) per insert instead of O(dag)
     /// per try_commit.
@@ -287,6 +296,7 @@ impl State {
                     last_boundary_round: 0,
                 },
                 pending_stake: BTreeMap::new(),
+                pending_governance: Vec::new(),
                 seen_at: BTreeMap::new(),
                 detected_equivocations: Vec::new(),
             }),
@@ -429,13 +439,18 @@ impl Daemon {
         // socket. Pre-S27.2 this took `state` and pushed onto
         // `pending_intents` under the global mutex. Now it takes
         // `intent_tx` and sends over the mpsc — no consensus-lock
-        // contention.
+        // contention. Issue #28 (Phase 2.6): the listener also takes a
+        // clone of `state` + the genesis `network_id` so it can verify
+        // ML-DSA-65 signatures on every inbound intent against the
+        // seated `AuthorityRegistry`.
         {
             let client_task = crate::client::run(
                 cfg.client_listen,
                 self_label.clone(),
                 intent_tx,
                 log.clone(),
+                state.clone(),
+                manifest.network_id.clone(),
             )
             .await?;
             tasks.push(client_task);
@@ -1138,9 +1153,27 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
                 }
             }
 
-            // DAG-S27.3: apply Phase G governance intents at commit time.
-            for intent in &intents {
-                apply_governance_intent(state, intent, cert_round, self_label, log).await;
+            // Issue #18: queue Phase G governance intents for
+            // epoch-boundary application. Applying at commit time made
+            // n_authorities update at different rounds across daemons
+            // (jitter), causing transitional quorum-threshold asymmetry
+            // that stalled the eject path (n=5→n=4: threshold changes
+            // from 4 to 3 mid-flight). Draining at the epoch boundary
+            // (below) makes governance transitions atomic across the
+            // mesh. Non-governance intents (Transfer) already executed
+            // via execute_block above — they are unchanged.
+            {
+                let mut inner = state.inner.lock().await;
+                for intent in &intents {
+                    if matches!(
+                        intent,
+                        Intent::AdmitAuthority { .. }
+                            | Intent::ExitAuthority { .. }
+                            | Intent::EjectAuthority { .. }
+                    ) {
+                        inner.pending_governance.push(intent.clone());
+                    }
+                }
             }
 
             log.emit(
@@ -1152,18 +1185,36 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
             state.votes.lock().remove(&h);
 
             // Epoch boundary detection (DAG-S25 Phase G).
-            let mut inner = state.inner.lock().await;
-            if inner.epoch.boundary_crossed_by(cert_round) {
-                let new_epoch = inner.epoch.epoch_for(cert_round);
-                inner.epoch.current = new_epoch;
-                inner.epoch.last_boundary_round = cert_round;
+            // Issue #18: drains queued governance intents here so that
+            // registry mutations land atomically at the boundary round.
+            let boundary_crossed = {
+                let mut inner = state.inner.lock().await;
+                if inner.epoch.boundary_crossed_by(cert_round) {
+                    let new_epoch = inner.epoch.epoch_for(cert_round);
+                    inner.epoch.current = new_epoch;
+                    inner.epoch.last_boundary_round = cert_round;
+                    true
+                } else {
+                    false
+                }
+            };
+            if boundary_crossed {
+                let queued: Vec<Intent> = {
+                    let mut inner = state.inner.lock().await;
+                    inner.pending_governance.drain(..).collect()
+                };
+                for intent in &queued {
+                    apply_governance_intent(state, intent, cert_round, self_label, log).await;
+                }
                 log.emit(
                     Event::now(self_label, Lane::Main, "epoch_boundary").with_round(cert_round),
                 );
+                let new_epoch = state.inner.lock().await.epoch.current;
                 tracing::info!(
                     epoch = new_epoch,
                     round = cert_round,
-                    "epoch boundary crossed"
+                    drained = queued.len(),
+                    "epoch boundary crossed; governance applied"
                 );
             }
         }
@@ -1520,17 +1571,24 @@ mod tests {
     /// the intent landed in a block. Pre-S27.2 this test poked
     /// `state.pending_intents` directly; that field no longer exists since
     /// intents flow over a lock-free mpsc to the round driver.
+    ///
+    /// Issue #28 (Phase 2.6): the listener now enforces ML-DSA-65
+    /// signatures, so the test seeds a real keypair into the genesis
+    /// manifest and uses the matching secret key on the client side.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn client_listener_accepts_intent() {
         let n = 1u32;
         let base_port: u16 = 19_500;
+        let network_id = "client-1n".to_string();
+        let (pk, sk) = gsx_crypto::mldsa::keypair();
+        let pk_hex = hex::encode(pk.as_bytes());
         let manifest = GenesisManifest {
-            network_id: "client-1n".into(),
+            network_id: network_id.clone(),
             validators: (0..n)
                 .map(|i| GenesisValidator {
                     authority_id: i,
                     label: format!("v{}", i),
-                    mldsa_public_key_hex: "00".into(),
+                    mldsa_public_key_hex: pk_hex.clone(),
                     bls_public_key_hex: "00".into(),
                     validator_stake_gsx: 1_000,
                     authority_stake_gsx: 1_000,
@@ -1555,9 +1613,14 @@ mod tests {
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        let mut client = crate::client::LoadGenClient::connect(cfg.client_listen)
-            .await
-            .unwrap();
+        let mut client = crate::client::LoadGenClient::connect(
+            cfg.client_listen,
+            sk,
+            pk,
+            network_id,
+        )
+        .await
+        .unwrap();
         let intent = gsx_execution::Intent::Transfer {
             from: [1u8; 20],
             to: [2u8; 20],
@@ -1581,7 +1644,9 @@ mod tests {
 
     /// DAG-S29.2: submit a batch of N intents in one wire roundtrip
     /// and verify the daemon returns N hashes in order, and that the
-    /// intents land in proposed blocks.
+    /// intents land in proposed blocks. Issue #28 (Phase 2.6): the
+    /// batch path now signs every intent and verifies all signatures
+    /// before pushing any onto the mpsc.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn client_listener_accepts_intent_batch() {
         let n = 1u32;
@@ -1591,13 +1656,16 @@ mod tests {
         //   phase_g_admit_and_eject       19_700-19_803
         // 20_000 base is well clear.
         let base_port: u16 = 20_000;
+        let network_id = "client-batch-1n".to_string();
+        let (pk, sk) = gsx_crypto::mldsa::keypair();
+        let pk_hex = hex::encode(pk.as_bytes());
         let manifest = GenesisManifest {
-            network_id: "client-batch-1n".into(),
+            network_id: network_id.clone(),
             validators: (0..n)
                 .map(|i| GenesisValidator {
                     authority_id: i,
                     label: format!("v{}", i),
-                    mldsa_public_key_hex: "00".into(),
+                    mldsa_public_key_hex: pk_hex.clone(),
                     bls_public_key_hex: "00".into(),
                     validator_stake_gsx: 1_000,
                     authority_stake_gsx: 1_000,
@@ -1622,9 +1690,14 @@ mod tests {
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        let mut client = crate::client::LoadGenClient::connect(cfg.client_listen)
-            .await
-            .unwrap();
+        let mut client = crate::client::LoadGenClient::connect(
+            cfg.client_listen,
+            sk,
+            pk,
+            network_id,
+        )
+        .await
+        .unwrap();
         let batch: Vec<gsx_execution::Intent> = (0..50u8)
             .map(|i| gsx_execution::Intent::Transfer {
                 from: [i; 20],
@@ -1745,46 +1818,54 @@ mod tests {
     /// on every validator, which is the end-to-end guarantee Phase G
     /// claims (paper §4.1 + Invariant 5 for the eject path).
     ///
-    /// **`#[ignore]` rationale (2026-05-14):** the admit phase (n=4→n=5)
-    /// is reliable, but the eject phase (n=5→n=4) is flaky on busy GHA
-    /// runners and has blocked `main`-branch CI through S31, S32, S33.
-    /// The deadline has been bumped 30s→60s→90s→120s without fixing the
-    /// underlying race: governance intents apply at commit time
-    /// (`apply_governance_intent` at line ~1086), so each daemon updates
-    /// `n_authorities` at the round it personally commits the eject
-    /// block — which can be a different round across the 4 daemons.
-    /// During that transitional window, `quorum_threshold(5) = 4` (pre)
-    /// and `quorum_threshold(4) = 3` (post) disagree on what constitutes
-    /// a valid round-completion, briefly stalling commits. Admit doesn't
-    /// see this because `quorum_threshold(4) = quorum_threshold(5) = 4`
-    /// — the threshold is unchanged across the n increment.
-    ///
-    /// Fix requires a proper consensus-side change (e.g. apply governance
-    /// effects at an epoch boundary so transitions are atomic across the
-    /// mesh, or have daemons gate quorum_threshold on the highest n seen
-    /// in any committed block they've voted for). That's out of scope
-    /// for build-reliability work. Tracked in a follow-up issue. Run
-    /// locally with `cargo test phase_g -- --ignored` to reproduce.
-    #[ignore = "flaky on GHA runners; transitional quorum-threshold asymmetry in eject path"]
+    /// Issue #18 fix (2026-05-14): governance intents
+    /// (`AdmitAuthority` / `ExitAuthority` / `EjectAuthority`) are now
+    /// queued at commit time and drained at the next epoch boundary,
+    /// making the registry mutation atomic across the mesh. This
+    /// eliminates the transitional quorum-threshold asymmetry where
+    /// daemons disagreed on `quorum_threshold(5)=4` vs
+    /// `quorum_threshold(4)=3` during the n=5→n=4 window. The test
+    /// uses a deliberately short `rounds_per_epoch = 16` (≈1.6s at
+    /// `round_ms=100ms`) so each governance op only waits ~one epoch
+    /// boundary, not multi-round consensus convergence.
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn phase_g_admit_and_eject() {
         let n = 4u32;
         let base_port: u16 = 19_700;
+        let network_id = "phase-g-4n".to_string();
+
+        // Issue #28 (Phase 2.6): generate a real ML-DSA-65 keypair
+        // for v0 so the loadgen client can sign AdmitAuthority /
+        // EjectAuthority intents that pass the new signature gate.
+        let (client_pk, client_sk) = gsx_crypto::mldsa::keypair();
+        let client_pk_hex = hex::encode(client_pk.as_bytes());
 
         let manifest = GenesisManifest {
-            network_id: "phase-g-4n".into(),
+            network_id: network_id.clone(),
             validators: (0..n)
                 .map(|i| GenesisValidator {
                     authority_id: i,
                     label: format!("v{}", i),
-                    mldsa_public_key_hex: "00".into(),
+                    // v0 carries the loadgen-known pubkey so this
+                    // test's `client.submit(...)` calls verify.
+                    // Other validators carry "00" — they don't need
+                    // to verify their OWN cert authorship in this
+                    // test, only the client wire on v0.
+                    mldsa_public_key_hex: if i == 0 {
+                        client_pk_hex.clone()
+                    } else {
+                        "00".into()
+                    },
                     bls_public_key_hex: "00".into(),
                     validator_stake_gsx: 30_000, // ≥ VALIDATOR_STAKE_THRESHOLD_GSX
                     authority_stake_gsx: 150_000, // ≥ AUTHORITY_STAKE_THRESHOLD_GSX
                 })
                 .collect(),
             corridors: Vec::new(),
-            rounds_per_epoch: 1024,
+            // Issue #18: short epochs so governance application
+            // (which now lands at the next boundary) is exercised on
+            // CI-sane timescales. 16 rounds * 100ms = 1.6s/boundary.
+            rounds_per_epoch: 16,
         };
 
         let mut daemons = Vec::new();
@@ -1833,9 +1914,14 @@ mod tests {
         let admit_addr = format!("127.0.0.1:{}", base_port + 100)
             .parse::<SocketAddr>()
             .unwrap();
-        let mut client = crate::client::LoadGenClient::connect(admit_addr)
-            .await
-            .unwrap();
+        let mut client = crate::client::LoadGenClient::connect(
+            admit_addr,
+            client_sk,
+            client_pk,
+            network_id.clone(),
+        )
+        .await
+        .unwrap();
         let admit = gsx_execution::Intent::AdmitAuthority {
             authority_id: 4,
             stake_gsx: 150_000,
@@ -1849,7 +1935,7 @@ mod tests {
         // starve commit progress for several seconds; a fixed sleep
         // misses the deadline whereas a poll passes as soon as the
         // registry reflects the new admission on every node.
-        let admit_deadline = std::time::Instant::now() + Duration::from_secs(90);
+        let admit_deadline = std::time::Instant::now() + Duration::from_secs(60);
         loop {
             let all_at_5 = {
                 let mut ok = true;
@@ -1915,7 +2001,7 @@ mod tests {
                         auth_equiv
                     ));
                 }
-                panic!("phase G admit timed out (90s):\n  {}", diag.join("\n  "));
+                panic!("phase G admit timed out (60s):\n  {}", diag.join("\n  "));
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
@@ -1927,16 +2013,13 @@ mod tests {
         };
         client.submit(eject).await.unwrap();
 
-        // DAG-S32: bumped 30s -> 120s. Two compounding effects on CI:
-        // (a) orphan-pull retry backoff (500ms, 1s, 2s, 4s, 5s cap)
-        // widens worst-case recovery; (b) post-admit the registry has
-        // n=5 authorities but the test only runs 4 daemons, so leader
-        // rotation has a permanently missing slot every 5th round and
-        // commits rely on the f+1 leader_timeout fallback (200ms each
-        // missed wave). The eject intent therefore commits much slower
-        // than admit. Test logic is correct (poll-until-convergence);
-        // the deadline is just the failure ceiling.
-        let eject_deadline = std::time::Instant::now() + Duration::from_secs(120);
+        // Issue #18: post-admit the registry has n=5 authorities but
+        // the test only runs 4 daemons, so leader rotation has a
+        // permanently missing slot every 5th round and commits rely
+        // on the f+1 leader_timeout fallback. With governance now
+        // applied at epoch boundaries (16 rounds = 1.6s), the eject
+        // converges in ~one boundary plus orphan-pull recovery.
+        let eject_deadline = std::time::Instant::now() + Duration::from_secs(60);
         loop {
             let all_at_4 = {
                 let mut ok = true;
@@ -1959,12 +2042,198 @@ mod tests {
                     sizes.push(reg.len());
                 }
                 panic!(
-                    "phase G eject timed out (120s); registry sizes by node = {:?}",
+                    "phase G eject timed out (60s); registry sizes by node = {:?}",
                     sizes
                 );
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
+    }
+
+    /// Issue #28 (Phase 2.6): end-to-end signature-gate enforcement.
+    ///
+    /// Stand up a single-validator daemon whose Authority Ring seats
+    /// a known ML-DSA-65 pubkey, then send four submission attempts
+    /// over raw TCP:
+    ///   1. Properly-signed intent → expect `Ack`, intent lands in a block.
+    ///   2. Bogus signer_pubkey_hash → expect `Err("unknown signer ...")`.
+    ///   3. Valid hash but garbage signature → expect `Err("bad ML-DSA-65 ...")`.
+    ///   4. Properly-formed message but signature for a DIFFERENT intent
+    ///      (replay-class attack) → expect `Err("bad ML-DSA-65 ...")`.
+    ///
+    /// After all submissions, assert exactly one intent landed in any
+    /// proposed block — proving the bad cases were rejected before
+    /// reaching the round driver's mpsc.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn client_listener_enforces_mldsa_signature() {
+        use crate::client::{intent_signing_digest, signer_pubkey_hash, ClientMessage,
+            ClientResponse};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let n = 1u32;
+        let base_port: u16 = 20_500;
+        let network_id = "auth-1n".to_string();
+        let (pk, sk) = gsx_crypto::mldsa::keypair();
+        let pk_hex = hex::encode(pk.as_bytes());
+        let manifest = GenesisManifest {
+            network_id: network_id.clone(),
+            validators: (0..n)
+                .map(|i| GenesisValidator {
+                    authority_id: i,
+                    label: format!("v{}", i),
+                    mldsa_public_key_hex: pk_hex.clone(),
+                    bls_public_key_hex: "00".into(),
+                    validator_stake_gsx: 1_000,
+                    authority_stake_gsx: 1_000,
+                })
+                .collect(),
+            corridors: Vec::new(),
+            rounds_per_epoch: 1024,
+        };
+        let cfg = NodeConfig {
+            self_id: "v0".into(),
+            authority_id: 0,
+            listen: format!("127.0.0.1:{}", base_port).parse().unwrap(),
+            client_listen: format!("127.0.0.1:{}", base_port + 100).parse().unwrap(),
+            peers: vec![],
+            round_ms: 500,
+            checkpoint_cadence_rounds: 1,
+            mldsa_secret_key_path: "/dev/null".into(),
+            bls_secret_key_path: "/dev/null".into(),
+            genesis_manifest_path: "/dev/null".into(),
+            event_log_path: std::env::temp_dir().join("gsx-client-auth-test.ndjson"),
+        };
+        let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Helper: send one framed `ClientMessage`, read one framed
+        // `ClientResponse`. Returns the response.
+        async fn round_trip(
+            addr: SocketAddr,
+            msg: &ClientMessage,
+        ) -> ClientResponse {
+            let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let _ = s.set_nodelay(true);
+            let bytes = bincode::serialize(msg).unwrap();
+            let len = (bytes.len() as u32).to_be_bytes();
+            s.write_all(&len).await.unwrap();
+            s.write_all(&bytes).await.unwrap();
+            s.flush().await.unwrap();
+            let mut len_buf = [0u8; 4];
+            s.read_exact(&mut len_buf).await.unwrap();
+            let n = u32::from_be_bytes(len_buf) as usize;
+            let mut buf = vec![0u8; n];
+            s.read_exact(&mut buf).await.unwrap();
+            bincode::deserialize(&buf).unwrap()
+        }
+
+        // ----- Case 1: properly-signed intent → Ack + lands in block.
+        let good_intent = gsx_execution::Intent::Transfer {
+            from: [1u8; 20],
+            to: [2u8; 20],
+            amount: 42,
+        };
+        let good_digest = intent_signing_digest(&network_id, &good_intent);
+        let good_sig = gsx_crypto::mldsa::sign(&good_digest, &sk).unwrap();
+        let pkh = signer_pubkey_hash(pk.as_bytes());
+        let good_msg = ClientMessage::Submit {
+            intent: good_intent.clone(),
+            signature: good_sig.as_bytes().to_vec(),
+            signer_pubkey_hash: pkh,
+        };
+        match round_trip(cfg.client_listen, &good_msg).await {
+            ClientResponse::Ack { .. } => {}
+            other => panic!("good submit should Ack, got {:?}", other),
+        }
+
+        // ----- Case 2: bogus signer_pubkey_hash → reject.
+        let bogus_pkh = [0xAAu8; 32];
+        let bogus_msg = ClientMessage::Submit {
+            intent: gsx_execution::Intent::Transfer {
+                from: [9u8; 20],
+                to: [9u8; 20],
+                amount: 99,
+            },
+            signature: good_sig.as_bytes().to_vec(),
+            signer_pubkey_hash: bogus_pkh,
+        };
+        match round_trip(cfg.client_listen, &bogus_msg).await {
+            ClientResponse::Err(e) => assert!(
+                e.contains("unknown signer"),
+                "expected unknown-signer error, got {}",
+                e
+            ),
+            other => panic!("bogus pkh should reject, got {:?}", other),
+        }
+
+        // ----- Case 3: valid pkh but garbage signature → reject.
+        let garbage_msg = ClientMessage::Submit {
+            intent: gsx_execution::Intent::Transfer {
+                from: [7u8; 20],
+                to: [8u8; 20],
+                amount: 77,
+            },
+            signature: vec![0u8; 3309], // structured-shape garbage
+            signer_pubkey_hash: pkh,
+        };
+        match round_trip(cfg.client_listen, &garbage_msg).await {
+            ClientResponse::Err(e) => assert!(
+                e.contains("bad ML-DSA-65 signature"),
+                "expected bad-sig error, got {}",
+                e
+            ),
+            other => panic!("garbage sig should reject, got {:?}", other),
+        }
+
+        // ----- Case 4: signature is genuine but for a DIFFERENT intent.
+        // Submitter signed intent_A, then swaps the body to intent_B
+        // hoping the verifier doesn't bind the signature to the body.
+        let intent_b = gsx_execution::Intent::Transfer {
+            from: [1u8; 20],
+            to: [2u8; 20],
+            amount: 999, // different amount
+        };
+        let replay_msg = ClientMessage::Submit {
+            intent: intent_b,
+            signature: good_sig.as_bytes().to_vec(), // signs good_intent, not intent_b
+            signer_pubkey_hash: pkh,
+        };
+        match round_trip(cfg.client_listen, &replay_msg).await {
+            ClientResponse::Err(e) => assert!(
+                e.contains("bad ML-DSA-65 signature"),
+                "expected bad-sig (body-swap) error, got {}",
+                e
+            ),
+            other => panic!("body-swap should reject, got {:?}", other),
+        }
+
+        // Give the round driver time to drain whatever made it through.
+        tokio::time::sleep(Duration::from_millis(700)).await;
+
+        // Exactly one intent (case 1) should have landed.
+        let blocks = d.state.blocks.lock();
+        let landed: Vec<&Intent> = blocks
+            .values()
+            .flat_map(|b| b.intents.iter())
+            .filter(|i| matches!(i, Intent::Transfer { .. }))
+            .collect();
+        assert_eq!(
+            landed.len(),
+            1,
+            "exactly one signed intent should land; got {:?}",
+            landed
+        );
+        assert!(
+            matches!(
+                landed[0],
+                Intent::Transfer {
+                    amount: 42,
+                    ..
+                }
+            ),
+            "the landed intent should be the genuinely-signed amount=42, got {:?}",
+            landed[0]
+        );
     }
 
     /// Smoke test for the fast-path lane handler (DAG-S22).
