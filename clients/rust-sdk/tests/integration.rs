@@ -8,7 +8,8 @@ use std::{net::SocketAddr, sync::Arc};
 
 use axum::{routing::post, Json, Router};
 use gsx_client::{
-    AuthorityMemberView, BalanceView, Client, EpochView, Error, StakeEntry, ValidatorMemberView,
+    AuthorityMemberView, BalanceView, BlockView, Client, EpochView, Error, StakeEntry,
+    TransactionView, ValidatorMemberView,
 };
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
@@ -60,6 +61,54 @@ async fn spawn_mock_server() -> SocketAddr {
                         "0"
                     };
                     Some(json!({"address": addr_hex, "balance": bal}))
+                }
+                "gsx_getBlock" => {
+                    let params = &req["params"];
+                    let round = params["round"].as_u64().unwrap_or(u64::MAX);
+                    if round == 42 {
+                        Some(json!({
+                            "round": 42,
+                            "cert_hash": format!("0x{}", "ab".repeat(32)),
+                            "intents": [
+                                {
+                                    "kind": "transfer",
+                                    "from": format!("0x{}", "11".repeat(20)),
+                                    "to": format!("0x{}", "22".repeat(20)),
+                                    "amount": "100",
+                                }
+                            ],
+                        }))
+                    } else {
+                        return Json(json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "error": {"code": -32000, "message": format!("no committed block at round {}", round)}
+                        }));
+                    }
+                }
+                "gsx_getTransaction" => {
+                    let params = &req["params"];
+                    let h = params["tx_hash"].as_str().unwrap_or("");
+                    if h == format!("0x{}", "cd".repeat(32)) {
+                        Some(json!({
+                            "tx_hash": h,
+                            "round": 42,
+                            "cert_hash": format!("0x{}", "ab".repeat(32)),
+                            "index": 0,
+                            "intent": {
+                                "kind": "transfer",
+                                "from": format!("0x{}", "11".repeat(20)),
+                                "to": format!("0x{}", "22".repeat(20)),
+                                "amount": "100",
+                            },
+                        }))
+                    } else {
+                        return Json(json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "error": {"code": -32000, "message": format!("no committed transaction with hash {}", h)}
+                        }));
+                    }
                 }
                 _ => {
                     return Json(json!({
@@ -179,6 +228,43 @@ async fn get_balance_unknown_address_returns_zero() {
     // unknown address must round-trip as balance="0", not Err.
     let b: BalanceView = client.get_balance([0xCD; 20]).await.unwrap();
     assert_eq!(b.balance, "0");
+}
+
+#[tokio::test]
+async fn get_block_known_round() {
+    let addr = spawn_mock_server().await;
+    let client = client_for(addr);
+    let b: BlockView = client.get_block(42).await.unwrap().expect("block exists");
+    assert_eq!(b.round, 42);
+    assert_eq!(b.intents.len(), 1);
+}
+
+#[tokio::test]
+async fn get_block_unknown_round_returns_none() {
+    let addr = spawn_mock_server().await;
+    let client = client_for(addr);
+    let b = client.get_block(999).await.unwrap();
+    assert!(b.is_none());
+}
+
+#[tokio::test]
+async fn get_transaction_known_hash() {
+    let addr = spawn_mock_server().await;
+    let client = client_for(addr);
+    let mut h = [0u8; 32];
+    h.fill(0xCD);
+    let t: TransactionView = client.get_transaction(h).await.unwrap().expect("tx exists");
+    assert_eq!(t.round, 42);
+    assert_eq!(t.index, 0);
+}
+
+#[tokio::test]
+async fn get_transaction_unknown_returns_none() {
+    let addr = spawn_mock_server().await;
+    let client = client_for(addr);
+    let h = [0xFFu8; 32];
+    let t = client.get_transaction(h).await.unwrap();
+    assert!(t.is_none());
 }
 
 #[tokio::test]

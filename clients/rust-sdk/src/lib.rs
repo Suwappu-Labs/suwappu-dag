@@ -39,7 +39,10 @@ mod error;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub use error::Error;
-pub use gsx_rpc::context::{AuthorityMemberView, BalanceView, EpochView, ValidatorMemberView};
+pub use gsx_rpc::context::{
+    AuthorityMemberView, BalanceView, BlockView, EpochView, IntentView, TransactionView,
+    ValidatorMemberView,
+};
 use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::{json, Value};
 
@@ -111,6 +114,38 @@ impl Client {
         let hex_addr = format!("0x{}", hex::encode(address));
         self.call::<BalanceView>("gsx_getBalance", json!({ "address": hex_addr }))
             .await
+    }
+
+    /// Committed block at `round`. Returns `Ok(None)` for the
+    /// application-level NotFound code (no block committed at that
+    /// round, e.g. because the leader was skipped or the round is in
+    /// the future). Other errors propagate.
+    pub async fn get_block(&self, round: u64) -> Result<Option<BlockView>, Error> {
+        match self
+            .call::<BlockView>("gsx_getBlock", json!({ "round": round }))
+            .await
+        {
+            Ok(v) => Ok(Some(v)),
+            Err(Error::Rpc { code: -32000, .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Committed transaction by intent hash. Returns `Ok(None)` for the
+    /// application-level NotFound code; other errors propagate.
+    pub async fn get_transaction(
+        &self,
+        tx_hash: [u8; 32],
+    ) -> Result<Option<TransactionView>, Error> {
+        let hex_h = format!("0x{}", hex::encode(tx_hash));
+        match self
+            .call::<TransactionView>("gsx_getTransaction", json!({ "tx_hash": hex_h }))
+            .await
+        {
+            Ok(v) => Ok(Some(v)),
+            Err(Error::Rpc { code: -32000, .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     /// Generic JSON-RPC call. Public so callers can drive any method

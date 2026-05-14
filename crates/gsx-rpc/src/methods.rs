@@ -120,6 +120,85 @@ pub async fn get_balance<S: StateView>(state: &S, params: &Value) -> Result<Valu
     }))
 }
 
+#[derive(Deserialize)]
+struct GetBlockParams {
+    round: u64,
+}
+
+/// `gsx_getBlock` — params `{ round: u64 }` or positional `[u64]`;
+/// returns `BlockView` or NotFound if no block has been committed at
+/// that round.
+pub async fn get_block<S: StateView>(state: &S, params: &Value) -> Result<Value, RpcError> {
+    let p: GetBlockParams = match params {
+        Value::Object(_) => serde_json::from_value(params.clone())
+            .map_err(|e| RpcError::InvalidParams(e.to_string()))?,
+        Value::Array(arr) if arr.len() == 1 => {
+            let r: u64 = serde_json::from_value(arr[0].clone())
+                .map_err(|e| RpcError::InvalidParams(e.to_string()))?;
+            GetBlockParams { round: r }
+        }
+        _ => {
+            return Err(RpcError::InvalidParams(
+                "expected `{round: u64}` or `[u64]`".into(),
+            ))
+        }
+    };
+
+    match state.block_at_round(p.round).await {
+        Some(view) => serde_json::to_value(view).map_err(|e| RpcError::Internal(e.to_string())),
+        None => Err(RpcError::NotFound(format!(
+            "no committed block at round {}",
+            p.round
+        ))),
+    }
+}
+
+#[derive(Deserialize)]
+struct GetTransactionParams {
+    /// 32-byte intent hash, hex-encoded. Accepts with or without `0x`
+    /// prefix (case-insensitive).
+    tx_hash: String,
+}
+
+/// `gsx_getTransaction` — params `{ tx_hash: hex }` or positional;
+/// returns `TransactionView` or NotFound if the hash has never been
+/// observed in a committed block.
+pub async fn get_transaction<S: StateView>(state: &S, params: &Value) -> Result<Value, RpcError> {
+    let p: GetTransactionParams = match params {
+        Value::Object(_) => serde_json::from_value(params.clone())
+            .map_err(|e| RpcError::InvalidParams(e.to_string()))?,
+        Value::Array(arr) if arr.len() == 1 => {
+            let h: String = serde_json::from_value(arr[0].clone())
+                .map_err(|e| RpcError::InvalidParams(e.to_string()))?;
+            GetTransactionParams { tx_hash: h }
+        }
+        _ => {
+            return Err(RpcError::InvalidParams(
+                "expected `{tx_hash: hex}` or `[hex]`".into(),
+            ))
+        }
+    };
+
+    let trimmed = p
+        .tx_hash
+        .strip_prefix("0x")
+        .or_else(|| p.tx_hash.strip_prefix("0X"))
+        .unwrap_or(&p.tx_hash);
+    let bytes =
+        hex::decode(trimmed).map_err(|e| RpcError::InvalidParams(format!("tx_hash hex: {}", e)))?;
+    let hash: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
+        RpcError::InvalidParams(format!("tx_hash must be 32 bytes, got {}", bytes.len()))
+    })?;
+
+    match state.transaction_by_hash(hash).await {
+        Some(view) => serde_json::to_value(view).map_err(|e| RpcError::Internal(e.to_string())),
+        None => Err(RpcError::NotFound(format!(
+            "no committed transaction with hash 0x{}",
+            hex::encode(hash)
+        ))),
+    }
+}
+
 fn expect_no_params(params: &Value) -> Result<(), RpcError> {
     match params {
         Value::Null => Ok(()),

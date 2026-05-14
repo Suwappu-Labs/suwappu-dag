@@ -190,3 +190,86 @@ test("getBalance unknown address returns BalanceView with balance='0'", async ()
   const view = await client.getBalance(new Uint8Array(20).fill(0xdd));
   assert.equal(view.balance, "0");
 });
+
+test("getBlock returns typed BlockView for known round", async () => {
+  const { fetch } = makeFetchMock(() => ({
+    jsonrpc: "2.0",
+    id: 1,
+    result: {
+      round: 42,
+      cert_hash: `0x${"ab".repeat(32)}`,
+      intents: [
+        {
+          kind: "transfer",
+          from: `0x${"11".repeat(20)}`,
+          to: `0x${"22".repeat(20)}`,
+          amount: "100",
+        },
+      ],
+    },
+  }));
+  const client = new Client("http://localhost:0", { fetch });
+  const b = await client.getBlock(42);
+  assert.notEqual(b, null);
+  assert.equal(b!.round, 42);
+  assert.equal(b!.intents.length, 1);
+  const first = b!.intents[0]!;
+  assert.equal(first.kind, "transfer");
+  if (first.kind === "transfer") {
+    assert.equal(first.amount, "100");
+  }
+});
+
+test("getBlock returns null on NotFound (-32000)", async () => {
+  const { fetch } = makeFetchMock(() => ({
+    jsonrpc: "2.0",
+    id: 1,
+    error: { code: -32000, message: "no committed block at round 999" },
+  }));
+  const client = new Client("http://localhost:0", { fetch });
+  assert.equal(await client.getBlock(999), null);
+});
+
+test("getTransaction accepts Uint8Array and round-trips", async () => {
+  const { fetch, captured } = makeFetchMock(() => ({
+    jsonrpc: "2.0",
+    id: 1,
+    result: {
+      tx_hash: `0x${"cd".repeat(32)}`,
+      round: 42,
+      cert_hash: `0x${"ab".repeat(32)}`,
+      index: 0,
+      intent: {
+        kind: "transfer",
+        from: `0x${"11".repeat(20)}`,
+        to: `0x${"22".repeat(20)}`,
+        amount: "100",
+      },
+    },
+  }));
+  const client = new Client("http://localhost:0", { fetch });
+  const h = new Uint8Array(32).fill(0xcd);
+  const t = await client.getTransaction(h);
+  assert.notEqual(t, null);
+  assert.equal(t!.round, 42);
+  assert.equal(t!.index, 0);
+  // Sent param uses 0x-prefixed hex regardless of input type.
+  const body = JSON.parse(captured[0]!.init.body as string);
+  assert.equal(body.params.tx_hash, `0x${"cd".repeat(32)}`);
+});
+
+test("getTransaction returns null on NotFound (-32000)", async () => {
+  const { fetch } = makeFetchMock(() => ({
+    jsonrpc: "2.0",
+    id: 1,
+    error: {
+      code: -32000,
+      message: "no committed transaction with hash 0xff...",
+    },
+  }));
+  const client = new Client("http://localhost:0", { fetch });
+  assert.equal(
+    await client.getTransaction(new Uint8Array(32).fill(0xff)),
+    null,
+  );
+});
