@@ -451,7 +451,7 @@ async fn run_inbox(
                             .with_round(ic.round)
                             .with_cert_hash(&ic.hash.0),
                     );
-                    broadcast(&outbound, WireMessage::Vote(vote));
+                    broadcast_traced(&outbound, WireMessage::Vote(vote), &self_label, &log);
                 }
                 try_commit(&state, &self_label, &log).await;
             }
@@ -911,18 +911,47 @@ async fn run_sync_sweeper(
     }
 }
 
-/// Best-effort broadcast: drop on full channel, never block.
+/// DAG-S31.4: drop-aware best-effort broadcast.
 ///
-/// Previously this used `tx.send(...).await`, which queues if the per-peer
-/// outbound mpsc is full. A single slow peer (which couldn't drain its
-/// 1024-slot channel fast enough) would back-pressure the broadcasting
-/// validator's round driver to a complete halt, deadlocking the whole
-/// cluster's progress. `try_send` matches the "best-effort gossip" model
-/// the wire transport advertises — retries happen via natural cert
-/// re-broadcast at the next round.
-fn broadcast(outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>, msg: WireMessage) {
-    for tx in outbound.values() {
-        let _ = tx.try_send(msg.clone());
+/// Pre-S31 the silent `broadcast` used `tx.send(...).await` which
+/// queues if the per-peer outbound mpsc is full; a single slow peer
+/// could back-pressure the round driver to a halt. The S30 fix made
+/// it `try_send` (drop on full), but drops were silent. S31.4 emits a
+/// `wire_drop` event per (peer, msg_kind) when the per-peer outbound
+/// channel is full or closed. The orphan-pull machinery (S21.3)
+/// already handles natural replay: a peer that missed a cert this
+/// way will request it back via `GetCert` once they see a child cert.
+/// The event log surface is what compliance trace + the gsx-metrics
+/// pair table need to attribute "missing on receive" to "dropped on
+/// send" rather than "lost in transit".
+fn broadcast_traced(
+    outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
+    msg: WireMessage,
+    self_label: &str,
+    log: &EventLog,
+) {
+    let kind = wire_msg_kind(&msg);
+    for (peer, tx) in outbound {
+        if tx.try_send(msg.clone()).is_err() {
+            log.emit(
+                Event::now(self_label, Lane::Main, "wire_drop")
+                    .with_peer(peer.0.clone())
+                    .with_kind(kind),
+            );
+        }
+    }
+}
+
+fn wire_msg_kind(msg: &WireMessage) -> &'static str {
+    match msg {
+        WireMessage::Cert(_) => "cert",
+        WireMessage::Block(_) => "block",
+        WireMessage::Vote(_) => "vote",
+        WireMessage::GetCert(_) => "get_cert",
+        WireMessage::FastPath(_) => "fast_path",
+        WireMessage::Ltp(_) => "ltp",
+        WireMessage::Ping(_) => "ping",
+        WireMessage::Pong(_) => "pong",
     }
 }
 
@@ -1315,8 +1344,8 @@ async fn run_round_driver(
                 .with_round(target_round)
                 .with_cert_hash(&cert_hash.0),
         );
-        broadcast(&outbound, WireMessage::Block(block));
-        broadcast(&outbound, WireMessage::Cert(cert));
+        broadcast_traced(&outbound, WireMessage::Block(block), &self_label, &log);
+        broadcast_traced(&outbound, WireMessage::Cert(cert), &self_label, &log);
     }
 }
 
