@@ -31,6 +31,15 @@ pub struct NodeConfig {
     /// connects here). Distinct from `listen` to keep operator surfaces apart.
     pub client_listen: SocketAddr,
 
+    /// Optional local TCP socket to bind for the JSON-RPC query API
+    /// (`gsx-rpc`). When unset, the RPC server is not started — this is
+    /// the perf-testnet default so the cluster's peer-to-peer cost
+    /// measurements aren't perturbed by an external read API. Mainnet
+    /// validators should set this to a public-facing TLS-terminated
+    /// front (or bind to localhost behind a reverse proxy).
+    #[serde(default)]
+    pub rpc_listen: Option<SocketAddr>,
+
     /// Peers this node should dial. List excludes self.
     pub peers: Vec<Peer>,
 
@@ -271,6 +280,7 @@ mod tests {
             authority_id: 0,
             listen: "0.0.0.0:9090".parse().unwrap(),
             client_listen: "0.0.0.0:9091".parse().unwrap(),
+            rpc_listen: None,
             peers: vec![],
             round_ms: 250,
             checkpoint_cadence_rounds: 1,

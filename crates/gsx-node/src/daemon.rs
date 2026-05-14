@@ -456,6 +456,17 @@ impl Daemon {
             tasks.push(client_task);
         }
 
+        // Issue #27: optional JSON-RPC query API. Not bound unless the
+        // operator configures `rpc_listen` in NodeConfig — perf testnet
+        // leaves it off so peer-to-peer latency measurements aren't
+        // perturbed by an external read API.
+        if let Some(rpc_addr) = cfg.rpc_listen {
+            let view = crate::rpc_adapter::NodeStateView::new(state.clone());
+            let ctx = std::sync::Arc::new(gsx_rpc::RpcContext::new(std::sync::Arc::new(view)));
+            let rpc_task = gsx_rpc::start(rpc_addr, ctx).await?;
+            tasks.push(rpc_task);
+        }
+
         Ok(Self {
             _log_task: log_task,
             tasks,
@@ -1633,6 +1644,7 @@ mod tests {
             authority_id: 0,
             listen: format!("127.0.0.1:{}", base_port).parse().unwrap(),
             client_listen: format!("127.0.0.1:{}", base_port + 100).parse().unwrap(),
+            rpc_listen: None,
             peers: vec![],
             round_ms: 500,
             checkpoint_cadence_rounds: 1,
@@ -1708,6 +1720,7 @@ mod tests {
             authority_id: 0,
             listen: format!("127.0.0.1:{}", base_port).parse().unwrap(),
             client_listen: format!("127.0.0.1:{}", base_port + 100).parse().unwrap(),
+            rpc_listen: None,
             peers: vec![],
             round_ms: 500,
             checkpoint_cadence_rounds: 1,
@@ -1798,6 +1811,7 @@ mod tests {
                 client_listen: format!("127.0.0.1:{}", base_port + 100 + i as u16)
                     .parse::<SocketAddr>()
                     .unwrap(),
+                rpc_listen: None,
                 peers,
                 round_ms: 100,
                 checkpoint_cadence_rounds: 1,
@@ -1923,6 +1937,7 @@ mod tests {
                 client_listen: format!("127.0.0.1:{}", base_port + 100 + i as u16)
                     .parse::<SocketAddr>()
                     .unwrap(),
+                rpc_listen: None,
                 peers,
                 round_ms: 100,
                 checkpoint_cadence_rounds: 1,
@@ -2134,6 +2149,7 @@ mod tests {
             authority_id: 0,
             listen: format!("127.0.0.1:{}", base_port).parse().unwrap(),
             client_listen: format!("127.0.0.1:{}", base_port + 100).parse().unwrap(),
+            rpc_listen: None,
             peers: vec![],
             round_ms: 500,
             checkpoint_cadence_rounds: 1,
@@ -2622,5 +2638,81 @@ mod tests {
         let inner = state.inner.lock().await;
         assert_eq!(inner.ltp_received_count, 1);
         assert!(inner.ltp_latest.contains_key(&fallback_id));
+    }
+
+    /// Issue #27: end-to-end JSON-RPC binding. When `NodeConfig.rpc_listen`
+    /// is set, `Daemon::start` spawns `gsx_rpc::start` and the four
+    /// read-only methods become reachable over HTTP. This test boots a
+    /// single-validator daemon, opens a TCP socket to the RPC port,
+    /// sends a `gsx_getEpoch` request as raw HTTP, and verifies the
+    /// JSON-RPC response envelope. Stays at the wire level (no `reqwest`)
+    /// so the test crate doesn't pull in another HTTP client.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rpc_binding_returns_epoch_over_http() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let base_port: u16 = 21_000;
+        let manifest = GenesisManifest {
+            network_id: "rpc-bind-1n".into(),
+            validators: vec![GenesisValidator {
+                authority_id: 0,
+                label: "v0".into(),
+                mldsa_public_key_hex: "00".into(),
+                bls_public_key_hex: "00".into(),
+                validator_stake_gsx: 30_000,
+                authority_stake_gsx: 150_000,
+            }],
+            corridors: Vec::new(),
+            rounds_per_epoch: 1024,
+        };
+        let cfg = NodeConfig {
+            self_id: "v0".into(),
+            authority_id: 0,
+            listen: format!("127.0.0.1:{}", base_port).parse().unwrap(),
+            client_listen: format!("127.0.0.1:{}", base_port + 100).parse().unwrap(),
+            rpc_listen: Some(format!("127.0.0.1:{}", base_port + 200).parse().unwrap()),
+            peers: vec![],
+            round_ms: 500,
+            checkpoint_cadence_rounds: 1,
+            mldsa_secret_key_path: "/dev/null".into(),
+            bls_secret_key_path: "/dev/null".into(),
+            genesis_manifest_path: "/dev/null".into(),
+            event_log_path: std::env::temp_dir().join("gsx-rpc-bind-test.ndjson"),
+        };
+        let _d = Daemon::start(cfg.clone(), manifest).await.unwrap();
+        // Give the bound listener a tick to accept connections.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let body = br#"{"jsonrpc":"2.0","id":1,"method":"gsx_getEpoch"}"#;
+        let req = format!(
+            "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+
+        let rpc_addr = cfg.rpc_listen.unwrap();
+        let mut stream = tokio::net::TcpStream::connect(rpc_addr).await.unwrap();
+        let _ = stream.set_nodelay(true);
+        stream.write_all(req.as_bytes()).await.unwrap();
+        stream.write_all(body).await.unwrap();
+        stream.flush().await.unwrap();
+
+        let mut resp_bytes = Vec::new();
+        stream.read_to_end(&mut resp_bytes).await.unwrap();
+        let resp = String::from_utf8(resp_bytes).expect("response is utf-8");
+
+        // Split off HTTP body (everything after the blank line).
+        let body_start = resp
+            .find("\r\n\r\n")
+            .expect("HTTP response has CRLF-CRLF separator")
+            + 4;
+        let json_body = &resp[body_start..];
+        let parsed: serde_json::Value = serde_json::from_str(json_body.trim_end())
+            .unwrap_or_else(|e| panic!("failed to parse JSON-RPC body {:?}: {}", json_body, e));
+
+        assert_eq!(parsed["jsonrpc"], "2.0");
+        assert_eq!(parsed["id"], 1);
+        assert_eq!(parsed["result"]["current"], 0);
+        assert_eq!(parsed["result"]["rounds_per_epoch"], 1024);
+        assert!(parsed["error"].is_null());
     }
 }
