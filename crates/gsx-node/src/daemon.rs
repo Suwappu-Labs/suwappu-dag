@@ -1544,6 +1544,18 @@ async fn run_round_driver(
             payload_digest,
         };
         let cert_hash = cert.hash();
+
+        // Per-intent hashes for the `tx_to_block` secondary index.
+        // Computed BEFORE moving `intents` into the `BlockPayload`.
+        // `try_commit` populates the same indices on the peer-receive
+        // path; this site mirrors it for the self-propose path so
+        // single-node and multi-node clusters both expose
+        // `blocks_by_round` and `tx_to_block`.
+        let intent_hash_bytes: Vec<[u8; 32]> = intents
+            .iter()
+            .map(|i| *blake3::hash(&bincode::serialize(i).expect("intent serialize")).as_bytes())
+            .collect();
+
         let block = BlockPayload {
             payload_digest,
             author: self_id,
@@ -1560,6 +1572,12 @@ async fn run_round_driver(
             inner.last_authored_round = Some(target_round);
             if target_round > inner.max_observed_round {
                 inner.max_observed_round = target_round;
+            }
+            inner.blocks_by_round.insert(target_round, cert_hash);
+            for (idx, tx_hash) in intent_hash_bytes.iter().enumerate() {
+                inner
+                    .tx_to_block
+                    .insert(*tx_hash, (target_round, cert_hash, idx));
             }
             let key = (self_id, target_round);
             match inner.seen_at.get(&key).copied() {
