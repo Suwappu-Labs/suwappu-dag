@@ -481,10 +481,15 @@ impl Daemon {
         // cloned intent sender + network_id to drive the same
         // verify+enqueue gate the TCP wire uses.
         if let Some(rpc_addr) = cfg.rpc_listen {
+            // T6: the adapter also needs an EventLog handle to spawn
+            // the Event → EventView bridge. The log is already cloneable
+            // (Clone for EventLog is cheap — it's just an mpsc sender +
+            // broadcast sender).
             let view = crate::rpc_adapter::NodeStateView::new(
                 state.clone(),
                 intent_tx_for_rpc,
                 manifest.network_id.clone(),
+                &log,
             );
             let ctx = std::sync::Arc::new(gsx_rpc::RpcContext::new(std::sync::Arc::new(view)));
             let rpc_task = gsx_rpc::start(rpc_addr, ctx).await?;

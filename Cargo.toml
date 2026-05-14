@@ -12,6 +12,7 @@ members = [
     "crates/gsx-transport",
     "crates/gsx-node",
     "crates/gsx-rpc",
+    "crates/gsx-indexer",
     "clients/rust-sdk",
 ]
 
@@ -43,6 +44,7 @@ gsx-precompiles = { path = "crates/gsx-precompiles" }
 gsx-ltp = { path = "crates/gsx-ltp" }
 gsx-transport = { path = "crates/gsx-transport" }
 gsx-rpc = { path = "crates/gsx-rpc" }
+gsx-indexer = { path = "crates/gsx-indexer" }
 
 # Post-quantum primitives (FIPS 203 / 204)
 pqcrypto-mldsa = "0.1"

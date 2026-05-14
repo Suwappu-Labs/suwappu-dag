@@ -1,14 +1,22 @@
-//! axum router for JSON-RPC 2.0 over HTTP POST.
+//! axum router for JSON-RPC 2.0 over HTTP POST plus T6's WebSocket
+//! event subscription endpoint.
 //!
-//! Single endpoint `POST /` accepts a JSON-RPC request body and returns
-//! the corresponding response. Non-POST methods → 405. Malformed JSON
-//! → 200 with a JSON-RPC InvalidRequest error in the body (per spec —
-//! HTTP status stays 200, transport errors are encoded in the response
-//! envelope).
+//! - `POST /` — JSON-RPC request/response (all unary methods).
+//! - `GET /ws` — WebSocket subscription stream (`gsx_subscribeEvents`).
+//!
+//! Non-POST on `/` → 405. Malformed JSON → 200 with a JSON-RPC
+//! InvalidRequest error in the body (per spec — HTTP status stays
+//! 200, transport errors are encoded in the response envelope).
 
 use std::sync::Arc;
 
-use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::post, Json, Router};
+use axum::{
+    extract::State,
+    http::StatusCode,
+    response::IntoResponse,
+    routing::{get, post},
+    Json, Router,
+};
 use serde_json::Value;
 use tracing::warn;
 
@@ -17,12 +25,14 @@ use crate::{
     error::RpcError,
     methods,
     types::{JsonRpcRequest, JsonRpcResponse},
+    ws,
 };
 
 /// Build the axum router. Caller is responsible for `axum::serve`-ing it.
 pub fn router<S: StateView>(ctx: Arc<RpcContext<S>>) -> Router {
     Router::new()
         .route("/", post(handle_rpc::<S>))
+        .route("/ws", get(ws::handle_ws_upgrade::<S>))
         .with_state(ctx)
 }
 

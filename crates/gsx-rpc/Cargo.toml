@@ -19,7 +19,11 @@ serde_json = { workspace = true }
 hex = { workspace = true }
 
 tokio = { workspace = true }
-axum = "0.7"
+# `ws` feature enables `axum::extract::ws::WebSocketUpgrade` for the
+# `gsx_subscribeEvents` live stream (T6). The HTTP POST surface
+# doesn't need it, but adding to the dep is cheap (axum is already in
+# tree).
+axum = { version = "0.7", features = ["ws"] }
 
 thiserror = { workspace = true }
 anyhow = { workspace = true }

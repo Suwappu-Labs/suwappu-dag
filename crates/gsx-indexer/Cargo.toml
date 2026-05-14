@@ -1,0 +1,47 @@
+[package]
+name = "gsx-indexer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+description = "Streaming indexer for gsx-dag. Tails gsx_subscribeEvents over WebSocket, stores commits in a queryable store, and exposes a thin HTTP API for explorers and analytics."
+
+[lib]
+name = "gsx_indexer"
+path = "src/lib.rs"
+
+[[bin]]
+name = "gsx-indexer"
+path = "src/main.rs"
+
+[dependencies]
+# Share the view types so the indexer's HTTP API serves the same
+# shapes gsx-rpc returns. Zero glue code between RPC and indexer.
+gsx-rpc = { workspace = true }
+
+# HTTP server (read API for explorer) and WebSocket client.
+axum = { version = "0.7", features = ["macros"] }
+tokio-tungstenite = { version = "0.21", default-features = false, features = ["connect"] }
+futures-util = "0.3"
+
+# Persistence — for the MVP we keep everything in memory behind a
+# RwLock. The Postgres adapter lands in a follow-up; that's the
+# point at which `sqlx` joins the dep graph. Keeping it out for now
+# means the scaffold compiles + tests run without docker-postgres.
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+
+tokio = { workspace = true }
+clap = { workspace = true, features = ["env"] }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

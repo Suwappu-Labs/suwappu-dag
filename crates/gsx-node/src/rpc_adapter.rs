@@ -15,15 +15,44 @@ use std::sync::Arc;
 
 use gsx_execution::Intent;
 use gsx_rpc::context::{
-    AuthorityMemberView, BlockView, EpochView, IntentView, StateView, SubmitIntentError,
+    AuthorityMemberView, BlockView, EpochView, EventView, IntentView, StateView, SubmitIntentError,
     TransactionView, ValidatorMemberView,
 };
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::{broadcast, mpsc::UnboundedSender};
 
 use crate::{
     client::{verify_signed_intent, AuthOutcome},
     daemon::State,
+    events::{Event, EventLog, Lane},
 };
+
+/// Translate a daemon `Event` into the JSON-safe `EventView`
+/// projection. Pure function. Lane is rendered as the same lowercase
+/// string the NDJSON file uses (matches `Event`'s
+/// `#[serde(rename_all = "lowercase")]`).
+fn event_to_view(ev: Event) -> EventView {
+    let lane = match ev.lane {
+        Lane::Main => "main",
+        Lane::FastPath => "fastpath",
+        Lane::Ltp => "ltp",
+        Lane::Client => "client",
+    }
+    .to_string();
+    EventView {
+        t_ms: ev.t_ms,
+        region: ev.region,
+        lane,
+        event: ev.event,
+        round: ev.round,
+        cert_hash: ev.cert_hash,
+        tx_hash: ev.tx_hash,
+        peer: ev.peer,
+        intent_hashes: ev.intent_hashes,
+        authority_id: ev.authority_id,
+        kind: ev.kind,
+        received_60s: ev.received_60s,
+    }
+}
 
 /// Translate a daemon `Intent` into the JSON-safe `IntentView`
 /// projection. Pure function; no state access. Address + stake +
@@ -66,10 +95,17 @@ fn intent_to_view(intent: &Intent) -> IntentView {
 /// fan into the SAME sender, so the two ingress paths share order
 /// guarantees and the round driver doesn't notice which wire an
 /// intent arrived on.
+///
+/// T6: also holds a `broadcast::Sender<EventView>` that bridges the
+/// gsx-node `Event` stream into the JSON-safe `EventView` shape the
+/// RPC surface exposes. One bridge task converts events at the
+/// adapter boundary; every WS subscriber gets its own `Receiver` and
+/// drops it cleanly on disconnect.
 pub struct NodeStateView {
     state: Arc<State>,
     intent_tx: UnboundedSender<Intent>,
     network_id: String,
+    event_view_tx: broadcast::Sender<EventView>,
 }
 
 impl NodeStateView {
@@ -77,11 +113,40 @@ impl NodeStateView {
         state: Arc<State>,
         intent_tx: UnboundedSender<Intent>,
         network_id: String,
+        log: &EventLog,
     ) -> Self {
+        // T6: bridge gsx-node Event → gsx-rpc EventView once per
+        // daemon (not per subscriber). 1024 slot ring buffer matches
+        // EventLog's broadcast buffer.
+        let (event_view_tx, _) = broadcast::channel::<EventView>(1024);
+        let bridge_tx = event_view_tx.clone();
+        let mut rx = log.subscribe();
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(ev) => {
+                        // No receivers? `send` errors; ignore — RPC
+                        // server still runs even with zero subscribers.
+                        let _ = bridge_tx.send(event_to_view(ev));
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        // Bridge can't see the dropped events; the WS
+                        // peer will see Lagged from its own receiver
+                        // (the buffers are sized identically).
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        tracing::debug!("rpc adapter: event bridge channel closed");
+                        return;
+                    }
+                }
+            }
+        });
         Self {
             state,
             intent_tx,
             network_id,
+            event_view_tx,
         }
     }
 }
@@ -212,5 +277,12 @@ impl StateView for NodeStateView {
             .map_err(|_| SubmitIntentError::EnqueueFull)?;
 
         Ok(intent_hash)
+    }
+
+    fn subscribe_events(&self) -> broadcast::Receiver<EventView> {
+        // Per-subscriber receiver. The bridge task spawned in
+        // `NodeStateView::new` keeps the buffer pumped; dropping
+        // this receiver cancels the subscription cleanly.
+        self.event_view_tx.subscribe()
     }
 }
