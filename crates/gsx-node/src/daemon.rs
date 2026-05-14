@@ -1739,7 +1739,7 @@ mod tests {
         // starve commit progress for several seconds; a fixed sleep
         // misses the deadline whereas a poll passes as soon as the
         // registry reflects the new admission on every node.
-        let admit_deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let admit_deadline = std::time::Instant::now() + Duration::from_secs(60);
         loop {
             let all_at_5 = {
                 let mut ok = true;
@@ -1805,7 +1805,7 @@ mod tests {
                         auth_equiv
                     ));
                 }
-                panic!("phase G admit timed out (30s):\n  {}", diag.join("\n  "));
+                panic!("phase G admit timed out (60s):\n  {}", diag.join("\n  "));
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
@@ -1817,7 +1817,12 @@ mod tests {
         };
         client.submit(eject).await.unwrap();
 
-        let eject_deadline = std::time::Instant::now() + Duration::from_secs(30);
+        // DAG-S32: bumped 30s -> 60s. Orphan-pull retry backoff (500ms,
+        // 1s, 2s, 4s, 5s cap) widens the worst-case recovery window
+        // when a cert misses its first request; on a 2-core CI runner
+        // with 4 daemons + 8 worker threads contending, the 30s ceiling
+        // intermittently misses convergence.
+        let eject_deadline = std::time::Instant::now() + Duration::from_secs(60);
         loop {
             let all_at_4 = {
                 let mut ok = true;
@@ -1840,7 +1845,7 @@ mod tests {
                     sizes.push(reg.len());
                 }
                 panic!(
-                    "phase G eject timed out (30s); registry sizes by node = {:?}",
+                    "phase G eject timed out (60s); registry sizes by node = {:?}",
                     sizes
                 );
             }
