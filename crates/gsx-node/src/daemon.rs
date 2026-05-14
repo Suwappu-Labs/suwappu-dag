@@ -1267,7 +1267,7 @@ fn f_plus_one(n: u32) -> u32 {
 /// Matches Sui's `leader_timeout` (consensus/core/src/leader_timeout.rs).
 /// Default for production; tests with intentionally-degraded leader rotation
 /// (e.g. `phase_g_admit_and_eject`) override via `NodeConfig::leader_timeout_rounds`.
-
+#[allow(clippy::too_many_arguments)]
 async fn run_round_driver(
     self_label: String,
     self_id: AuthorityId,
