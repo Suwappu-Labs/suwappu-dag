@@ -339,6 +339,7 @@ impl Daemon {
         let self_id: AuthorityId = cfg.authority_id;
         let self_label = cfg.self_id.clone();
         let round_ms = cfg.round_ms;
+        let leader_timeout_rounds = cfg.leader_timeout_rounds;
 
         let (log, log_task) = EventLog::start(&cfg.event_log_path).await?;
         let wire = Wire::start(WireConfig {
@@ -395,7 +396,14 @@ impl Daemon {
             let self_label = self_label.clone();
             tasks.push(tokio::spawn(async move {
                 run_round_driver(
-                    self_label, self_id, round_ms, state, outbound, log, intent_rx,
+                    self_label,
+                    self_id,
+                    round_ms,
+                    leader_timeout_rounds,
+                    state,
+                    outbound,
+                    log,
+                    intent_rx,
                 )
                 .await;
             }));
@@ -1257,12 +1265,14 @@ fn f_plus_one(n: u32) -> u32 {
 /// when a later directly-decided anchor's causal history reaches it.
 ///
 /// Matches Sui's `leader_timeout` (consensus/core/src/leader_timeout.rs).
-const LEADER_TIMEOUT_ROUNDS: u32 = 4;
+/// Default for production; tests with intentionally-degraded leader rotation
+/// (e.g. `phase_g_admit_and_eject`) override via `NodeConfig::leader_timeout_rounds`.
 
 async fn run_round_driver(
     self_label: String,
     self_id: AuthorityId,
     round_ms: u64,
+    leader_timeout_rounds: u32,
     state: Arc<State>,
     outbound: Arc<HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>>,
     log: EventLog,
@@ -1273,7 +1283,7 @@ async fn run_round_driver(
     // elapsed wall-clock, force-propose with whatever parents we have
     // (≥ f+1). Bypasses the strict quorum gate so a slow peer can't
     // permanently stall the cluster. Matches Sui's `leader_timeout`.
-    let leader_timeout = Duration::from_millis(round_ms * LEADER_TIMEOUT_ROUNDS as u64);
+    let leader_timeout = Duration::from_millis(round_ms * leader_timeout_rounds as u64);
     let mut round_started_at = tokio::time::Instant::now();
 
     loop {
@@ -1459,6 +1469,7 @@ mod tests {
             peers: vec![],
             round_ms: 500,
             checkpoint_cadence_rounds: 1,
+            leader_timeout_rounds: 4,
             mldsa_secret_key_path: "/dev/null".into(),
             bls_secret_key_path: "/dev/null".into(),
             genesis_manifest_path: "/dev/null".into(),
@@ -1526,6 +1537,7 @@ mod tests {
             peers: vec![],
             round_ms: 500,
             checkpoint_cadence_rounds: 1,
+            leader_timeout_rounds: 4,
             mldsa_secret_key_path: "/dev/null".into(),
             bls_secret_key_path: "/dev/null".into(),
             genesis_manifest_path: "/dev/null".into(),
@@ -1615,6 +1627,7 @@ mod tests {
                 peers,
                 round_ms: 100,
                 checkpoint_cadence_rounds: 1,
+                leader_timeout_rounds: 4,
                 mldsa_secret_key_path: "/dev/null".into(),
                 bls_secret_key_path: "/dev/null".into(),
                 genesis_manifest_path: "/dev/null".into(),
@@ -1700,6 +1713,17 @@ mod tests {
                 peers,
                 round_ms: 100,
                 checkpoint_cadence_rounds: 1,
+                // Post-admit the registry has n=5 authorities but the test
+                // only runs 4 daemons, so leader rotation has a permanently
+                // missing slot every 5th round. With production
+                // LEADER_TIMEOUT = 4 × round_ms = 400ms per missed wave the
+                // eject phase regularly blows the test deadline on a busy
+                // CI runner (2-core, many parallel daemon tests). Cutting
+                // the timeout to 1 × round_ms = 100ms still exercises the
+                // f+1 force-propose fallback path while bounding the worst
+                // case at ~4× faster eject convergence. Production stays at
+                // the default 4 via `default_leader_timeout_rounds`.
+                leader_timeout_rounds: 1,
                 mldsa_secret_key_path: "/dev/null".into(),
                 bls_secret_key_path: "/dev/null".into(),
                 genesis_manifest_path: "/dev/null".into(),
@@ -1817,16 +1841,15 @@ mod tests {
         };
         client.submit(eject).await.unwrap();
 
-        // DAG-S32: bumped 30s -> 120s. Two compounding effects on CI:
-        // (a) orphan-pull retry backoff (500ms, 1s, 2s, 4s, 5s cap)
-        // widens worst-case recovery; (b) post-admit the registry has
-        // n=5 authorities but the test only runs 4 daemons, so leader
-        // rotation has a permanently missing slot every 5th round and
-        // commits rely on the f+1 leader_timeout fallback (200ms each
-        // missed wave). The eject intent therefore commits much slower
-        // than admit. Test logic is correct (poll-until-convergence);
-        // the deadline is just the failure ceiling.
-        let eject_deadline = std::time::Instant::now() + Duration::from_secs(120);
+        // Eject convergence ceiling. The structural cost (post-admit
+        // registry has n=5 authorities but only 4 daemons run, so every
+        // 5th leader slot is missing and commits fall back to the
+        // f+1 leader-timeout path) is now bounded by the per-config
+        // `leader_timeout_rounds: 1` override (= 1 × round_ms = 100ms
+        // per missed wave instead of 400ms with the production default).
+        // 60s is comfortably above the worst-case observed CI run; it's
+        // a failure ceiling, not a target.
+        let eject_deadline = std::time::Instant::now() + Duration::from_secs(60);
         loop {
             let all_at_4 = {
                 let mut ok = true;

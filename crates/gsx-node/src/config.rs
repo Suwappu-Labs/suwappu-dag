@@ -44,6 +44,17 @@ pub struct NodeConfig {
     #[serde(default = "default_checkpoint_cadence")]
     pub checkpoint_cadence_rounds: u32,
 
+    /// Leader-timeout in `round_ms` multiples. The round driver force-proposes
+    /// with ≥ f+1 parents once this elapsed time has passed without strict
+    /// quorum, preventing a single absent leader from stalling the cluster.
+    /// Default 4 matches Sui's calibration. Lower values (e.g. 1) are useful
+    /// in tests that intentionally run with fewer daemons than the registry
+    /// holds — the post-admit `phase_g_admit_and_eject` test is the canonical
+    /// case (n=5 in registry, 4 daemons running, every 5th leader slot
+    /// missing). Production deployments should leave this at the default.
+    #[serde(default = "default_leader_timeout_rounds")]
+    pub leader_timeout_rounds: u32,
+
     /// Path to the ML-DSA-65 secret key file (raw bytes, no envelope).
     pub mldsa_secret_key_path: PathBuf,
 
@@ -148,6 +159,10 @@ fn default_round_ms() -> u64 {
 
 fn default_checkpoint_cadence() -> u32 {
     1
+}
+
+fn default_leader_timeout_rounds() -> u32 {
+    4
 }
 
 fn default_rounds_per_epoch() -> u64 {
@@ -274,6 +289,7 @@ mod tests {
             peers: vec![],
             round_ms: 250,
             checkpoint_cadence_rounds: 1,
+            leader_timeout_rounds: 4,
             mldsa_secret_key_path: "/x".into(),
             bls_secret_key_path: "/x".into(),
             genesis_manifest_path: "/x".into(),
