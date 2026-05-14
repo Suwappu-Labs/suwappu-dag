@@ -136,6 +136,16 @@ pub(crate) struct StateInner {
     /// Equivocations detected at insertion time. `try_commit`
     /// drains this queue instead of re-scanning the DAG.
     pub(crate) detected_equivocations: Vec<EquivocationProof>,
+    /// `round → committed cert hash` index. Populated from `try_commit`
+    /// alongside the existing `state.blocks` insert so `gsx_getBlock(round)`
+    /// is O(log n) instead of O(blocks) scan. `BTreeMap` (rather than
+    /// `HashMap`) so range scans for explorer "next N blocks" stay cheap.
+    pub(crate) blocks_by_round: BTreeMap<Round, CertHash>,
+    /// `intent_hash → (round, cert_hash, index_within_block)` index for
+    /// `gsx_getTransaction(hash)`. Populated alongside `blocks_by_round`
+    /// from `try_commit`. `usize` is the position in `block.intents` so
+    /// the explorer can resolve to a single intent cheaply.
+    pub(crate) tx_to_block: HashMap<[u8; 32], (Round, CertHash, usize)>,
 }
 
 /// Round-based epoch counter for validator-set governance (DAG-S25).
@@ -299,6 +309,8 @@ impl State {
                 pending_governance: Vec::new(),
                 seen_at: BTreeMap::new(),
                 detected_equivocations: Vec::new(),
+                blocks_by_round: BTreeMap::new(),
+                tx_to_block: HashMap::new(),
             }),
         }
     }
@@ -1151,13 +1163,16 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
                 .map(|b| b.intents.clone())
                 .unwrap_or_default();
             // DAG-S26.1: capture intent hashes for compliance trace.
-            let intent_hashes: Vec<String> = intents
+            // Computed once and reused for the `tx_to_block` index below
+            // so we don't pay blake3 twice per intent.
+            let intent_hash_bytes: Vec<[u8; 32]> = intents
                 .iter()
                 .map(|i| {
                     let bytes = bincode::serialize(i).expect("intent serialize");
-                    hex::encode(blake3::hash(&bytes).as_bytes())
+                    *blake3::hash(&bytes).as_bytes()
                 })
                 .collect();
+            let intent_hashes: Vec<String> = intent_hash_bytes.iter().map(hex::encode).collect();
             let block = Block {
                 round: cert_round,
                 intents: intents.clone(),
@@ -1174,6 +1189,14 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
                     if let Some(ml_tx) = intent_to_main_lane_tx(intent, cert_round, h) {
                         inner.main_lane_index.push(ml_tx);
                     }
+                }
+                // Secondary indices for `gsx_getBlock(round)` and
+                // `gsx_getTransaction(hash)`. Populated here (and only
+                // here) so the indices are tight-coupled to the canonical
+                // commit path — no second `try_commit` writer.
+                inner.blocks_by_round.insert(cert_round, h);
+                for (idx, tx_hash) in intent_hash_bytes.iter().enumerate() {
+                    inner.tx_to_block.insert(*tx_hash, (cert_round, h, idx));
                 }
             }
 
@@ -2714,5 +2737,104 @@ mod tests {
         assert_eq!(parsed["result"]["current"], 0);
         assert_eq!(parsed["result"]["rounds_per_epoch"], 1024);
         assert!(parsed["error"].is_null());
+    }
+
+    /// `blocks_by_round` + `tx_to_block` indices populate on commit.
+    ///
+    /// Stand up a single-validator daemon, submit three signed transfer
+    /// intents over the client wire, wait for them to land, and assert
+    /// the round-keyed and tx-hash-keyed indices both resolve to the
+    /// same cert + the right intent positions. Mirrors the
+    /// `client_listener_accepts_intent` scaffold; the unique port range
+    /// avoids collisions with other inline daemon tests.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn try_commit_populates_blocks_by_round_and_tx_to_block() {
+        let n = 1u32;
+        let base_port: u16 = 21_000;
+        let network_id = "blocks-idx-1n".to_string();
+        let (pk, sk) = gsx_crypto::mldsa::keypair();
+        let pk_hex = hex::encode(pk.as_bytes());
+        let manifest = GenesisManifest {
+            network_id: network_id.clone(),
+            validators: (0..n)
+                .map(|i| GenesisValidator {
+                    authority_id: i,
+                    label: format!("v{}", i),
+                    mldsa_public_key_hex: pk_hex.clone(),
+                    bls_public_key_hex: "00".into(),
+                    // Stakes must clear both ring thresholds so the
+                    // signature gate accepts our submissions.
+                    validator_stake_gsx: 150_000,
+                    authority_stake_gsx: 150_000,
+                })
+                .collect(),
+            corridors: Vec::new(),
+            rounds_per_epoch: 1024,
+        };
+        let cfg = NodeConfig {
+            self_id: "v0".into(),
+            authority_id: 0,
+            listen: format!("127.0.0.1:{}", base_port).parse().unwrap(),
+            client_listen: format!("127.0.0.1:{}", base_port + 100).parse().unwrap(),
+            rpc_listen: None,
+            peers: vec![],
+            round_ms: 500,
+            checkpoint_cadence_rounds: 1,
+            mldsa_secret_key_path: "/dev/null".into(),
+            bls_secret_key_path: "/dev/null".into(),
+            genesis_manifest_path: "/dev/null".into(),
+            event_log_path: std::env::temp_dir().join("gsx-blocks-idx-test.ndjson"),
+        };
+        let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let mut client =
+            crate::client::LoadGenClient::connect(cfg.client_listen, sk, pk, network_id)
+                .await
+                .unwrap();
+        let intents: Vec<Intent> = (0..3u8)
+            .map(|i| Intent::Transfer {
+                from: [i + 1; 20],
+                to: [i + 2; 20],
+                amount: 1_000 + i as u128,
+            })
+            .collect();
+        let hashes = client.submit_batch(intents.clone()).await.unwrap();
+        assert_eq!(hashes.len(), 3);
+
+        // Wait for the round driver to author + commit the block carrying
+        // these intents. Single-node cluster commits every tick, so a
+        // few ticks is plenty.
+        let mut found = false;
+        for _ in 0..30 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let inner = d.state.inner.lock().await;
+            if intents.iter().enumerate().all(|(idx, intent)| {
+                let bytes = bincode::serialize(intent).unwrap();
+                let h: [u8; 32] = *blake3::hash(&bytes).as_bytes();
+                inner.tx_to_block.get(&h).is_some_and(|(_, _, i)| *i == idx)
+            }) {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "tx_to_block did not index every submitted intent");
+
+        // Cross-check the round-keyed index agrees with tx_to_block on
+        // the (round, cert) pair.
+        let inner = d.state.inner.lock().await;
+        let h0 = blake3::hash(&bincode::serialize(&intents[0]).unwrap());
+        let (round, cert_hash, _) = inner.tx_to_block.get(h0.as_bytes()).copied().unwrap();
+        assert_eq!(inner.blocks_by_round.get(&round).copied(), Some(cert_hash));
+
+        // Every intent landed in the same block (single-node, single-tick).
+        for (idx, intent) in intents.iter().enumerate() {
+            let bytes = bincode::serialize(intent).unwrap();
+            let h: [u8; 32] = *blake3::hash(&bytes).as_bytes();
+            let (r, c, i) = inner.tx_to_block.get(&h).copied().unwrap();
+            assert_eq!(r, round, "round mismatch for intent {}", idx);
+            assert_eq!(c, cert_hash, "cert mismatch for intent {}", idx);
+            assert_eq!(i, idx, "index mismatch for intent {}", idx);
+        }
     }
 }
