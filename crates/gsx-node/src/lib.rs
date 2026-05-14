@@ -11,6 +11,7 @@ pub mod client;
 pub mod config;
 pub mod daemon;
 pub mod events;
+pub mod rpc_adapter;
 pub mod validator;
 pub mod wire;
 
