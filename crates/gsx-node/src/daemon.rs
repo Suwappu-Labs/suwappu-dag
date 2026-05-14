@@ -1926,15 +1926,12 @@ mod tests {
     /// `round_ms=100ms`) so each governance op only waits ~one epoch
     /// boundary, not multi-round consensus convergence.
     ///
-    /// **Re-`#[ignore]`'d on this branch only (#28).** The deferred-
-    /// activation fix from #32 passes this test on `main` in
-    /// isolation, but in combination with the ML-DSA signature gate
-    /// added by #28 the eject phase consistently times out with
-    /// `registry sizes = [5, 5, 5, 5]`. Both fixes are individually
-    /// correct; the interaction needs a fresh investigation. Filing
-    /// as a follow-up so #28 isn't blocked. Run locally with
-    /// `cargo test phase_g -- --ignored`.
-    #[ignore = "flaky on this branch only — IQ#18 deferred-activation + #28 signature gate interaction; see follow-up"]
+    /// Un-`#[ignore]`'d in #35: the eject path was failing with the
+    /// bare `registry sizes = [5,5,5,5]` panic, which doesn't say
+    /// whether the eject Intent ever reached a block, ever committed,
+    /// or whether `pending_governance` is draining. The eject failure
+    /// branch below now mirrors the admit branch's diagnostic so the
+    /// CI log actually identifies which step is wedged.
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn phase_g_admit_and_eject() {
         let n = 4u32;
@@ -2121,12 +2118,16 @@ mod tests {
         };
         client.submit(eject).await.unwrap();
 
-        // Issue #18: post-admit the registry has n=5 authorities but
-        // the test only runs 4 daemons, so leader rotation has a
-        // permanently missing slot every 5th round and commits rely
-        // on the f+1 leader_timeout fallback. With governance now
-        // applied at epoch boundaries (16 rounds = 1.6s), the eject
-        // converges in ~one boundary plus orphan-pull recovery.
+        // Issue #18 + #32 deferred-activation: post-admit the
+        // authority_registry has size 5, but `inner.n_authorities`
+        // stays at 4 (v4 never authors a cert, so the pending_stake
+        // promotion site in `ingest_cert` never bumps it). Leader
+        // rotation continues over v0..v3 at full speed and the
+        // joint-quorum stake threshold is unchanged, so commits
+        // flow at line rate. The eject Intent only has to make it
+        // into one block + commit + cross the next epoch boundary
+        // (~1.6s for rounds_per_epoch=16). 60s is the failure
+        // ceiling, not the expected wall-clock.
         let eject_deadline = std::time::Instant::now() + Duration::from_secs(60);
         loop {
             let all_at_4 = {
@@ -2144,15 +2145,72 @@ mod tests {
                 break;
             }
             if std::time::Instant::now() >= eject_deadline {
-                let mut sizes = Vec::new();
-                for d in &daemons {
+                // Mirror the admit-phase diagnostic so a CI failure
+                // identifies WHERE the eject pipeline is stuck:
+                //   * `eject_in_block` — did v0 propose a block with it?
+                //   * `committed` / `blocks` — is the cluster still committing?
+                //   * `n_auth` / `stake(tot,thr)` — quorum reachable?
+                //   * `pending_gov` — is the intent queued waiting for boundary?
+                //   * `epoch(cur,last_bd)` / `max_round` — has a new epoch
+                //     fired since admit applied? If not, the queued
+                //     eject never drains.
+                let mut diag = Vec::new();
+                for (i, d) in daemons.iter().enumerate() {
+                    let (committed_n, blocks_n, eject_in_block, votes_total, votes_keys) = {
+                        let committed = d.state.committed.lock();
+                        let blocks = d.state.blocks.lock();
+                        let votes = d.state.votes.lock();
+                        let eject_in_block = blocks.values().any(|b| {
+                            b.intents.iter().any(|x| {
+                                matches!(
+                                    x,
+                                    Intent::EjectAuthority {
+                                        authority_id: 4,
+                                        ..
+                                    }
+                                )
+                            })
+                        });
+                        let votes_total: usize = votes.values().map(|v| v.len()).sum();
+                        (
+                            committed.len(),
+                            blocks.len(),
+                            eject_in_block,
+                            votes_total,
+                            votes.len(),
+                        )
+                    };
+                    let inner = d.state.inner.lock().await;
                     let reg = d.state.authority_registry.read().await;
-                    sizes.push(reg.len());
+                    let stake_table = d.state.stake_table.read().await;
+                    let last_authored = inner.last_authored_round.unwrap_or(u64::MAX);
+                    let reg_size = reg.len();
+                    let has_id4 = reg.contains(4);
+                    let n_auth = inner.n_authorities;
+                    let stake_total = stake_table.total();
+                    let stake_thresh =
+                        gsx_consensus::joint::validator_quorum_threshold(&stake_table);
+                    let pending_gov = inner.pending_governance.len();
+                    let pending_gov_has_eject = inner.pending_governance.iter().any(|x| {
+                        matches!(
+                            x,
+                            Intent::EjectAuthority {
+                                authority_id: 4,
+                                ..
+                            }
+                        )
+                    });
+                    let epoch_cur = inner.epoch.current;
+                    let epoch_last_bd = inner.epoch.last_boundary_round;
+                    let max_round = inner.max_observed_round;
+                    diag.push(format!(
+                        "v{}: reg={} has4={} n={} last_authored={} max_round={} committed={} blocks={} eject_in_block={} votes(k={},tot={}) stake(tot={},thr={}) pending_gov(n={},eject={}) epoch(cur={},last_bd={})",
+                        i, reg_size, has_id4, n_auth, last_authored, max_round, committed_n,
+                        blocks_n, eject_in_block, votes_keys, votes_total, stake_total,
+                        stake_thresh, pending_gov, pending_gov_has_eject, epoch_cur, epoch_last_bd
+                    ));
                 }
-                panic!(
-                    "phase G eject timed out (60s); registry sizes by node = {:?}",
-                    sizes
-                );
+                panic!("phase G eject timed out (60s):\n  {}", diag.join("\n  "));
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
