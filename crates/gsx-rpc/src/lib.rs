@@ -48,7 +48,10 @@ use tracing::info;
 /// stake table, epoch). The same `Arc<State>` shared by the rest of
 /// `gsx-node` is wrapped in `RpcContext::from_state` in the daemon's
 /// bind site.
-pub async fn start(addr: SocketAddr, ctx: Arc<RpcContext>) -> anyhow::Result<JoinHandle<()>> {
+pub async fn start<S: StateView>(
+    addr: SocketAddr,
+    ctx: Arc<RpcContext<S>>,
+) -> anyhow::Result<JoinHandle<()>> {
     let app = router(ctx);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let actual = listener.local_addr()?;

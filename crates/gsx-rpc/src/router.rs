@@ -8,13 +8,7 @@
 
 use std::sync::Arc;
 
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    routing::post,
-    Json, Router,
-};
+use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::post, Json, Router};
 use serde_json::Value;
 use tracing::warn;
 
@@ -39,10 +33,7 @@ async fn handle_rpc<S: StateView>(
         Err(err) => {
             warn!(error = %err, "rpc: malformed request body");
             // Per JSON-RPC 2.0, the id is "Null" when not parseable.
-            let resp = JsonRpcResponse::err(
-                Value::Null,
-                RpcError::InvalidRequest(err.body_text()),
-            );
+            let resp = JsonRpcResponse::err(Value::Null, RpcError::InvalidRequest(err.body_text()));
             return (StatusCode::OK, Json(resp));
         }
     };
