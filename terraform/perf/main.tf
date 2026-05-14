@@ -33,6 +33,116 @@ resource "aws_s3_bucket_versioning" "artifacts" {
   }
 }
 
+# Lifecycle rules for the shared artifact bucket. Without these, every
+# perf campaign drops ~70 MB of compressed NDJSON + reports per region
+# into `logs/` and `reports/`, and CodeBuild source bundles accumulate
+# in `sources/`. As of 2026-05-14 the bucket holds 2.9 GB across 105
+# objects — the campaign-paused steady state. Bin/configs/genesis/keys
+# are intentionally not lifecycled (current versions are load-bearing
+# and tiny).
+resource "aws_s3_bucket_lifecycle_configuration" "artifacts" {
+  provider = aws.us_east_1
+  bucket   = aws_s3_bucket.artifacts.id
+
+  # Standard hygiene: clean up failed/abandoned multipart uploads.
+  rule {
+    id     = "abort-incomplete-multipart"
+    status = "Enabled"
+
+    filter {}
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+  }
+
+  # CodeBuild source bundles are inputs only — `scripts/perf/build.sh`
+  # uploads a fresh `sources/gsx-dag.zip` on every build invocation, so
+  # any historical zip is dead weight.
+  rule {
+    id     = "expire-sources"
+    status = "Enabled"
+
+    filter {
+      prefix = "sources/"
+    }
+
+    expiration {
+      days = 7
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = 7
+    }
+  }
+
+  # Campaign artifacts (logs + reports) tier down and expire. 30d in
+  # STANDARD covers active investigation; STANDARD_IA after 30 days
+  # halves storage cost with a small retrieval fee; GLACIER_IR after
+  # 90 days drops cost ~6x; 365d expiration prevents unbounded growth.
+  rule {
+    id     = "tier-and-expire-logs"
+    status = "Enabled"
+
+    filter {
+      prefix = "logs/"
+    }
+
+    transition {
+      days          = 30
+      storage_class = "STANDARD_IA"
+    }
+
+    transition {
+      days          = 90
+      storage_class = "GLACIER_IR"
+    }
+
+    expiration {
+      days = 365
+    }
+  }
+
+  rule {
+    id     = "tier-and-expire-reports"
+    status = "Enabled"
+
+    filter {
+      prefix = "reports/"
+    }
+
+    transition {
+      days          = 30
+      storage_class = "STANDARD_IA"
+    }
+
+    transition {
+      days          = 90
+      storage_class = "GLACIER_IR"
+    }
+
+    expiration {
+      days = 365
+    }
+  }
+
+  # Bucket-wide cleanup of obsolete versions left by versioned overwrites
+  # (e.g. `bin/gsx-node` is overwritten on every CodeBuild release —
+  # versioning preserves the prior copy as noncurrent, which we don't
+  # need beyond 30 days). Per-prefix rules above already cover their
+  # own noncurrent cleanup; this is the catch-all for the rest.
+  rule {
+    id     = "noncurrent-version-cleanup"
+    status = "Enabled"
+
+    filter {}
+
+    noncurrent_version_expiration {
+      noncurrent_days = 30
+    }
+  }
+}
+
 module "us_east_1" {
   source           = "./modules/region"
   providers        = { aws = aws.us_east_1 }
