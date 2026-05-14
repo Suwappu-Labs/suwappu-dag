@@ -6,10 +6,10 @@
 //! it is consumed via generic bounds (`S: StateView`), not as
 //! `dyn StateView` (the trait is intentionally not dyn-compatible).
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Snapshot of the current epoch state.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EpochView {
     /// Current epoch index (monotonic, increments at every boundary cross).
     pub current: u64,
@@ -20,7 +20,7 @@ pub struct EpochView {
 }
 
 /// JSON-safe projection of an Authority Ring member.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthorityMemberView {
     /// Authority id (zero-indexed slot in the published set).
     pub id: u32,
@@ -34,7 +34,7 @@ pub struct AuthorityMemberView {
 /// JSON-safe projection of a Validator Ring member. Stake is encoded
 /// as a decimal string to survive JSON's 53-bit integer ceiling
 /// (Validator stakes use u128 — see `gsx_consensus::Stake`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidatorMemberView {
     pub id: u32,
     pub stake_gsx: String,

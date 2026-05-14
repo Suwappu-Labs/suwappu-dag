@@ -12,6 +12,7 @@ members = [
     "crates/gsx-transport",
     "crates/gsx-node",
     "crates/gsx-rpc",
+    "clients/rust-sdk",
 ]
 
 [workspace.package]
