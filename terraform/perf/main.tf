@@ -150,7 +150,7 @@ module "us_east_1" {
   authority_id     = 0
   instance_type    = var.instance_type
   ssh_public_key   = var.ssh_public_key
-  operator_ip_cidr = var.operator_ip_cidr
+  operator_ip_cidrs = var.operator_ip_cidrs
   consensus_port   = var.consensus_port
   client_port      = var.client_port
   artifact_bucket  = aws_s3_bucket.artifacts.id
@@ -163,7 +163,7 @@ module "us_west_2" {
   authority_id     = 1
   instance_type    = var.instance_type
   ssh_public_key   = var.ssh_public_key
-  operator_ip_cidr = var.operator_ip_cidr
+  operator_ip_cidrs = var.operator_ip_cidrs
   consensus_port   = var.consensus_port
   client_port      = var.client_port
   artifact_bucket  = aws_s3_bucket.artifacts.id
@@ -176,7 +176,7 @@ module "eu_west_1" {
   authority_id     = 2
   instance_type    = var.instance_type
   ssh_public_key   = var.ssh_public_key
-  operator_ip_cidr = var.operator_ip_cidr
+  operator_ip_cidrs = var.operator_ip_cidrs
   consensus_port   = var.consensus_port
   client_port      = var.client_port
   artifact_bucket  = aws_s3_bucket.artifacts.id
@@ -189,7 +189,7 @@ module "ap_northeast_1" {
   authority_id     = 3
   instance_type    = var.instance_type
   ssh_public_key   = var.ssh_public_key
-  operator_ip_cidr = var.operator_ip_cidr
+  operator_ip_cidrs = var.operator_ip_cidrs
   consensus_port   = var.consensus_port
   client_port      = var.client_port
   artifact_bucket  = aws_s3_bucket.artifacts.id
@@ -222,7 +222,7 @@ module "ap_northeast_1" {
 #   authority_id     = 6
 #   instance_type    = var.instance_type
 #   ssh_public_key   = var.ssh_public_key
-#   operator_ip_cidr = var.operator_ip_cidr
+#   operator_ip_cidrs = var.operator_ip_cidrs
 #   consensus_port   = var.consensus_port
 #   client_port      = var.client_port
 #   artifact_bucket  = aws_s3_bucket.artifacts.id

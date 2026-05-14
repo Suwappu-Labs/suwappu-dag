@@ -31,10 +31,15 @@ This is also the index order in `genesis.toml`.
 cd terraform/perf
 terraform init
 terraform plan \
-  -var operator_ip_cidr="$(curl -s ifconfig.me)/32" \
+  -var 'operator_ip_cidrs=["1.2.3.4/32","5.6.7.8/32"]' \
   -var ssh_public_key="$(cat ~/.ssh/gsx-perf.pub)"
 terraform apply ...
 ```
+
+`operator_ip_cidrs` is a list so multiple operator networks (home, mobile
+hotspot, office) can stay reachable across re-applies. The
+`scripts/deploy-aws.sh` wrapper accepts a comma-separated `OPERATOR_CIDRS`
+env var; if unset it auto-detects the current public IP.
 
 `af-south-1` requires one-time region opt-in in the AWS console before the
 first apply succeeds.
