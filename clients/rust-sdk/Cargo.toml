@@ -13,7 +13,11 @@ description = "Rust client SDK for the gsx-dag JSON-RPC query API."
 # Share view types so an SDK consumer gets the same shape gsx-node serves.
 gsx-rpc = { workspace = true }
 
-reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
+# Use native-tls (default-tls) instead of rustls — matches what the
+# rest of the workspace already pulls in via gsxdb-bridge → reqwest,
+# avoids dragging in a second TLS stack with webpki-related advisories
+# (RUSTSEC name-constraints family) that cargo-deny would reject.
+reqwest = { version = "0.11", features = ["json"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
