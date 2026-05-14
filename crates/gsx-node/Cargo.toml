@@ -44,6 +44,11 @@ hex.workspace = true
 # Pull the vendored-openssl flag into the linker graph so the musl build
 # bundles OpenSSL from source (reqwest -> openssl-sys transitive dep).
 openssl-sys.workspace = true
+# DAG-S31.3: parking_lot::Mutex for short critical sections on
+# votes/blocks/committed where the previous tokio::sync::Mutex's
+# async-yield overhead was wasted on sub-microsecond HashMap/HashSet
+# operations.
+parking_lot = "0.12"
 rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true

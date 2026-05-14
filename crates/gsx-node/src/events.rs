@@ -90,6 +90,12 @@ pub struct Event {
     /// so compliance reports can track ring membership over time.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authority_id: Option<u32>,
+    /// Optional WireMessage kind tag (DAG-S31.4) — set on `wire_drop`
+    /// events so compliance trace can attribute "missing on receive"
+    /// to "dropped on send" per message type (`cert`, `block`, `vote`,
+    /// etc.).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 impl Event {
@@ -111,6 +117,7 @@ impl Event {
             intent_hashes: None,
             received_60s: None,
             authority_id: None,
+            kind: None,
         }
     }
 
@@ -156,6 +163,13 @@ impl Event {
     /// governance + slashing events).
     pub fn with_authority_id(mut self, id: u32) -> Self {
         self.authority_id = Some(id);
+        self
+    }
+
+    /// Builder: attach a WireMessage kind tag (DAG-S31.4 `wire_drop`
+    /// events).
+    pub fn with_kind(mut self, kind: impl Into<String>) -> Self {
+        self.kind = Some(kind.into());
         self
     }
 }

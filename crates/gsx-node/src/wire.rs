@@ -146,8 +146,14 @@ pub struct WireEvent {
 
 /// Running wire-transport handle. Drop to stop all background tasks.
 pub struct Wire {
-    /// Inbound channel: every received message from any peer arrives here.
-    pub inbox: mpsc::Receiver<WireEvent>,
+    /// DAG-S31.1: per-peer inbound channels. Pre-S31 every inbound peer
+    /// stream multiplexed into one channel + one consumer task; on the
+    /// 4-region perf testnet that consumer became the slowest-node
+    /// bottleneck (ap-northeast-1 received 143 msg/sec across 3 peers
+    /// but a single tokio task couldn't keep up). Splitting by peer
+    /// lets the runtime spread inbox processing across multiple worker
+    /// threads.
+    pub inboxes: HashMap<PeerId, mpsc::Receiver<WireEvent>>,
     /// Per-peer outbound channels. Send a message into the channel and the
     /// dialer task will write it to the peer's TCP socket. Slow peers drop
     /// excess sends (bounded channel) — this matches the consensus paper's
@@ -161,8 +167,8 @@ pub struct Wire {
 /// background tasks transfer with the inbox so callers don't have to track
 /// them separately.
 pub struct WireSplit {
-    /// Inbound receiver — drains messages from every peer.
-    pub inbox: mpsc::Receiver<WireEvent>,
+    /// Per-peer inbound receivers. See [`Wire::inboxes`].
+    pub inboxes: HashMap<PeerId, mpsc::Receiver<WireEvent>>,
     /// Per-peer outbound senders.
     pub outbound: HashMap<PeerId, mpsc::Sender<WireMessage>>,
     /// Background accept/dialer tasks. Abort them to stop the wire.
@@ -178,18 +184,15 @@ impl Drop for Wire {
 }
 
 impl Wire {
-    /// Decompose into raw inbox / outbound / task-set components. After this,
+    /// Decompose into raw inboxes / outbound / task-set components. After this,
     /// the original `Wire` is consumed and the caller is responsible for
     /// aborting the returned tasks when shutting down.
     pub fn split(mut self) -> WireSplit {
-        // Replace the inner channels with empty stand-ins so `Drop` doesn't
-        // abort the tasks we're handing out.
-        let (_dummy_tx, dummy_inbox) = mpsc::channel::<WireEvent>(1);
-        let inbox = std::mem::replace(&mut self.inbox, dummy_inbox);
+        let inboxes = std::mem::take(&mut self.inboxes);
         let outbound = std::mem::take(&mut self.outbound);
         let tasks = std::mem::take(&mut self.tasks);
         WireSplit {
-            inbox,
+            inboxes,
             outbound,
             tasks,
         }
@@ -197,7 +200,18 @@ impl Wire {
 
     /// Bind the listen socket, dial every peer, return a running handle.
     pub async fn start(cfg: WireConfig) -> Result<Self, WireError> {
-        let (inbound_tx, inbound_rx) = mpsc::channel::<WireEvent>(4096);
+        // DAG-S31.1: one inbound channel per configured peer. Inbound
+        // streams whose hello-frame peer ID doesn't match any configured
+        // peer get dropped (matches the static-peer-set assumption that
+        // already held implicitly for the perf testnet).
+        let mut inbound_txs: HashMap<PeerId, mpsc::Sender<WireEvent>> = HashMap::new();
+        let mut inboxes: HashMap<PeerId, mpsc::Receiver<WireEvent>> = HashMap::new();
+        for (peer, _addr) in &cfg.peers {
+            let (tx, rx) = mpsc::channel::<WireEvent>(4096);
+            inbound_txs.insert(peer.clone(), tx);
+            inboxes.insert(peer.clone(), rx);
+        }
+        let inbound_txs = Arc::new(inbound_txs);
 
         // Bind first so the caller knows the port is up before we return.
         let listener = TcpListener::bind(cfg.listen).await?;
@@ -207,10 +221,10 @@ impl Wire {
 
         // Accept loop. Each inbound connection spawns a per-conn reader.
         {
-            let inbound_tx = inbound_tx.clone();
+            let inbound_txs = inbound_txs.clone();
             let self_id = cfg.self_id.clone();
             tasks.push(tokio::spawn(async move {
-                accept_loop(listener, inbound_tx, self_id).await;
+                accept_loop(listener, inbound_txs, self_id).await;
             }));
         }
 
@@ -231,7 +245,7 @@ impl Wire {
         }
 
         Ok(Self {
-            inbox: inbound_rx,
+            inboxes,
             outbound,
             tasks,
         })
@@ -261,16 +275,20 @@ impl Wire {
     }
 }
 
-async fn accept_loop(listener: TcpListener, inbound_tx: mpsc::Sender<WireEvent>, self_id: PeerId) {
+async fn accept_loop(
+    listener: TcpListener,
+    inbound_txs: Arc<HashMap<PeerId, mpsc::Sender<WireEvent>>>,
+    self_id: PeerId,
+) {
     loop {
         match listener.accept().await {
             Ok((stream, addr)) => {
                 debug!(remote = %addr, "wire: inbound");
                 let _ = stream.set_nodelay(true);
-                let inbound_tx = inbound_tx.clone();
+                let inbound_txs = inbound_txs.clone();
                 let self_id = self_id.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = read_loop(stream, inbound_tx, self_id, addr).await {
+                    if let Err(e) = read_loop(stream, inbound_txs, self_id, addr).await {
                         debug!(remote = %addr, err = %e, "wire: inbound closed");
                     }
                 });
@@ -287,15 +305,27 @@ async fn accept_loop(listener: TcpListener, inbound_tx: mpsc::Sender<WireEvent>,
 /// learned from the first frame: a sender writes its [`PeerId`] before any
 /// `WireMessage`. Without that, logs only have the socket address and you
 /// can't tell which region the traffic came from.
+///
+/// DAG-S31.1: routes WireEvents to a per-peer channel rather than a
+/// shared fan-in. If the hello-frame peer ID doesn't match any
+/// configured peer, the connection is closed.
 async fn read_loop(
     mut stream: TcpStream,
-    inbound_tx: mpsc::Sender<WireEvent>,
+    inbound_txs: Arc<HashMap<PeerId, mpsc::Sender<WireEvent>>>,
     _self_id: PeerId,
     remote_addr: SocketAddr,
 ) -> Result<(), WireError> {
     let hello = read_frame(&mut stream).await?;
     let from: PeerId = bincode::deserialize(&hello)?;
     debug!(peer = %from.0, addr = %remote_addr, "wire: hello");
+
+    let inbound_tx = match inbound_txs.get(&from) {
+        Some(tx) => tx.clone(),
+        None => {
+            warn!(peer = %from.0, addr = %remote_addr, "wire: unknown peer in hello, dropping");
+            return Ok(());
+        }
+    };
 
     loop {
         let bytes = read_frame(&mut stream).await?;
@@ -439,17 +469,23 @@ mod tests {
         assert!(a.send_to(&PeerId::new("b"), WireMessage::Ping(42)).await);
         assert!(b.send_to(&PeerId::new("a"), WireMessage::Ping(99)).await);
 
-        let from_a = tokio::time::timeout(Duration::from_secs(2), b.inbox.recv())
-            .await
-            .expect("b receive timed out")
-            .expect("b inbox closed");
+        let from_a = tokio::time::timeout(
+            Duration::from_secs(2),
+            b.inboxes.get_mut(&PeerId::new("a")).unwrap().recv(),
+        )
+        .await
+        .expect("b receive timed out")
+        .expect("b inbox closed");
         assert_eq!(from_a.from.0, "a");
         assert!(matches!(from_a.msg, WireMessage::Ping(42)));
 
-        let from_b = tokio::time::timeout(Duration::from_secs(2), a.inbox.recv())
-            .await
-            .expect("a receive timed out")
-            .expect("a inbox closed");
+        let from_b = tokio::time::timeout(
+            Duration::from_secs(2),
+            a.inboxes.get_mut(&PeerId::new("b")).unwrap().recv(),
+        )
+        .await
+        .expect("a receive timed out")
+        .expect("a inbox closed");
         assert_eq!(from_b.from.0, "b");
         assert!(matches!(from_b.msg, WireMessage::Ping(99)));
     }
@@ -492,14 +528,20 @@ mod tests {
         let sent = a.broadcast(WireMessage::Ping(7)).await;
         assert_eq!(sent, 2);
 
-        let ev_b = tokio::time::timeout(Duration::from_secs(2), b.inbox.recv())
-            .await
-            .expect("b timed out")
-            .expect("b closed");
-        let ev_c = tokio::time::timeout(Duration::from_secs(2), c.inbox.recv())
-            .await
-            .expect("c timed out")
-            .expect("c closed");
+        let ev_b = tokio::time::timeout(
+            Duration::from_secs(2),
+            b.inboxes.get_mut(&PeerId::new("a")).unwrap().recv(),
+        )
+        .await
+        .expect("b timed out")
+        .expect("b closed");
+        let ev_c = tokio::time::timeout(
+            Duration::from_secs(2),
+            c.inboxes.get_mut(&PeerId::new("a")).unwrap().recv(),
+        )
+        .await
+        .expect("c timed out")
+        .expect("c closed");
 
         assert_eq!(ev_b.from.0, "a");
         assert_eq!(ev_c.from.0, "a");
