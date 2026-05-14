@@ -245,10 +245,12 @@ async fn verify_signed_intent(
     // then drop before the (CPU-heavy) signature verify.
     let pubkey_bytes_opt: Option<Vec<u8>> = {
         let registry = state.authority_registry.read().await;
-        registry
+        let found = registry
             .members()
             .find(|m| blake3::hash(&m.public_key_bytes).as_bytes() == signer_pubkey_hash)
-            .map(|m| m.public_key_bytes.clone())
+            .map(|m| m.public_key_bytes.clone());
+        drop(registry);
+        found
     };
     let pubkey_bytes = match pubkey_bytes_opt {
         Some(b) => b,
