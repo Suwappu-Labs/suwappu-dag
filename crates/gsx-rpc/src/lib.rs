@@ -29,7 +29,7 @@ pub mod methods;
 pub mod router;
 pub mod types;
 
-pub use context::RpcContext;
+pub use context::{RpcContext, StateView};
 pub use error::RpcError;
 pub use router::router;
 pub use types::{JsonRpcRequest, JsonRpcResponse};
