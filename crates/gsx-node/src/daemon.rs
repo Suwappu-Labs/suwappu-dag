@@ -325,7 +325,7 @@ impl Daemon {
         })
         .await?;
         let WireSplit {
-            inbox,
+            inboxes,
             outbound,
             tasks: mut wire_tasks,
         } = wire.split();
@@ -341,14 +341,21 @@ impl Daemon {
 
         let mut tasks = Vec::new();
 
-        // Inbox handler: per-message dispatch.
-        {
+        // DAG-S31.1: per-peer inbox tasks. Pre-S31 one run_inbox task
+        // multiplexed every peer's stream; on the 4-region perf testnet
+        // that single tokio task saturated under inbound bursts. One
+        // task per peer lets the tokio runtime spread inbox processing
+        // across worker threads.
+        for (peer_id, peer_inbox) in inboxes.into_iter() {
             let state = state.clone();
             let outbound = outbound.clone();
             let log = log.clone();
             let self_label = self_label.clone();
+            let peer_label = peer_id.0.clone();
             tasks.push(tokio::spawn(async move {
-                run_inbox(self_label, self_id, state, outbound, log, inbox).await;
+                tracing::debug!(peer = %peer_label, "inbox task: starting");
+                run_inbox(self_label, self_id, state, outbound, log, peer_inbox).await;
+                tracing::debug!(peer = %peer_label, "inbox task: exiting");
             }));
         }
 
