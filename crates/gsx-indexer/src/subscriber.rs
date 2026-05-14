@@ -102,7 +102,7 @@ async fn handle_frame<S: Store>(line: &str, store: &S) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{InMemoryStore, IndexedBlock};
+    use crate::store::InMemoryStore;
 
     #[tokio::test]
     async fn handle_frame_ingests_committed_event() {
@@ -136,19 +136,5 @@ mod tests {
         let store = InMemoryStore::new();
         handle_frame("not json at all", &store).await;
         assert_eq!(store.latest_round().await, None);
-    }
-
-    #[test]
-    fn unused_warn_imports_compile_cleanly() {
-        // Smoke test that the `Store` trait bound resolves and
-        // `InMemoryStore` satisfies it. Compile-only.
-        fn _bounds<S: Store>() {}
-        _bounds::<InMemoryStore>();
-        let _ = IndexedBlock {
-            round: 0,
-            indexed_at_ms: 0,
-            cert_hash: String::new(),
-            tx_hashes: vec![],
-        };
     }
 }

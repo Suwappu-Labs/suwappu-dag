@@ -70,7 +70,7 @@ async fn list_blocks<S: Store>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{InMemoryStore, IndexedBlock};
+    use crate::store::InMemoryStore;
 
     fn block(round: u64) -> IndexedBlock {
         IndexedBlock {

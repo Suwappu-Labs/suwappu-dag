@@ -692,8 +692,8 @@ async fn subscribe_events_returns_receiver_per_subscriber() {
     // Verify each call to `subscribe_events` yields an independent
     // receiver — slow consumer A doesn't block fast consumer B.
     let ctx = fixture();
-    let mut rx_a = ctx.state.subscribe_events();
-    let mut rx_b = ctx.state.subscribe_events();
+    let rx_a = ctx.state.subscribe_events();
+    let rx_b = ctx.state.subscribe_events();
 
     // Drive an event through the broadcast channel and confirm both
     // receivers see it. The MockState owns the sender, so we go
