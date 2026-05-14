@@ -201,8 +201,7 @@ pub(crate) async fn run(
                     let network_id = network_id.clone();
                     tokio::spawn(async move {
                         if let Err(e) =
-                            handle_conn(stream, self_label, intent_tx, log, state, network_id)
-                                .await
+                            handle_conn(stream, self_label, intent_tx, log, state, network_id).await
                         {
                             debug!(remote = %addr, err = %e, "client: conn closed");
                         }
@@ -316,8 +315,7 @@ async fn handle_conn(
                         return Ok(());
                     }
                     AuthOutcome::BadSignature => {
-                        let resp =
-                            ClientResponse::Err("auth: bad ML-DSA-65 signature".to_string());
+                        let resp = ClientResponse::Err("auth: bad ML-DSA-65 signature".to_string());
                         let _ = write_response(&mut stream, &resp).await;
                         return Ok(());
                     }
@@ -554,8 +552,9 @@ fn _shape_hint() -> Option<HashMap<u32, u32>> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use gsx_execution::Intent;
+
+    use super::*;
 
     #[test]
     fn signing_digest_is_deterministic() {

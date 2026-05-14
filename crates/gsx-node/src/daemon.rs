@@ -1639,14 +1639,10 @@ mod tests {
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        let mut client = crate::client::LoadGenClient::connect(
-            cfg.client_listen,
-            sk,
-            pk,
-            network_id,
-        )
-        .await
-        .unwrap();
+        let mut client =
+            crate::client::LoadGenClient::connect(cfg.client_listen, sk, pk, network_id)
+                .await
+                .unwrap();
         let intent = gsx_execution::Intent::Transfer {
             from: [1u8; 20],
             to: [2u8; 20],
@@ -1716,14 +1712,10 @@ mod tests {
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        let mut client = crate::client::LoadGenClient::connect(
-            cfg.client_listen,
-            sk,
-            pk,
-            network_id,
-        )
-        .await
-        .unwrap();
+        let mut client =
+            crate::client::LoadGenClient::connect(cfg.client_listen, sk, pk, network_id)
+                .await
+                .unwrap();
         let batch: Vec<gsx_execution::Intent> = (0..50u8)
             .map(|i| gsx_execution::Intent::Transfer {
                 from: [i; 20],
@@ -2092,9 +2084,11 @@ mod tests {
     /// reaching the round driver's mpsc.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn client_listener_enforces_mldsa_signature() {
-        use crate::client::{intent_signing_digest, signer_pubkey_hash, ClientMessage,
-            ClientResponse};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        use crate::client::{
+            intent_signing_digest, signer_pubkey_hash, ClientMessage, ClientResponse,
+        };
 
         let n = 1u32;
         let base_port: u16 = 20_500;
@@ -2134,10 +2128,7 @@ mod tests {
 
         // Helper: send one framed `ClientMessage`, read one framed
         // `ClientResponse`. Returns the response.
-        async fn round_trip(
-            addr: SocketAddr,
-            msg: &ClientMessage,
-        ) -> ClientResponse {
+        async fn round_trip(addr: SocketAddr, msg: &ClientMessage) -> ClientResponse {
             let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
             let _ = s.set_nodelay(true);
             let bytes = bincode::serialize(msg).unwrap();
@@ -2250,13 +2241,7 @@ mod tests {
             landed
         );
         assert!(
-            matches!(
-                landed[0],
-                Intent::Transfer {
-                    amount: 42,
-                    ..
-                }
-            ),
+            matches!(landed[0], Intent::Transfer { amount: 42, .. }),
             "the landed intent should be the genuinely-signed amount=42, got {:?}",
             landed[0]
         );
