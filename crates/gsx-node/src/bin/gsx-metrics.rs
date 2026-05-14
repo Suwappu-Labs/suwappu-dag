@@ -91,6 +91,20 @@ struct Args {
     /// is reported as an outage window. Default 5s.
     #[arg(long, default_value_t = 5_000)]
     recovery_threshold_ms: u64,
+
+    /// `--mode e2e` campaign-window start (epoch ms). Committed events
+    /// outside `[start, end]` are excluded from the join (DAG-S30.4).
+    /// Prevents stale matches from prior campaign runs surviving into
+    /// the current report when the validator's events.ndjson persists
+    /// across runs. Default 0 disables the window filter (pre-S30
+    /// behaviour). Compliance-campaign.sh forwards meta.json start_ms.
+    #[arg(long, default_value_t = 0)]
+    campaign_start_ms: u64,
+
+    /// `--mode e2e` campaign-window end (epoch ms). See
+    /// `--campaign-start-ms`. Default 0 disables the upper bound.
+    #[arg(long, default_value_t = 0)]
+    campaign_end_ms: u64,
 }
 
 fn parse_log_arg(s: &str) -> Result<(String, PathBuf), String> {
@@ -162,7 +176,12 @@ fn main() -> Result<()> {
 
     match args.mode {
         Mode::Cert => emit_cert_mode(&all_events, &args.lane),
-        Mode::E2e => emit_e2e_mode(&all_events, &args.loadgen_csv)?,
+        Mode::E2e => emit_e2e_mode(
+            &all_events,
+            &args.loadgen_csv,
+            args.campaign_start_ms,
+            args.campaign_end_ms,
+        )?,
         Mode::Pair => emit_pair_mode(&all_events),
         Mode::Tps => emit_tps_mode(&all_events, args.bucket_ms),
         Mode::Recovery => emit_recovery_mode(&all_events, args.recovery_threshold_ms),
@@ -205,7 +224,12 @@ fn emit_cert_mode(events: &[Event], lane: &str) {
 /// Intent submit → first finalized commit per region. Bank-compliance
 /// e2e latency table. Joins loadgen CSV tx_hash to `committed` events'
 /// `intent_hashes`.
-fn emit_e2e_mode(events: &[Event], loadgen_csv: &Option<PathBuf>) -> Result<()> {
+fn emit_e2e_mode(
+    events: &[Event],
+    loadgen_csv: &Option<PathBuf>,
+    campaign_start_ms: u64,
+    campaign_end_ms: u64,
+) -> Result<()> {
     let path = loadgen_csv
         .as_ref()
         .context("--mode e2e requires --loadgen-csv")?;
@@ -234,9 +258,36 @@ fn emit_e2e_mode(events: &[Event], loadgen_csv: &Option<PathBuf>) -> Result<()> 
     // For each intent: first_committed per region = min(t_ms) of
     // committed events whose intent_hashes contains the tx_hash.
     // Map (tx_hash, region) → first_committed_ms.
+    //
+    // DAG-S30.4: campaign-window filter. Pre-S30 the join walked
+    // every `committed` event in the events.ndjson file, which
+    // accumulates across daemon restarts. Even with the S29.1
+    // stale-match filter, a stale committed event from a prior
+    // campaign run could match the current tx_hash before the
+    // S29.1 ts filter kicked in — producing `no_data` finality
+    // verdicts. With explicit `[campaign_start_ms, campaign_end_ms]`
+    // bounds the join becomes deterministic against the current
+    // campaign window. Defaults of 0 disable the filter (pre-S30
+    // behaviour) for one-shot debugging.
+    let window_active = campaign_start_ms > 0 || campaign_end_ms > 0;
+    let lo = if campaign_start_ms > 0 {
+        campaign_start_ms.saturating_sub(5_000) // 5s pre-window slack
+    } else {
+        0
+    };
+    let hi = if campaign_end_ms > 0 {
+        campaign_end_ms.saturating_add(60_000) // 60s post-window slack
+    } else {
+        u64::MAX
+    };
     let mut first_committed: HashMap<(String, String), u64> = HashMap::new();
+    let mut dropped_out_of_window: u64 = 0;
     for ev in events {
         if ev.event != "committed" {
+            continue;
+        }
+        if window_active && (ev.t_ms < lo || ev.t_ms > hi) {
+            dropped_out_of_window += 1;
             continue;
         }
         let Some(hashes) = ev.intent_hashes.as_ref() else {
@@ -253,6 +304,12 @@ fn emit_e2e_mode(events: &[Event], loadgen_csv: &Option<PathBuf>) -> Result<()> 
                 })
                 .or_insert(ev.t_ms);
         }
+    }
+    if dropped_out_of_window > 0 {
+        eprintln!(
+            "gsx-metrics e2e: filtered {} committed events outside window [{}, {}]",
+            dropped_out_of_window, lo, hi
+        );
     }
 
     // DAG-S29.1: drop rows where the matched committed_ms is BEFORE

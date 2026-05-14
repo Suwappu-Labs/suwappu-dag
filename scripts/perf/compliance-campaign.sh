@@ -193,7 +193,13 @@ echo "[$(date -u +%FT%TZ)] running gsx-metrics in 5 modes"
 "$METRICS" "${LOG_ARGS[@]}" --mode recovery > "$CAMPAIGN_DIR/recovery.csv"
 
 if [[ -s "$CAMPAIGN_DIR/loadgen.csv" ]]; then
-  "$METRICS" "${LOG_ARGS[@]}" --mode e2e --loadgen-csv "$CAMPAIGN_DIR/loadgen.csv" > "$CAMPAIGN_DIR/e2e.csv"
+  # DAG-S30.4: pass the campaign window so gsx-metrics e2e can drop
+  # stale committed events from prior runs that share intent hashes.
+  "$METRICS" "${LOG_ARGS[@]}" --mode e2e \
+      --loadgen-csv "$CAMPAIGN_DIR/loadgen.csv" \
+      --campaign-start-ms "$START_MS" \
+      --campaign-end-ms "$END_MS" \
+      > "$CAMPAIGN_DIR/e2e.csv"
 else
   echo "  skipping e2e — no loadgen.csv"
   echo "tx_hash,submitted_ms,region,first_committed_ms,e2e_latency_ms" > "$CAMPAIGN_DIR/e2e.csv"

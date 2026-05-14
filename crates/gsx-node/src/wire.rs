@@ -215,10 +215,14 @@ impl Wire {
         }
 
         // Dial each configured peer. Each dialer is its own task with its own
-        // bounded send channel.
+        // bounded send channel. DAG-S30.3: bumped 1024 -> 8192 to absorb
+        // post-S29 block payloads, which carry ~1100 intents (~70 KB
+        // serialised) per cert at 4-cert/sec cadence. Pre-S30 the 1024-slot
+        // channel filled under brief receiver stalls and `broadcast` silently
+        // dropped via `try_send`, starving the cluster of cert proposals.
         let mut outbound = HashMap::new();
         for (peer, addr) in cfg.peers.iter().cloned() {
-            let (tx, rx) = mpsc::channel::<WireMessage>(1024);
+            let (tx, rx) = mpsc::channel::<WireMessage>(8192);
             outbound.insert(peer.clone(), tx);
             let self_id = cfg.self_id.clone();
             tasks.push(tokio::spawn(async move {

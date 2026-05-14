@@ -24,10 +24,11 @@ use std::{
 
 use gsx_authority::{AuthorityMember, AuthorityRegistry};
 use gsx_consensus::{
-    cert::{CertHash, Certificate},
+    cert::{CertHash, Certificate, Round},
     commit::{cert_at, quorum_threshold},
     dag::DagStore,
     decide_slot,
+    equivocation::EquivocationProof,
     joint::{StakeTable, Vote},
     validator_quorum_met, AuthorityId, ConsensusError, LeaderStatus,
 };
@@ -140,6 +141,18 @@ pub(crate) struct State {
     /// Stake is promoted into `stake_table` on first-cert insertion
     /// in `ingest_cert`.
     pub(crate) pending_stake: BTreeMap<AuthorityId, gsx_consensus::Stake>,
+    /// **DAG-S30.1 incremental slashing scan.** `(author, round) →
+    /// first cert hash observed` so equivocation detection becomes
+    /// O(1) per cert insertion instead of O(dag) per try_commit. The
+    /// pre-S30 code called `detect_authority_equivocation(&s.dag)` on
+    /// every try_commit invocation (~16/sec/node), each walk
+    /// linearising the entire DAG. At 9.6k certs that's ~150k
+    /// ops/sec just for slashing checks — enough to starve the
+    /// round driver under cross-region load.
+    pub(crate) seen_at: BTreeMap<(AuthorityId, Round), CertHash>,
+    /// Equivocations detected at insertion time (DAG-S30.1).
+    /// `try_commit` drains this queue instead of re-scanning the DAG.
+    pub(crate) detected_equivocations: Vec<EquivocationProof>,
 }
 
 /// Round-based epoch counter for validator-set governance (DAG-S25).
@@ -293,6 +306,8 @@ impl State {
             authority_registry,
             validator_registry,
             pending_stake: BTreeMap::new(),
+            seen_at: BTreeMap::new(),
+            detected_equivocations: Vec::new(),
         }
     }
 
@@ -561,6 +576,31 @@ fn ingest_cert(
                 // stake to the joint-quorum denominator now.
                 if let Some(stake) = s.pending_stake.remove(&c.author) {
                     s.stake_table.insert(c.author, stake);
+                }
+                // DAG-S30.1: incremental equivocation detection. Record
+                // the first cert hash for (author, round); if we ever
+                // see a second distinct hash for the same slot, that
+                // author has equivocated. O(log n) per insert vs the
+                // O(dag) full-rescan that pre-S30 ran on every
+                // try_commit. The queued proof is consumed in
+                // try_commit's slashing section. (No `Entry` API here
+                // because the Occupied arm would hold a mutable borrow
+                // of `s.seen_at` while we need to push onto
+                // `s.detected_equivocations`.)
+                let key = (c.author, round);
+                match s.seen_at.get(&key).copied() {
+                    None => {
+                        s.seen_at.insert(key, h);
+                    }
+                    Some(prev) if prev != h => {
+                        s.detected_equivocations.push(EquivocationProof {
+                            author: c.author,
+                            round,
+                            cert_a: prev,
+                            cert_b: h,
+                        });
+                    }
+                    _ => {}
                 }
                 inserted.push(IngestedCert { hash: h, round });
                 if let Some(unblocked) = s.orphans.remove(&h) {
@@ -1120,13 +1160,17 @@ fn try_commit(s: &mut State, self_label: &str, log: &EventLog) {
         }
     }
 
-    // DAG-S27.4: slashing-triggered ejection. After processing all newly
-    // committed certs, run the equivocation detectors and auto-eject any
-    // authority that signed conflicting certs at the same round (paper
-    // Invariant 5 — 100% slashing). Detectors are library code that's
-    // tested at 10k proptest cases (DAG-S7); this just wires them up.
-    let auth_equivs = gsx_consensus::detect_authority_equivocation(&s.dag);
-    for proof in auth_equivs {
+    // DAG-S30.1: drain the equivocation queue populated incrementally
+    // in `ingest_cert` and the round driver. Pre-S30 we called
+    // `gsx_consensus::detect_authority_equivocation(&s.dag)` here,
+    // which linearised the entire DAG (O(n)) on every try_commit
+    // invocation — ~150k operations/sec at a 9.6k-cert DAG with 16
+    // try_commits/sec/node. CPU-bound on the slowest node and
+    // starved the round driver. The new path is O(1) per drained
+    // proof, with detection itself amortised at O(log n) per cert
+    // insertion (BTreeMap::entry).
+    let proofs: Vec<EquivocationProof> = s.detected_equivocations.drain(..).collect();
+    for proof in proofs {
         let id = proof.author;
         if s.authority_registry.contains(id) {
             s.authority_registry.remove(id);
@@ -1190,51 +1234,59 @@ async fn run_round_driver(
 
     loop {
         tick.tick().await;
-        let mut s = state.lock().await;
-        let n = s.n_authorities;
-        // Always advance one round at a time from our own last authored
-        // round. Skipping rounds (the pre-S21.5 snap-up) breaks the
-        // per-authority equivocation invariant — every authority's
-        // column in the DAG must be contiguous. Catch-up of missing
-        // peer certs is the synchronizer's job (S21.3), not the round
-        // driver's.
-        let target_round = s.last_authored_round.map(|r| r + 1).unwrap_or(0);
-        let prev_round = target_round.saturating_sub(1);
 
-        if s.last_authored_round.is_some() {
-            let parents_count = s.distinct_authors_at(prev_round);
-            let elapsed = round_started_at.elapsed();
-            let strict_ok = parents_count >= quorum_threshold(n);
-            let timeout_force = parents_count >= f_plus_one(n) && elapsed >= leader_timeout;
-
-            if !strict_ok && !timeout_force {
-                debug!(
-                    target_round,
-                    prev_round,
-                    parents = parents_count,
-                    quorum = quorum_threshold(n),
-                    elapsed_ms = elapsed.as_millis() as u64,
-                    "round driver: waiting"
-                );
-                continue;
+        // DAG-S30.2: split the propose path into 3 short lock-windows
+        // with the expensive bincode/blake3 work outside the lock.
+        // Pre-S30 the driver held `state.lock().await` for the entire
+        // path including serialising ~1100 intents (~70 KB) and a
+        // blake3 hash, ~30-50 ms wall-clock under load. run_inbox
+        // couldn't acquire the lock fast enough to drain votes, so
+        // the round driver's *next* tick also stalled waiting for
+        // quorum-of-parents — feedback loop that capped commits at
+        // 0.6/sec instead of 4/sec at ROUND_MS=250.
+        //
+        // Phase 1 (locked): read quorum metadata + parents.
+        let target_round;
+        let prev_round;
+        let parents;
+        {
+            let s = state.lock().await;
+            let n = s.n_authorities;
+            target_round = s.last_authored_round.map(|r| r + 1).unwrap_or(0);
+            prev_round = target_round.saturating_sub(1);
+            if s.last_authored_round.is_some() {
+                let parents_count = s.distinct_authors_at(prev_round);
+                let elapsed = round_started_at.elapsed();
+                let strict_ok = parents_count >= quorum_threshold(n);
+                let timeout_force = parents_count >= f_plus_one(n) && elapsed >= leader_timeout;
+                if !strict_ok && !timeout_force {
+                    debug!(
+                        target_round,
+                        prev_round,
+                        parents = parents_count,
+                        quorum = quorum_threshold(n),
+                        elapsed_ms = elapsed.as_millis() as u64,
+                        "round driver: waiting"
+                    );
+                    continue;
+                }
+                if !strict_ok {
+                    tracing::warn!(
+                        round = target_round,
+                        parents = parents_count,
+                        quorum = quorum_threshold(n),
+                        elapsed_ms = elapsed.as_millis() as u64,
+                        "round driver: leader-timeout force-propose"
+                    );
+                }
             }
-            if !strict_ok {
-                tracing::warn!(
-                    round = target_round,
-                    parents = parents_count,
-                    quorum = quorum_threshold(n),
-                    elapsed_ms = elapsed.as_millis() as u64,
-                    "round driver: leader-timeout force-propose"
-                );
-            }
+            parents = s.parents_for_round(target_round);
         }
         round_started_at = tokio::time::Instant::now();
-        let parents = s.parents_for_round(target_round);
-        // DAG-S27.2: drain queued intents from the mpsc receiver. The
-        // receiver lives in this task (single owner), so no lock is
-        // taken on the consensus State for this — pushing into the
-        // channel from `client::handle_conn` is now lock-free w.r.t.
-        // run_inbox / run_round_driver / run_sync_sweeper.
+
+        // Phase 2 (unlocked): drain intents from mpsc (single consumer,
+        // no lock), then bincode + blake3 + cert hash. Heaviest CPU on
+        // the whole path; run_inbox can drain votes during this window.
         let mut intents: Vec<gsx_execution::Intent> = Vec::new();
         while let Ok(intent) = intent_rx.try_recv() {
             intents.push(intent);
@@ -1248,11 +1300,6 @@ async fn run_round_driver(
             payload_digest,
         };
         let cert_hash = cert.hash();
-        s.last_authored_round = Some(target_round);
-        if target_round > s.max_observed_round {
-            s.max_observed_round = target_round;
-        }
-        let _ = s.dag.insert(cert.clone());
         let block = BlockPayload {
             payload_digest,
             author: self_id,
@@ -1260,9 +1307,37 @@ async fn run_round_driver(
             cert_hash,
             intents,
         };
-        s.blocks.insert(cert_hash, block.clone());
-        drop(s);
 
+        // Phase 3 (locked): brief — insert cert + block + update
+        // markers + record own (author, round) for S30.1 incremental
+        // equivocation detection.
+        {
+            let mut s = state.lock().await;
+            s.last_authored_round = Some(target_round);
+            if target_round > s.max_observed_round {
+                s.max_observed_round = target_round;
+            }
+            let _ = s.dag.insert(cert.clone());
+            s.blocks.insert(cert_hash, block.clone());
+            let key = (self_id, target_round);
+            match s.seen_at.get(&key).copied() {
+                None => {
+                    s.seen_at.insert(key, cert_hash);
+                }
+                Some(prev) if prev != cert_hash => {
+                    s.detected_equivocations.push(EquivocationProof {
+                        author: self_id,
+                        round: target_round,
+                        cert_a: prev,
+                        cert_b: cert_hash,
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        // Phase 4 (unlocked): event log emit + cluster broadcast. No
+        // state access, pure I/O.
         log.emit(
             Event::now(&self_label, Lane::Main, "proposed")
                 .with_round(target_round)
