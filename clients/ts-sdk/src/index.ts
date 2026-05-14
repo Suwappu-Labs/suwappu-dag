@@ -155,6 +155,40 @@ export class Client {
   }
 
   /**
+   * Submit a signed intent for inclusion in the next block.
+   *
+   * **Low-level** — the caller is responsible for:
+   *
+   *   1. bincode-serializing the typed `Intent` into `intentBincode`.
+   *      This SDK doesn't bundle bincode (a Rust serde wire format)
+   *      yet; a typed helper that wraps this lands in a follow-up.
+   *   2. Computing the signing digest
+   *      `blake3(b"GSX_INTENT_V1" || network_id_bytes || intent_bincode)`
+   *      and signing it with ML-DSA-65.
+   *   3. Computing `blake3(public_key_bytes)` for `signerPubkeyHash`.
+   *
+   * Each parameter may be a `Uint8Array` or hex string (with or
+   * without `0x` prefix). Returns the daemon's computed 32-byte
+   * intent hash.
+   */
+  async submitIntentRaw(
+    intentBincode: Uint8Array | string,
+    signature: Uint8Array | string,
+    signerPubkeyHash: Uint8Array | string,
+  ): Promise<Uint8Array> {
+    const params = {
+      intent: hexParam(intentBincode),
+      signature: hexParam(signature),
+      signer_pubkey_hash: hexParam(signerPubkeyHash),
+    };
+    const ack = await this.call<{ tx_hash: string }>(
+      "gsx_submitIntent",
+      params,
+    );
+    return hexToBytes(ack.tx_hash);
+  }
+
+  /**
    * Committed transaction by intent hash. The hash may be:
    *   - a 32-byte `Uint8Array`, or
    *   - a hex string (with or without `0x` prefix).
@@ -259,6 +293,41 @@ function bytesToHex(bytes: Uint8Array): string {
     if (b !== undefined) {
       out += b.toString(16).padStart(2, "0");
     }
+  }
+  return out;
+}
+
+/**
+ * Normalize a `Uint8Array | string` to a `0x`-prefixed lowercase hex
+ * string suitable for the JSON-RPC params position. Strings are
+ * passed through (and the prefix is auto-added if missing).
+ */
+function hexParam(input: Uint8Array | string): string {
+  if (typeof input === "string") {
+    return input.startsWith("0x") || input.startsWith("0X")
+      ? input
+      : `0x${input}`;
+  }
+  return `0x${bytesToHex(input)}`;
+}
+
+/**
+ * Decode a `0x`-prefixed (or bare) hex string into a `Uint8Array`.
+ * Throws if any character isn't a valid hex digit or the length is odd.
+ */
+function hexToBytes(hex: string): Uint8Array {
+  const trimmed =
+    hex.startsWith("0x") || hex.startsWith("0X") ? hex.slice(2) : hex;
+  if (trimmed.length % 2 !== 0) {
+    throw new Error(`hex string has odd length: ${trimmed.length}`);
+  }
+  const out = new Uint8Array(trimmed.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    const byte = parseInt(trimmed.slice(i * 2, i * 2 + 2), 16);
+    if (Number.isNaN(byte)) {
+      throw new Error(`invalid hex at offset ${i * 2}`);
+    }
+    out[i] = byte;
   }
   return out;
 }

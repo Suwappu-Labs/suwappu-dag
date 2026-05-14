@@ -148,6 +148,49 @@ impl Client {
         }
     }
 
+    /// Submit a signed intent for inclusion in the next block.
+    ///
+    /// **Low-level** — the caller is responsible for:
+    ///
+    /// 1. bincode-serializing the typed `gsx_execution::Intent` into
+    ///    `intent_bincode`. This SDK doesn't depend on `gsx-execution`
+    ///    yet so the encoding stays on the caller side; a typed helper
+    ///    `submit_signed(Intent, &SecretKey, &str)` lands in a follow-up.
+    /// 2. Computing the signing digest:
+    ///    `blake3(b"GSX_INTENT_V1" || network_id_bytes || intent_bincode)`
+    ///    and signing it with ML-DSA-65.
+    /// 3. Computing `blake3(public_key_bytes)` for `signer_pubkey_hash`.
+    ///
+    /// Returns the daemon's computed intent hash on success (same as
+    /// what will appear in `gsx_getTransaction` lookups).
+    pub async fn submit_intent_raw(
+        &self,
+        intent_bincode: &[u8],
+        signature: &[u8],
+        signer_pubkey_hash: [u8; 32],
+    ) -> Result<[u8; 32], Error> {
+        #[derive(serde::Deserialize)]
+        struct Ack {
+            tx_hash: String,
+        }
+        let params = json!({
+            "intent": format!("0x{}", hex::encode(intent_bincode)),
+            "signature": format!("0x{}", hex::encode(signature)),
+            "signer_pubkey_hash": format!("0x{}", hex::encode(signer_pubkey_hash)),
+        });
+        let ack: Ack = self.call("gsx_submitIntent", params).await?;
+        let trimmed = ack
+            .tx_hash
+            .strip_prefix("0x")
+            .or_else(|| ack.tx_hash.strip_prefix("0X"))
+            .unwrap_or(&ack.tx_hash);
+        let bytes =
+            hex::decode(trimmed).map_err(|e| Error::Deserialize(format!("tx_hash hex: {}", e)))?;
+        bytes.as_slice().try_into().map_err(|_| {
+            Error::Deserialize(format!("tx_hash must be 32 bytes, got {}", bytes.len()))
+        })
+    }
+
     /// Generic JSON-RPC call. Public so callers can drive any method
     /// that doesn't yet have a typed wrapper here.
     pub async fn call<T: DeserializeOwned>(&self, method: &str, params: Value) -> Result<T, Error> {

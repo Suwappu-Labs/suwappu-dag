@@ -167,6 +167,42 @@ pub trait StateView: Send + Sync + 'static {
         &self,
         tx_hash: [u8; 32],
     ) -> impl std::future::Future<Output = Option<TransactionView>> + Send;
+
+    /// Submit a signed intent for inclusion in the next block. The
+    /// adapter is responsible for: (1) bincode-decoding `intent_bincode`
+    /// into a typed `Intent`, (2) verifying the ML-DSA-65 signature
+    /// against the network_id + Authority Ring, (3) computing the
+    /// intent hash, (4) enqueueing the intent into the daemon's mpsc.
+    ///
+    /// Errors are typed so the RPC layer can map them to the correct
+    /// JSON-RPC error codes (see `SubmitIntentError`). `intent_bincode`
+    /// is the SAME bincode-serialized form used on the TCP wire — SDK
+    /// clients build it once, then can choose either ingress wire
+    /// (TCP/bincode or JSON-RPC) without re-signing.
+    fn submit_intent(
+        &self,
+        intent_bincode: Vec<u8>,
+        signature: Vec<u8>,
+        signer_pubkey_hash: [u8; 32],
+    ) -> impl std::future::Future<Output = Result<[u8; 32], SubmitIntentError>> + Send;
+}
+
+/// Error taxonomy returned by `StateView::submit_intent`. Maps directly
+/// to JSON-RPC error codes in the dispatcher.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubmitIntentError {
+    /// Intent bytes failed bincode decoding into `gsx_execution::Intent`.
+    /// Maps to `-32602 InvalidParams`.
+    BadIntentEncoding(String),
+    /// `signer_pubkey_hash` is not in the active Authority Ring.
+    /// Maps to `-32001 UnknownSigner`.
+    UnknownSigner,
+    /// Signature failed ML-DSA-65 verification against the resolved
+    /// pubkey. Maps to `-32002 BadSignature`.
+    BadSignature,
+    /// The daemon's intent channel is full / closed; the caller should
+    /// retry. Maps to `-32003 EnqueueFull`.
+    EnqueueFull,
 }
 
 /// Concrete context handle passed into the router. Wraps an

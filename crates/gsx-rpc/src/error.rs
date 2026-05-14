@@ -19,6 +19,23 @@ pub enum RpcError {
 
     #[error("not found: {0}")]
     NotFound(String),
+
+    /// `submit_intent`: signer_pubkey_hash didn't resolve to a seated
+    /// Authority Ring member. Returned to the SDK so the wallet can
+    /// surface "your key isn't authorized to write to this network" —
+    /// distinct from MethodNotFound and NotFound so error UX can branch.
+    #[error("unknown signer: {0}")]
+    UnknownSigner(String),
+
+    /// `submit_intent`: signature failed ML-DSA-65 verification against
+    /// the resolved pubkey.
+    #[error("bad signature: {0}")]
+    BadSignature(String),
+
+    /// `submit_intent`: daemon's intent channel is full or closed.
+    /// Transient — caller should retry with backoff.
+    #[error("enqueue full: {0}")]
+    EnqueueFull(String),
 }
 
 impl RpcError {
@@ -31,6 +48,9 @@ impl RpcError {
             RpcError::Internal(_) => -32603,
             // Application-level codes start at -32000.
             RpcError::NotFound(_) => -32000,
+            RpcError::UnknownSigner(_) => -32001,
+            RpcError::BadSignature(_) => -32002,
+            RpcError::EnqueueFull(_) => -32003,
         }
     }
 }

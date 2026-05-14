@@ -218,8 +218,11 @@ pub(crate) async fn run(
 }
 
 /// Outcome of looking up + verifying a (`signer_pubkey_hash`, `signature`)
-/// pair against the seated Authority Ring.
-enum AuthOutcome {
+/// pair against the seated Authority Ring. Made `pub` in T2 so the
+/// `gsx-rpc` write path (`gsx_submitIntent`) can reuse this exact
+/// gate — the two ingress wires MUST share the same auth surface so a
+/// signed payload accepted by one is also accepted by the other.
+pub enum AuthOutcome {
     /// Signer resolved AND signature verified.
     Ok,
     /// `signer_pubkey_hash` does not match any seated Authority member.
@@ -234,7 +237,12 @@ enum AuthOutcome {
 /// `ValidatorMember` doesn't yet carry pubkey material — extending the
 /// auth surface to validator-ring submitters is tracked as a follow-up
 /// (Issue #28 discussion).
-async fn verify_signed_intent(
+///
+/// Made `pub` in T2 so the JSON-RPC write path can reuse this exact
+/// function. New ingress wires MUST call this rather than reinventing
+/// the lookup + verify dance — otherwise the two wires drift on what
+/// "signed intent" means and security audits get nightmarish.
+pub async fn verify_signed_intent(
     state: &State,
     network_id: &str,
     intent: &Intent,
