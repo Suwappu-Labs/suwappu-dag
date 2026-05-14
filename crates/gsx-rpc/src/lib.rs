@@ -7,11 +7,10 @@
 //!
 //! Methods (read-only, P1 surface for tooling + indexer bootstrap):
 //!
-//! - `gsx_getEpoch`             → current epoch + last boundary round +
-//!                                rounds_per_epoch
-//! - `gsx_getAuthorityRegistry` → ordered list of Authority Ring members
-//! - `gsx_getValidatorRegistry` → ordered list of Validator Ring members
-//! - `gsx_getStake { authority_id }` → stake for a specific authority id
+//! - `gsx_getEpoch` — current epoch + last boundary round + rounds_per_epoch
+//! - `gsx_getAuthorityRegistry` — ordered list of Authority Ring members
+//! - `gsx_getValidatorRegistry` — ordered list of Validator Ring members
+//! - `gsx_getStake { authority_id }` — stake for a specific authority id
 //!
 //! Deferred to follow-on PRs (each touches state not currently indexed
 //! for fast lookup, or duplicates an existing write path):
