@@ -464,12 +464,14 @@ impl Daemon {
         // priority queue all live inside the mempool. The round
         // driver drains at block-build time.
         {
+            let limits = crate::client::ClientListenLimits::from_config(&cfg);
             let client_task = crate::client::run(
                 cfg.client_listen,
                 self_label.clone(),
                 log.clone(),
                 state.clone(),
                 manifest.network_id.clone(),
+                limits,
             )
             .await?;
             tasks.push(client_task);
@@ -1720,6 +1722,10 @@ mod tests {
             bls_secret_key_path: "/dev/null".into(),
             genesis_manifest_path: "/dev/null".into(),
             event_log_path: std::env::temp_dir().join("gsx-client-test.ndjson"),
+
+            max_client_connections: 256,
+            client_idle_timeout_ms: 30_000,
+            client_per_ip_limit: 8,
         };
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1796,6 +1802,10 @@ mod tests {
             bls_secret_key_path: "/dev/null".into(),
             genesis_manifest_path: "/dev/null".into(),
             event_log_path: std::env::temp_dir().join("gsx-client-batch-test.ndjson"),
+
+            max_client_connections: 256,
+            client_idle_timeout_ms: 30_000,
+            client_per_ip_limit: 8,
         };
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1887,6 +1897,10 @@ mod tests {
                 bls_secret_key_path: "/dev/null".into(),
                 genesis_manifest_path: "/dev/null".into(),
                 event_log_path: std::env::temp_dir().join(format!("gsx-daemon-test-v{}.ndjson", i)),
+
+                max_client_connections: 256,
+                client_idle_timeout_ms: 30_000,
+                client_per_ip_limit: 8,
             };
             let d = Daemon::start(cfg, manifest.clone()).await.unwrap();
             daemons.push(d);
@@ -2010,6 +2024,10 @@ mod tests {
                 bls_secret_key_path: "/dev/null".into(),
                 genesis_manifest_path: "/dev/null".into(),
                 event_log_path: std::env::temp_dir().join(format!("gsx-phaseg-test-v{}.ndjson", i)),
+
+                max_client_connections: 256,
+                client_idle_timeout_ms: 30_000,
+                client_per_ip_limit: 8,
             };
             let d = Daemon::start(cfg, manifest.clone()).await.unwrap();
             daemons.push(d);
@@ -2345,6 +2363,10 @@ mod tests {
             bls_secret_key_path: "/dev/null".into(),
             genesis_manifest_path: "/dev/null".into(),
             event_log_path: std::env::temp_dir().join("gsx-client-auth-test.ndjson"),
+
+            max_client_connections: 256,
+            client_idle_timeout_ms: 30_000,
+            client_per_ip_limit: 8,
         };
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2866,6 +2888,10 @@ mod tests {
             bls_secret_key_path: "/dev/null".into(),
             genesis_manifest_path: "/dev/null".into(),
             event_log_path: std::env::temp_dir().join("gsx-rpc-bind-test.ndjson"),
+
+            max_client_connections: 256,
+            client_idle_timeout_ms: 30_000,
+            client_per_ip_limit: 8,
         };
         let _d = Daemon::start(cfg.clone(), manifest).await.unwrap();
         // Give the bound listener a tick to accept connections.
@@ -2949,6 +2975,10 @@ mod tests {
             bls_secret_key_path: "/dev/null".into(),
             genesis_manifest_path: "/dev/null".into(),
             event_log_path: std::env::temp_dir().join("gsx-blocks-idx-test.ndjson"),
+
+            max_client_connections: 256,
+            client_idle_timeout_ms: 30_000,
+            client_per_ip_limit: 8,
         };
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -3056,6 +3086,10 @@ mod tests {
             bls_secret_key_path: "/dev/null".into(),
             genesis_manifest_path: "/dev/null".into(),
             event_log_path: std::env::temp_dir().join("gsx-rpc-submit-test.ndjson"),
+
+            max_client_connections: 256,
+            client_idle_timeout_ms: 30_000,
+            client_per_ip_limit: 8,
         };
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -3161,6 +3195,10 @@ mod tests {
             bls_secret_key_path: "/dev/null".into(),
             genesis_manifest_path: "/dev/null".into(),
             event_log_path: std::env::temp_dir().join("gsx-rpc-submit-bad-test.ndjson"),
+
+            max_client_connections: 256,
+            client_idle_timeout_ms: 30_000,
+            client_per_ip_limit: 8,
         };
         let _d = Daemon::start(cfg.clone(), manifest).await.unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;

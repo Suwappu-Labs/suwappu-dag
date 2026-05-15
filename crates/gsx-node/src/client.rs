@@ -171,25 +171,99 @@ pub enum ClientResponse {
     Pong(u64),
 }
 
+/// Hardening limits applied to every accepted client connection.
+/// Plumbed in from `NodeConfig` at daemon startup so an operator can
+/// tune the defaults per environment (perf testnet vs public mainnet
+/// validator).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ClientListenLimits {
+    /// Cluster-wide cap on concurrent open connections to this
+    /// listener. The N+1th accepted socket is closed immediately.
+    pub max_connections: u32,
+    /// Per-source-IP cap on concurrent connections. The N+1th
+    /// from the same `IpAddr` is closed at accept time.
+    pub per_ip_limit: u32,
+    /// Idle-timeout in milliseconds — close the connection if no
+    /// frame arrives in this window. `0` disables the timeout
+    /// (legacy / loadgen-only mode).
+    pub idle_timeout_ms: u64,
+}
+
+impl ClientListenLimits {
+    pub(crate) fn from_config(cfg: &crate::config::NodeConfig) -> Self {
+        Self {
+            max_connections: cfg.max_client_connections,
+            per_ip_limit: cfg.client_per_ip_limit,
+            idle_timeout_ms: cfg.client_idle_timeout_ms,
+        }
+    }
+}
+
 /// Run the client listener until the process exits. Spawns one task per
 /// inbound connection. Returns immediately with the bound socket address so
 /// the daemon can attach the listener task to its lifecycle.
 ///
-/// Crate-private — only the [`crate::daemon::Daemon`] startup path invokes
-/// this. External callers go through [`LoadGenClient`] on the client side.
+/// B1 hardening applied at accept time:
+///   1. Global semaphore caps concurrent accepted connections at
+///      `limits.max_connections`. The N+1th is dropped.
+///   2. Per-IP map caps concurrent connections from any single source
+///      IP at `limits.per_ip_limit`. Mitigates a single misbehaving
+///      peer monopolizing the listener.
+///   3. Idle-frame timeout (`limits.idle_timeout_ms`) applied inside
+///      `handle_conn` — see `read_frame_with_timeout`.
+///
+/// Crate-private — only the [`crate::daemon::Daemon`] startup path
+/// invokes this. External callers go through [`LoadGenClient`].
 pub(crate) async fn run(
     listen: SocketAddr,
     self_label: String,
     log: EventLog,
     state: Arc<State>,
     network_id: String,
+    limits: ClientListenLimits,
 ) -> io::Result<tokio::task::JoinHandle<()>> {
     let listener = TcpListener::bind(listen).await?;
-    info!(addr = %listen, "client: listening for intent submissions");
+    info!(
+        addr = %listen,
+        max_connections = limits.max_connections,
+        per_ip_limit = limits.per_ip_limit,
+        idle_timeout_ms = limits.idle_timeout_ms,
+        "client: listening for intent submissions"
+    );
+    let global_sem = Arc::new(tokio::sync::Semaphore::new(limits.max_connections as usize));
+    let per_ip: Arc<tokio::sync::Mutex<HashMap<std::net::IpAddr, u32>>> =
+        Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     let handle = tokio::spawn(async move {
         loop {
             match listener.accept().await {
                 Ok((stream, addr)) => {
+                    let global_sem = global_sem.clone();
+                    let per_ip = per_ip.clone();
+                    // Non-blocking semaphore acquire — if the cap is
+                    // hit we close the new socket immediately rather
+                    // than queuing it (which could lead to
+                    // slow-loris-style hold attacks).
+                    let permit = match global_sem.clone().try_acquire_owned() {
+                        Ok(p) => p,
+                        Err(_) => {
+                            debug!(remote = %addr, "client: max_connections reached, closing");
+                            drop(stream);
+                            continue;
+                        }
+                    };
+                    // Per-IP cap.
+                    let ip = addr.ip();
+                    {
+                        let mut map = per_ip.lock().await;
+                        let count = map.entry(ip).or_insert(0);
+                        if *count >= limits.per_ip_limit {
+                            debug!(remote = %addr, "client: per-IP limit reached, closing");
+                            drop(stream);
+                            drop(permit);
+                            continue;
+                        }
+                        *count += 1;
+                    }
                     debug!(remote = %addr, "client: inbound");
                     let _ = stream.set_nodelay(true);
                     let log = log.clone();
@@ -197,11 +271,30 @@ pub(crate) async fn run(
                     let state = state.clone();
                     let network_id = network_id.clone();
                     let peer_label = addr.to_string();
+                    let idle_timeout_ms = limits.idle_timeout_ms;
                     tokio::spawn(async move {
-                        if let Err(e) =
-                            handle_conn(stream, self_label, peer_label, log, state, network_id)
-                                .await
-                        {
+                        let _permit = permit; // dropped when this task exits
+                        let result = handle_conn(
+                            stream,
+                            self_label,
+                            peer_label,
+                            log,
+                            state,
+                            network_id,
+                            idle_timeout_ms,
+                        )
+                        .await;
+                        // Decrement per-IP count on disconnect.
+                        let mut map = per_ip.lock().await;
+                        if let Some(c) = map.get_mut(&ip) {
+                            if *c <= 1 {
+                                map.remove(&ip);
+                            } else {
+                                *c -= 1;
+                            }
+                        }
+                        drop(map);
+                        if let Err(e) = result {
                             debug!(remote = %addr, err = %e, "client: conn closed");
                         }
                     });
@@ -303,9 +396,10 @@ async fn handle_conn(
     log: EventLog,
     state: Arc<State>,
     network_id: String,
+    idle_timeout_ms: u64,
 ) -> io::Result<()> {
     loop {
-        let bytes = match read_frame(&mut stream).await {
+        let bytes = match read_frame_with_timeout(&mut stream, idle_timeout_ms).await {
             Ok(b) => b,
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
             Err(e) => return Err(e),
@@ -467,6 +561,38 @@ async fn read_frame(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
     let mut buf = vec![0u8; len];
     stream.read_exact(&mut buf).await?;
     Ok(buf)
+}
+
+/// B1 hardening: read a single frame with an idle timeout. If
+/// `idle_timeout_ms == 0`, no timeout is applied (legacy behavior).
+/// Otherwise the read awaits at most `idle_timeout_ms` milliseconds
+/// for the next byte; on expiry returns an `io::Error` of kind
+/// `TimedOut`, which the caller treats as a disconnect.
+///
+/// Idle timeout applies between frames, not within a frame: once the
+/// 4-byte length prefix arrives we read the body to completion without
+/// re-arming the timer. A patient attacker that sent the prefix and
+/// then dribbled body bytes is bounded by the `MAX_FRAME_BYTES` cap
+/// and tokio's default TCP read buffering — not unbounded.
+async fn read_frame_with_timeout(
+    stream: &mut TcpStream,
+    idle_timeout_ms: u64,
+) -> io::Result<Vec<u8>> {
+    if idle_timeout_ms == 0 {
+        return read_frame(stream).await;
+    }
+    match tokio::time::timeout(
+        std::time::Duration::from_millis(idle_timeout_ms),
+        read_frame(stream),
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(_) => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("client: idle for >{}ms, closing", idle_timeout_ms),
+        )),
+    }
 }
 
 async fn write_response(stream: &mut TcpStream, resp: &ClientResponse) -> io::Result<()> {
