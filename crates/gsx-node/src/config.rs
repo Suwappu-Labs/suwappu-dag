@@ -66,6 +66,34 @@ pub struct NodeConfig {
     /// Where to write the structured event log (NDJSON, one line per event).
     /// `gsx-metrics` tails this file.
     pub event_log_path: PathBuf,
+
+    /// B1 hardening: cap concurrent open connections on the
+    /// `client_listen` socket. The 257th simultaneous connection
+    /// is rejected (the listener immediately closes the accepted
+    /// socket). Defaults to 256, which is well above the perf-
+    /// testnet's typical concurrent-loadgen footprint. Set lower
+    /// for resource-constrained deployments or higher for
+    /// public-facing validators expecting many client wallets.
+    #[serde(default = "default_max_client_connections")]
+    pub max_client_connections: u32,
+
+    /// B1 hardening: close an inbound client connection if it sits
+    /// idle (no frame received) for this many milliseconds.
+    /// Defaults to 30,000 (30 s). Set to 0 to disable the idle
+    /// timeout. A patient slow-loris-style attacker can otherwise
+    /// hold many connections open by trickling bytes; combined
+    /// with `max_client_connections` this caps the resource cost.
+    #[serde(default = "default_client_idle_timeout_ms")]
+    pub client_idle_timeout_ms: u64,
+
+    /// B1 hardening: cap concurrent open connections from any
+    /// single source IP. The N+1th connection from the same IP is
+    /// rejected at accept time. Defaults to 8 — enough headroom for
+    /// a wallet + a re-tried loadgen + a couple of explorers from
+    /// the same NAT, but tight enough that a single source can't
+    /// monopolize the listener.
+    #[serde(default = "default_client_per_ip_limit")]
+    pub client_per_ip_limit: u32,
 }
 
 /// One peer entry inside [`NodeConfig::peers`].
@@ -161,6 +189,18 @@ fn default_checkpoint_cadence() -> u32 {
 
 fn default_rounds_per_epoch() -> u64 {
     1024
+}
+
+fn default_max_client_connections() -> u32 {
+    256
+}
+
+fn default_client_idle_timeout_ms() -> u64 {
+    30_000
+}
+
+fn default_client_per_ip_limit() -> u32 {
+    8
 }
 
 /// Errors from loading config / genesis off disk.
@@ -288,6 +328,10 @@ mod tests {
             bls_secret_key_path: "/x".into(),
             genesis_manifest_path: "/x".into(),
             event_log_path: "/x".into(),
+
+            max_client_connections: 256,
+            client_idle_timeout_ms: 30_000,
+            client_per_ip_limit: 8,
         };
         let err = manifest.validate_against(&cfg).unwrap_err();
         assert!(matches!(err, ConfigError::LabelMismatch { id: 0, .. }));
