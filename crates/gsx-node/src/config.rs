@@ -94,6 +94,22 @@ pub struct NodeConfig {
     /// monopolize the listener.
     #[serde(default = "default_client_per_ip_limit")]
     pub client_per_ip_limit: u32,
+
+    /// B2.1 hardening: per-IP token-bucket burst allowance on the
+    /// JSON-RPC ingress. The N+1th request from a single source IP
+    /// (after exhausting `rpc_per_ip_capacity` tokens) is rejected
+    /// with JSON-RPC error code `-32099` (`RateLimited`). Tokens
+    /// refill at `rpc_per_ip_refill_per_sec`/sec. Defaults to 60 —
+    /// covers a typical wallet's startup-time state-query burst.
+    #[serde(default = "default_rpc_per_ip_capacity")]
+    pub rpc_per_ip_capacity: u64,
+
+    /// B2.1 hardening: per-IP steady-state ceiling for JSON-RPC
+    /// requests, in requests/sec. Defaults to 10 — a 10 Hz polling
+    /// loop is the steady-state limit; 100 Hz scripted loops are
+    /// throttled toward 10 Hz, abuse floods are bounded.
+    #[serde(default = "default_rpc_per_ip_refill_per_sec")]
+    pub rpc_per_ip_refill_per_sec: u64,
 }
 
 /// One peer entry inside [`NodeConfig::peers`].
@@ -201,6 +217,14 @@ fn default_client_idle_timeout_ms() -> u64 {
 
 fn default_client_per_ip_limit() -> u32 {
     8
+}
+
+fn default_rpc_per_ip_capacity() -> u64 {
+    60
+}
+
+fn default_rpc_per_ip_refill_per_sec() -> u64 {
+    10
 }
 
 /// Errors from loading config / genesis off disk.
@@ -332,6 +356,8 @@ mod tests {
             max_client_connections: 256,
             client_idle_timeout_ms: 30_000,
             client_per_ip_limit: 8,
+            rpc_per_ip_capacity: 60,
+            rpc_per_ip_refill_per_sec: 10,
         };
         let err = manifest.validate_against(&cfg).unwrap_err();
         assert!(matches!(err, ConfigError::LabelMismatch { id: 0, .. }));

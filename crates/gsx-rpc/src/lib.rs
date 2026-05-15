@@ -29,6 +29,7 @@
 pub mod context;
 pub mod error;
 pub mod methods;
+pub mod per_ip;
 pub mod router;
 pub mod types;
 pub mod ws;
@@ -37,7 +38,7 @@ use std::{net::SocketAddr, sync::Arc};
 
 pub use context::{RpcContext, StateView};
 pub use error::RpcError;
-pub use router::router;
+pub use router::{router, router_with_limits, RouterLimits};
 use tokio::task::JoinHandle;
 use tracing::info;
 pub use types::{JsonRpcRequest, JsonRpcResponse};
@@ -54,12 +55,28 @@ pub async fn start<S: StateView>(
     addr: SocketAddr,
     ctx: Arc<RpcContext<S>>,
 ) -> anyhow::Result<JoinHandle<()>> {
-    let app = router(ctx);
+    start_with_limits(addr, ctx, RouterLimits::default()).await
+}
+
+/// Variant of [`start`] that takes explicit hardening limits. Daemon
+/// callers read these from `NodeConfig`.
+pub async fn start_with_limits<S: StateView>(
+    addr: SocketAddr,
+    ctx: Arc<RpcContext<S>>,
+    limits: RouterLimits,
+) -> anyhow::Result<JoinHandle<()>> {
+    let app = router_with_limits(ctx, limits);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let actual = listener.local_addr()?;
     info!(addr = %actual, "gsx-rpc server bound");
+    // `into_make_service_with_connect_info::<SocketAddr>()` populates
+    // the `ConnectInfo<SocketAddr>` request extension that the
+    // per-IP middleware extracts. Without this, the middleware sees
+    // no extension and admits every request (defense-in-depth: the
+    // global concurrency cap still applies).
+    let make_service = app.into_make_service_with_connect_info::<SocketAddr>();
     let handle = tokio::spawn(async move {
-        if let Err(err) = axum::serve(listener, app).await {
+        if let Err(err) = axum::serve(listener, make_service).await {
             tracing::error!(error = %err, "gsx-rpc server exited");
         }
     });

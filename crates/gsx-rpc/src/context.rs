@@ -88,6 +88,15 @@ pub enum IntentView {
         authority_id: u32,
         proof_ref: String,
     },
+    /// Forward-compat sentinel for `Intent` variants the SDK was
+    /// built before. `Intent` is `#[non_exhaustive]` (C4); a future
+    /// protocol revision may add a variant this client doesn't know
+    /// how to project field-by-field. Wallets should treat
+    /// `IntentView::Unknown` as "skip, refresh SDK".
+    Unknown {
+        /// Best-effort discriminant name for diagnostics.
+        kind_hint: String,
+    },
 }
 
 /// JSON-safe projection of a committed block. `cert_hash` is the

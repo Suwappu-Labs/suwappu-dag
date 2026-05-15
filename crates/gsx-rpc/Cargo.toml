@@ -13,6 +13,7 @@ description = "JSON-RPC query API for the gsx-dag node. Phase 2.1 read-only MVP.
 gsx-consensus = { workspace = true }
 gsx-authority = { workspace = true }
 gsx-validator = { workspace = true }
+gsx-mempool = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }

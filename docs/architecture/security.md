@@ -34,8 +34,10 @@ the PQ cryptographic primitives) and [`safety-liveness.md`](safety-liveness.md)
 |---|---|---|
 | Request body size limit | 1 MiB | `RouterLimits::max_request_body_bytes` (B2) |
 | Global in-flight concurrency cap | 64 | `RouterLimits::max_concurrent_requests` (B2) |
-| Reserved `RateLimited` error code | -32099 | `RpcError::RateLimited` (B2, no middleware emits yet) |
-| Per-IP rate limit | pending | follow-up: `tower-governor` evaluation OR custom layer in B2.1 |
+| `RateLimited` JSON-RPC error code | -32099 | `RpcError::RateLimited` (B2) |
+| Per-IP token bucket — burst | 60 | `NodeConfig::rpc_per_ip_capacity` / `RouterLimits::per_ip_capacity` (B2.1) |
+| Per-IP token bucket — refill rate | 10 req/s | `NodeConfig::rpc_per_ip_refill_per_sec` / `RouterLimits::per_ip_refill_per_sec` (B2.1) |
+| Per-IP bucket idle GC | 300 s TTL, 60 s sweep | `BUCKET_IDLE_TTL_MS` / `BUCKET_GC_INTERVAL` in `crates/gsx-rpc/src/per_ip.rs` (B2.1) |
 
 ## Fuzz targets
 

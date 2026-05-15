@@ -495,7 +495,16 @@ impl Daemon {
                 &log,
             );
             let ctx = std::sync::Arc::new(gsx_rpc::RpcContext::new(std::sync::Arc::new(view)));
-            let rpc_task = gsx_rpc::start(rpc_addr, ctx).await?;
+            // B2.1: thread per-IP rate-limit knobs through to the
+            // router. Other RouterLimits fields keep their B2 defaults
+            // (concurrency cap, body-size cap) until we have a reason
+            // to make them config-driven.
+            let limits = gsx_rpc::RouterLimits {
+                per_ip_capacity: cfg.rpc_per_ip_capacity,
+                per_ip_refill_per_sec: cfg.rpc_per_ip_refill_per_sec,
+                ..gsx_rpc::RouterLimits::default()
+            };
+            let rpc_task = gsx_rpc::start_with_limits(rpc_addr, ctx, limits).await?;
             tasks.push(rpc_task);
         }
 
@@ -1343,9 +1352,12 @@ fn intent_to_main_lane_tx(intent: &Intent, round: Round, lineage: CertHash) -> O
         }
         // Governance / admission / ejection intents don't touch a
         // single-owner object; they can't conflict with a fast-path cert.
+        // Catch-all required because `Intent` is `#[non_exhaustive]`
+        // (C4) — future variants default to "no fast-path mapping".
         Intent::AdmitAuthority { .. }
         | Intent::ExitAuthority { .. }
         | Intent::EjectAuthority { .. } => None,
+        _ => None,
     }
 }
 
@@ -1459,6 +1471,11 @@ async fn apply_governance_intent(
             }
         }
         Intent::Transfer { .. } => {}
+        // `Intent` is `#[non_exhaustive]` (C4). Future variants
+        // default to no governance-side effect; substrate or
+        // execution-layer code is where any new variant's logic
+        // lands.
+        _ => {}
     }
 }
 
@@ -1726,6 +1743,8 @@ mod tests {
             max_client_connections: 256,
             client_idle_timeout_ms: 30_000,
             client_per_ip_limit: 8,
+            rpc_per_ip_capacity: 60,
+            rpc_per_ip_refill_per_sec: 10,
         };
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1806,6 +1825,8 @@ mod tests {
             max_client_connections: 256,
             client_idle_timeout_ms: 30_000,
             client_per_ip_limit: 8,
+            rpc_per_ip_capacity: 60,
+            rpc_per_ip_refill_per_sec: 10,
         };
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1901,6 +1922,8 @@ mod tests {
                 max_client_connections: 256,
                 client_idle_timeout_ms: 30_000,
                 client_per_ip_limit: 8,
+                rpc_per_ip_capacity: 60,
+                rpc_per_ip_refill_per_sec: 10,
             };
             let d = Daemon::start(cfg, manifest.clone()).await.unwrap();
             daemons.push(d);
@@ -2028,6 +2051,8 @@ mod tests {
                 max_client_connections: 256,
                 client_idle_timeout_ms: 30_000,
                 client_per_ip_limit: 8,
+                rpc_per_ip_capacity: 60,
+                rpc_per_ip_refill_per_sec: 10,
             };
             let d = Daemon::start(cfg, manifest.clone()).await.unwrap();
             daemons.push(d);
@@ -2367,6 +2392,8 @@ mod tests {
             max_client_connections: 256,
             client_idle_timeout_ms: 30_000,
             client_per_ip_limit: 8,
+            rpc_per_ip_capacity: 60,
+            rpc_per_ip_refill_per_sec: 10,
         };
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2892,6 +2919,8 @@ mod tests {
             max_client_connections: 256,
             client_idle_timeout_ms: 30_000,
             client_per_ip_limit: 8,
+            rpc_per_ip_capacity: 60,
+            rpc_per_ip_refill_per_sec: 10,
         };
         let _d = Daemon::start(cfg.clone(), manifest).await.unwrap();
         // Give the bound listener a tick to accept connections.
@@ -2979,6 +3008,8 @@ mod tests {
             max_client_connections: 256,
             client_idle_timeout_ms: 30_000,
             client_per_ip_limit: 8,
+            rpc_per_ip_capacity: 60,
+            rpc_per_ip_refill_per_sec: 10,
         };
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -3090,6 +3121,8 @@ mod tests {
             max_client_connections: 256,
             client_idle_timeout_ms: 30_000,
             client_per_ip_limit: 8,
+            rpc_per_ip_capacity: 60,
+            rpc_per_ip_refill_per_sec: 10,
         };
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -3199,6 +3232,8 @@ mod tests {
             max_client_connections: 256,
             client_idle_timeout_ms: 30_000,
             client_per_ip_limit: 8,
+            rpc_per_ip_capacity: 60,
+            rpc_per_ip_refill_per_sec: 10,
         };
         let _d = Daemon::start(cfg.clone(), manifest).await.unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;

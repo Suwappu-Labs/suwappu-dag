@@ -13,6 +13,7 @@ use std::sync::Arc;
 use axum::{
     extract::State,
     http::StatusCode,
+    middleware as axum_middleware,
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
@@ -24,6 +25,7 @@ use crate::{
     context::{RpcContext, StateView},
     error::RpcError,
     methods,
+    per_ip::{self, PerIpRateLimiter},
     types::{JsonRpcRequest, JsonRpcResponse},
     ws,
 };
@@ -42,6 +44,18 @@ pub const DEFAULT_MAX_CONCURRENT_REQUESTS: usize = 64;
 /// upper bound that still rejects payload-amplification probing.
 pub const DEFAULT_MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 
+/// B2.1 hardening: default per-IP burst allowance (number of requests
+/// that can land back-to-back from one source before refill kicks in).
+/// 60 covers a typical wallet's startup-time burst of state queries.
+pub const DEFAULT_PER_IP_CAPACITY: u64 = 60;
+
+/// B2.1 hardening: default per-IP steady-state refill rate (requests
+/// per second). At 10/s the bucket fills in 6 s after exhaustion; a
+/// scripted query loop that polls every 100 ms can sustain forever,
+/// while abusive flood attempts are throttled below validator-relevant
+/// CPU budgets.
+pub const DEFAULT_PER_IP_REFILL_PER_SEC: u64 = 10;
+
 /// Hardening limits applied to the gsx-rpc HTTP router. The defaults
 /// match `DEFAULT_MAX_CONCURRENT_REQUESTS` and `DEFAULT_MAX_REQUEST_BODY_BYTES`;
 /// callers can override at startup if the deployment topology
@@ -54,6 +68,11 @@ pub struct RouterLimits {
     /// Cap on a single HTTP request body, applied at the tower-http
     /// layer (before axum's `Json` extractor allocates).
     pub max_request_body_bytes: usize,
+    /// B2.1: per-IP token-bucket capacity (burst allowance).
+    pub per_ip_capacity: u64,
+    /// B2.1: per-IP token-bucket refill rate (steady-state ceiling
+    /// in requests/sec).
+    pub per_ip_refill_per_sec: u64,
 }
 
 impl Default for RouterLimits {
@@ -61,6 +80,8 @@ impl Default for RouterLimits {
         Self {
             max_concurrent_requests: DEFAULT_MAX_CONCURRENT_REQUESTS,
             max_request_body_bytes: DEFAULT_MAX_REQUEST_BODY_BYTES,
+            per_ip_capacity: DEFAULT_PER_IP_CAPACITY,
+            per_ip_refill_per_sec: DEFAULT_PER_IP_REFILL_PER_SEC,
         }
     }
 }
@@ -81,7 +102,13 @@ pub fn router<S: StateView>(ctx: Arc<RpcContext<S>>) -> Router {
 ///      requests across all sources. The N+1th request is held in the
 ///      tower service queue; under sustained overload tokio's
 ///      backpressure surfaces to the TCP layer.
-///   3. The route table itself (`POST /` for JSON-RPC, `GET /ws` for
+///   3. **B2.1 per-IP rate limit** — buckets by the TCP source IP
+///      extracted from `ConnectInfo<SocketAddr>`. Reject path returns
+///      HTTP 200 with a JSON-RPC body carrying error code `-32099`
+///      ([`RpcError::RateLimited`]) so SDK consumers see a uniform
+///      JSON-RPC envelope regardless of which layer rejected. Skipped
+///      when no `ConnectInfo` is present (tower-only unit tests).
+///   4. The route table itself (`POST /` for JSON-RPC, `GET /ws` for
 ///      event subscriptions).
 ///
 /// **Note:** the WebSocket path inherits the same middleware stack
@@ -89,16 +116,17 @@ pub fn router<S: StateView>(ctx: Arc<RpcContext<S>>) -> Router {
 /// stream after upgrade (it applies only to the upgrade-request body);
 /// the concurrency cap counts an active WS subscription against the
 /// cap until disconnect, so operators with many subscribers should
-/// raise `max_concurrent_requests` accordingly.
-///
-/// **Not yet wired:** per-IP rate limiting. The
-/// [`RpcError::RateLimited`] variant + code `-32099` are pre-wired
-/// for the follow-up; a tower middleware that buckets by
-/// `axum::extract::ConnectInfo<SocketAddr>` lands in B2.1.
+/// raise `max_concurrent_requests` accordingly. The per-IP bucket
+/// charges one token per upgrade request, not per delivered frame.
 pub fn router_with_limits<S: StateView>(ctx: Arc<RpcContext<S>>, limits: RouterLimits) -> Router {
+    let per_ip = PerIpRateLimiter::new(limits.per_ip_capacity, limits.per_ip_refill_per_sec);
     Router::new()
         .route("/", post(handle_rpc::<S>))
         .route("/ws", get(ws::handle_ws_upgrade::<S>))
+        .layer(axum_middleware::from_fn_with_state(
+            per_ip,
+            per_ip::middleware,
+        ))
         .layer(tower::limit::ConcurrencyLimitLayer::new(
             limits.max_concurrent_requests,
         ))

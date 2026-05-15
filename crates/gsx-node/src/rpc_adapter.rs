@@ -86,6 +86,13 @@ fn intent_to_view(intent: &Intent) -> IntentView {
             authority_id: *authority_id,
             proof_ref: format!("0x{}", hex::encode(proof_ref)),
         },
+        // `Intent` is `#[non_exhaustive]` (C4). Unknown variants
+        // round-trip through the JSON-RPC surface as
+        // `IntentView::Unknown` so old SDKs see a clearly-tagged
+        // forward-compat sentinel instead of a decode error.
+        other => IntentView::Unknown {
+            kind_hint: format!("{other:?}").split_whitespace().next().unwrap_or("unknown").to_string(),
+        },
     }
 }
 

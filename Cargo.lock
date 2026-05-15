@@ -998,6 +998,7 @@ dependencies = [
  "blake3",
  "gsx-authority",
  "gsx-consensus",
+ "gsx-mempool",
  "gsx-validator",
  "hex",
  "http-body-util",
