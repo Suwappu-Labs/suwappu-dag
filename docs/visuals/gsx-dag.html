@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GSX DAG — Presentation View</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; font-family: 'JetBrains Mono', monospace; background: #020617; color: #e2e8f0; padding: 28px; }
+    .wrap { max-width: 1360px; margin: 0 auto; }
+    .hero { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+    .dot { width: 12px; height: 12px; border-radius: 999px; background: #22d3ee; box-shadow: 0 0 0 0 rgba(34,211,238,0.35); animation: pulse 2s infinite; }
+    @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(34,211,238,0.35); } 70% { box-shadow: 0 0 0 12px rgba(0,0,0,0); } 100% { box-shadow: 0 0 0 0 rgba(0,0,0,0); } }
+    h1 { margin: 0; font-size: 1.55rem; letter-spacing: -0.03em; }
+    .sub { color: #94a3b8; margin: 0 0 20px 24px; font-size: 0.88rem; line-height: 1.6; }
+    .grid { display: grid; grid-template-columns: 1.45fr 0.95fr; gap: 16px; align-items: start; }
+    .panel, .card { background: rgba(15,23,42,0.58); border: 1px solid #1e293b; border-radius: 16px; box-shadow: 0 20px 40px rgba(0,0,0,0.25); }
+    .panel { padding: 16px; overflow: hidden; }
+    .card { padding: 14px 16px; }
+    svg { width: 100%; height: auto; display: block; }
+    .section-title { display: flex; align-items: center; gap: 10px; margin: 20px 0 12px; }
+    .section-title h2 { margin: 0; font-size: 0.9rem; font-weight: 700; color: #f8fafc; }
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+    .chip { border: 1px solid #334155; background: rgba(2,6,23,0.34); color: #cbd5e1; border-radius: 999px; padding: 6px 10px; font-size: 0.72rem; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; margin-top: 16px; }
+    .kpi { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; margin-bottom: 8px; font-size: 0.74rem; }
+    .track { height: 14px; border-radius: 999px; background: rgba(30,41,59,0.82); border: 1px solid #334155; overflow: hidden; }
+    .fill { height: 100%; border-radius: 999px; }
+    .meta { color: #94a3b8; font-size: 0.72rem; line-height: 1.65; margin-top: 8px; }
+    .footer { text-align: center; color: #64748b; font-size: 0.74rem; margin-top: 18px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="hero"><div class="dot"></div><h1>GSX DAG — Presentation View</h1></div>
+    <p class="sub">Presentation-style diagram set for gsx-dag: chain architecture, crate map, and the security and commitment story.</p>
+
+    <div class="section-title"><span class="dot" style="width:8px;height:8px"></span><h2>GSX DAG at a glance</h2></div>
+    <div class="grid">
+      <div class="panel">
+        <svg viewBox="0 0 1160 520" aria-label="GSX DAG architecture">
+  <defs>
+    <marker id="a" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><polygon points="0 0, 10 4, 0 8" fill="#34d399"/></marker>
+    <marker id="b" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><polygon points="0 0, 10 4, 0 8" fill="#22d3ee"/></marker>
+    <marker id="c" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><polygon points="0 0, 10 4, 0 8" fill="#a78bfa"/></marker>
+    <pattern id="g" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.55"/></pattern>
+  </defs>
+  <rect width="100%" height="100%" fill="#020617"/><rect width="100%" height="100%" fill="url(#g)" opacity="0.95"/>
+  <rect x="18" y="18" width="1124" height="138" rx="14" fill="rgba(2,6,23,0.32)" stroke="#1e293b"/>
+  <text x="36" y="48" fill="#f8fafc" font-size="16" font-weight="700">Single-chain layer stack</text>
+  <text x="36" y="70" fill="#94a3b8" font-size="10">Four layers; one chain; joint-quorum security on top of the DAG core.</text>
+  <rect x="36" y="92" width="188" height="40" rx="8" fill="rgba(120,53,15,0.28)" stroke="#fbbf24"/>
+  <text x="130" y="117" text-anchor="middle" fill="#f8fafc" font-size="11" font-weight="700">1. LTP attestations</text>
+  <rect x="255" y="92" width="188" height="40" rx="8" fill="rgba(6,78,59,0.28)" stroke="#34d399"/>
+  <text x="349" y="117" text-anchor="middle" fill="#f8fafc" font-size="11" font-weight="700">2. Mysticeti-C DAG</text>
+  <rect x="474" y="92" width="188" height="40" rx="8" fill="rgba(8,51,68,0.28)" stroke="#22d3ee"/>
+  <text x="568" y="117" text-anchor="middle" fill="#f8fafc" font-size="11" font-weight="700">3. Dual VM execution</text>
+  <rect x="693" y="92" width="188" height="40" rx="8" fill="rgba(76,29,149,0.28)" stroke="#a78bfa"/>
+  <text x="787" y="117" text-anchor="middle" fill="#f8fafc" font-size="11" font-weight="700">4. Applications</text>
+  <line x1="224" y1="112" x2="253" y2="112" stroke="#34d399" stroke-width="1.8" marker-end="url(#a)"/>
+  <line x1="443" y1="112" x2="472" y2="112" stroke="#22d3ee" stroke-width="1.8" marker-end="url(#b)"/>
+  <line x1="662" y1="112" x2="691" y2="112" stroke="#a78bfa" stroke-width="1.8" marker-end="url(#c)"/>
+  <line x1="880" y1="112" x2="980" y2="112" stroke="#fb7185" stroke-width="1.8" marker-end="url(#c)"/>
+  <rect x="890" y="92" width="208" height="40" rx="8" fill="rgba(30,41,59,0.45)" stroke="#94a3b8"/>
+  <text x="994" y="117" text-anchor="middle" fill="#f8fafc" font-size="11" font-weight="700">Base chains / corridors</text>
+
+  <rect x="18" y="182" width="560" height="318" rx="14" fill="rgba(15,23,42,0.42)" stroke="#1e293b"/>
+  <text x="36" y="208" fill="#f8fafc" font-size="14" font-weight="700">Crate map</text>
+  <rect x="36" y="228" width="238" height="52" rx="10" fill="rgba(6,78,59,0.24)" stroke="#34d399"/>
+  <text x="155" y="250" text-anchor="middle" fill="#f8fafc" font-size="11" font-weight="700">gsx-consensus</text>
+  <text x="155" y="266" text-anchor="middle" fill="#94a3b8" font-size="9">certificate DAG / commit rule</text>
+  <rect x="292" y="228" width="238" height="52" rx="10" fill="rgba(8,51,68,0.24)" stroke="#22d3ee"/>
+  <text x="411" y="250" text-anchor="middle" fill="#f8fafc" font-size="11" font-weight="700">gsx-execution</text>
+  <text x="411" y="266" text-anchor="middle" fill="#94a3b8" font-size="9">dual VM over gsx-db</text>
+  <rect x="36" y="294" width="238" height="52" rx="10" fill="rgba(120,53,15,0.24)" stroke="#fbbf24"/>
+  <text x="155" y="316" text-anchor="middle" fill="#f8fafc" font-size="11" font-weight="700">gsx-ltp</text>
+  <text x="155" y="332" text-anchor="middle" fill="#94a3b8" font-size="9">7-of-9 corridor quorum</text>
+  <rect x="292" y="294" width="238" height="52" rx="10" fill="rgba(76,29,149,0.24)" stroke="#a78bfa"/>
+  <text x="411" y="316" text-anchor="middle" fill="#f8fafc" font-size="11" font-weight="700">gsx-precompiles</text>
+  <text x="411" y="332" text-anchor="middle" fill="#94a3b8" font-size="9">DID / issuer / reserve coverage</text>
+  <rect x="36" y="360" width="494" height="110" rx="10" fill="rgba(2,6,23,0.35)" stroke="#1e293b"/>
+  <text x="54" y="386" fill="#f8fafc" font-size="11" font-weight="700">Security model</text>
+  <text x="54" y="408" fill="#94a3b8" font-size="9">Authority Ring: 30–50 institutions</text>
+  <text x="54" y="426" fill="#94a3b8" font-size="9">Validator Ring: 100–500 stake-weighted participants</text>
+  <text x="54" y="444" fill="#94a3b8" font-size="9">Safety requires corruption of both rings simultaneously.</text>
+  <text x="54" y="462" fill="#fb7185" font-size="9">Joint-quorum AND-gate</text>
+
+  <rect x="600" y="182" width="542" height="318" rx="14" fill="rgba(15,23,42,0.42)" stroke="#1e293b"/>
+  <text x="618" y="208" fill="#f8fafc" font-size="14" font-weight="700">Presentation notes</text>
+  <text x="618" y="232" fill="#94a3b8" font-size="10">Mysticeti-style certificate DAG with a dual-ring validator set and co-resident dual VM.</text>
+  <text x="618" y="256" fill="#94a3b8" font-size="10">The chain commits to: linearized certificate order, joint state commitment, LTP attestation, and parent-linked block hashes.</text>
+  <text x="618" y="288" fill="#e2e8f0" font-size="10">Charts:</text>
+  <text x="618" y="310" fill="#94a3b8" font-size="9">• 4 layers on one chain</text>
+  <text x="618" y="328" fill="#94a3b8" font-size="9">• 3 substantive crates in the stack</text>
+  <text x="618" y="346" fill="#94a3b8" font-size="9">• 7-of-9 LTP corridor witness quorum</text>
+  <text x="618" y="364" fill="#94a3b8" font-size="9">• 1.6 kB LTP commitment surface</text>
+  <text x="618" y="392" fill="#e2e8f0" font-size="10">This page is the presentation-style summary.</text>
+</svg>
+      </div>
+      <div class="card">
+        <div class="section-title" style="margin-top:0"><span class="dot" style="width:8px;height:8px;background:#22d3ee"></span><h2>Key facts</h2></div>
+        <ul style="margin:0;padding-left:18px;color:#94a3b8;font-size:0.76rem;line-height:1.75"><li>GSX DAG is the Layer 1 chain implementation.</li><li>Consensus is Mysticeti-C over a certificate DAG.</li><li>Execution is co-resident dual VM over the gsx-db substrate.</li><li>Security is split across Authority Ring and Validator Ring.</li></ul>
+      </div>
+    </div>
+
+    <div class="section-title"><span class="dot" style="width:8px;height:8px;background:#22d3ee"></span><h2>Charts</h2></div>
+    <div class="cards">
+      <div class="card"><h3 style="margin:0 0 10px;font-size:0.84rem">Architecture counts</h3><div class="kpi"><div>Layers</div><div>4</div></div><div class="track"><div class="fill" style="width:100%;background:linear-gradient(90deg,#22d3ee,#06b6d4)"></div></div><div class="kpi"><div>Core crates</div><div>3</div></div><div class="track"><div class="fill" style="width:75%;background:linear-gradient(90deg,#34d399,#10b981)"></div></div><div class="kpi"><div>LTP phases</div><div>3</div></div><div class="track"><div class="fill" style="width:75%;background:linear-gradient(90deg,#a78bfa,#8b5cf6)"></div></div><div class="meta">This is the clean presentation-style count view for the chain stack.</div></div><div class="card"><h3 style="margin:0 0 10px;font-size:0.84rem">Security geometry</h3><div class="kpi"><div>Authority ring</div><div>30–50</div></div><div class="track"><div class="fill" style="width:18%;background:linear-gradient(90deg,#fb7185,#f43f5e)"></div></div><div class="kpi"><div>Validator ring</div><div>100–500</div></div><div class="track"><div class="fill" style="width:44%;background:linear-gradient(90deg,#22d3ee,#06b6d4)"></div></div><div class="kpi"><div>Corridor quorum</div><div>7/9</div></div><div class="track"><div class="fill" style="width:78%;background:linear-gradient(90deg,#fbbf24,#f59e0b)"></div></div><div class="meta">The AND-gate only closes if both rings are compromised.</div></div><div class="card"><h3 style="margin:0 0 10px;font-size:0.84rem">Chain commitments</h3><div class="kpi"><div>Joint state</div><div>linearized</div></div><div class="track"><div class="fill" style="width:67%;background:linear-gradient(90deg,#34d399,#10b981)"></div></div><div class="kpi"><div>LTP attestation</div><div>~1.6 kB</div></div><div class="track"><div class="fill" style="width:83%;background:linear-gradient(90deg,#a78bfa,#8b5cf6)"></div></div><div class="kpi"><div>Anchor input</div><div>~96 B</div></div><div class="track"><div class="fill" style="width:6%;background:linear-gradient(90deg,#22d3ee,#06b6d4)"></div></div><div class="meta">The chain commits to the same deterministic state each block.</div></div>
+    </div>
+
+    <div class="chips"><span class="chip">Mysticeti-C</span><span class="chip">dual-ring validator set</span><span class="chip">dual VM</span><span class="chip">LTP integration</span><span class="chip">post-quantum signing</span></div>
+    <div class="footer">See also: gsx-db substrate page and LTP lifecycle page.</div>
+  </div>
+</body>
+</html>

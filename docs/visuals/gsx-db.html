@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GSX DB — Presentation View</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; font-family: 'JetBrains Mono', monospace; background: #020617; color: #e2e8f0; padding: 28px; }
+    .wrap { max-width: 1360px; margin: 0 auto; }
+    .hero { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+    .dot { width: 12px; height: 12px; border-radius: 999px; background: #a78bfa; box-shadow: 0 0 0 0 rgba(167,139,250,0.35); animation: pulse 2s infinite; }
+    @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(167,139,250,0.35); } 70% { box-shadow: 0 0 0 12px rgba(0,0,0,0); } 100% { box-shadow: 0 0 0 0 rgba(0,0,0,0); } }
+    h1 { margin: 0; font-size: 1.55rem; letter-spacing: -0.03em; }
+    .sub { color: #94a3b8; margin: 0 0 20px 24px; font-size: 0.88rem; line-height: 1.6; }
+    .grid { display: grid; grid-template-columns: 1.45fr 0.95fr; gap: 16px; align-items: start; }
+    .panel, .card { background: rgba(15,23,42,0.58); border: 1px solid #1e293b; border-radius: 16px; box-shadow: 0 20px 40px rgba(0,0,0,0.25); }
+    .panel { padding: 16px; overflow: hidden; }
+    .card { padding: 14px 16px; }
+    svg { width: 100%; height: auto; display: block; }
+    .section-title { display: flex; align-items: center; gap: 10px; margin: 20px 0 12px; }
+    .section-title h2 { margin: 0; font-size: 0.9rem; font-weight: 700; color: #f8fafc; }
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+    .chip { border: 1px solid #334155; background: rgba(2,6,23,0.34); color: #cbd5e1; border-radius: 999px; padding: 6px 10px; font-size: 0.72rem; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; margin-top: 16px; }
+    .kpi { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; margin-bottom: 8px; font-size: 0.74rem; }
+    .track { height: 14px; border-radius: 999px; background: rgba(30,41,59,0.82); border: 1px solid #334155; overflow: hidden; }
+    .fill { height: 100%; border-radius: 999px; }
+    .meta { color: #94a3b8; font-size: 0.72rem; line-height: 1.65; margin-top: 8px; }
+    .footer { text-align: center; color: #64748b; font-size: 0.74rem; margin-top: 18px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="hero"><div class="dot"></div><h1>GSX DB — Presentation View</h1></div>
+    <p class="sub">Presentation-style diagram set for gsx-db: canonical state lattice, sealed mutation path, and the mechanical upgrade surfaces.</p>
+
+    <div class="section-title"><span class="dot" style="width:8px;height:8px"></span><h2>gsx-db at a glance</h2></div>
+    <div class="grid">
+      <div class="panel">
+        <svg viewBox="0 0 1160 520" aria-label="GSX DB substrate">
+  <defs>
+    <marker id="d" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><polygon points="0 0, 10 4, 0 8" fill="#22d3ee"/></marker>
+    <marker id="e" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><polygon points="0 0, 10 4, 0 8" fill="#a78bfa"/></marker>
+    <pattern id="g" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.55"/></pattern>
+  </defs>
+  <rect width="100%" height="100%" fill="#020617"/><rect width="100%" height="100%" fill="url(#g)" opacity="0.95"/>
+  <rect x="18" y="18" width="1124" height="150" rx="14" fill="rgba(2,6,23,0.32)" stroke="#1e293b"/>
+  <text x="36" y="48" fill="#f8fafc" font-size="16" font-weight="700">Canonical state lattice</text>
+  <text x="36" y="70" fill="#94a3b8" font-size="10">One state, two projections, no internal bridge. The mutation gate is explicit and sealed.</text>
+  <rect x="36" y="92" width="178" height="40" rx="8" fill="rgba(30,41,59,0.44)" stroke="#94a3b8"/>
+  <text x="125" y="117" text-anchor="middle" fill="#f8fafc" font-size="11" font-weight="700">gsxdb-lane</text>
+  <rect x="238" y="92" width="178" height="40" rx="8" fill="rgba(6,78,59,0.24)" stroke="#34d399"/>
+  <text x="327" y="117" text-anchor="middle" fill="#f8fafc" font-size="11" font-weight="700">gsxdb-bridge</text>
+  <rect x="440" y="92" width="178" height="40" rx="8" fill="rgba(76,29,149,0.24)" stroke="#a78bfa"/>
+  <text x="529" y="117" text-anchor="middle" fill="#f8fafc" font-size="11" font-weight="700">gsxdb-state</text>
+  <line x1="214" y1="112" x2="236" y2="112" stroke="#22d3ee" stroke-width="1.8" marker-end="url(#d)"/>
+  <line x1="416" y1="112" x2="438" y2="112" stroke="#a78bfa" stroke-width="1.8" marker-end="url(#e)"/>
+  <line x1="214" y1="136" x2="438" y2="136" stroke="#fb7185" stroke-width="1.4" stroke-dasharray="5,5"/>
+  <text x="326" y="131" text-anchor="middle" fill="#fb7185" font-size="9">lane cannot import state</text>
+  <rect x="658" y="92" width="468" height="40" rx="8" fill="rgba(2,6,23,0.35)" stroke="#94a3b8"/>
+  <text x="892" y="117" text-anchor="middle" fill="#f8fafc" font-size="11" font-weight="700">BridgeToken sealed mutation path → store + tree + anchor</text>
+
+  <rect x="18" y="186" width="566" height="316" rx="14" fill="rgba(15,23,42,0.42)" stroke="#1e293b"/>
+  <text x="36" y="212" fill="#f8fafc" font-size="14" font-weight="700">Mutation pipeline</text>
+  <text x="36" y="238" fill="#94a3b8" font-size="10">Intent → validate → mint BridgeToken → apply canonical state → replayable output.</text>
+  <rect x="36" y="260" width="494" height="44" rx="10" fill="rgba(8,51,68,0.24)" stroke="#22d3ee"/>
+  <text x="283" y="288" text-anchor="middle" fill="#f8fafc" font-size="11" font-weight="700">Intent submission and speculative execution</text>
+  <rect x="36" y="318" width="494" height="44" rx="10" fill="rgba(6,78,59,0.24)" stroke="#34d399"/>
+  <text x="283" y="346" text-anchor="middle" fill="#f8fafc" font-size="11" font-weight="700">Sequential validation + conflict resolution</text>
+  <rect x="36" y="376" width="494" height="44" rx="10" fill="rgba(76,29,149,0.24)" stroke="#a78bfa"/>
+  <text x="283" y="404" text-anchor="middle" fill="#f8fafc" font-size="11" font-weight="700">Consolidate to canonical state and tree root</text>
+  <rect x="36" y="434" width="494" height="46" rx="10" fill="rgba(2,6,23,0.35)" stroke="#1e293b"/>
+  <text x="283" y="462" text-anchor="middle" fill="#f8fafc" font-size="11" font-weight="700">Replay reproduces block, anchor, and root bit-for-bit</text>
+
+  <rect x="616" y="186" width="526" height="316" rx="14" fill="rgba(15,23,42,0.42)" stroke="#1e293b"/>
+  <text x="634" y="212" fill="#f8fafc" font-size="14" font-weight="700">Swappable surfaces</text>
+  <text x="634" y="238" fill="#94a3b8" font-size="10">The trait surfaces are structural; the implementation can be upgraded without changing the invariants.</text>
+  <text x="634" y="272" fill="#e2e8f0" font-size="10">• redb → RocksDB</text>
+  <text x="634" y="292" fill="#e2e8f0" font-size="10">• MockEvm → revm</text>
+  <text x="634" y="312" fill="#e2e8f0" font-size="10">• MockMove → Aptos Move VM adapter</text>
+  <text x="634" y="332" fill="#e2e8f0" font-size="10">• BLAKE3 tree → IPA Verkle commitment</text>
+  <text x="634" y="352" fill="#e2e8f0" font-size="10">• MAC anchor → Solidity LTP registry</text>
+  <text x="634" y="378" fill="#94a3b8" font-size="10">The chain remains deterministic because the swap points are isolated.</text>
+  <text x="634" y="406" fill="#22d3ee" font-size="10">Dual-VM projection equality is the central guarantee.</text>
+</svg>
+      </div>
+      <div class="card">
+        <div class="section-title" style="margin-top:0"><span class="dot" style="width:8px;height:8px;background:#a78bfa"></span><h2>Key facts</h2></div>
+        <ul style="margin:0;padding-left:18px;color:#94a3b8;font-size:0.76rem;line-height:1.75"><li>GSX DB is the state substrate under the DAG.</li><li>The lane / bridge / state split enforces a sealed mutation path.</li><li>EVM and Move project the same canonical BalanceSlot.</li><li>Replay, parity, and tree roots are deterministic.</li></ul>
+      </div>
+    </div>
+
+    <div class="section-title"><span class="dot" style="width:8px;height:8px;background:#a78bfa"></span><h2>Charts</h2></div>
+    <div class="cards">
+      <div class="card"><h3 style="margin:0 0 10px;font-size:0.84rem">Boundary layout</h3><div class="kpi"><div>Lane</div><div>untrusted</div></div><div class="track"><div class="fill" style="width:100%;background:linear-gradient(90deg,#94a3b8,#64748b)"></div></div><div class="kpi"><div>Bridge</div><div>sealed</div></div><div class="track"><div class="fill" style="width:75%;background:linear-gradient(90deg,#34d399,#10b981)"></div></div><div class="kpi"><div>State</div><div>canonical</div></div><div class="track"><div class="fill" style="width:100%;background:linear-gradient(90deg,#a78bfa,#8b5cf6)"></div></div><div class="meta">The bridge is the only place where mutation can be authorized.</div></div><div class="card"><h3 style="margin:0 0 10px;font-size:0.84rem">Parity guarantees</h3><div class="kpi"><div>EVM balanceOf</div><div>projector</div></div><div class="track"><div class="fill" style="width:92%;background:linear-gradient(90deg,#22d3ee,#06b6d4)"></div></div><div class="kpi"><div>Move value</div><div>projector</div></div><div class="track"><div class="fill" style="width:92%;background:linear-gradient(90deg,#22d3ee,#06b6d4)"></div></div><div class="kpi"><div>Tree root</div><div>deterministic</div></div><div class="track"><div class="fill" style="width:100%;background:linear-gradient(90deg,#fbbf24,#f59e0b)"></div></div><div class="meta">The two projections must stay equal for the same address.</div></div><div class="card"><h3 style="margin:0 0 10px;font-size:0.84rem">Swap points</h3><div class="kpi"><div>Storage backend</div><div>trait</div></div><div class="track"><div class="fill" style="width:75%;background:linear-gradient(90deg,#34d399,#10b981)"></div></div><div class="kpi"><div>Execution VM</div><div>adapter</div></div><div class="track"><div class="fill" style="width:83%;background:linear-gradient(90deg,#a78bfa,#8b5cf6)"></div></div><div class="kpi"><div>Anchor auth</div><div>surface</div></div><div class="track"><div class="fill" style="width:67%;background:linear-gradient(90deg,#fb7185,#f43f5e)"></div></div><div class="meta">These are mechanical replacement points rather than rewrites.</div></div>
+    </div>
+
+    <div class="chips"><span class="chip">lane separation</span><span class="chip">BridgeToken</span><span class="chip">BalanceSlot</span><span class="chip">replay</span><span class="chip">parity</span></div>
+    <div class="footer">See also: gsx-dag architecture page and the LTP lifecycle page.</div>
+  </div>
+</body>
+</html>
