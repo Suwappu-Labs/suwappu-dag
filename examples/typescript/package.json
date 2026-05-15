@@ -1,0 +1,25 @@
+{
+  "name": "gsx-examples-ts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Runnable TypeScript examples against a local gsx-dag devnet.",
+  "type": "module",
+  "scripts": {
+    "example:query-epoch": "tsx query_epoch.ts",
+    "example:query-balance": "tsx query_balance.ts",
+    "example:subscribe-events": "tsx subscribe_events.ts"
+  },
+  "dependencies": {
+    "@gsx/client": "file:../../clients/ts-sdk",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
