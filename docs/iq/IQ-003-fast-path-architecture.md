@@ -1,9 +1,9 @@
 # IQ-003 — Fast-path lane architecture
 
-**Status:** Draft — awaiting ratification
+**Status:** Ratified 2026-05-15 — parallel-lane architecture shipped (DAG-S8 + DAG-S9 closed); K-binding cross-check live in `crates/gsx-node/src/daemon.rs::handle_fastpath_cert` (lines 837-872) with integration test `K_binding_violator_is_slashed` at lines 2556+
 **Owner:** consensus + fastpath
-**Date:** 2026-05-13
-**Sprint:** DAG-S22 (downstream of S21)
+**Date:** 2026-05-13 (ratified 2026-05-15)
+**Sprint:** DAG-S22 (downstream of S21) ✅
 
 ## Question
 
