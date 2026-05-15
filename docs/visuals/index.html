@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GSX Visual Index</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      padding: 28px;
+      background: #020617;
+      color: #e2e8f0;
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .wrap { max-width: 1120px; margin: 0 auto; }
+    .hero { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+    .dot { width: 12px; height: 12px; border-radius: 999px; background: #22d3ee; box-shadow: 0 0 0 0 rgba(34,211,238,0.35); animation: pulse 2s infinite; }
+    @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(34,211,238,0.35); } 70% { box-shadow: 0 0 0 12px rgba(0,0,0,0); } 100% { box-shadow: 0 0 0 0 rgba(0,0,0,0); } }
+    h1 { margin: 0; font-size: 1.65rem; letter-spacing: -0.03em; }
+    .sub { margin: 0 0 20px 24px; color: #94a3b8; font-size: 0.9rem; line-height: 1.6; }
+    .panel {
+      background: rgba(15,23,42,0.58);
+      border: 1px solid #1e293b;
+      border-radius: 16px;
+      padding: 18px;
+      box-shadow: 0 20px 40px rgba(0,0,0,0.25);
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 14px;
+      margin-top: 16px;
+    }
+    .card {
+      background: rgba(2,6,23,0.34);
+      border: 1px solid #334155;
+      border-radius: 14px;
+      padding: 14px 16px;
+      text-decoration: none;
+      color: inherit;
+      transition: transform .15s ease, border-color .15s ease, background .15s ease;
+    }
+    .card:hover { transform: translateY(-2px); border-color: #22d3ee; background: rgba(15,23,42,0.72); }
+    .card h2 { margin: 0 0 8px; font-size: 0.92rem; }
+    .card p { margin: 0; color: #94a3b8; font-size: 0.75rem; line-height: 1.7; }
+    .tagrow { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+    .tag { border: 1px solid #334155; border-radius: 999px; padding: 5px 9px; font-size: 0.7rem; color: #cbd5e1; background: rgba(2,6,23,0.35); }
+    .section-title { display: flex; align-items: center; gap: 10px; margin: 20px 0 12px; }
+    .section-title h3 { margin: 0; font-size: 0.88rem; color: #f8fafc; }
+    .footer { text-align: center; margin-top: 18px; color: #64748b; font-size: 0.74rem; }
+    a { color: inherit; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="hero"><div class="dot"></div><h1>GSX Visual Index</h1></div>
+    <p class="sub">Central landing page for the three presentation-style visual sets plus their Mermaid and Excalidraw sources.</p>
+
+    <div class="section-title"><span class="dot" style="width:8px;height:8px"></span><h3>Presentation pages</h3></div>
+    <div class="grid">
+      <a class="card" href="gsx-dag.html">
+        <h2>GSX DAG</h2>
+        <p>Chain architecture, crate map, dual-ring security, and commitment story.</p>
+        <div class="tagrow">
+          <span class="tag">Mysticeti-C</span><span class="tag">dual VM</span><span class="tag">LTP</span>
+        </div>
+      </a>
+      <a class="card" href="gsx-db.html">
+        <h2>GSX DB</h2>
+        <p>Canonical state lattice, sealed mutation path, and mechanical upgrade surfaces.</p>
+        <div class="tagrow">
+          <span class="tag">BridgeToken</span><span class="tag">replay</span><span class="tag">parity</span>
+        </div>
+      </a>
+      <a class="card" href="ltp.html">
+        <h2>LTP</h2>
+        <p>Commit / Lattice / Materialize lifecycle, security stack, and corridor settlement anchors.</p>
+        <div class="tagrow">
+          <span class="tag">ML-KEM-768</span><span class="tag">7-of-9</span><span class="tag">~1.3 kB</span>
+        </div>
+      </a>
+    </div>
+
+    <div class="section-title"><span class="dot" style="width:8px;height:8px;background:#a78bfa"></span><h3>Source formats</h3></div>
+    <div class="grid">
+      <a class="card" href="mermaid/gsx-dag.md"><h2>GSX DAG — Mermaid</h2><p>Text-native flowchart source for docs and GitHub rendering.</p></a>
+      <a class="card" href="mermaid/gsx-db.md"><h2>GSX DB — Mermaid</h2><p>Substrate lattice and mutation pipeline diagram source.</p></a>
+      <a class="card" href="mermaid/ltp.md"><h2>LTP — Mermaid</h2><p>Protocol lifecycle and security stack source diagram.</p></a>
+      <a class="card" href="excalidraw/gsx-dag.excalidraw"><h2>GSX DAG — Excalidraw</h2><p>Hand-drawn dark-mode canvas version for visual editing.</p></a>
+      <a class="card" href="excalidraw/gsx-db.excalidraw"><h2>GSX DB — Excalidraw</h2><p>Substrate lattice canvas version for live editing.</p></a>
+      <a class="card" href="excalidraw/ltp.excalidraw"><h2>LTP — Excalidraw</h2><p>Transfer lifecycle canvas version for visual iteration.</p></a>
+    </div>
+
+    <div class="footer">Generated in /Users/mongolraider/gsx-build/gsx-dag/docs/visuals</div>
+  </div>
+</body>
+</html>
