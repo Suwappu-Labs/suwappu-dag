@@ -122,6 +122,16 @@ npm test            # node --test test/*.test.ts
 
 No CI step in `.github/workflows/ci.yml` runs this — gsx-dag's CI is Rust-only. Publish/test wiring lands in a follow-up.
 
+## Stability promise
+
+This SDK follows semver with the following 0.x carve-outs:
+
+- **Within a minor version** (e.g. `0.2.0` → `0.2.5`), method signatures, request/response types, and emitted event shapes are stable. Bug fixes only.
+- **Between minor versions** (e.g. `0.2` → `0.3`), the public API may gain new methods or fields; existing method signatures will not break, but discriminated-union variants on `IntentView`, `EventView`, and the JSON-RPC error code set may grow new members. Downstream `switch (intent.kind)` blocks should always include a `default` arm.
+- **At 1.0**, signatures freeze under the standard semver guarantee and breaking changes require a major bump.
+
+The Rust SDK (`gsx-client`) follows the same policy and pins exactly the same minor-version cadence; method names map between camelCase (TS) and snake_case (Rust), but the shape and stability of the surface are identical.
+
 ## License
 
 Apache-2.0

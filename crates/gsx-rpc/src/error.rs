@@ -3,7 +3,12 @@
 
 use thiserror::Error;
 
+/// C4 hardening: `#[non_exhaustive]` — external crates that match on
+/// `RpcError` must include a wildcard arm. New error codes
+/// (per-IP rate limit emission, future application-level rejection
+/// reasons) become non-breaking additions.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum RpcError {
     #[error("invalid request: {0}")]
     InvalidRequest(String),

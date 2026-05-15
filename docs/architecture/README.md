@@ -41,3 +41,29 @@ architecture docs are in
 [`GlobalSettlementNetwork/gsx-db/docs/`](https://github.com/GlobalSettlementNetwork/gsx-db/tree/main/docs);
 LTP runtime details are in
 [`GlobalSettlementNetwork/gsx-lattice-protocol/docs/`](https://github.com/GlobalSettlementNetwork/gsx-lattice-protocol/tree/main/docs).
+
+## Generated API docs
+
+Auto-published from `main` on every merge by
+[`.github/workflows/docs.yml`](../../.github/workflows/docs.yml):
+
+- **Rust:** <https://globalsettlementnetwork.github.io/gsx-dag/rust/> — every
+  workspace crate, public surface only (`cargo doc --no-deps`,
+  `RUSTDOCFLAGS=-D warnings`). The landing page redirects to `gsx_node` (the
+  integration crate); browse to other crates via the sidebar. The Rust SDK
+  ([`gsx_client`](https://globalsettlementnetwork.github.io/gsx-dag/rust/gsx_client/))
+  is the recommended entrypoint for external developers building Rust clients.
+- **TypeScript:** <https://globalsettlementnetwork.github.io/gsx-dag/ts/> —
+  TypeDoc for [`@gsx/client`](../../clients/ts-sdk/). The SDK README is rendered
+  on the index page.
+
+External-facing enums (`gsx_execution::Intent`, `gsx_rpc::error::RpcError`) are
+marked `#[non_exhaustive]` so adding new variants is a non-breaking change for
+downstream crates; consumers must include a wildcard arm when matching.
+`gsx_consensus::commit::LeaderStatus` is deliberately exhaustive — its three
+states (Direct / Skip / Undecided) are the paper's canonical commit-rule
+outcomes (paper §6 + Theorem 2), so a fourth state would be a paper-level
+amendment and a major-version bump. See
+[`../../clients/rust-sdk/src/lib.rs`](../../clients/rust-sdk/src/lib.rs) and
+[`../../clients/ts-sdk/README.md`](../../clients/ts-sdk/README.md) for the full
+0.x → 1.0 stability policy.

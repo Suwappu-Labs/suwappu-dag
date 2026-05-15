@@ -30,7 +30,14 @@ pub type Balance = u128;
 ///
 /// `Copy` was dropped in S25.2 to accommodate variable-size pubkey
 /// material. Existing pattern matches now bind by reference.
+///
+/// C4 hardening: `#[non_exhaustive]` ensures external crates that
+/// match on `Intent` must include a wildcard arm, so adding a new
+/// variant in a future protocol revision (Phase G3/G4 governance
+/// operations, fast-path intents, LTP-bound intents, etc.) is a
+/// non-breaking change for SDK consumers.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum Intent {
     /// Transfer `amount` from `from` to `to`.
     Transfer {

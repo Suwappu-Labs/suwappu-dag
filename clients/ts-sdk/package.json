@@ -20,7 +20,8 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "node --test --experimental-test-coverage test/*.test.ts",
-    "clean": "rm -rf dist"
+    "docs": "typedoc",
+    "clean": "rm -rf dist docs-out"
   },
   "keywords": [
     "gsx",
@@ -41,6 +42,7 @@
   },
   "devDependencies": {
     "@types/node": "^22",
+    "typedoc": "^0.26",
     "typescript": "^5.6"
   },
   "publishConfig": {

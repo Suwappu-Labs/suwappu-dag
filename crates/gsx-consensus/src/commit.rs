@@ -103,6 +103,12 @@ fn supporters(dag: &DagStore, target: CertHash, round: Round) -> BTreeSet<Author
 ///   later when a higher-round anchor commits.
 ///
 /// See `docs/iq/IQ-002-indirect-commit.md` for the protocol-level rationale.
+///
+/// Deliberately **not** `#[non_exhaustive]`: the three states are the
+/// canonical paper-defined decision outcomes (paper §6 + Theorem 2).
+/// Adding a fourth state would require a paper-level amendment and
+/// therefore a major-version bump, so downstream exhaustive matching
+/// is the desired behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeaderStatus {
     /// Leader committed (directly or by inheritance from a later anchor).

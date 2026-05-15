@@ -1,5 +1,28 @@
 //! `gsx-client` — Rust client SDK for the gsx-dag JSON-RPC query API.
 //!
+//! # Stability promise
+//!
+//! This crate follows semver with the following 0.x carve-outs:
+//!
+//! - **Within a minor version** (e.g. 0.2.0 → 0.2.5), method
+//!   signatures, request/response types, and error variants are
+//!   stable. Bug fixes only.
+//! - **Between minor versions** (e.g. 0.2 → 0.3), the public API may
+//!   gain new methods or fields; existing method signatures will not
+//!   break, but new variants may appear on `#[non_exhaustive]` enums
+//!   (notably `gsx_rpc::error::RpcError` and `gsx_execution::Intent`).
+//! - **At 1.0**, signatures freeze under the standard semver guarantee
+//!   and breaking changes require a major bump.
+//!
+//! Downstream code that matches on `Intent` or `RpcError` must include
+//! a wildcard arm — those enums are marked `#[non_exhaustive]`
+//! precisely so adding a new variant in a future protocol revision
+//! (Phase G3/G4 governance ops, future application-level RPC errors)
+//! is a non-breaking change for SDK consumers. `LeaderStatus` from
+//! `gsx_consensus` is deliberately exhaustive (Direct/Skip/Undecided)
+//! because it tracks the paper's canonical commit-rule outcomes; any
+//! fourth state would be a paper-level amendment and a major bump.
+//!
 //! Wraps the JSON-RPC 2.0 methods exposed by `gsx-rpc` (bound into the
 //! daemon by `crates/gsx-node/src/rpc_adapter.rs`). The current method
 //! surface is read-only (Phase 2.1 MVP):

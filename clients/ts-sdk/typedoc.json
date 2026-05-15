@@ -1,0 +1,16 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "entryPoints": ["src/index.ts"],
+  "out": "docs-out",
+  "name": "@gsx/client",
+  "readme": "README.md",
+  "includeVersion": true,
+  "excludePrivate": true,
+  "excludeInternal": true,
+  "githubPages": false,
+  "navigationLinks": {
+    "GitHub": "https://github.com/GlobalSettlementNetwork/gsx-dag",
+    "Rust SDK": "https://globalsettlementnetwork.github.io/gsx-dag/rust/gsx_client/",
+    "DEVNET": "https://github.com/GlobalSettlementNetwork/gsx-dag/blob/main/DEVNET.md"
+  }
+}
