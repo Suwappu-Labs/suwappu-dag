@@ -2128,19 +2128,28 @@ mod tests {
         // into one block + commit + cross the next epoch boundary
         // (~1.6s for rounds_per_epoch=16). 60s is the failure
         // ceiling, not the expected wall-clock.
-        // Issue #35 (2026-05-15): the original test submitted the
-        // eject Intent once and waited. Under CI jitter the
-        // containing cert sometimes lands during a wave where one
-        // node is briefly behind, so the round-R+1 supporters don't
-        // include the leader-cert hash as a parent — the slot stays
-        // Undecided and later anchors' causal_history walks miss it,
-        // so the Intent is silently dropped from the commit pipeline.
-        // (See the orphan-cert / `decide_slot` skip path; affects any
-        // single-block Intent, not just governance.) A real client
-        // would resubmit on timeout; mirror that here by re-sending
-        // every 5s until the registry converges. 90s budget covers
-        // ~18 resubmissions, multiple epoch boundaries.
-        let eject_deadline = std::time::Instant::now() + Duration::from_secs(90);
+        // Issue #35 (2026-05-15): two-stage CI failure mode.
+        //
+        // Stage 1 — single-cert orphaning. The original test
+        // submitted eject once. Under scheduler jitter the
+        // containing cert sometimes landed in a wave where peers
+        // hadn't picked its hash into their round-R+1 parent set
+        // (orphan-cert skip path in `decide_slot`), so the slot
+        // stayed Undecided forever and the intent vanished from
+        // the commit pipeline. Fix: resubmit every 5s — a fresh
+        // cert gets a fresh chance at the next anchor's
+        // causal_history.
+        //
+        // Stage 2 — lagging-node convergence. With resubmits in
+        // place, ≥3 of 4 daemons converge to reg=4 quickly, but
+        // the 4th can lag 20-30 rounds under heavy CI load. It
+        // has the eject cert locally but hasn't committed it,
+        // so its registry stays at 5 and `all_at_4` is false.
+        // The lagging daemon does recover via orphan-pull, just
+        // slower than wall-clock allows. Fix: budget 180s so the
+        // tail-latency daemon has room to catch up + cross one
+        // more epoch boundary (16 rounds × 100ms each).
+        let eject_deadline = std::time::Instant::now() + Duration::from_secs(180);
         let mut last_resubmit = std::time::Instant::now();
         loop {
             let all_at_4 = {
@@ -2263,7 +2272,7 @@ mod tests {
                         pending_gov_has_eject, epoch_cur, epoch_last_bd
                     ));
                 }
-                panic!("phase G eject timed out (90s):\n  {}", diag.join("\n  "));
+                panic!("phase G eject timed out (180s):\n  {}", diag.join("\n  "));
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
