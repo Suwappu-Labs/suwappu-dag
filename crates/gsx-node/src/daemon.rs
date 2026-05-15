@@ -79,6 +79,16 @@ pub(crate) struct State {
     pub(crate) authority_registry: tokio::sync::RwLock<AuthorityRegistry>,
     pub(crate) validator_registry: tokio::sync::RwLock<ValidatorRegistry>,
     pub(crate) inner: tokio::sync::Mutex<StateInner>,
+    /// DAG-S31.4 / A3 mempool integration: priority + rate-limited
+    /// queue replacing the FIFO `intent_tx` mpsc. Both client wire
+    /// (`crates/gsx-node/src/client.rs::handle_conn`) and JSON-RPC
+    /// (`crates/gsx-rpc/src/methods.rs::submit_intent` via the
+    /// `rpc_adapter`) `Mempool::submit` after `verify_signed_intent`;
+    /// the round driver pops via `drain_for_block` at block-build
+    /// time. The mempool enforces per-peer leaky-bucket rate limits,
+    /// content dedup, capacity floor with priority-ordered eviction,
+    /// and TTL expiry. See `crates/gsx-mempool/src/lib.rs`.
+    pub(crate) mempool: std::sync::Arc<gsx_mempool::Mempool>,
 }
 
 /// Cold-path fields. Pre-S31 these lived on `State` directly; now
@@ -312,6 +322,9 @@ impl State {
                 blocks_by_round: BTreeMap::new(),
                 tx_to_block: HashMap::new(),
             }),
+            mempool: std::sync::Arc::new(gsx_mempool::Mempool::new(
+                gsx_mempool::MempoolConfig::default(),
+            )),
         }
     }
 
@@ -390,13 +403,13 @@ impl Daemon {
         let outbound = Arc::new(outbound);
         let state = Arc::new(State::new(&manifest));
 
-        // DAG-S27.2: client intent submissions flow over an unbounded
-        // mpsc instead of contending on the State mutex. Sender goes
-        // to the client listener; receiver lives inside the round
-        // driver task (single owner; no Arc/Mutex needed).
-        let (intent_tx, intent_rx) =
-            tokio::sync::mpsc::unbounded_channel::<gsx_execution::Intent>();
-
+        // DAG-S31.4 / A3: client + JSON-RPC intent submissions flow
+        // through `state.mempool` directly. The pre-A3 `intent_tx` /
+        // `intent_rx` mpsc has been retired — the mempool itself is
+        // the queue (with priority ordering, per-peer leaky-bucket
+        // rate limit, dedup, TTL expiry, capacity floor). Round
+        // driver drains via `state.mempool.drain_for_block` at block-
+        // build time.
         let mut tasks = Vec::new();
 
         // DAG-S31.1: per-peer inbox tasks. Pre-S31 one run_inbox task
@@ -417,18 +430,15 @@ impl Daemon {
             }));
         }
 
-        // Round driver — owns `intent_rx` since it's the only consumer
-        // (drains the queue at block-build time).
+        // Round driver — drains the shared mempool at block-build time
+        // (`state.mempool.drain_for_block`). No mpsc receiver to own.
         {
             let state = state.clone();
             let outbound = outbound.clone();
             let log = log.clone();
             let self_label = self_label.clone();
             tasks.push(tokio::spawn(async move {
-                run_round_driver(
-                    self_label, self_id, round_ms, state, outbound, log, intent_rx,
-                )
-                .await;
+                run_round_driver(self_label, self_id, round_ms, state, outbound, log).await;
             }));
         }
 
@@ -448,23 +458,15 @@ impl Daemon {
         tasks.append(&mut wire_tasks);
 
         // Client listener: load generator submits intents over this
-        // socket. Pre-S27.2 this took `state` and pushed onto
-        // `pending_intents` under the global mutex. Now it takes
-        // `intent_tx` and sends over the mpsc — no consensus-lock
-        // contention. Issue #28 (Phase 2.6): the listener also takes a
-        // clone of `state` + the genesis `network_id` so it can verify
-        // ML-DSA-65 signatures on every inbound intent against the
-        // seated `AuthorityRegistry`.
-        // T2: clone the sender so the JSON-RPC write path
-        // (`gsx_submitIntent`) shares the same single mpsc as the
-        // TCP/bincode wire — both ingress wires fan into the round
-        // driver's single consumer.
-        let intent_tx_for_rpc = intent_tx.clone();
+        // socket. After ML-DSA-65 verification (#28), the intent goes
+        // to `state.mempool.submit` keyed by the connection's remote
+        // address — the per-peer leaky-bucket rate-limits + dedup +
+        // priority queue all live inside the mempool. The round
+        // driver drains at block-build time.
         {
             let client_task = crate::client::run(
                 cfg.client_listen,
                 self_label.clone(),
-                intent_tx,
                 log.clone(),
                 state.clone(),
                 manifest.network_id.clone(),
@@ -487,7 +489,6 @@ impl Daemon {
             // broadcast sender).
             let view = crate::rpc_adapter::NodeStateView::new(
                 state.clone(),
-                intent_tx_for_rpc,
                 manifest.network_id.clone(),
                 &log,
             );
@@ -1475,6 +1476,13 @@ fn f_plus_one(n: u32) -> u32 {
 /// Matches Sui's `leader_timeout` (consensus/core/src/leader_timeout.rs).
 const LEADER_TIMEOUT_ROUNDS: u32 = 4;
 
+/// Max intents drained from the mempool per block proposal.
+/// Honors mempool's priority ordering (higher priority drained first).
+/// Conservative — same order of magnitude as the pre-A3 try_recv loop
+/// which drained whatever the channel had, capped only by the channel
+/// fill rate.
+const MAX_INTENTS_PER_BLOCK: usize = 4096;
+
 async fn run_round_driver(
     self_label: String,
     self_id: AuthorityId,
@@ -1482,7 +1490,6 @@ async fn run_round_driver(
     state: Arc<State>,
     outbound: Arc<HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>>,
     log: EventLog,
-    mut intent_rx: tokio::sync::mpsc::UnboundedReceiver<gsx_execution::Intent>,
 ) {
     let mut tick = tokio::time::interval(Duration::from_millis(round_ms));
     // Per-round leader timeout: if we haven't advanced after this much
@@ -1545,13 +1552,16 @@ async fn run_round_driver(
         }
         round_started_at = tokio::time::Instant::now();
 
-        // Phase 2 (unlocked): drain intents from mpsc (single consumer,
-        // no lock), then bincode + blake3 + cert hash. Heaviest CPU on
-        // the whole path; run_inbox can drain votes during this window.
-        let mut intents: Vec<gsx_execution::Intent> = Vec::new();
-        while let Ok(intent) = intent_rx.try_recv() {
-            intents.push(intent);
-        }
+        // Phase 2 (unlocked): drain intents from the shared mempool
+        // honoring priority ordering, then bincode + blake3 + cert
+        // hash. Heaviest CPU on the whole path; run_inbox can drain
+        // votes during this window. Pre-A3 this was an mpsc try_recv
+        // loop; A3 routes both ingress wires (TCP + JSON-RPC) through
+        // `state.mempool.submit` so per-peer rate limits + dedup +
+        // capacity-floor eviction live at admission, and the round
+        // driver simply pops the top-priority intents at propose time.
+        let intents: Vec<gsx_execution::Intent> =
+            state.mempool.drain_for_block(MAX_INTENTS_PER_BLOCK);
         let payload_digest: [u8; 32] =
             blake3::hash(&bincode::serialize(&intents).expect("intents serialize")).into();
         let cert = Certificate {

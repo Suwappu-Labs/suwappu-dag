@@ -62,7 +62,6 @@ use serde::{Deserialize, Serialize};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::mpsc,
 };
 use tracing::{debug, info, warn};
 
@@ -181,7 +180,6 @@ pub enum ClientResponse {
 pub(crate) async fn run(
     listen: SocketAddr,
     self_label: String,
-    intent_tx: mpsc::UnboundedSender<Intent>,
     log: EventLog,
     state: Arc<State>,
     network_id: String,
@@ -194,14 +192,15 @@ pub(crate) async fn run(
                 Ok((stream, addr)) => {
                     debug!(remote = %addr, "client: inbound");
                     let _ = stream.set_nodelay(true);
-                    let intent_tx = intent_tx.clone();
                     let log = log.clone();
                     let self_label = self_label.clone();
                     let state = state.clone();
                     let network_id = network_id.clone();
+                    let peer_label = addr.to_string();
                     tokio::spawn(async move {
                         if let Err(e) =
-                            handle_conn(stream, self_label, intent_tx, log, state, network_id).await
+                            handle_conn(stream, self_label, peer_label, log, state, network_id)
+                                .await
                         {
                             debug!(remote = %addr, err = %e, "client: conn closed");
                         }
@@ -283,10 +282,24 @@ pub(crate) async fn verify_signed_intent(
     }
 }
 
+/// Default priority for intents submitted via the TCP wire — no fee
+/// market yet, so every signed submission lands at priority 0 and
+/// FIFO tiebreak applies via `submit_ms`. When the fee surface lands
+/// (S34+), the loadgen wire will carry a `priority: u64` field and
+/// this constant will retire.
+const DEFAULT_INTENT_PRIORITY: u64 = 0;
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 async fn handle_conn(
     mut stream: TcpStream,
     self_label: String,
-    intent_tx: mpsc::UnboundedSender<Intent>,
+    peer_label: String,
     log: EventLog,
     state: Arc<State>,
     network_id: String,
@@ -336,10 +349,18 @@ async fn handle_conn(
                 }
                 let intent_hash: [u8; 32] =
                     blake3::hash(&bincode::serialize(&intent).expect("intent serialize")).into();
-                if intent_tx.send(intent).is_err() {
-                    let resp = ClientResponse::Err("intent channel closed".to_string());
-                    let _ = write_response(&mut stream, &resp).await;
-                    return Ok(());
+                match state.mempool.submit(
+                    intent,
+                    DEFAULT_INTENT_PRIORITY,
+                    Some(peer_label.clone()),
+                    now_ms(),
+                ) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        let resp = ClientResponse::Err(format!("mempool: {}", e));
+                        let _ = write_response(&mut stream, &resp).await;
+                        return Ok(());
+                    }
                 }
                 log.emit(
                     Event::now(&self_label, Lane::Client, "submitted").with_tx_hash(&intent_hash),
@@ -391,18 +412,26 @@ async fn handle_conn(
                         }
                     }
                 }
-                // DAG-S29.2: same lock-free mpsc, just amortise the ack
-                // roundtrip across N intents.
+                // DAG-S29.2 + A3: amortise the ack roundtrip across N
+                // intents; each intent flows through `state.mempool.submit`
+                // for priority/dedup/rate-limit accounting.
                 let mut hashes: Vec<[u8; 32]> = Vec::with_capacity(intents.len());
                 for intent in intents {
                     let intent_hash: [u8; 32] =
                         blake3::hash(&bincode::serialize(&intent).expect("intent serialize"))
                             .into();
-                    if intent_tx.send(intent).is_err() {
-                        let resp =
-                            ClientResponse::Err("intent channel closed mid-batch".to_string());
-                        let _ = write_response(&mut stream, &resp).await;
-                        return Ok(());
+                    match state.mempool.submit(
+                        intent,
+                        DEFAULT_INTENT_PRIORITY,
+                        Some(peer_label.clone()),
+                        now_ms(),
+                    ) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            let resp = ClientResponse::Err(format!("mempool (mid-batch): {}", e));
+                            let _ = write_response(&mut stream, &resp).await;
+                            return Ok(());
+                        }
                     }
                     log.emit(
                         Event::now(&self_label, Lane::Client, "submitted")

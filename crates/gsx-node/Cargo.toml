@@ -36,6 +36,7 @@ gsx-precompiles.workspace = true
 gsx-ltp.workspace = true
 gsx-transport.workspace = true
 gsx-rpc.workspace = true
+gsx-mempool.workspace = true
 
 anyhow.workspace = true
 bincode.workspace = true
