@@ -14,6 +14,24 @@ scheduler, state tree, anchor pipeline, recovery replay) is implemented in
 [`GlobalSettlementNetwork/gsx-db`](https://github.com/GlobalSettlementNetwork/gsx-db)
 and consumed here as a workspace dependency.
 
+## Visuals
+
+Diagrams of the three GSX stack layers (DAG L1, GSX DB substrate,
+LTP transfer-and-attestation) live in [`docs/visuals/`](docs/visuals/).
+The [`README.md`](docs/visuals/README.md) inlines the Mermaid blocks
+so they render natively on GitHub. The standalone HTML presentations
+(index, ecosystem atlas, per-layer pages) and Excalidraw / Mermaid
+sources sit alongside it:
+
+- [Inline-rendered visuals](docs/visuals/README.md)
+- [Visual index (HTML)](docs/visuals/index.html) ·
+  [Ecosystem atlas](docs/visuals/gsx-ecosystem-atlas.html)
+- Per-layer presentations: [GSX DAG](docs/visuals/gsx-dag.html) ·
+  [GSX DB](docs/visuals/gsx-db.html) ·
+  [LTP](docs/visuals/ltp.html)
+- Sources: [Mermaid](docs/visuals/mermaid/) ·
+  [Excalidraw](docs/visuals/excalidraw/)
+
 ## Architecture
 
 Four logical layers on a single chain (paper §4):

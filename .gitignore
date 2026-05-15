@@ -10,6 +10,9 @@ Cargo.lock.bak
 *.swo
 .DS_Store
 
+# Local agent / tooling state (Claude Code worktrees, etc.)
+.claude/
+
 # Local config
 config.local.toml
 .env
