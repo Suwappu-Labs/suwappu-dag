@@ -9,20 +9,32 @@ no-default-features = false
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
+# B5 audit sweep (2026-05-15): re-evaluated each accepted ignore.
+# All three remain BLOCKED on upstream changes outside this repo;
+# every entry below now carries a `Re-check:` date and a `Gate:`
+# condition so we don't silently carry these forever. When the gate
+# clears, the ignore is removed in the same PR that bumps the dep.
 ignore = [
     # `paste` is unmaintained but stable and widely used by tracing-derive,
-    # serde-derive, and pqcrypto. No known vulnerabilities; replacement is
-    # tracked upstream in RUSTSEC-2024-0436. Revisit when those crates migrate.
+    # serde-derive, and pqcrypto. No known vulnerabilities.
+    # Gate: tracing-derive + pqcrypto migrate off `paste`.
+    # Re-check: 2026-Q3.
     "RUSTSEC-2024-0436",
-    # `rustls-pemfile` is unmaintained; pulled in transitively by `reqwest 0.11`
-    # via `gsxdb-bridge`. No known vulnerabilities. Cleared when gsxdb-bridge
-    # bumps to reqwest 0.12 (rustls-pki-types path). Tracked at
-    # RUSTSEC-2025-0134 / https://github.com/rustls/pemfile/issues/61.
+    # `rustls-pemfile` is unmaintained; pulled in transitively by
+    # `reqwest 0.11` via `gsxdb-bridge`. No known vulnerabilities.
+    # Gate: gsx-db's gsxdb-bridge bumps to reqwest 0.12 (which uses
+    # rustls-pki-types instead). Tracked at
+    # https://github.com/rustls/pemfile/issues/61.
+    # Re-check: when gsx-db releases v0.2.0.
     "RUSTSEC-2025-0134",
-    # `bincode 1.x` is unmaintained — upstream moved to 2.x with a different
-    # API. We use 1.3 across the workspace for wire framing. No CVE; bumping
-    # to 2.x is a separate refactor (breaking serde-derive API changes).
-    # Tracked at RUSTSEC-2025-0141.
+    # `bincode 1.x` is unmaintained — upstream moved to 2.x with a
+    # different API. We use 1.3 across the workspace for wire framing.
+    # No CVE.
+    # Gate: workspace-wide migration to bincode 2.x (~2 sprints of
+    # test-fixture rewrites; every Certificate, WireMessage,
+    # ClientMessage, EventView serialization is bincode-1 today).
+    # Pre-mainnet blocker but post-Track-C work.
+    # Re-check: 2026-Q3 alongside the bincode 2.x migration sprint.
     "RUSTSEC-2025-0141",
 ]
 
