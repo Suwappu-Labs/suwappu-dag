@@ -1,0 +1,43 @@
+[package]
+name = "gsx-dag-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+bincode = "1"
+
+# Workspace crates under test. Pull only what each fuzz target needs.
+gsx-node = { path = "../crates/gsx-node" }
+gsx-consensus = { path = "../crates/gsx-consensus" }
+
+[[bin]]
+name = "wire_decode"
+path = "fuzz_targets/wire_decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "dag_insert"
+path = "fuzz_targets/dag_insert.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decide_slot"
+path = "fuzz_targets/decide_slot.rs"
+test = false
+doc = false
+
+[profile.release]
+debug = true       # symbol-rich crashes; default for cargo-fuzz
+lto = false        # cargo-fuzz needs sanitizer compat
+codegen-units = 1
+opt-level = 3
+
+# cargo-fuzz's `cargo +nightly fuzz run …` injects the sanitizer +
+# coverage instrumentation; nothing else to configure here.

@@ -16,6 +16,12 @@ members = [
     "crates/gsx-mempool",
     "clients/rust-sdk",
 ]
+# B4: keep the cargo-fuzz workspace out of the main one — cargo-fuzz
+# uses its own nightly toolchain + libfuzzer-sys sanitizer flags
+# that would force the whole workspace through nightly. Run via
+# `cd fuzz && cargo +nightly fuzz run <target>`. See
+# `docs/architecture/security.md` for the full procedure.
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.1.0"
