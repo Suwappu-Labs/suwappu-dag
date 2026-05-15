@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Governance flow — Presentation View</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: true, theme: 'dark', securityLevel: 'loose' });
+  </script>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; font-family: 'JetBrains Mono', monospace; background: #020617; color: #e2e8f0; padding: 28px; }
+    .wrap { max-width: 1360px; margin: 0 auto; }
+    .hero { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+    .dot { width: 12px; height: 12px; border-radius: 999px; background: #a78bfa; box-shadow: 0 0 0 0 rgba(167,139,250,0.35); animation: pulse 2s infinite; }
+    @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(167,139,250,0.35); } 70% { box-shadow: 0 0 0 12px rgba(0,0,0,0); } 100% { box-shadow: 0 0 0 0 rgba(0,0,0,0); } }
+    h1 { margin: 0; font-size: 1.55rem; letter-spacing: -0.03em; }
+    .sub { color: #94a3b8; margin: 0 0 20px 24px; font-size: 0.88rem; line-height: 1.6; }
+    .panel { background: rgba(15,23,42,0.58); border: 1px solid #1e293b; border-radius: 16px; padding: 18px; box-shadow: 0 20px 40px rgba(0,0,0,0.25); }
+    .notes { color: #94a3b8; font-size: 0.82rem; line-height: 1.7; }
+    .notes h2 { color: #f8fafc; font-size: 0.95rem; margin: 20px 0 8px; }
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+    .chip { border: 1px solid #334155; background: rgba(2,6,23,0.34); color: #cbd5e1; border-radius: 999px; padding: 6px 10px; font-size: 0.72rem; }
+    .footer { text-align: center; color: #64748b; font-size: 0.74rem; margin-top: 18px; }
+    a { color: #22d3ee; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .mermaid { background: rgba(2,6,23,0.32); border-radius: 12px; padding: 16px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="hero"><div class="dot"></div><h1>Governance flow — Phase G2</h1></div>
+    <p class="sub">AdmitAuthority / ExitAuthority / EjectAuthority — signed wire, epoch-boundary apply, deferred activation. Canonical source: <a href="mermaid/governance-flow.md">mermaid/governance-flow.md</a>.</p>
+
+    <div class="panel">
+      <pre class="mermaid">
+flowchart LR
+    Op[Authority operator<br/>signs intent with ML-DSA-65<br/>see issue 28] --> Wire[Client wire verify_signed_intent<br/>rejects unsigned or forged before mpsc]
+    Wire --> Intent[Intent: AdmitAuthority<br/>ExitAuthority or EjectAuthority]
+    Intent --> Block[Lands in proposed block]
+    Block --> Commit[Block committed via decide_slot<br/>see commit-rule visual]
+    Commit --> Queue[pending_governance push intent<br/>at try_commit NOT applied yet]
+    Queue --> Boundary{Epoch boundary<br/>at cert_round?}
+    Boundary -->|no| Wait[Wait next round]
+    Wait --> Queue
+    Boundary -->|yes issue 18| Drain[Drain queue]
+    Drain --> Apply[apply_governance_intent for each]
+    Apply -->|AdmitAuthority| AdmReg[registries grow to n+1<br/>pending_stake parks stake<br/>n_authorities UNCHANGED]
+    Apply -->|Exit or Eject| RemReg[registries shrink<br/>n_authorities equals registry len]
+    AdmReg --> NewCert{New authority first cert<br/>ingests via ingest_cert?}
+    NewCert -->|yes issue 32| Activate[pending_stake remove to stake_table<br/>n_authorities plus 1<br/>NOW the new voter is active]
+    NewCert -->|no still pending| AdmReg
+      </pre>
+    </div>
+
+    <div class="notes">
+      <h2>Why signed (#28)</h2>
+      <p>Every governance intent must carry an ML-DSA-65 signature from a key seated in the Authority Ring. The client listener verifies the signature before pushing the intent to the consensus mpsc; unsigned or forged intents never reach consensus.</p>
+      <h2>Why queued at commit, drained at boundary (#18)</h2>
+      <p>Applying governance the instant a block commits caused inter-daemon drift — each daemon mutates <code>n_authorities</code> at a different round, transitional quorum thresholds disagree, commits stall. Queueing in <code>pending_governance</code> and draining atomically at the next epoch boundary makes the mutation cluster-wide simultaneous.</p>
+      <h2>Why defer the activation bump (#32)</h2>
+      <p>If <code>n_authorities</code> jumped the moment AdmitAuthority committed, the quorum denominator inflates before the new authority can actually vote — <code>quorum_threshold(n+1)</code> becomes unreachable and the chain stalls. Parking stake in <code>pending_stake</code> and bumping <code>n_authorities</code> only on the new authority's first ingested cert (in <code>ingest_cert</code>) avoids this. See the <code>bft-stake-denominator-deadlock-on-admit</code> operator skill.</p>
+      <h2>Interaction with IQ-004</h2>
+      <p>The governance intent rides in a single cert. If that cert lands in the <a href="../iq/IQ-004-decide-slot-orphan-window.md"><code>decide_slot</code> orphan window</a>, the intent vanishes from the commit pipeline. Current test-side mitigation: client resubmits every 5s (<a href="https://github.com/GlobalSettlementNetwork/gsx-dag/pull/44">PR #44</a>). Real fix tracked in <a href="https://github.com/GlobalSettlementNetwork/gsx-dag/issues/45">#45</a>.</p>
+    </div>
+
+    <div class="chips"><span class="chip">DAG-S25</span><span class="chip">#18 epoch boundary</span><span class="chip">#28 ML-DSA wire</span><span class="chip">#32 deferred activation</span><span class="chip">Phase G2</span></div>
+    <div class="footer">Source: <a href="mermaid/governance-flow.md">mermaid/governance-flow.md</a> · See also: <a href="index.html">visual index</a></div>
+  </div>
+</body>
+</html>

@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Fast path + slashing — Presentation View</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: true, theme: 'dark', securityLevel: 'loose' });
+  </script>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; font-family: 'JetBrains Mono', monospace; background: #020617; color: #e2e8f0; padding: 28px; }
+    .wrap { max-width: 1360px; margin: 0 auto; }
+    .hero { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+    .dot { width: 12px; height: 12px; border-radius: 999px; background: #fbbf24; box-shadow: 0 0 0 0 rgba(251,191,36,0.35); animation: pulse 2s infinite; }
+    @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(251,191,36,0.35); } 70% { box-shadow: 0 0 0 12px rgba(0,0,0,0); } 100% { box-shadow: 0 0 0 0 rgba(0,0,0,0); } }
+    h1 { margin: 0; font-size: 1.55rem; letter-spacing: -0.03em; }
+    .sub { color: #94a3b8; margin: 0 0 20px 24px; font-size: 0.88rem; line-height: 1.6; }
+    .panel { background: rgba(15,23,42,0.58); border: 1px solid #1e293b; border-radius: 16px; padding: 18px; box-shadow: 0 20px 40px rgba(0,0,0,0.25); }
+    .notes { color: #94a3b8; font-size: 0.82rem; line-height: 1.7; }
+    .notes h2 { color: #f8fafc; font-size: 0.95rem; margin: 20px 0 8px; }
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+    .chip { border: 1px solid #334155; background: rgba(2,6,23,0.34); color: #cbd5e1; border-radius: 999px; padding: 6px 10px; font-size: 0.72rem; }
+    .footer { text-align: center; color: #64748b; font-size: 0.74rem; margin-top: 18px; }
+    a { color: #22d3ee; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .mermaid { background: rgba(2,6,23,0.32); border-radius: 12px; padding: 16px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="hero"><div class="dot"></div><h1>Fast path + equivocation slashing</h1></div>
+    <p class="sub">Paper §6.4. Single-owner lane + K-binding cross-check + 100% slashing on equivocation. Canonical source: <a href="mermaid/fast-path-and-slashing.md">mermaid/fast-path-and-slashing.md</a>.</p>
+
+    <div class="panel">
+      <pre class="mermaid">
+flowchart LR
+    Client[Client submits<br/>single-owner intent] --> Lane[Fast-path lane<br/>K-of-N owner-binding cert]
+    Lane -->|K equals 4 confirmations| Ack[Client receives ack<br/>1-RTT commit confirmation]
+    Lane --> Cross{K-binding cross-check<br/>vs main_lane_index<br/>populated by try_commit}
+    Cross -->|consistent| Final[Fast-path cert<br/>safe to spend]
+    Cross -->|conflict<br/>in K-window| Equiv[EquivocationProof<br/>two fast-path certs<br/>same owner same nonce]
+    Equiv --> Slash[100% bonded stake<br/>plus Authority Ring expulsion]
+    subgraph MainLane[Main-lane fallback]
+      MLane[Same intent flows<br/>through Mysticeti-C DAG]
+      MLane --> Commit[Block commit<br/>main_lane_index updated]
+    end
+    Cross -.- MLane
+    Slash -. paper section 6.4<br/>Invariant 5 .- Inv[100% slashing<br/>plus expulsion]
+      </pre>
+    </div>
+
+    <div class="notes">
+      <h2>Why the fast path exists</h2>
+      <p>Single-owner transactions don't need a full DAG round; one Authority's binding signature is enough. The fast path is a 1-RTT happy-path for those — clients see commit-confirmation in milliseconds instead of waiting for the next commit wave.</p>
+      <h2>K-binding cross-check (IQ-003)</h2>
+      <p>Every fast-path cert is reconciled against the <code>main_lane_index</code> populated by <code>try_commit</code>. A mismatch within the K-window — i.e., the main-lane ordering disagrees with the fast-path commit — yields an <code>EquivocationProof</code> that any honest validator can publish.</p>
+      <h2>100% slashing (Invariant 5)</h2>
+      <p>Slashing for fast-path equivocation is total: 100% of bonded stake + immediate Authority Ring expulsion. Non-interactive, publishable proof. Paper §6.4 + DAG-S9 proptest gate at 10k cases.</p>
+      <h2>Status</h2>
+      <p>S8 + S9 proptests are sealed. <a href="../iq/IQ-003-fast-path-architecture.md">IQ-003</a> pending sign-off; K-binding cross-check is wired in <code>binding.rs</code> but daemon-level cross-check exercise is tracked separately.</p>
+    </div>
+
+    <div class="chips"><span class="chip">DAG-S8</span><span class="chip">DAG-S9</span><span class="chip">IQ-003</span><span class="chip">K=4 binding</span><span class="chip">Invariant 5</span></div>
+    <div class="footer">Source: <a href="mermaid/fast-path-and-slashing.md">mermaid/fast-path-and-slashing.md</a> · See also: <a href="index.html">visual index</a></div>
+  </div>
+</body>
+</html>
