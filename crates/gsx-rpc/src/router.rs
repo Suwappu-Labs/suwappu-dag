@@ -28,11 +28,83 @@ use crate::{
     ws,
 };
 
-/// Build the axum router. Caller is responsible for `axum::serve`-ing it.
+/// B2 hardening: default cap on the number of in-flight HTTP requests
+/// being served concurrently. A patient attacker could otherwise open
+/// many connections each holding a slow request open; combined with
+/// the body-size cap this bounds the worst-case memory + CPU cost of
+/// the ingress. Tunable via [`RouterLimits`].
+pub const DEFAULT_MAX_CONCURRENT_REQUESTS: usize = 64;
+
+/// B2 hardening: default cap on a single JSON-RPC request body. The
+/// JSON-RPC envelope is at most a few KB for any read method; a
+/// `submitIntent` carries a bincoded intent (~1 KB) + an ML-DSA
+/// signature (3,309 B) + a 32-byte hash. 1 MiB is a comfortable
+/// upper bound that still rejects payload-amplification probing.
+pub const DEFAULT_MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
+
+/// Hardening limits applied to the gsx-rpc HTTP router. The defaults
+/// match `DEFAULT_MAX_CONCURRENT_REQUESTS` and `DEFAULT_MAX_REQUEST_BODY_BYTES`;
+/// callers can override at startup if the deployment topology
+/// requires it (e.g., a public-facing validator behind a CDN may
+/// permit higher concurrency since per-IP smoothing happens upstream).
+#[derive(Clone, Copy, Debug)]
+pub struct RouterLimits {
+    /// Cap on simultaneous in-flight requests across all sources.
+    pub max_concurrent_requests: usize,
+    /// Cap on a single HTTP request body, applied at the tower-http
+    /// layer (before axum's `Json` extractor allocates).
+    pub max_request_body_bytes: usize,
+}
+
+impl Default for RouterLimits {
+    fn default() -> Self {
+        Self {
+            max_concurrent_requests: DEFAULT_MAX_CONCURRENT_REQUESTS,
+            max_request_body_bytes: DEFAULT_MAX_REQUEST_BODY_BYTES,
+        }
+    }
+}
+
+/// Build the axum router with hardening middleware applied. Caller is
+/// responsible for `axum::serve`-ing it. Uses [`RouterLimits::default`].
 pub fn router<S: StateView>(ctx: Arc<RpcContext<S>>) -> Router {
+    router_with_limits(ctx, RouterLimits::default())
+}
+
+/// Build the axum router with explicit hardening limits.
+///
+/// Middleware order (outermost → innermost):
+///   1. `RequestBodyLimitLayer` (tower-http) — rejects an HTTP request
+///      whose declared `Content-Length` or streamed body exceeds the
+///      cap before axum's `Json` extractor allocates.
+///   2. `ConcurrencyLimitLayer` (tower) — caps simultaneously-served
+///      requests across all sources. The N+1th request is held in the
+///      tower service queue; under sustained overload tokio's
+///      backpressure surfaces to the TCP layer.
+///   3. The route table itself (`POST /` for JSON-RPC, `GET /ws` for
+///      event subscriptions).
+///
+/// **Note:** the WebSocket path inherits the same middleware stack
+/// since it shares the router. The body-size cap doesn't affect the
+/// stream after upgrade (it applies only to the upgrade-request body);
+/// the concurrency cap counts an active WS subscription against the
+/// cap until disconnect, so operators with many subscribers should
+/// raise `max_concurrent_requests` accordingly.
+///
+/// **Not yet wired:** per-IP rate limiting. The
+/// [`RpcError::RateLimited`] variant + code `-32099` are pre-wired
+/// for the follow-up; a tower middleware that buckets by
+/// `axum::extract::ConnectInfo<SocketAddr>` lands in B2.1.
+pub fn router_with_limits<S: StateView>(ctx: Arc<RpcContext<S>>, limits: RouterLimits) -> Router {
     Router::new()
         .route("/", post(handle_rpc::<S>))
         .route("/ws", get(ws::handle_ws_upgrade::<S>))
+        .layer(tower::limit::ConcurrencyLimitLayer::new(
+            limits.max_concurrent_requests,
+        ))
+        .layer(tower_http::limit::RequestBodyLimitLayer::new(
+            limits.max_request_body_bytes,
+        ))
         .with_state(ctx)
 }
 
