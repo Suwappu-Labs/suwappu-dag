@@ -166,12 +166,33 @@ pub fn try_indirect_decide(
 }
 
 /// Top-level slot decision. Tries direct commit first; on `Undecided`,
-/// searches for the lowest directly-decided anchor at round
-/// `target_round + 2 ..= max_round` and applies the indirect rule.
+/// scans directly-decided anchors at round `target_round + 2 ..= max_round`
+/// and applies the indirect rule against each.
 ///
-/// Returns `Undecided` only when no later directly-decided anchor
-/// exists. Once such an anchor lands, every earlier `Undecided` slot
-/// resolves to either `Direct` (inherited) or `Skip`.
+/// **IQ-004 late-arrival fix (closes #45).** Previously, this function
+/// returned on the first directly-decided anchor — so if that anchor's
+/// causal history didn't yet include the target leader cert, the slot
+/// was reported `Skip` permanently. Under jitter + orphan-pull recovery,
+/// a leader cert can arrive at peers *after* the round-R+1 wave has
+/// already proposed without it as a parent, but later certs (e.g., at
+/// round R+2 or beyond) may reference it via certs that DO include it.
+/// A later directly-decided anchor's `causal_history` can then reach
+/// the leader cert, where the first anchor's could not.
+///
+/// We therefore iterate every directly-decided anchor in ascending round
+/// order. The first anchor whose `try_indirect_decide` yields
+/// `Direct(leader_hash)` wins and we return that. If every directly-
+/// decided anchor yields `Skip`, we return `Skip`. If no directly-
+/// decided anchor exists yet (or none has been found within the search
+/// range), we return `Undecided` — i.e., the slot can still be resolved
+/// once a future anchor is directly decided.
+///
+/// Safety: `Direct → Skip/Undecided` transitions remain forbidden
+/// (verified by `mysticeti_c_finality` at 10k cases). Only
+/// `Skip → Direct` is newly permitted via this late-arrival path. The
+/// safety witness for any retroactive flip is the directly-decided
+/// anchor itself, which is finalized via the joint-quorum AND-gate
+/// before its causal history can reach the late leader cert.
 pub fn decide_slot(dag: &DagStore, target_round: Round, n: CommitteeSize) -> LeaderStatus {
     match try_direct_decide(dag, target_round, n) {
         LeaderStatus::Direct(h) => return LeaderStatus::Direct(h),
@@ -187,18 +208,38 @@ pub fn decide_slot(dag: &DagStore, target_round: Round, n: CommitteeSize) -> Lea
         Some(r) => r,
         None => return LeaderStatus::Undecided,
     };
-    // Search lowest anchor at R' >= target+2. The "+2" gap is the
-    // canonical wave length: direct commit at R' relies on supporters
-    // at R'+1, so an anchor at R' = target+2 means target's leader cert
-    // is in R'+1's parent set if any honest authority at R+1 supported
-    // target's leader. Smaller anchors (R'=target+1) are the leader
-    // itself and not informative.
+    // Search every anchor at R' >= target+2 in ascending order. The
+    // "+2" gap is the canonical wave length: direct commit at R'
+    // relies on supporters at R'+1, so an anchor at R' = target+2
+    // means target's leader cert is in R'+1's parent set if any
+    // honest authority at R+1 supported it. Smaller anchors
+    // (R'=target+1) are the leader itself and not informative.
+    //
+    // We do NOT early-return on the first anchor's Skip — see IQ-004.
+    let mut any_anchor_seen = false;
     for anchor_round in (target_round + 2)..=max_round {
         if let LeaderStatus::Direct(anchor_hash) = try_direct_decide(dag, anchor_round, n) {
-            return try_indirect_decide(dag, target_round, anchor_hash, n);
+            any_anchor_seen = true;
+            match try_indirect_decide(dag, target_round, anchor_hash, n) {
+                LeaderStatus::Direct(h) => return LeaderStatus::Direct(h),
+                // This anchor's causal history doesn't reach the leader
+                // cert. Keep scanning — a later anchor may, via certs
+                // that have arrived since.
+                LeaderStatus::Skip | LeaderStatus::Undecided => continue,
+            }
         }
     }
-    LeaderStatus::Undecided
+    // No anchor's causal history reaches the leader. If we found at
+    // least one directly-decided anchor, treat the slot as `Skip`
+    // (sufficient evidence: the cluster moved past R without
+    // anyone's causal chain referencing the leader cert). If we
+    // haven't seen any directly-decided anchor yet, the slot is
+    // still `Undecided` — a future anchor may resolve it.
+    if any_anchor_seen {
+        LeaderStatus::Skip
+    } else {
+        LeaderStatus::Undecided
+    }
 }
 
 /// Back-compat wrapper. `Some(hash)` iff [`decide_slot`] returns

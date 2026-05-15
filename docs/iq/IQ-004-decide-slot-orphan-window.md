@@ -1,9 +1,9 @@
 # IQ-004 — `decide_slot` single-cert orphaning under parent-set freeze
 
-**Status:** Draft — awaiting ratification
+**Status:** Ratified 2026-05-15 — Option A (multi-anchor scan in `decide_slot`) landed; paper-side amendment in [gsx-papers#2](https://github.com/GlobalSettlementNetwork/gsx-papers/pulls) (pending)
 **Owner:** consensus
 **Date:** 2026-05-15
-**Tracking:** [#35](https://github.com/GlobalSettlementNetwork/gsx-dag/issues/35) (closed by [#44](https://github.com/GlobalSettlementNetwork/gsx-dag/pull/44), test-side mitigation only) + [#45](https://github.com/GlobalSettlementNetwork/gsx-dag/issues/45) (real consensus fix)
+**Tracking:** [#35](https://github.com/GlobalSettlementNetwork/gsx-dag/issues/35) (closed by [#44](https://github.com/GlobalSettlementNetwork/gsx-dag/pull/44), test-side mitigation) → [#45](https://github.com/GlobalSettlementNetwork/gsx-dag/issues/45) (consensus-side fix in this IQ)
 
 ## Question
 
