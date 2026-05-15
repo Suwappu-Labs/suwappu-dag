@@ -43,5 +43,10 @@ pub mod config;
 pub mod store;
 pub mod subscriber;
 
+#[cfg(feature = "postgres")]
+pub mod postgres;
+
 pub use config::IndexerConfig;
+#[cfg(feature = "postgres")]
+pub use postgres::PostgresStore;
 pub use store::{InMemoryStore, IndexedBlock, Store};
