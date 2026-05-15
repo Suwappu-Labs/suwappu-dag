@@ -1,9 +1,9 @@
 # IQ-001 — Commit-rule quorum formula
 
-**Status:** Draft — awaiting ratification
+**Status:** Ratified 2026-05-14 via [gsx-papers#1](https://github.com/GlobalSettlementNetwork/gsx-papers/pull/1)
 **Owner:** consensus
-**Date:** 2026-05-13
-**Sprint:** DAG-S21.1
+**Date:** 2026-05-13 (ratified 2026-05-14)
+**Sprint:** DAG-S21.1 ✅
 
 ## Question
 
