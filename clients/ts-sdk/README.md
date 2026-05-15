@@ -43,16 +43,14 @@ if (stake === null) {
 | `getAuthorityRegistry()` | `AuthorityMemberView[]` | Ordered by authority id |
 | `getValidatorRegistry()` | `ValidatorMemberView[]` | `stake_gsx` is a decimal **string** (u128 doesn't fit in `number`) |
 | `getStake(authority_id)` | `StakeEntry \| null` | `null` on application-level NotFound; throws on other errors |
+| `getBalance(address)` | `BalanceView` | Address as `Uint8Array` or `0x`-prefixed hex string; `balance` is a decimal string for `bigint` lift |
+| `getBlock(round)` | `BlockView \| null` | `null` on NotFound; intents inside `BlockView` are tagged `IntentView` variants |
+| `getTransaction(tx_hash)` | `TransactionView \| null` | `null` on NotFound; `tx_hash` as `Uint8Array` or hex string |
+| `submitIntentRaw(intent_bincode, sig, signer_pubkey_hash)` | `Uint8Array` | Low-level write path; caller bincode-serializes and ML-DSA-signs first |
+| `subscribeEvents({ onEvent, onError?, onClose?, WebSocket? })` | `Subscription` | WebSocket stream of `EventView`s from `GET /ws`; close via `subscription.close()` |
 | `call<T>(method, params?)` | `T` | Generic escape hatch for methods without a typed wrapper |
 
-Deferred (not yet served by the daemon, see [#27](https://github.com/GlobalSettlementNetwork/gsx-dag/issues/27)):
-
-- `gsx_getBlock`, `gsx_getTransaction` — need a queryable index on `state.blocks`.
-- `gsx_getBalance` — needs a substrate-state read API.
-- `gsx_submitIntent` — write path is the existing TCP-bincode wire today.
-- `gsx_subscribeEvents` (WebSocket) — would require an additional transport here.
-
-Once the daemon serves them, this client will gain typed wrappers without breaking changes.
+The 8-method surface is at full parity with the [Rust SDK](../rust-sdk).
 
 ## u128 / `bigint`
 

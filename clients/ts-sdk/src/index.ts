@@ -35,12 +35,84 @@ import type {
   BalanceView,
   BlockView,
   EpochView,
+  EventView,
   JsonRpcRequest,
   JsonRpcResponse,
   StakeEntry,
   TransactionView,
   ValidatorMemberView,
 } from "./types.js";
+
+/**
+ * Constructor signature for a platform-native `WebSocket` (browser
+ * built-in, Node 22+ built-in, or the `ws` package's class). Kept
+ * loose deliberately — different platforms ship slightly different
+ * options, and the SDK only needs `new WebSocket(url)`.
+ */
+export interface WebSocketCtor {
+  // eslint-disable-next-line @typescript-eslint/no-misused-new
+  new (url: string): WebSocketLike;
+}
+
+/**
+ * The narrow `WebSocket`-ish surface the SDK actually uses. Both the
+ * platform built-in and the Node `ws` package satisfy this — kept
+ * minimal so injection in tests is trivial.
+ */
+export interface WebSocketLike {
+  addEventListener(
+    type: "message",
+    listener: (ev: WsMessageEvent) => void,
+  ): void;
+  addEventListener(
+    type: "error",
+    listener: (ev: WsErrorEvent) => void,
+  ): void;
+  addEventListener(type: "close", listener: () => void): void;
+  close(): void;
+}
+
+export interface WsMessageEvent {
+  data: unknown;
+}
+
+export interface WsErrorEvent {
+  message?: string;
+}
+
+/**
+ * Options for {@link Client.subscribeEvents}.
+ */
+export interface SubscribeEventsOptions {
+  /** Invoked synchronously for each parsed event. */
+  onEvent: (event: EventView) => void;
+  /**
+   * Optional error callback. Fires on:
+   *   - server-side broadcast lag (`{error: "lagged", ...}` notices)
+   *   - JSON parse failures on incoming text frames
+   *   - WebSocket transport errors
+   */
+  onError?: (error: Error) => void;
+  /**
+   * Optional close callback. Fires when the socket closes for any
+   * reason other than a caller-initiated `subscription.close()`.
+   */
+  onClose?: () => void;
+  /**
+   * Optional WebSocket constructor. Defaults to `globalThis.WebSocket`
+   * — present in browsers and Node ≥ 22. On Node 20/21, pass the
+   * `ws` package's exported class.
+   */
+  WebSocket?: WebSocketCtor;
+}
+
+/**
+ * Handle returned by {@link Client.subscribeEvents}. Call `close()`
+ * to shut the socket cleanly.
+ */
+export interface Subscription {
+  close(): void;
+}
 
 export interface ClientOptions {
   /**
@@ -213,6 +285,127 @@ export class Client {
       if (err instanceof RpcError && err.code === -32000) return null;
       throw err;
     }
+  }
+
+  /**
+   * Subscribe to the daemon's live event stream over WebSocket
+   * (`GET /ws` — same endpoint the Rust SDK's
+   * `subscribe_events` consumes). The daemon emits one
+   * `EventView`-shaped JSON object per WebSocket text message, plus
+   * `{error: "lagged", skipped, skipped_total}` notices when the
+   * server-side broadcast buffer overflows.
+   *
+   * Returns a `Subscription` object whose `close()` shuts the socket
+   * cleanly. `onEvent` is invoked synchronously for each parsed
+   * event; `onError` (optional) is invoked on lag notices, transport
+   * errors, and JSON-parse failures so the caller can decide
+   * whether to reconnect or escalate.
+   *
+   * The implementation uses the platform-native `WebSocket` class,
+   * available in browsers and Node.js ≥ 22. For Node 20/21 callers,
+   * pass `options.WebSocket` to inject the `ws` package's
+   * implementation (or another constructor with the same surface).
+   *
+   * @example
+   * ```ts
+   * const sub = client.subscribeEvents({
+   *   onEvent: (ev) => console.log(ev.event, ev.round, ev.cert_hash),
+   *   onError: (e) => console.warn("ws:", e),
+   * });
+   * // ...later
+   * sub.close();
+   * ```
+   */
+  subscribeEvents(options: SubscribeEventsOptions): Subscription {
+    const WebSocketImpl: WebSocketCtor =
+      options.WebSocket ?? (globalThis as { WebSocket?: WebSocketCtor }).WebSocket!;
+    if (typeof WebSocketImpl !== "function") {
+      throw new TransportError(
+        "no WebSocket implementation available — pass options.WebSocket " +
+          "(e.g. from the `ws` package) on Node < 22, or upgrade Node",
+      );
+    }
+
+    const url = this.#wsUrl();
+    const socket = new WebSocketImpl(url);
+    let closedByCaller = false;
+
+    socket.addEventListener("message", (msg: WsMessageEvent) => {
+      const raw = typeof msg.data === "string" ? msg.data : String(msg.data);
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch (err) {
+        options.onError?.(
+          new MalformedResponseError(
+            `ws: failed to parse event payload: ${err instanceof Error ? err.message : String(err)}`,
+          ),
+        );
+        return;
+      }
+      // Server emits `{error: "lagged", skipped, skipped_total}` on
+      // broadcast-buffer overflow. Surface as an error to the caller;
+      // don't try to coerce it into an EventView.
+      const obj = parsed as Record<string, unknown>;
+      if (typeof obj.error === "string" && obj.error === "lagged") {
+        options.onError?.(
+          new TransportError(
+            `ws: server reported lagged events (skipped=${String(obj.skipped)}, total=${String(obj.skipped_total)})`,
+          ),
+        );
+        return;
+      }
+      options.onEvent(parsed as EventView);
+    });
+
+    socket.addEventListener("error", (ev: WsErrorEvent) => {
+      // Browser WebSocket gives us an opaque Event on error; Node's
+      // `ws` package gives us an `ErrorEvent` with `.message`. Both
+      // are normalized into a TransportError for the caller.
+      const msg =
+        ev && typeof ev === "object" && "message" in ev && typeof (ev as { message?: unknown }).message === "string"
+          ? ((ev as { message: string }).message)
+          : "ws: transport error";
+      options.onError?.(new TransportError(msg));
+    });
+
+    socket.addEventListener("close", () => {
+      // Caller-initiated close → no callback needed; otherwise
+      // propagate as a transport error so the caller can reconnect.
+      if (!closedByCaller) {
+        options.onClose?.();
+      }
+    });
+
+    return {
+      close: () => {
+        closedByCaller = true;
+        try {
+          socket.close();
+        } catch {
+          // best-effort
+        }
+      },
+    };
+  }
+
+  /**
+   * Compute the WebSocket URL from the JSON-RPC base URL by swapping
+   * the scheme (`http://` → `ws://`, `https://` → `wss://`) and
+   * appending `/ws`. Used by `subscribeEvents`.
+   */
+  #wsUrl(): string {
+    let base = this.#baseUrl;
+    if (base.endsWith("/")) base = base.slice(0, -1);
+    const lower = base.toLowerCase();
+    if (lower.startsWith("https://")) {
+      return `wss://${base.slice("https://".length)}/ws`;
+    }
+    if (lower.startsWith("http://")) {
+      return `ws://${base.slice("http://".length)}/ws`;
+    }
+    // Already a ws:// / wss:// URL? Pass through.
+    return `${base}/ws`;
   }
 
   /**
