@@ -21,7 +21,7 @@ members = [
 # that would force the whole workspace through nightly. Run via
 # `cd fuzz && cargo +nightly fuzz run <target>`. See
 # `docs/architecture/security.md` for the full procedure.
-exclude = ["fuzz"]
+exclude = ["fuzz", "examples/rust"]
 
 [workspace.package]
 version = "0.1.0"
