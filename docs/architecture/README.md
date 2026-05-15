@@ -5,6 +5,19 @@ implementation. Every document here corresponds to one section of the v8
 academic paper (`gsx-papers/papers/dag-l1`); the paper is the design spec,
 this directory is the engineering view.
 
+## Visuals
+
+Inline-rendered diagrams (Mermaid, native on GitHub + GitBook) sit in
+[`../visuals/README.md`](../visuals/README.md). Standalone HTML
+presentations: [Visual Index](../visuals/index.html) ·
+[Ecosystem Atlas](../visuals/gsx-ecosystem-atlas.html) ·
+[GSX DAG](../visuals/gsx-dag.html) ·
+[GSX DB](../visuals/gsx-db.html) ·
+[LTP](../visuals/ltp.html). Sources:
+[Mermaid](../visuals/mermaid/), [Excalidraw](../visuals/excalidraw/).
+
+## Repository structure of `docs/`
+
 | Doc | Paper § | Topic |
 |---|---|---|
 | [overview.md](overview.md) | §4 | Four-layer stack on a single chain |
