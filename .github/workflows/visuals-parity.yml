@@ -1,0 +1,39 @@
+name: visuals-parity
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/visuals/**'
+      - 'scripts/check-visuals-parity.sh'
+  pull_request:
+    paths:
+      - 'docs/visuals/**'
+      - 'scripts/check-visuals-parity.sh'
+
+# Non-blocking: this job's failure surfaces as a red check on the PR but
+# doesn't gate merge (see docs/visuals/SOURCE-OF-TRUTH.md for rationale).
+# If you want it to gate, set `continue-on-error: false` below.
+
+jobs:
+  parity:
+    name: docs/visuals/ parity vs gsx-lattice-protocol
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout gsx-dag
+        uses: actions/checkout@v5
+        with:
+          path: gsx-dag
+
+      - name: Checkout gsx-lattice-protocol (sibling layout)
+        uses: actions/checkout@v5
+        with:
+          repository: GlobalSettlementNetwork/gsx-lattice-protocol
+          path: gsx-lattice-protocol
+          # If the LTP repo is private, set a GH_PAT secret and uncomment:
+          # token: ${{ secrets.GH_PAT }}
+
+      - name: Run parity check
+        working-directory: gsx-dag
+        run: ./scripts/check-visuals-parity.sh ../gsx-lattice-protocol
