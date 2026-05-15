@@ -18,7 +18,7 @@ use gsx_rpc::context::{
     AuthorityMemberView, BlockView, EpochView, EventView, IntentView, StateView, SubmitIntentError,
     TransactionView, ValidatorMemberView,
 };
-use tokio::sync::{broadcast, mpsc::UnboundedSender};
+use tokio::sync::broadcast;
 
 use crate::{
     client::{verify_signed_intent, AuthOutcome},
@@ -89,12 +89,12 @@ fn intent_to_view(intent: &Intent) -> IntentView {
     }
 }
 
-/// Adapter wrapping the daemon's shared `Arc<State>` plus the
-/// write-path machinery (`intent_tx` mpsc + `network_id`) needed for
-/// `gsx_submitIntent`. The TCP/bincode client wire and this adapter
-/// fan into the SAME sender, so the two ingress paths share order
-/// guarantees and the round driver doesn't notice which wire an
-/// intent arrived on.
+/// Adapter wrapping the daemon's shared `Arc<State>` for the JSON-RPC
+/// surface (`gsx_submitIntent` + read methods). DAG-S31.4 / A3: the
+/// write path routes through `state.mempool.submit`, so the TCP/bincode
+/// client wire and this adapter both feed the same shared mempool —
+/// the round driver drains in priority order at block-build time and
+/// doesn't notice which ingress wire admitted each intent.
 ///
 /// T6: also holds a `broadcast::Sender<EventView>` that bridges the
 /// gsx-node `Event` stream into the JSON-safe `EventView` shape the
@@ -103,18 +103,12 @@ fn intent_to_view(intent: &Intent) -> IntentView {
 /// drops it cleanly on disconnect.
 pub struct NodeStateView {
     state: Arc<State>,
-    intent_tx: UnboundedSender<Intent>,
     network_id: String,
     event_view_tx: broadcast::Sender<EventView>,
 }
 
 impl NodeStateView {
-    pub(crate) fn new(
-        state: Arc<State>,
-        intent_tx: UnboundedSender<Intent>,
-        network_id: String,
-        log: &EventLog,
-    ) -> Self {
+    pub(crate) fn new(state: Arc<State>, network_id: String, log: &EventLog) -> Self {
         // T6: bridge gsx-node Event → gsx-rpc EventView once per
         // daemon (not per subscriber). 1024 slot ring buffer matches
         // EventLog's broadcast buffer.
@@ -144,7 +138,6 @@ impl NodeStateView {
         });
         Self {
             state,
-            intent_tx,
             network_id,
             event_view_tx,
         }
@@ -269,12 +262,25 @@ impl StateView for NodeStateView {
         //    than re-serializing) guarantees the SDK's hash matches.
         let intent_hash: [u8; 32] = *blake3::hash(&intent_bincode).as_bytes();
 
-        // 4. Enqueue. `UnboundedSender::send` only fails if the receiver
-        //    has been dropped (round driver task died). Either way the
-        //    caller should treat it as a transient failure to retry.
-        self.intent_tx
-            .send(intent)
-            .map_err(|_| SubmitIntentError::EnqueueFull)?;
+        // 4. Enqueue into the shared mempool. JSON-RPC submissions
+        //    don't currently carry a peer label (we don't have the
+        //    remote address inside the adapter); pass `None` for the
+        //    peer so the per-peer leaky bucket is bypassed for RPC
+        //    ingress. Rate-limiting JSON-RPC happens one layer up
+        //    (Track B / PR B2 — tower middleware on the router).
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        self.state
+            .mempool
+            .submit(intent, /* priority */ 0, None, now_ms)
+            .map_err(|e| match e {
+                gsx_mempool::MempoolError::DuplicateIntent { .. } => SubmitIntentError::EnqueueFull,
+                gsx_mempool::MempoolError::BelowFloor { .. } => SubmitIntentError::EnqueueFull,
+                gsx_mempool::MempoolError::RateLimited { .. } => SubmitIntentError::EnqueueFull,
+                gsx_mempool::MempoolError::Encode(_) => SubmitIntentError::EnqueueFull,
+            })?;
 
         Ok(intent_hash)
     }
