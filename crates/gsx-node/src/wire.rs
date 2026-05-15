@@ -99,7 +99,32 @@ pub enum WireMessage {
 }
 
 /// Maximum allowed framed payload size. Drops the connection on overrun.
+/// This is the *outer* envelope cap — applied at the length-prefix
+/// header before any allocation. A single `WireMessage` variant may
+/// carry payloads up to (but not beyond) this cap.
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
+
+/// B3 hardening: per-message size cap applied AFTER successful frame
+/// receipt but BEFORE bincode-deserialization commits to the type-
+/// specific allocations. A bincode-serialized `Certificate` is on the
+/// order of ~1-2 KiB (32-byte hash, 4 KiB parent list at n=128,
+/// payload digest, signature). 64 KiB gives an order-of-magnitude
+/// envelope above the honest worst case and rejects malicious peers
+/// that send a 1 MiB frame just under `MAX_FRAME_BYTES` to chew CPU
+/// during decode. The check sits in `read_frame` alongside the
+/// length-prefix guard so a peer can't bypass it by lying about
+/// `Content-Length`-style headers — bincode is unframed at this
+/// layer, so the only signal is the BE u32 prefix we already
+/// validate against `MAX_FRAME_BYTES`.
+///
+/// `BlockPayload` is the one variant that can legitimately exceed
+/// this cap (it carries up to ~1100 intents per the perf testnet's
+/// observed peak). Block frames are sent on the same wire so we
+/// don't gate decode of arbitrary `WireMessage` on this cap; instead
+/// the cert/vote/ack paths each enforce it after bincode decode if
+/// the variant should be small. See `enforce_compact_variant_cap`
+/// for the per-variant policy.
+pub const MAX_COMPACT_MESSAGE_BYTES: usize = 64 * 1024;
 
 /// Outbound dial reconnect parameters. Geometric backoff capped at `max_ms`.
 const RECONNECT_MIN_MS: u64 = 50;
@@ -330,6 +355,24 @@ async fn read_loop(
     loop {
         let bytes = read_frame(&mut stream).await?;
         let msg: WireMessage = bincode::deserialize(&bytes)?;
+        // B3 hardening: per-variant size cap. `Block` carries up to
+        // ~1100 intents in the perf testnet's peak, so the cap
+        // sits at `MAX_FRAME_BYTES` (1 MiB). Compact variants
+        // (`Cert`, `Vote`, `GetCert`, `FastPath`, `Ltp`,
+        // `Ping`/`Pong`) cap at `MAX_COMPACT_MESSAGE_BYTES`
+        // (64 KiB) — a malicious peer can't burn CPU sending us
+        // an inflated cert that happens to fit inside the
+        // 1 MiB frame cap.
+        if !enforce_compact_variant_cap(&msg, bytes.len()) {
+            warn!(
+                peer = %from.0,
+                variant = wire_variant_name(&msg),
+                bytes = bytes.len(),
+                cap = MAX_COMPACT_MESSAGE_BYTES,
+                "wire: compact-variant cap exceeded; dropping frame"
+            );
+            continue;
+        }
         if inbound_tx
             .send(WireEvent {
                 from: from.clone(),
@@ -340,6 +383,32 @@ async fn read_loop(
         {
             return Ok(());
         }
+    }
+}
+
+/// B3 hardening: return `true` if the frame size is OK for this
+/// variant. `Block` is the only variant allowed to use the full
+/// `MAX_FRAME_BYTES` envelope — everything else must fit in the
+/// tighter `MAX_COMPACT_MESSAGE_BYTES` cap.
+fn enforce_compact_variant_cap(msg: &WireMessage, frame_bytes: usize) -> bool {
+    match msg {
+        // `Block` payload can be large; rely on the outer frame cap.
+        WireMessage::Block(_) => true,
+        // Everything else should fit in the compact cap.
+        _ => frame_bytes <= MAX_COMPACT_MESSAGE_BYTES,
+    }
+}
+
+fn wire_variant_name(msg: &WireMessage) -> &'static str {
+    match msg {
+        WireMessage::Cert(_) => "Cert",
+        WireMessage::Vote(_) => "Vote",
+        WireMessage::Block(_) => "Block",
+        WireMessage::GetCert(_) => "GetCert",
+        WireMessage::FastPath(_) => "FastPath",
+        WireMessage::Ltp(_) => "Ltp",
+        WireMessage::Ping(_) => "Ping",
+        WireMessage::Pong(_) => "Pong",
     }
 }
 
