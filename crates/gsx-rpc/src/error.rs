@@ -36,6 +36,14 @@ pub enum RpcError {
     /// Transient — caller should retry with backoff.
     #[error("enqueue full: {0}")]
     EnqueueFull(String),
+
+    /// B2 hardening: the request was rejected by an ingress
+    /// middleware (concurrency cap, body-size cap, or future
+    /// per-IP rate limit). Transient — caller should retry with
+    /// backoff. Mapped to code -32099 (Cloudflare-style 429
+    /// analog within the JSON-RPC reserved-error range).
+    #[error("rate limited: {0}")]
+    RateLimited(String),
 }
 
 impl RpcError {
@@ -51,6 +59,10 @@ impl RpcError {
             RpcError::UnknownSigner(_) => -32001,
             RpcError::BadSignature(_) => -32002,
             RpcError::EnqueueFull(_) => -32003,
+            // -32099: explicitly chosen to occupy the OTHER end of
+            // the application-level range so it can't collide with
+            // a future NotFound-style addition.
+            RpcError::RateLimited(_) => -32099,
         }
     }
 }

@@ -25,12 +25,19 @@ tokio = { workspace = true }
 # tree).
 axum = { version = "0.7", features = ["ws"] }
 
+# B2 hardening: tower middleware for global concurrency cap +
+# request-body size cap. `tower` already lived in dev-dependencies;
+# promoted to a production dep with the `limit` feature for
+# `ConcurrencyLimitLayer`. `tower-http` provides
+# `RequestBodyLimitLayer` for body-size caps at the HTTP layer.
+tower = { version = "0.5", features = ["util", "limit"] }
+tower-http = { version = "0.6", features = ["limit"] }
+
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
-tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 blake3 = { workspace = true }
