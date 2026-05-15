@@ -16,7 +16,7 @@ presentations: [Visual Index](../visuals/index.html) ·
 [LTP](../visuals/ltp.html). Sources:
 [Mermaid](../visuals/mermaid/), [Excalidraw](../visuals/excalidraw/).
 
-## Repository structure of `docs/`
+## Sections
 
 | Doc | Paper § | Topic |
 |---|---|---|
@@ -26,10 +26,18 @@ presentations: [Visual Index](../visuals/index.html) ·
 | [transport.md](transport.md) | §6.3 | SCION + RaptorQ inter-validator transport |
 | [fast-path.md](fast-path.md) | §6.4 | FastPay-style single-owner fast-path lane |
 | [execution.md](execution.md) | §7 | Co-resident dual VM over polymorphic balance map |
+| [gsx-db-bridge.md](gsx-db-bridge.md) | §7 | Workspace-dep boundary to the `gsx-db` substrate |
 | [application.md](application.md) | §8 | Precompiles: DID, registered-issuer, reserve-coverage |
-| [super-node.md](super-node.md) | §9 | Consolidated 6-authority super-node role |
+| [super-node.md](super-node.md) | §9 | Consolidated 6-of-9 Authority super-node role |
 | [ltp-integration.md](ltp-integration.md) | §10 | Lattice Transfer Protocol cross-chain settlement |
-| [safety-liveness.md](safety-liveness.md) | §11 | Joint-quorum AND-gate safety theorem |
+| [safety-liveness.md](safety-liveness.md) | §11 | Joint-quorum AND-gate safety (Theorem 2) |
 | [cryptographic-posture.md](cryptographic-posture.md) | §12 | PQ posture + exception zones |
 | [governance-phasing.md](governance-phasing.md) | §14 | Phase G2 → G3 → G4 governance |
 | [sprint-map.md](sprint-map.md) | — | Sprint backlog + dependency DAG |
+
+Investigation Questions (design decisions under ratification) live alongside the
+architecture docs in [`../iq/`](../iq/). Cross-repo: the substrate's own
+architecture docs are in
+[`GlobalSettlementNetwork/gsx-db/docs/`](https://github.com/GlobalSettlementNetwork/gsx-db/tree/main/docs);
+LTP runtime details are in
+[`GlobalSettlementNetwork/gsx-lattice-protocol/docs/`](https://github.com/GlobalSettlementNetwork/gsx-lattice-protocol/tree/main/docs).
