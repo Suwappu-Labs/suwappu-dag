@@ -27,10 +27,19 @@ axum = { version = "0.7", features = ["macros"] }
 tokio-tungstenite = { version = "0.21", default-features = false, features = ["connect"] }
 futures-util = "0.3"
 
-# Persistence — for the MVP we keep everything in memory behind a
-# RwLock. The Postgres adapter lands in a follow-up; that's the
-# point at which `sqlx` joins the dep graph. Keeping it out for now
-# means the scaffold compiles + tests run without docker-postgres.
+# Persistence: the in-memory store ships unconditionally for tests +
+# the MVP scaffold; the Postgres backend is feature-gated so the
+# scaffold compiles + tests run without a Postgres dependency.
+# `--features postgres` pulls in sqlx and enables the
+# `PostgresStore` adapter selected at runtime via
+# `--database-url`/`GSX_INDEXER_DATABASE_URL`.
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls",
+    "postgres",
+    "macros",
+    "migrate",
+], optional = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -45,3 +54,10 @@ tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+
+[features]
+default = []
+# Enable Postgres-backed persistence. Pulls in sqlx + tls-rustls. The
+# in-memory store remains available without this feature so unit
+# tests + the scaffold don't require a live Postgres.
+postgres = ["dep:sqlx"]

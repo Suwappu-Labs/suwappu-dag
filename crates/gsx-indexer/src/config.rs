@@ -31,4 +31,16 @@ pub struct IndexerConfig {
     /// reconnects immediately.
     #[arg(long, default_value_t = 5, env = "GSX_INDEXER_RECONNECT_SECS")]
     pub reconnect_secs: u64,
+
+    /// Optional Postgres URL for persistent storage. When set (and
+    /// the binary was built with `--features postgres`), the indexer
+    /// uses `PostgresStore` instead of the in-memory store and
+    /// applies the embedded migrations on startup. Example:
+    /// `postgres://gsx:gsx@127.0.0.1:5432/gsx_indexer`.
+    ///
+    /// When unset OR when the binary was built without the
+    /// `postgres` feature, the in-memory store is used (state is
+    /// lost on restart).
+    #[arg(long, env = "GSX_INDEXER_DATABASE_URL")]
+    pub database_url: Option<String>,
 }
