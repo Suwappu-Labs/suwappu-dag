@@ -2,14 +2,11 @@
 
 ```mermaid
 flowchart LR
-  Sender[Sender] --> Commit[Phase 1
-Commit]
+  Sender[Sender] --> Commit[Phase 1<br/>Commit]
   Commit --> Network[(Commitment network)]
-  Sender --> Lattice[Phase 2
-Lattice envelope ~1.3 kB]
+  Sender --> Lattice[Phase 2<br/>Lattice envelope ~1.3 kB]
   Lattice --> Receiver[Receiver]
-  Receiver --> Materialize[Phase 3
-Materialize]
+  Receiver --> Materialize[Phase 3<br/>Materialize]
   Materialize --> Network
   Network --> Output[Reconstructed payload]
   subgraph Security[Security stack]

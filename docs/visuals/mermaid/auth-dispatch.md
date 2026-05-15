@@ -1,6 +1,8 @@
-# IQ-7 Anchor Auth — Hybrid AND-gate
+# Auth dispatch — Anchor hybrid AND-gate (gsx-db IQ-7)
 
-Landed by `gsx-db` PR #4 (anchor/iq7-scheme-alignment).
+Diagrams the `verify_credential` dispatch for the anchor authentication
+scheme — Blake3 MAC / Sp1 / Ecdsa / Hybrid (ECDSA + ML-DSA-65 AND-gate)
+— landed by `gsx-db` PR #4 (`anchor/iq7-scheme-alignment`).
 
 ## AuthScheme + credential envelope
 

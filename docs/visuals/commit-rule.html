@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Commit rule — Presentation View</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: true, theme: 'dark', securityLevel: 'loose' });
+  </script>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; font-family: 'JetBrains Mono', monospace; background: #020617; color: #e2e8f0; padding: 28px; }
+    .wrap { max-width: 1360px; margin: 0 auto; }
+    .hero { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+    .dot { width: 12px; height: 12px; border-radius: 999px; background: #22d3ee; box-shadow: 0 0 0 0 rgba(34,211,238,0.35); animation: pulse 2s infinite; }
+    @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(34,211,238,0.35); } 70% { box-shadow: 0 0 0 12px rgba(0,0,0,0); } 100% { box-shadow: 0 0 0 0 rgba(0,0,0,0); } }
+    h1 { margin: 0; font-size: 1.55rem; letter-spacing: -0.03em; }
+    .sub { color: #94a3b8; margin: 0 0 20px 24px; font-size: 0.88rem; line-height: 1.6; }
+    .panel { background: rgba(15,23,42,0.58); border: 1px solid #1e293b; border-radius: 16px; padding: 18px; box-shadow: 0 20px 40px rgba(0,0,0,0.25); }
+    .notes { color: #94a3b8; font-size: 0.82rem; line-height: 1.7; }
+    .notes h2 { color: #f8fafc; font-size: 0.95rem; margin: 20px 0 8px; }
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+    .chip { border: 1px solid #334155; background: rgba(2,6,23,0.34); color: #cbd5e1; border-radius: 999px; padding: 6px 10px; font-size: 0.72rem; }
+    .footer { text-align: center; color: #64748b; font-size: 0.74rem; margin-top: 18px; }
+    a { color: #22d3ee; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .mermaid { background: rgba(2,6,23,0.32); border-radius: 12px; padding: 16px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="hero"><div class="dot"></div><h1>Mysticeti-C commit rule</h1></div>
+    <p class="sub">Direct + indirect commit rule with the <a href="../iq/IQ-004-decide-slot-orphan-window.md">IQ-004 parent-set freeze window</a>. Canonical source: <a href="mermaid/commit-rule.md">mermaid/commit-rule.md</a>.</p>
+
+    <div class="panel">
+      <pre class="mermaid">
+flowchart TB
+    R[Round R<br/>leader cert authored<br/>by leader R n]
+    R1[Round R+1<br/>peer authors propose<br/>parent set = local DAG R-certs]
+    Q{Distinct authors at R+1<br/>citing leader_hash as parent<br/>greater-equal quorum_threshold n?}
+    Direct[LeaderStatus::Direct<br/>commit + drain block]
+    Anchor[Search anchor at R-prime ge R+2<br/>directly decided]
+    InHist{leader cert in<br/>causal_history anchor?}
+    Skip[LeaderStatus::Skip<br/>permanently dropped<br/>one-shot intent lost]
+    Late[Late-arriving leader cert<br/>via orphan-pull]
+    IQ4[IQ-004 fix candidates:<br/>A late-arrival re-decide<br/>B wait-for-leader timer<br/>C author-buffered duplicates]
+
+    R --> R1
+    R1 --> Q
+    Q -->|yes| Direct
+    Q -->|no| Anchor
+    Anchor --> InHist
+    InHist -->|yes| Direct
+    InHist -->|no| Skip
+    Late -. arrives AFTER R+1<br/>parent-set frozen .- Q
+    Skip -. mitigated by .- IQ4
+      </pre>
+    </div>
+
+    <div class="notes">
+      <h2>Honest path</h2>
+      <p>A round-R cert with ≥ <code>quorum_threshold(n)</code> distinct supporters at R+1 finalizes via the direct rule. <code>quorum_threshold(n) = n − ⌊(n−1)/3⌋</code> per <a href="../iq/IQ-001-quorum-formula.md">IQ-001</a>.</p>
+      <h2>Indirect path (IQ-002)</h2>
+      <p>If round R stays <code>Undecided</code>, scan for an anchor at R' ≥ R+2 that's directly decided; walk its <code>causal_history</code> to settle R as <code>Direct</code> or <code>Skip</code>.</p>
+      <h2>Orphan window (IQ-004)</h2>
+      <p>If the leader's R cert is delivered <em>after</em> peers proposed R+1, the cert is not a parent of any R+1 cert. Orphan-pull adds it to the DAG but <code>causal_history</code> walks parents only — the late cert is unreachable from any anchor and the slot is permanently <code>Skip</code>. One-shot intents in that cert vanish from the commit pipeline.</p>
+      <h2>Joint quorum</h2>
+      <p>Not shown — the Validator Ring also co-signs before any candidate finalizes (paper Theorem 2's AND-gate). See <a href="../architecture/safety-liveness.md">architecture/safety-liveness.md</a>.</p>
+    </div>
+
+    <div class="chips"><span class="chip">decide_slot</span><span class="chip">try_direct_decide</span><span class="chip">try_indirect_decide</span><span class="chip">IQ-001</span><span class="chip">IQ-002</span><span class="chip">IQ-004</span></div>
+    <div class="footer">Source: <a href="mermaid/commit-rule.md">mermaid/commit-rule.md</a> · See also: <a href="index.html">visual index</a></div>
+  </div>
+</body>
+</html>

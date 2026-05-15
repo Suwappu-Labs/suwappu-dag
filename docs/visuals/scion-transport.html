@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SCION transport — Presentation View</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: true, theme: 'dark', securityLevel: 'loose' });
+  </script>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; font-family: 'JetBrains Mono', monospace; background: #020617; color: #e2e8f0; padding: 28px; }
+    .wrap { max-width: 1360px; margin: 0 auto; }
+    .hero { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+    .dot { width: 12px; height: 12px; border-radius: 999px; background: #fb7185; box-shadow: 0 0 0 0 rgba(251,113,133,0.35); animation: pulse 2s infinite; }
+    @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(251,113,133,0.35); } 70% { box-shadow: 0 0 0 12px rgba(0,0,0,0); } 100% { box-shadow: 0 0 0 0 rgba(0,0,0,0); } }
+    h1 { margin: 0; font-size: 1.55rem; letter-spacing: -0.03em; }
+    .sub { color: #94a3b8; margin: 0 0 20px 24px; font-size: 0.88rem; line-height: 1.6; }
+    .panel { background: rgba(15,23,42,0.58); border: 1px solid #1e293b; border-radius: 16px; padding: 18px; box-shadow: 0 20px 40px rgba(0,0,0,0.25); }
+    .notes { color: #94a3b8; font-size: 0.82rem; line-height: 1.7; }
+    .notes h2 { color: #f8fafc; font-size: 0.95rem; margin: 20px 0 8px; }
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+    .chip { border: 1px solid #334155; background: rgba(2,6,23,0.34); color: #cbd5e1; border-radius: 999px; padding: 6px 10px; font-size: 0.72rem; }
+    .footer { text-align: center; color: #64748b; font-size: 0.74rem; margin-top: 18px; }
+    a { color: #22d3ee; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .mermaid { background: rgba(2,6,23,0.32); border-radius: 12px; padding: 16px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="hero"><div class="dot"></div><h1>SCION transport + RaptorQ shred/reconstruct</h1></div>
+    <p class="sub">Paper §6.3. Path-authenticated routing with IP-Gateway fallback + RaptorQ fountain code. Canonical source: <a href="mermaid/scion-transport.md">mermaid/scion-transport.md</a>.</p>
+
+    <div class="panel">
+      <pre class="mermaid">
+flowchart LR
+    Author[Validator authors cert] --> Shred[RaptorQ encode<br/>n shreds any k reconstruct]
+    Shred --> Path{SCION path<br/>available?}
+    Path -->|yes| SCION[Path-authenticated<br/>SCION transport]
+    Path -->|no| Gateway[SCION-IP-Gateway<br/>fallback shim]
+    SCION --> Wire[Wire cluster mesh]
+    Gateway --> Wire
+    Wire --> Recv[Receiving validator<br/>collects ge k shreds]
+    Recv --> Reco[RaptorQ reconstruct]
+    Reco --> Ingest[ingest_cert<br/>insert into DAG]
+    Ingest -->|UnknownParent| Orphan[orphan-pull buffer<br/>fetch missing parents]
+    Ingest -->|OK| Vote[cast Vote<br/>broadcast]
+    Orphan -. per-orphan backoff<br/>500ms 1s 2s 4s 5s cap<br/>DAG-S32 .- Wire
+      </pre>
+    </div>
+
+    <div class="notes">
+      <h2>RaptorQ fountain code (S2)</h2>
+      <p>Payload is encoded into more shreds than strictly needed; any <code>k</code> distinct shreds reconstruct the source bit-exactly. Decouples delivery success from packet loss. <code>proptest_reconstruction.rs</code> × 10k cases.</p>
+      <h2>SCION path auth (S18)</h2>
+      <p>When the network supports SCION, paths are explicitly authenticated by the originating validator's path-segment certificates. <code>proptest_scion.rs</code> × 10k cases.</p>
+      <h2>IP-Gateway fallback (S19)</h2>
+      <p>If no native SCION path is available, the gateway shim carries the same shred set over plain IP with an equivalent authentication shim. <code>proptest_gateway.rs</code> × 10k cases.</p>
+      <h2>Per-orphan backoff (S32)</h2>
+      <p>The orphan-pull recovery has exponential backoff per missing-cert hash so a slow consumer doesn't suffer a retry storm. See the <code>dag-orphan-pull-retry-storm-without-per-orphan-backoff</code> operator skill.</p>
+    </div>
+
+    <div class="chips"><span class="chip">Paper §6.3</span><span class="chip">DAG-S2</span><span class="chip">DAG-S18</span><span class="chip">DAG-S19</span><span class="chip">DAG-S32 backoff</span></div>
+    <div class="footer">Source: <a href="mermaid/scion-transport.md">mermaid/scion-transport.md</a> · See also: <a href="index.html">visual index</a></div>
+  </div>
+</body>
+</html>
