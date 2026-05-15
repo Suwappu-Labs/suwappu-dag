@@ -136,6 +136,36 @@ export interface TransactionView {
 }
 
 /**
+ * JSON-safe projection of a single event from the daemon's NDJSON
+ * event log. One per WebSocket text message emitted by the daemon's
+ * `gsx_subscribeEvents` endpoint (`GET /ws`). Mirrors
+ * `gsx_rpc::context::EventView` on the server side.
+ *
+ * Optional fields follow `serde(skip_serializing_if = "Option::is_none")`
+ * on the Rust side — they're omitted from the JSON envelope, so the
+ * TypeScript type uses `?:` rather than `| null`.
+ */
+export interface EventView {
+  /** Unix milliseconds. */
+  t_ms: number;
+  /** Validator label (matches the daemon's `NodeConfig::self_id`). */
+  region: string;
+  /** Lane name: `"main" | "fastpath" | "ltp" | "client"`. */
+  lane: string;
+  /** Action verb (e.g. `"proposed"`, `"committed"`, `"submitted"`). */
+  event: string;
+  round?: number;
+  cert_hash?: string;
+  tx_hash?: string;
+  peer?: string;
+  intent_hashes?: string[];
+  authority_id?: number;
+  kind?: string;
+  /** Rolling 60-second receive count on `wire_metrics` events. */
+  received_60s?: number;
+}
+
+/**
  * JSON-RPC 2.0 request envelope.
  *
  * The SDK builds this internally — callers don't normally construct one
