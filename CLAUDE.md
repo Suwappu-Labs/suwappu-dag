@@ -106,6 +106,18 @@ Update this table when a sprint closes.
   (account 492042618949, us-east-1). Apply via `scripts/deploy-aws.sh`,
   never raw `terraform apply` (that's denied).
 
+### Local development
+
+- **Never run `cargo test --workspace`, `cargo build --workspace`, or
+  `cargo clippy --workspace` locally.** This Mac isn't powerful enough —
+  workspace-wide commands hang, thrash, or saturate CPU and starve other
+  work. Push to a feature branch and let GHA's CI matrix (rustfmt /
+  clippy / test / cargo-deny) validate. Iteration loop = CI cycle, not
+  local cargo. See `~/.claude/projects/-Users-mongolraider/memory/2-patterns/gsx-dag-no-local-cargo-test.md`.
+- Single-binary local builds are fine: `cargo build --release -p gsx-node --bin gsx-metrics`.
+- `cargo fmt -p <crate>` is cheap; run it locally before pushing to avoid
+  trivial rustfmt CI failures.
+
 ### Branch naming
 
 `<scope>/<short-slug>` — e.g., `crypto/mldsa-acvp`, `consensus/mysticeti-c`,
