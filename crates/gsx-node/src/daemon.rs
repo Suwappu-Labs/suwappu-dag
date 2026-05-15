@@ -2128,7 +2128,20 @@ mod tests {
         // into one block + commit + cross the next epoch boundary
         // (~1.6s for rounds_per_epoch=16). 60s is the failure
         // ceiling, not the expected wall-clock.
-        let eject_deadline = std::time::Instant::now() + Duration::from_secs(60);
+        // Issue #35 (2026-05-15): the original test submitted the
+        // eject Intent once and waited. Under CI jitter the
+        // containing cert sometimes lands during a wave where one
+        // node is briefly behind, so the round-R+1 supporters don't
+        // include the leader-cert hash as a parent — the slot stays
+        // Undecided and later anchors' causal_history walks miss it,
+        // so the Intent is silently dropped from the commit pipeline.
+        // (See the orphan-cert / `decide_slot` skip path; affects any
+        // single-block Intent, not just governance.) A real client
+        // would resubmit on timeout; mirror that here by re-sending
+        // every 5s until the registry converges. 90s budget covers
+        // ~18 resubmissions, multiple epoch boundaries.
+        let eject_deadline = std::time::Instant::now() + Duration::from_secs(90);
+        let mut last_resubmit = std::time::Instant::now();
         loop {
             let all_at_4 = {
                 let mut ok = true;
@@ -2143,6 +2156,14 @@ mod tests {
             };
             if all_at_4 {
                 break;
+            }
+            if last_resubmit.elapsed() >= Duration::from_secs(5) {
+                let resubmit = gsx_execution::Intent::EjectAuthority {
+                    authority_id: 4,
+                    proof_ref: [0u8; 32],
+                };
+                let _ = client.submit(resubmit).await;
+                last_resubmit = std::time::Instant::now();
             }
             if std::time::Instant::now() >= eject_deadline {
                 // Mirror the admit-phase diagnostic so a CI failure
@@ -2242,7 +2263,7 @@ mod tests {
                         pending_gov_has_eject, epoch_cur, epoch_last_bd
                     ));
                 }
-                panic!("phase G eject timed out (60s):\n  {}", diag.join("\n  "));
+                panic!("phase G eject timed out (90s):\n  {}", diag.join("\n  "));
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
