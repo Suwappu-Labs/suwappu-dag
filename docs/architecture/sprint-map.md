@@ -53,7 +53,11 @@ flowchart TB
     style S1 fill:#cfc
 ```
 
-S1 closed. All others queued.
+**Status:** S1 through S20 ✅ closed; each through its 10,000-case property
+test exit gate. Post-S20 work continues in named sub-sprints (S21–S33+);
+see [Post-S20 backlog](#post-s20-backlog) below. CLAUDE.md's sprint-backlog
+table is the day-to-day source of truth — this file is the dependency
+diagram + exit-gate registry.
 
 ## Sprint exit gates
 
@@ -79,6 +83,25 @@ S1 closed. All others queued.
 | DAG-S18 | gsx-transport | `scion` | `scion_path_auth` |
 | DAG-S19 | gsx-transport | `scion_ip_gw` | `gateway_fallback_correctness` |
 | DAG-S20 | gsx-node | (binary) | `node_runs_genesis_block` (E2E) |
+
+## Post-S20 backlog
+
+Sprints since the full-node E2E gate closed. Many close hot-fixes,
+ratifications, or perf campaigns rather than new invariants; see CLAUDE.md
+for the canonical day-to-day status.
+
+| Sprint | Crate / scope | Closes |
+|---|---|---|
+| DAG-S21.1 ✅ | gsx-consensus | IQ-001 quorum-formula ratification ([gsx-papers#1](https://github.com/GlobalSettlementNetwork/gsx-papers/pull/1)) |
+| DAG-S21.2 ✅ | gsx-consensus | IQ-002 indirect commit rule ([gsx-papers#1](https://github.com/GlobalSettlementNetwork/gsx-papers/pull/1)) |
+| DAG-S25 ✅ | gsx-node | Validator governance Phase G2 — `AdmitAuthority` / `ExitAuthority` / `EjectAuthority` |
+| DAG-S25.1 ✅ | gsx-node | Epoch-boundary application (#18) |
+| DAG-S25.2 ✅ | gsx-node | ML-DSA-65 signed governance intents (#28) |
+| DAG-S25.3 ✅ | gsx-node | Deferred-activation (#32, [skill](https://github.com/GlobalSettlementNetwork/gsx-dag/issues/35)) |
+| DAG-S26 ✅ | (workspace) | Compliance harness |
+| DAG-S27 ✅ | gsx-node | Throughput + governance — perf-testnet baseline |
+| DAG-S28–S33 ✅ | gsx-node, gsx-mempool, gsx-rpc, scripts/perf | Perf campaigns, mempool, JSON-RPC MVP, indexer, WS subscriptions, cert-finality metric |
+| (open) | gsx-consensus | IQ-004 `decide_slot` orphan window — tracked in [#45](https://github.com/GlobalSettlementNetwork/gsx-dag/issues/45) |
 
 ## Phase gates
 

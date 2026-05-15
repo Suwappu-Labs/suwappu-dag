@@ -361,9 +361,15 @@ AWS_PROFILE=gsn aws secretsmanager list-secrets \
 
 - `CLAUDE.md` — sprint backlog table, load-bearing invariants.
 - `docs/architecture/sprint-map.md`.
-- `docs/iq/IQ-001-quorum-formula.md` — code shipped; ratification pending.
-- `docs/iq/IQ-002-indirect-commit.md` — code shipped; ratification pending.
+- `docs/iq/IQ-001-quorum-formula.md` — ratified 2026-05-14 ([gsx-papers#1](https://github.com/GlobalSettlementNetwork/gsx-papers/pull/1)).
+- `docs/iq/IQ-002-indirect-commit.md` — ratified 2026-05-14 ([gsx-papers#1](https://github.com/GlobalSettlementNetwork/gsx-papers/pull/1)).
 - `docs/iq/IQ-003-fast-path-architecture.md` — handler wired; K-binding gap.
+- `docs/iq/IQ-004-decide-slot-orphan-window.md` — pending sign-off; tracking [#45](https://github.com/GlobalSettlementNetwork/gsx-dag/issues/45).
+
+**Perf history (this repo):**
+
+- `docs/perf-run-2026-05-12/README.md` — 6-region perf-testnet snapshot, pre-S29 RPC batch.
+- `docs/perf-run-2026-05-13/README.md` — extended campaign with S29 batch submit + S30 round-driver lock split; the throughput numbers cited in §2.2 of this audit derive from this run.
 - `crates/gsx-consensus/src/commit.rs:61-66` — canonical `2f+1`.
 - `crates/gsx-consensus/src/commit.rs:126-202` — `try_direct_decide`,
   `try_indirect_decide`, `decide_slot`, `finalize`.
