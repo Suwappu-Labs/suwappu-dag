@@ -1,0 +1,88 @@
+name: fuzz
+
+# Weekly scheduled fuzz run + manual dispatch. Each fuzz target runs
+# for FUZZ_DURATION_SECS (default 300s = 5min/target) under
+# libFuzzer. Crashes surface as workflow failures with the crashing
+# input attached as an artifact for repro.
+on:
+  schedule:
+    # Sunday 03:00 UTC — quietest CI window across regions.
+    - cron: '0 3 * * 0'
+  workflow_dispatch:
+    inputs:
+      duration_secs:
+        description: Per-target fuzz duration (seconds)
+        required: false
+        default: '300'
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - wire_decode
+          - dag_insert
+          - decide_slot
+    env:
+      FUZZ_DURATION_SECS: ${{ github.event.inputs.duration_secs || '300' }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup gsx-db deploy key
+        env:
+          GSX_DB_DEPLOY_KEY: ${{ secrets.GSX_DB_DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$GSX_DB_DEPLOY_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+
+      - name: Rewrite https://github.com → git@github.com for cargo
+        run: |
+          git config --global url."git@github.com:".insteadOf "https://github.com/"
+
+      - name: Install nightly + cargo-fuzz
+        run: |
+          rustup toolchain install nightly --component rustfmt
+          cargo install cargo-fuzz --locked --version "^0.12"
+
+      - name: Cache fuzz corpus
+        uses: actions/cache@v4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.sha }}
+          restore-keys: |
+            fuzz-corpus-${{ matrix.target }}-
+
+      - name: Run fuzz target ${{ matrix.target }}
+        env:
+          CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+        run: |
+          cd fuzz
+          cargo +nightly fuzz run \
+            ${{ matrix.target }} \
+            -- \
+            -max_total_time=$FUZZ_DURATION_SECS \
+            -print_final_stats=1
+
+      - name: Upload crashing inputs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          retention-days: 30
+
+      - name: Upload corpus snapshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-corpus-${{ matrix.target }}
+          path: fuzz/corpus/${{ matrix.target }}/
+          retention-days: 30
