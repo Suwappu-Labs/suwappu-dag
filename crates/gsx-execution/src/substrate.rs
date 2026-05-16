@@ -78,6 +78,59 @@ pub enum Intent {
         /// EquivocationProof commitment).
         proof_ref: [u8; 32],
     },
+    /// Commit a per-batch L2 state root to the L1 chain. Submitted by
+    /// the L2 prover after successfully proving an L2 batch with SP1
+    /// (Track G Phase G2 + G4). The verifier-precompile arm in
+    /// `apply_intent` validates the Groth16 BN254 proof against
+    /// `vk_hash` + the chain-state's `aggregation_vk_hash`, then
+    /// writes the new state root into the reserved registry account
+    /// `gsx_dag_l2_registry` (per
+    /// `docs/iq/IQ-006-l2-state-root-commitment-surface.md`).
+    ///
+    /// **Phase 1 (this PR / G2.1)**: only the variant is added.
+    /// The verifier-precompile body lands in G2.2 (#97); until then
+    /// the arm is a stub that accepts the Intent without state effect.
+    CommitL2StateRoot {
+        /// Monotonic per-L2-chain batch identifier.
+        batch_id: u64,
+        /// EVM MPT root produced by the L2 STM after applying the
+        /// batch's tx list (per Open Item #8 EVM flip).
+        new_state_root: [u8; 32],
+        /// SP1 Groth16 BN254 proof bytes (~260 B). The L1 verifier
+        /// precompile validates this against `vk_hash` + the
+        /// chain-state `aggregation_vk_hash`.
+        proof_bytes: Vec<u8>,
+        /// Public inputs to the SP1 proof. Fixed-offset SSZ layout
+        /// (240 B) per Track G spec. Includes `prev_l2_state_root`,
+        /// `new_l2_state_root`, `batch_id`, `da_commitment`,
+        /// `l1_anchor_height`, `range_vk_commitment`,
+        /// `prev_l1_state_root`, `l2_chain_id_hash`,
+        /// `confidential_root` (Track H).
+        public_inputs: Vec<u8>,
+        /// SP1 verifying-key hash. Must equal the chain-state's
+        /// `aggregation_vk_hash` (rotatable via
+        /// `SetL2VerifyingKey`).
+        vk_hash: [u8; 32],
+    },
+    /// Rotate the L2 verifying keys via governance. Per op-succinct's
+    /// "multiBlockVKey" pattern, the L1 verifier expects:
+    /// - `aggregation_vk_hash`: the exact SP1 vkey the precompile
+    ///   verifies against
+    /// - `range_vk_commitment`: per-batch range-program VK commitment
+    ///   that the aggregation proof's public values embed
+    ///
+    /// Rotation lands at the next epoch boundary alongside other
+    /// governance Intents. Authority Ring quorum (≥ ⌈2n/3⌉+1) must
+    /// authorize the rotation via the standard governance path.
+    SetL2VerifyingKey {
+        /// New aggregation VK hash. Replaces the chain-state value
+        /// consulted by the verifier precompile.
+        new_aggregation_vk: [u8; 32],
+        /// New range-program VK commitment. Validated against the
+        /// embedded value in every subsequent aggregation proof's
+        /// public inputs.
+        new_range_commitment: [u8; 32],
+    },
 }
 
 /// The execution substrate API consumed by the block executor.
@@ -196,6 +249,20 @@ impl Substrate for InMemorySubstrate {
             Intent::AdmitAuthority { .. }
             | Intent::ExitAuthority { .. }
             | Intent::EjectAuthority { .. } => Ok(()),
+            // Track G Phase G2.1 (#96): L2 state-root commitment +
+            // verifying-key rotation. Phase 1 (variants added) — the
+            // verifier-precompile body lands in G2.2 (#97). Until
+            // then these are stub no-ops that accept the Intent so
+            // upstream RPC + daemon dispatch can be exercised.
+            //
+            // **Reserved address invariant**: the production handler
+            // in G2.2 will validate that the resulting state mutation
+            // targets the `gsx_dag_l2_registry` reserved address
+            // (BLAKE3("gsx-l2-registry-v1")[..20]) and reject any
+            // Intent that would mutate balances at that address by
+            // any other path. See `docs/iq/IQ-006-l2-state-root-
+            // commitment-surface.md` for the full design.
+            Intent::CommitL2StateRoot { .. } | Intent::SetL2VerifyingKey { .. } => Ok(()),
         }
     }
 
@@ -287,5 +354,44 @@ mod tests {
         });
         assert!(matches!(err, Err(ExecutionError::BalanceOverflow { .. })));
         assert_eq!(s.state_root(), before);
+    }
+
+    /// G2.1 stub: CommitL2StateRoot accepted; state unchanged until
+    /// G2.2 wires the verifier precompile + reserved registry account.
+    #[test]
+    fn commit_l2_state_root_stub_is_accepted() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 100)]);
+        let before = s.state_root();
+        let intent = Intent::CommitL2StateRoot {
+            batch_id: 0,
+            new_state_root: [0xab; 32],
+            proof_bytes: vec![0xcd; 260],
+            public_inputs: vec![0xef; 240],
+            vk_hash: [0x42; 32],
+        };
+        assert!(s.apply_intent(&intent).is_ok());
+        assert_eq!(
+            s.state_root(),
+            before,
+            "G2.1 stub MUST NOT mutate state; G2.2 wires the registry account"
+        );
+    }
+
+    /// G2.1 stub: SetL2VerifyingKey accepted; state unchanged until
+    /// G2.2 wires the chain-state VK registry.
+    #[test]
+    fn set_l2_verifying_key_stub_is_accepted() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 100)]);
+        let before = s.state_root();
+        let intent = Intent::SetL2VerifyingKey {
+            new_aggregation_vk: [0x11; 32],
+            new_range_commitment: [0x22; 32],
+        };
+        assert!(s.apply_intent(&intent).is_ok());
+        assert_eq!(
+            s.state_root(),
+            before,
+            "G2.1 stub MUST NOT mutate state; G2.2 wires the chain-state VK registry"
+        );
     }
 }

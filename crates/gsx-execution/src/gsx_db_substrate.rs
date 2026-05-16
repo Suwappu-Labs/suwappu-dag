@@ -142,6 +142,14 @@ impl Substrate for GsxDbSubstrate {
             Intent::AdmitAuthority { .. }
             | Intent::ExitAuthority { .. }
             | Intent::EjectAuthority { .. } => Ok(()),
+            // Track G Phase G2.1 (#96): L2 state-root commitment +
+            // verifying-key rotation. Stub no-op until G2.2 (#97)
+            // wires the verifier precompile + reserved registry-
+            // account. See `docs/iq/IQ-006-l2-state-root-commitment-
+            // surface.md` for the full design + the
+            // `gsx-l2-verifier-precompile` crate scaffold landing
+            // in G2.2.
+            Intent::CommitL2StateRoot { .. } | Intent::SetL2VerifyingKey { .. } => Ok(()),
         }
     }
 
