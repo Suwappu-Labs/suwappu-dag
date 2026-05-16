@@ -881,6 +881,7 @@ version = "0.1.0"
 dependencies = [
  "blst",
  "hex",
+ "hkdf",
  "pqcrypto-mldsa",
  "pqcrypto-mlkem",
  "pqcrypto-traits",

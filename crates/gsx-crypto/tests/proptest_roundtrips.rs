@@ -94,6 +94,37 @@ proptest! {
         prop_assert_eq!(hash::sha3_256(&data), hash::sha3_256(&data));
     }
 
+    /// HKDF-SHA3-256 is deterministic over arbitrary inputs.
+    /// Property: same (salt, ikm, info, out_len) ⇒ same bytes.
+    #[test]
+    fn hkdf_is_deterministic(
+        salt in prop::collection::vec(any::<u8>(), 0..256),
+        ikm in prop::collection::vec(any::<u8>(), 1..256),
+        info in prop::collection::vec(any::<u8>(), 0..128),
+        out_len in 1usize..=512,
+    ) {
+        let a = hash::hkdf_sha3_256(&salt, &ikm, &info, out_len);
+        let b = hash::hkdf_sha3_256(&salt, &ikm, &info, out_len);
+        prop_assert_eq!(a, b);
+    }
+
+    /// HKDF-SHA3-256 separates outputs by `info` label: different `info`
+    /// under the same `(salt, ikm)` produces independent bytes.
+    /// This is the security property Track H relies on for deriving
+    /// nullifier-key + viewing-seed + spend-seed from one root.
+    #[test]
+    fn hkdf_separates_by_info(
+        salt in prop::collection::vec(any::<u8>(), 0..64),
+        ikm in prop::collection::vec(any::<u8>(), 32..64),
+        info_a in prop::collection::vec(any::<u8>(), 1..32),
+        info_b in prop::collection::vec(any::<u8>(), 1..32),
+    ) {
+        prop_assume!(info_a != info_b);
+        let a = hash::hkdf_sha3_256(&salt, &ikm, &info_a, 32);
+        let b = hash::hkdf_sha3_256(&salt, &ikm, &info_b, 32);
+        prop_assert_ne!(a, b);
+    }
+
     /// Domain separation: swapping tag/data boundary changes the digest.
     /// We require the tag to be non-empty and a strict prefix of the joined
     /// stream, otherwise (e.g. tag is empty) the partition can be trivially

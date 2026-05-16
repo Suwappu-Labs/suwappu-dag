@@ -70,6 +70,7 @@ blst = "0.3"
 # Hash + symmetric
 sha3 = "0.10"
 blake3 = "1.5"
+hkdf = "0.12"
 
 # Erasure coding (RFC 6330) — gsx-transport block shred/reconstruct
 raptorq = "2.0"
