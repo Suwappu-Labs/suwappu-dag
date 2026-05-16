@@ -519,16 +519,219 @@ without first deploying the patched binary per § 6.
 
 ---
 
+## 10. Testnet operations
+
+Procedures §§ 1–9 above apply to the **devnet**. The **testnet**
+is structurally identical (same gsx-node binary, same systemd
+unit shape, same SSM access pattern), with these scale-up
+diffs:
+
+- **7 seed regions** instead of 4 (us-east-1, us-west-2,
+  eu-west-1, eu-central-1, ap-southeast-1, ap-northeast-1,
+  sa-east-1).
+- **Bigger instances** (`c7g.xlarge` not `t4g.medium`) +
+  **larger state volumes** (200 GB vs 50 GB).
+- **External validators** join via the points program — see
+  § 10.2 below.
+- **Validator-program EC2 + RDS** runs the points accumulator
+  daemon (forthcoming) — see § 10.3.
+- **DNS surface** is `*.testnet.gsx.globalsettlement.com`
+  (devnet uses `*.devnet.gsx.*`).
+- **Chain id 20251**, network_id `gsx-testnet-v1`.
+
+When a procedure from §§ 1–9 also applies to testnet, swap
+`devnet` → `testnet` in the paths + bucket names + the
+`scripts/devnet/` → `scripts/testnet/` references; everything
+else is identical.
+
+### 10.1 Bootstrap the testnet
+
+Same shape as § 1 with the per-region count + bucket names
+bumped up. Use `./scripts/testnet/deploy.sh apply` (not
+`./scripts/devnet/deploy.sh`); the wrapper enforces
+`BILLING_ALARM_EMAIL` + blocks destroy.
+
+```sh
+# 1. Generate genesis (7 validators + 1 faucet authority).
+./scripts/testnet/gen-genesis.py --out-dir ./target/testnet/keys
+
+# 2. First apply (creates buckets + EC2 + EBS + EIPs).
+BILLING_ALARM_EMAIL=ops@globalsettlement.com \
+  ./scripts/testnet/deploy.sh apply
+
+# 3. Upload binary + keys + genesis + prebalances to S3.
+BUCKET=gsx-dag-testnet-artifacts
+aws s3 cp ./bin/gsx-node              s3://$BUCKET/bin/gsx-node              --profile gsn
+aws s3 cp ./bin/gsx-faucet            s3://$BUCKET/bin/gsx-faucet            --profile gsn
+aws s3 sync ./target/testnet/keys/    s3://$BUCKET/keys/                     --profile gsn --exclude "faucet/mldsa.sk"
+aws s3 cp  ./target/testnet/keys/genesis.toml      s3://$BUCKET/genesis/genesis.toml      --profile gsn
+aws s3 cp  ./target/testnet/keys/prebalances.toml  s3://$BUCKET/genesis/prebalances.toml  --profile gsn
+aws secretsmanager put-secret-value \
+    --secret-id gsx-testnet/faucet/mldsa-secret-key \
+    --secret-binary fileb://./target/testnet/keys/faucet/mldsa.sk \
+    --profile gsn --region us-east-1
+
+# 4. Render + upload per-region node.toml (peer IPs known only
+#    after apply allocated EIPs).
+./scripts/testnet/render-configs.sh
+
+# 5. Restart bootstrap on each seed.
+./scripts/testnet/deploy.sh output -json validators \
+  | jq -r '.[].instance_id' \
+  | xargs -I {} aws ssm send-command --instance-ids {} \
+      --document-name AWS-RunShellScript \
+      --parameters 'commands=["systemctl restart gsx-bootstrap gsx-node"]' \
+      --profile gsn --region us-east-1
+
+# 6. Verify all 7 seeds via the public ALB.
+curl -fsS -X POST -H 'Content-Type: application/json' \
+     -d '{"jsonrpc":"2.0","id":1,"method":"gsx_getEpoch"}' \
+     https://rpc.testnet.gsx.globalsettlement.com/ | jq .
+
+# 7. Verify the faucet end-to-end.
+curl -fsS https://faucet.testnet.gsx.globalsettlement.com/health | jq .
+```
+
+After step 7 returns 200 with a sensible epoch, the testnet
+is serving external traffic.
+
+**Post-bootstrap one-time DNS step.** The testnet zone is in
+the gsn account; if `globalsettlement.com`'s apex zone lives
+in a different account, an operator must paste the
+`testnet_nameservers` output as NS records under the apex.
+See `terraform/testnet/dns.tf` for the output.
+
+### 10.2 Onboard an external validator operator
+
+The points program (Track B) accepts external operators after
+they apply + KYC. The flow:
+
+```sh
+# After foundation submits an AdmitAuthority governance Intent
+# for the new operator (admit assigns them an authority_id ≥ 8),
+# generate their scoped IAM credentials:
+./scripts/testnet/onboard-operator.sh <authority_id> <operator-label>
+
+# Example for authority_id=8, label=acme-validator-co:
+./scripts/testnet/onboard-operator.sh 8 acme-validator-co
+```
+
+The script:
+1. Creates IAM user `gsx-testnet-operator-acme-validator-co`.
+2. Attaches a policy scoped to `s3:PutObject` on exactly
+   `s3://gsx-dag-testnet-validator-uploads/uploads/8/*`.
+3. Generates an access-key + secret pair.
+4. Prints the credentials in a block to forward to the
+   operator out-of-band (Signal / 1Password secure share).
+
+Send the operator both the credentials AND the URL of
+[`docs/testnet/VALIDATOR-OPERATORS.md`](docs/testnet/VALIDATOR-OPERATORS.md)
+for their setup procedure.
+
+### 10.3 Deploy the points-accumulator daemon
+
+The daemon binary (`crates/gsx-validator-program/`) is a
+forthcoming PR. Once it lands + a tagged release publishes
+the binary, deploy via SSM:
+
+```sh
+PROGRAM_ID=$(./scripts/testnet/deploy.sh output -json validator_program | jq -r '.ec2_instance_id')
+
+aws ssm send-command --instance-ids $PROGRAM_ID \
+    --document-name AWS-RunShellScript \
+    --profile gsn --region us-east-1 \
+    --parameters 'commands=["
+      aws s3 cp s3://gsx-dag-testnet-artifacts/bin/gsx-validator-program /opt/gsx/gsx-validator-program
+      chmod +x /opt/gsx/gsx-validator-program
+      # Install + enable the systemd unit shipped alongside the binary.
+      systemctl daemon-reload
+      systemctl enable gsx-validator-program
+      systemctl start gsx-validator-program
+    "]'
+```
+
+Verify the leaderboard endpoint comes up:
+
+```sh
+curl -fsS https://program.testnet.gsx.globalsettlement.com/leaderboard | jq .
+```
+
+The `gsx-testnet-program-down` CloudWatch alarm switches from
+"missing-data" to "OK" within 5 minutes of the daemon
+responding.
+
+### 10.4 Quarterly testnet maintenance window
+
+The testnet allows scheduled re-genesis at most once per
+quarter, announced ≥ 14 days in advance via the status page +
+Discord. The maintenance procedure:
+
+1. **T−14 days**: post the maintenance window on the status
+   page + Discord `#announcements`. Include the expected
+   downtime window + the rationale + the rollback plan.
+2. **T−24 hours**: snapshot every state volume (§ 8) so the
+   pre-maintenance state is recoverable if the window goes bad.
+3. **T+0**: stop all 7 seed validators (`§ 9 emergency stop`).
+4. **T+0..T+1h**: re-generate genesis, upload the new
+   `genesis.toml` to S3, replace per-region node.toml files
+   (render-configs.sh).
+5. **T+1h**: restart the seeds in a coordinated wave; verify
+   the new chain head via the explorer.
+6. **T+2h**: status page returns to green; post the
+   "maintenance complete" notice.
+
+If the window slips past T+4h, escalate to a CEO/founder
+decision: extend the window vs. roll back to the pre-snapshot
+state. Default: roll back; missed deadlines hurt operator
+trust.
+
+### 10.5 Testnet tear-down (mainnet cutover)
+
+When mainnet launches, the testnet either (a) keeps running
+indefinitely as a parallel testing environment, or (b) is
+formally torn down. The team picks at TGE.
+
+If (b) — formal tear-down:
+
+1. Announce the tear-down date ≥ 90 days in advance. Operators
+   need time to wind down their dApps + extract any data they
+   want to keep.
+2. Export the points-accumulator RDS via `pg_dump` to S3 —
+   this is the canonical record of operator points that
+   converts to mainnet token.
+3. Snapshot every state volume one final time.
+4. Edit `terraform/testnet/modules/validator/main.tf` —
+   remove `prevent_destroy = true` on `aws_ebs_volume.state`.
+5. Edit `terraform/testnet/validator-program.tf` — set
+   `deletion_protection = false` on the RDS instance.
+6. `terraform apply` to update the lifecycle settings.
+7. `scripts/deploy-aws.sh destroy testnet`. (The deploy.sh
+   testnet-wrapper blocks this; bypass via the underlying
+   `scripts/deploy-aws.sh` directly.)
+
+This is deliberately painful. The testnet's chain history +
+points data are load-bearing for the TGE conversion; don't
+destroy them by accident.
+
+---
+
 ## See also
 
 - [`RELEASING.md`](RELEASING.md) — version bump + tag + Release
   workflow procedure.
 - [`DEVNET.md`](DEVNET.md) — what external developers see; what we
-  promise about devnet stability.
+  promise about devnet + testnet stability.
 - [`terraform/devnet/README.md`](terraform/devnet/README.md) —
-  infrastructure overview + apply prerequisites.
+  devnet infrastructure overview + apply prerequisites.
+- [`terraform/testnet/README.md`](terraform/testnet/README.md) —
+  testnet infrastructure overview.
 - [`docs/devnet/faucet-key-ceremony.md`](docs/devnet/faucet-key-ceremony.md) —
-  faucet-specific key handling.
+  faucet-specific key handling (applies to both devnet + testnet
+  faucets; they share the ceremony shape with distinct secrets).
+- [`docs/testnet/VALIDATOR-OPERATORS.md`](docs/testnet/VALIDATOR-OPERATORS.md) —
+  external operator onboarding flow.
+- [`docs/testnet/POINTS.md`](docs/testnet/POINTS.md) — points
+  formula contract.
 - `CONTRIBUTING.md` — how external developers report ops issues.
 - `SECURITY.md` — coordinated disclosure for security incidents
   (the part of § 6 that requires careful messaging).
