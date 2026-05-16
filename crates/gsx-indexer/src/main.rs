@@ -75,6 +75,30 @@ where
 {
     let store = Arc::new(store);
 
+    // F2 (A5 Phase 2): catch-up backfill before the live tail
+    // takes over, so the store is reconciled with the chain head
+    // even if the indexer was offline through some commits. Skipped
+    // when `rpc_url` is unset — operators can opt out by leaving the
+    // CLI flag off (the live tail then starts from whatever the WS
+    // emits, with any pre-startup gap going unfilled).
+    if let Some(rpc_url) = cfg.rpc_url.clone() {
+        info!(rpc_url = %rpc_url, "gsx-indexer: running startup backfill");
+        if let Err(e) = gsx_indexer::backfill::catch_up(
+            &*store,
+            &rpc_url,
+            gsx_indexer::backfill::DEFAULT_MAX_PER_ITER,
+        )
+        .await
+        {
+            warn!(error = %e, "gsx-indexer: backfill failed — continuing with live tail only");
+        }
+    } else {
+        info!(
+            "gsx-indexer: --rpc-url not set; skipping startup backfill. \
+             Pre-startup gaps will not be filled."
+        );
+    }
+
     // Subscriber task — runs forever, reconnects on disconnect.
     {
         let store = store.clone();

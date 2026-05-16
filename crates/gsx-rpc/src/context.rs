@@ -9,6 +9,13 @@
 use serde::{Deserialize, Serialize};
 
 /// Snapshot of the current epoch state.
+///
+/// Construct via `EpochView { … }` — fields are stable, but new fields
+/// may be appended in minor versions for forward-compat. SDK consumers
+/// that deserialize via serde_json silently ignore unknown fields;
+/// downstream code that constructs `EpochView` literals (rare; mostly
+/// internal tests + the daemon's rpc adapter) is the only thing
+/// affected by a field addition.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EpochView {
     /// Current epoch index (monotonic, increments at every boundary cross).
@@ -17,6 +24,13 @@ pub struct EpochView {
     pub last_boundary_round: u64,
     /// Rounds per epoch (constant across an epoch, set at genesis).
     pub rounds_per_epoch: u64,
+    /// Highest round that has been committed on this node (Mysticeti-C
+    /// direct or indirect commit; Skip rounds are not counted). Zero
+    /// if the daemon hasn't committed any block yet — the genesis
+    /// state. Used by indexers + explorers to find the chain head for
+    /// catch-up backfill without scanning rounds blindly.
+    #[serde(default)]
+    pub latest_committed_round: u64,
 }
 
 /// JSON-safe projection of an Authority Ring member.
@@ -111,6 +125,15 @@ pub struct BlockView {
     pub cert_hash: String,
     /// Ordered intents in this block. `[]` for empty blocks (governance-only).
     pub intents: Vec<IntentView>,
+    /// Per-intent transaction hashes in commit order (`0x`-prefixed
+    /// hex of `blake3(bincode(intent))`). Empty when the block has no
+    /// intents. Indexers + explorers join on this list; the live
+    /// EventView path carries the same values as `intent_hashes` (sans
+    /// `0x` prefix). Added with F2's indexer backfill so the
+    /// `gsx_getBlock` response is self-sufficient — no follow-up
+    /// `gsx_getTransaction` calls needed to enumerate a block's txs.
+    #[serde(default)]
+    pub tx_hashes: Vec<String>,
 }
 
 /// JSON-safe projection of a single emitted event (T6). The shape

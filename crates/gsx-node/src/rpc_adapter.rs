@@ -154,10 +154,20 @@ impl NodeStateView {
 impl StateView for NodeStateView {
     async fn epoch_snapshot(&self) -> EpochView {
         let inner = self.state.inner.lock().await;
+        // `blocks_by_round` is the canonical round-index of all
+        // committed blocks (direct + indirect). Highest key is the
+        // chain head; zero if nothing has committed yet.
+        let latest_committed_round = inner
+            .blocks_by_round
+            .keys()
+            .next_back()
+            .copied()
+            .unwrap_or(0);
         EpochView {
             current: inner.epoch.current,
             last_boundary_round: inner.epoch.last_boundary_round,
             rounds_per_epoch: inner.epoch.rounds_per_epoch,
+            latest_committed_round,
         }
     }
 
@@ -206,10 +216,25 @@ impl StateView for NodeStateView {
             let blocks = self.state.blocks.lock();
             blocks.get(&cert_hash).map(|b| b.intents.clone())
         }?;
+        // F2: recompute the per-intent blake3(bincode(intent)) hashes
+        // so the block view is self-sufficient for indexers. This
+        // matches the hash recipe used at commit time
+        // (daemon.rs::try_commit) but recomputes rather than storing
+        // — we don't need a per-block tx-hash list anywhere except
+        // here, and the recompute is cheap (~one bincode pass per
+        // intent, dwarfed by the I/O of returning the BlockView).
+        let tx_hashes: Vec<String> = block_intents
+            .iter()
+            .map(|i| {
+                let bytes = bincode::serialize(i).expect("intent serialize");
+                format!("0x{}", hex::encode(blake3::hash(&bytes).as_bytes()))
+            })
+            .collect();
         Some(BlockView {
             round,
             cert_hash: format!("0x{}", hex::encode(cert_hash.0)),
             intents: block_intents.iter().map(intent_to_view).collect(),
+            tx_hashes,
         })
     }
 

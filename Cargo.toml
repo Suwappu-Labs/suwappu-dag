@@ -53,6 +53,7 @@ gsx-transport = { path = "crates/gsx-transport" }
 gsx-rpc = { path = "crates/gsx-rpc" }
 gsx-indexer = { path = "crates/gsx-indexer" }
 gsx-mempool = { path = "crates/gsx-mempool" }
+gsx-client = { path = "clients/rust-sdk" }
 
 # Post-quantum primitives (FIPS 203 / 204)
 pqcrypto-mldsa = "0.1"

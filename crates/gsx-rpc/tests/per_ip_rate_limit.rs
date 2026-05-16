@@ -37,6 +37,7 @@ impl StateView for MockState {
             current: 0,
             last_boundary_round: 0,
             rounds_per_epoch: 1024,
+            latest_committed_round: 0,
         }
     }
     async fn authority_snapshot(&self) -> Vec<AuthorityMemberView> {

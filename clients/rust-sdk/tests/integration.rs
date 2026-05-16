@@ -168,6 +168,7 @@ async fn get_epoch_round_trip() {
             current: 7,
             last_boundary_round: 7168,
             rounds_per_epoch: 1024,
+            latest_committed_round: 0,
         }
     );
 }

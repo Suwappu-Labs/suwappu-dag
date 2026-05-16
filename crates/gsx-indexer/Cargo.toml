@@ -22,6 +22,13 @@ path = "src/main.rs"
 # shapes gsx-rpc returns. Zero glue code between RPC and indexer.
 gsx-rpc = { workspace = true }
 
+# F2 (A5 Phase 2): the indexer uses the Rust SDK as its JSON-RPC
+# client for startup catch-up backfill. The SDK already exposes
+# `get_epoch` (chain head) and `get_block(round)` with the right
+# error shapes for NotFound → None, so we don't re-roll HTTP plumbing
+# here.
+gsx-client = { workspace = true }
+
 # HTTP server (read API for explorer) and WebSocket client.
 axum = { version = "0.7", features = ["macros"] }
 tokio-tungstenite = { version = "0.21", default-features = false, features = ["connect"] }

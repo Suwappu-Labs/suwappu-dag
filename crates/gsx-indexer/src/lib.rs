@@ -39,6 +39,7 @@
 #![warn(missing_docs)]
 
 pub mod api;
+pub mod backfill;
 pub mod config;
 pub mod store;
 pub mod subscriber;
@@ -46,6 +47,7 @@ pub mod subscriber;
 #[cfg(feature = "postgres")]
 pub mod postgres;
 
+pub use backfill::catch_up;
 pub use config::IndexerConfig;
 #[cfg(feature = "postgres")]
 pub use postgres::PostgresStore;

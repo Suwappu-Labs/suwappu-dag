@@ -108,6 +108,7 @@ fn fixture() -> Arc<RpcContext<MockState>> {
         round: 42,
         cert_hash: cert_hex.clone(),
         intents: vec![transfer_view.clone()],
+        tx_hashes: vec![],
     };
     let mut blocks_by_round = std::collections::BTreeMap::new();
     blocks_by_round.insert(42u64, block_42);
@@ -128,6 +129,7 @@ fn fixture() -> Arc<RpcContext<MockState>> {
             current: 7,
             last_boundary_round: 7168,
             rounds_per_epoch: 1024,
+            latest_committed_round: 0,
         },
         authorities: vec![
             AuthorityMemberView {
@@ -741,6 +743,7 @@ async fn subscribe_events_delivers_to_multiple_subscribers() {
             current: 0,
             last_boundary_round: 0,
             rounds_per_epoch: 1024,
+            latest_committed_round: 0,
         },
         authorities: vec![],
         validators: vec![],
