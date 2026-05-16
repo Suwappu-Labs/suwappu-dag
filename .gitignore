@@ -39,3 +39,4 @@ terraform.tfvars.json
 # Local sprint state (allowed at root, ignored elsewhere)
 **/.sprint-state.md
 !/.sprint-state.md
+scripts/testnet/__pycache__/
