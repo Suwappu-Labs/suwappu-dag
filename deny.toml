@@ -27,6 +27,19 @@ ignore = [
     # https://github.com/rustls/pemfile/issues/61.
     # Re-check: when gsx-db releases v0.2.0.
     "RUSTSEC-2025-0134",
+    # `bincode` (the entire crate, all versions) is unmaintained. The
+    # advisory was filed against bincode 1.x and ALSO covers 2.x — F4
+    # (2026-05-16) migrated workspace-wide to 2.0.1 thinking the
+    # ignore could drop, but the advisory is project-scope, not
+    # version-scope ("the bincode team has taken the decision to cease
+    # development permanently"). No safe upgrade exists.
+    # Gate: workspace migration to one of the suggested alternatives
+    # (postcard, rkyv, bitcode). Each requires a wire-format hard fork
+    # plus a new IQ comparing throughput vs decode safety vs ergonomics.
+    # The F4 wire-frame version byte (`FRAME_VERSION_V1 = 0x01`) was
+    # added precisely to make this future migration detectable.
+    # Re-check: 2026-Q4.
+    "RUSTSEC-2025-0141",
 ]
 
 [licenses]

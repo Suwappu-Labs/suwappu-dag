@@ -1,7 +1,8 @@
 //! Client-facing intent submission protocol.
 //!
-//! Each validator binds [`NodeConfig::client_listen`] in parallel with its
-//! peer listen socket. External clients (typically `gsx-loadgen`) open a TCP
+//! Each validator binds [`crate::config::NodeConfig::client_listen`] in
+//! parallel with its peer listen socket. External clients (typically
+//! `gsx-loadgen`) open a TCP
 //! connection, length-prefixed bincode-frame their submissions, and receive
 //! per-intent acknowledgements.
 //!
@@ -114,7 +115,7 @@ pub enum ClientMessage {
         /// The intent to include.
         intent: Intent,
         /// ML-DSA-65 detached signature over
-        /// [`intent_signing_digest`](self::intent_signing_digest)`(network_id, &intent)`.
+        /// [`intent_signing_digest`]`(network_id, &intent)`.
         /// `Vec<u8>` rather than a fixed `[u8; 3309]` array for
         /// forward compatibility with future parameter sets.
         signature: Vec<u8>,

@@ -4,8 +4,13 @@
 code-only follow-up program).
 **Owner:** transport / node
 **Date:** 2026-05-16
-**Tracking:** F4 line item in the post-C4 code-only follow-up plan;
-closes the `RUSTSEC-2025-0141` cargo-deny exception.
+**Tracking:** F4 line item in the post-C4 code-only follow-up plan.
+**Note (2026-05-16 revision):** the F4 commit message originally
+claimed this closed `RUSTSEC-2025-0141`. That was wrong — the
+advisory covers the entire bincode crate (1.x AND 2.x; the project
+was discontinued, not just the 1.x branch), so the ignore stays in
+`deny.toml` until we migrate to one of the suggested alternatives
+(postcard, rkyv, bitcode). See `deny.toml` for the updated gate.
 
 ## Question
 
@@ -51,7 +56,10 @@ Per-PR scope:
    `Encode(codec::EncodeError)` and `Decode(codec::FrameDecodeError)`;
    the latter wraps `FrameDecodeError::UnknownVersion(u8)` so a
    pre-flip peer (or a malicious one) is surfaced cleanly.
-5. **`deny.toml`**: remove the `RUSTSEC-2025-0141` ignore.
+5. **`deny.toml`**: ~~remove the `RUSTSEC-2025-0141` ignore~~ —
+   reverted on 2026-05-16; the advisory covers all bincode versions
+   including 2.x. The ignore's rationale is updated to reflect the
+   actual project-wide unmaintained status.
 
 ## Constraints honored
 
