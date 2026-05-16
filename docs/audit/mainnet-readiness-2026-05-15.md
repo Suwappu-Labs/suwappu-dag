@@ -98,7 +98,7 @@ in workspace root). Three targets, weekly scheduled CI:
 
 | Target | Surface |
 |---|---|
-| `wire_decode` | `bincode::deserialize::<{WireMessage, ClientMessage}>` |
+| `wire_decode` | `gsx_node::codec::decode_frame::<{WireMessage, ClientMessage}>` (F4) |
 | `dag_insert` | `DagStore::insert` against bincode-decoded `Certificate` streams |
 | `decide_slot` | `gsx_consensus::decide_slot` over arbitrary DAG topologies (exercises IQ-004 multi-anchor scan) |
 
@@ -136,8 +136,12 @@ Remaining time-to-mainnet is concentrated in:
    initiated now that the post-Track-B surface is stable.
 4. **Public testnet** (12+ weeks minimum): genesis ceremony, operator
    recruitment, sustained 4-region 5k-TPS perf campaign.
-5. **bincode 2.x migration** (pre-mainnet blocker, separate sprint):
-   workspace-wide refactor of wire serialization.
+5. **bincode 2.x migration** (~~pre-mainnet blocker~~ — **shipped F4
+   on 2026-05-16**, see [IQ-005](../iq/IQ-005-bincode-2x-migration.md)).
+   Workspace flipped to bincode 2.x with `config::legacy()` for byte
+   parity; 1-byte wire-frame version marker (`FRAME_VERSION_V1`)
+   added so future codec flips are detectable. `RUSTSEC-2025-0141`
+   ignore removed from `deny.toml`.
 
 ## 7. References
 
@@ -183,18 +187,29 @@ QRL Zond, Naoris).
 
 ## 8. Open items / known unknowns
 
-- **Per-IP JSON-RPC rate limit** — pre-wired `-32099` code but no
-  middleware emits yet. Tracked as B2.1.
-- **Indexer backfill** — Postgres adapter is live but doesn't pull
-  `gsx_getBlock` for the gap between last persisted round and chain
-  head on restart. Tracked as A5 Phase-2.
-- **bincode 2.x migration** — workspace-wide; pre-mainnet blocker;
-  Re-check 2026-Q3 per `deny.toml`.
-- **`phase_g_admit_and_eject` flake** — stage-2 lagging-node failure
-  observed at ~3% rate even after A1's IQ-004 fix. Likely a separate
-  round-driver tail-latency issue independent of IQ-004 — needs its
-  own diagnostic + fix. Tracked as a follow-up under B1's hardening
-  posture (slow-node containment).
+- ~~**Per-IP JSON-RPC rate limit**~~ — **shipped F1 on 2026-05-15**
+  ([PR #67](https://github.com/GlobalSettlementNetwork/gsx-dag/pull/67)):
+  `PerIpRateLimiter` reuses `gsx_mempool::LeakyBucket`; defaults
+  60 burst / 10 req/s per IP; emits `RpcError::RateLimited`
+  (`-32099`) inside a JSON-RPC envelope.
+- ~~**Indexer backfill**~~ — **shipped F2 on 2026-05-15**
+  ([PR #68](https://github.com/GlobalSettlementNetwork/gsx-dag/pull/68)):
+  `gsx_indexer::backfill::catch_up` walks `gsx_getBlock` from
+  `Store::latest_round()` to the new `EpochView.latest_committed_round`
+  chain-head field; idempotent against existing rows.
+- ~~**bincode 2.x migration**~~ — **shipped F4 on 2026-05-16**
+  (this audit's IQ-005). Workspace flipped to bincode 2.x with
+  `config::legacy()` for byte parity; 1-byte
+  `FRAME_VERSION_V1 = 0x01` marker prepended to wire-going frames
+  so future codec flips fail-fast on
+  `FrameDecodeError::UnknownVersion`.
+- **`phase_g_admit_and_eject` flake** — F3 (shipped 2026-05-15,
+  [PR #69](https://github.com/GlobalSettlementNetwork/gsx-dag/pull/69))
+  added a 30-second pre-convergence propagation probe that
+  bisects the flake into propagation-class vs boundary-drain
+  class. The structural fix (cert-broadcast retry on orphan-pull
+  path, or a CI-only round-barrier) is gated on CI data once
+  the new diagnostic ships.
 - **External security audit** — not initiated. Recommend kickoff
   once Track C ships (devnet + examples + governance docs) so an
   auditor has the full public-facing surface to review.

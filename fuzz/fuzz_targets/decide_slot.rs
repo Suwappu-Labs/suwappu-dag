@@ -44,7 +44,9 @@ fuzz_target!(|bytes: &[u8]| {
         }
         let chunk = &body[cursor..cursor + len];
         cursor += len;
-        if let Ok(cert) = bincode::deserialize::<Certificate>(chunk) {
+        if let Ok((cert, _)) =
+            bincode::serde::decode_from_slice::<Certificate, _>(chunk, bincode::config::legacy())
+        {
             let _ = dag.insert(cert);
         }
     }

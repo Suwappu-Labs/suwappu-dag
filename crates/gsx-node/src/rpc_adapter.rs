@@ -226,7 +226,7 @@ impl StateView for NodeStateView {
         let tx_hashes: Vec<String> = block_intents
             .iter()
             .map(|i| {
-                let bytes = bincode::serialize(i).expect("intent serialize");
+                let bytes = crate::codec::encode(i).expect("intent serialize");
                 format!("0x{}", hex::encode(blake3::hash(&bytes).as_bytes()))
             })
             .collect();
@@ -270,7 +270,7 @@ impl StateView for NodeStateView {
         // 1. Decode the bincode-serialized Intent. SDK clients build
         //    this exact form before signing, so we can reuse the same
         //    bytes for both the digest and the channel send.
-        let intent: Intent = bincode::deserialize(&intent_bincode)
+        let intent: Intent = crate::codec::decode(&intent_bincode)
             .map_err(|e| SubmitIntentError::BadIntentEncoding(e.to_string()))?;
 
         // 2. Verify the signature using the same gate the TCP wire uses.

@@ -89,7 +89,7 @@ pub const INTENT_DOMAIN_TAG: &[u8] = b"GSX_INTENT_V1";
 /// Both submitter and verifier MUST compute the digest the same way;
 /// any divergence rejects every signature.
 pub fn intent_signing_digest(network_id: &str, intent: &Intent) -> [u8; 32] {
-    let intent_bytes = bincode::serialize(intent).expect("intent serialize");
+    let intent_bytes = crate::codec::encode(intent).expect("intent serialize");
     let mut hasher = blake3::Hasher::new();
     hasher.update(INTENT_DOMAIN_TAG);
     hasher.update(network_id.as_bytes());
@@ -404,7 +404,7 @@ async fn handle_conn(
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
             Err(e) => return Err(e),
         };
-        let msg: ClientMessage = match bincode::deserialize(&bytes) {
+        let msg: ClientMessage = match crate::codec::decode_frame(&bytes) {
             Ok(m) => m,
             Err(e) => {
                 let resp = ClientResponse::Err(format!("decode: {}", e));
@@ -442,7 +442,7 @@ async fn handle_conn(
                     }
                 }
                 let intent_hash: [u8; 32] =
-                    blake3::hash(&bincode::serialize(&intent).expect("intent serialize")).into();
+                    blake3::hash(&crate::codec::encode(&intent).expect("intent serialize")).into();
                 match state.mempool.submit(
                     intent,
                     DEFAULT_INTENT_PRIORITY,
@@ -512,7 +512,7 @@ async fn handle_conn(
                 let mut hashes: Vec<[u8; 32]> = Vec::with_capacity(intents.len());
                 for intent in intents {
                     let intent_hash: [u8; 32] =
-                        blake3::hash(&bincode::serialize(&intent).expect("intent serialize"))
+                        blake3::hash(&crate::codec::encode(&intent).expect("intent serialize"))
                             .into();
                     match state.mempool.submit(
                         intent,
@@ -596,7 +596,7 @@ async fn read_frame_with_timeout(
 }
 
 async fn write_response(stream: &mut TcpStream, resp: &ClientResponse) -> io::Result<()> {
-    let bytes = bincode::serialize(resp)
+    let bytes = crate::codec::encode_frame(resp)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
     let len = (bytes.len() as u32).to_be_bytes();
     stream.write_all(&len).await?;
@@ -653,7 +653,7 @@ impl LoadGenClient {
             signature: signature.as_bytes().to_vec(),
             signer_pubkey_hash: pkh,
         };
-        let bytes = bincode::serialize(&msg)
+        let bytes = crate::codec::encode_frame(&msg)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
         let len = (bytes.len() as u32).to_be_bytes();
         self.stream.write_all(&len).await?;
@@ -661,7 +661,7 @@ impl LoadGenClient {
         self.stream.flush().await?;
 
         let resp_bytes = read_frame(&mut self.stream).await?;
-        let resp: ClientResponse = bincode::deserialize(&resp_bytes)
+        let resp: ClientResponse = crate::codec::decode_frame(&resp_bytes)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
         match resp {
             ClientResponse::Ack { intent_hash } => Ok(intent_hash),
@@ -691,7 +691,7 @@ impl LoadGenClient {
             signatures,
             signer_pubkey_hash: pkh,
         };
-        let bytes = bincode::serialize(&msg)
+        let bytes = crate::codec::encode_frame(&msg)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
         let len = (bytes.len() as u32).to_be_bytes();
         self.stream.write_all(&len).await?;
@@ -699,7 +699,7 @@ impl LoadGenClient {
         self.stream.flush().await?;
 
         let resp_bytes = read_frame(&mut self.stream).await?;
-        let resp: ClientResponse = bincode::deserialize(&resp_bytes)
+        let resp: ClientResponse = crate::codec::decode_frame(&resp_bytes)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
         match resp {
             ClientResponse::AckBatch { intent_hashes } => Ok(intent_hashes),
@@ -777,7 +777,7 @@ mod tests {
             amount: 0,
         };
         let network_id = "n";
-        let intent_bytes = bincode::serialize(&intent).unwrap();
+        let intent_bytes = crate::codec::encode(&intent).unwrap();
         let mut h = blake3::Hasher::new();
         h.update(b"GSX_INTENT_V1");
         h.update(network_id.as_bytes());

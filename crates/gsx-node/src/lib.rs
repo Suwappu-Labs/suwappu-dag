@@ -8,6 +8,7 @@
 #![warn(missing_docs)]
 
 pub mod client;
+pub mod codec;
 pub mod config;
 pub mod daemon;
 pub mod events;

@@ -137,9 +137,13 @@ pub enum WireError {
     /// Underlying I/O failure on a TCP socket.
     #[error("io: {0}")]
     Io(#[from] io::Error),
-    /// bincode serialization or deserialization failure.
-    #[error("codec: {0}")]
-    Codec(#[from] bincode::Error),
+    /// bincode encode failure (outbound path).
+    #[error("encode: {0}")]
+    Encode(#[from] crate::codec::EncodeError),
+    /// bincode decode failure (inbound path), including
+    /// version-byte mismatch on the F4 framed payload.
+    #[error("decode: {0}")]
+    Decode(#[from] crate::codec::FrameDecodeError),
     /// Frame size exceeded [`MAX_FRAME_BYTES`].
     #[error("frame too large: {0} bytes")]
     FrameTooLarge(usize),
@@ -341,7 +345,7 @@ async fn read_loop(
     remote_addr: SocketAddr,
 ) -> Result<(), WireError> {
     let hello = read_frame(&mut stream).await?;
-    let from: PeerId = bincode::deserialize(&hello)?;
+    let from: PeerId = crate::codec::decode_frame(&hello)?;
     debug!(peer = %from.0, addr = %remote_addr, "wire: hello");
 
     let inbound_tx = match inbound_txs.get(&from) {
@@ -354,7 +358,7 @@ async fn read_loop(
 
     loop {
         let bytes = read_frame(&mut stream).await?;
-        let msg: WireMessage = bincode::deserialize(&bytes)?;
+        let msg: WireMessage = crate::codec::decode_frame(&bytes)?;
         // B3 hardening: per-variant size cap. `Block` carries up to
         // ~1100 intents in the perf testnet's peak, so the cap
         // sits at `MAX_FRAME_BYTES` (1 MiB). Compact variants
@@ -431,7 +435,7 @@ async fn dialer_loop(
                 backoff_ms = RECONNECT_MIN_MS;
 
                 // Send hello first so the peer can label inbound frames.
-                let hello_bytes = match bincode::serialize(&self_id) {
+                let hello_bytes = match crate::codec::encode_frame(&self_id) {
                     Ok(b) => b,
                     Err(e) => {
                         warn!(err = %e, "wire: hello serialize");
@@ -445,7 +449,7 @@ async fn dialer_loop(
 
                 // Drain any queued send from before the connection landed.
                 if let Some(msg) = pending.write().await.take() {
-                    if let Ok(bytes) = bincode::serialize(&msg) {
+                    if let Ok(bytes) = crate::codec::encode_frame(&msg) {
                         let _ = write_frame(&mut stream, &bytes).await;
                     }
                 }
@@ -453,7 +457,7 @@ async fn dialer_loop(
                 // Steady-state: pull from channel, write frame.
                 loop {
                     match rx.recv().await {
-                        Some(msg) => match bincode::serialize(&msg) {
+                        Some(msg) => match crate::codec::encode_frame(&msg) {
                             Ok(bytes) => {
                                 if let Err(e) = write_frame(&mut stream, &bytes).await {
                                     warn!(peer = %peer.0, err = %e, "wire: send failed");

@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-bincode = "1"
+bincode = { version = "2", features = ["serde", "std"], default-features = false }
 
 # Workspace crates under test. Pull only what each fuzz target needs.
 gsx-node = { path = "../crates/gsx-node" }

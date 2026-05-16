@@ -27,15 +27,6 @@ ignore = [
     # https://github.com/rustls/pemfile/issues/61.
     # Re-check: when gsx-db releases v0.2.0.
     "RUSTSEC-2025-0134",
-    # `bincode 1.x` is unmaintained — upstream moved to 2.x with a
-    # different API. We use 1.3 across the workspace for wire framing.
-    # No CVE.
-    # Gate: workspace-wide migration to bincode 2.x (~2 sprints of
-    # test-fixture rewrites; every Certificate, WireMessage,
-    # ClientMessage, EventView serialization is bincode-1 today).
-    # Pre-mainnet blocker but post-Track-C work.
-    # Re-check: 2026-Q3 alongside the bincode 2.x migration sprint.
-    "RUSTSEC-2025-0141",
 ]
 
 [licenses]

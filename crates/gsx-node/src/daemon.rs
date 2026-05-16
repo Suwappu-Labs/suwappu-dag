@@ -1197,7 +1197,7 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
             let intent_hash_bytes: Vec<[u8; 32]> = intents
                 .iter()
                 .map(|i| {
-                    let bytes = bincode::serialize(i).expect("intent serialize");
+                    let bytes = crate::codec::encode(i).expect("intent serialize");
                     *blake3::hash(&bytes).as_bytes()
                 })
                 .collect();
@@ -1341,7 +1341,7 @@ fn intent_to_main_lane_tx(intent: &Intent, round: Round, lineage: CertHash) -> O
         Intent::Transfer { from, to, amount } => {
             let mut object_bytes = [0u8; 32];
             object_bytes[..from.len()].copy_from_slice(from);
-            let payload_bytes = bincode::serialize(&(to, amount)).ok()?;
+            let payload_bytes = crate::codec::encode(&(to, amount)).ok()?;
             let payload_digest: [u8; 32] = blake3::hash(&payload_bytes).into();
             Some(MainLaneTx {
                 round,
@@ -1582,7 +1582,7 @@ async fn run_round_driver(
         let intents: Vec<gsx_execution::Intent> =
             state.mempool.drain_for_block(MAX_INTENTS_PER_BLOCK);
         let payload_digest: [u8; 32] =
-            blake3::hash(&bincode::serialize(&intents).expect("intents serialize")).into();
+            blake3::hash(&crate::codec::encode(&intents).expect("intents serialize")).into();
         let cert = Certificate {
             author: self_id,
             round: target_round,
@@ -1599,7 +1599,7 @@ async fn run_round_driver(
         // `blocks_by_round` and `tx_to_block`.
         let intent_hash_bytes: Vec<[u8; 32]> = intents
             .iter()
-            .map(|i| *blake3::hash(&bincode::serialize(i).expect("intent serialize")).as_bytes())
+            .map(|i| *blake3::hash(&crate::codec::encode(i).expect("intent serialize")).as_bytes())
             .collect();
 
         let block = BlockPayload {
@@ -2465,7 +2465,7 @@ mod tests {
         async fn round_trip(addr: SocketAddr, msg: &ClientMessage) -> ClientResponse {
             let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
             let _ = s.set_nodelay(true);
-            let bytes = bincode::serialize(msg).unwrap();
+            let bytes = crate::codec::encode_frame(msg).unwrap();
             let len = (bytes.len() as u32).to_be_bytes();
             s.write_all(&len).await.unwrap();
             s.write_all(&bytes).await.unwrap();
@@ -2475,7 +2475,7 @@ mod tests {
             let n = u32::from_be_bytes(len_buf) as usize;
             let mut buf = vec![0u8; n];
             s.read_exact(&mut buf).await.unwrap();
-            bincode::deserialize(&buf).unwrap()
+            crate::codec::decode_frame(&buf).unwrap()
         }
 
         // ----- Case 1: properly-signed intent → Ack + lands in block.
@@ -3096,7 +3096,7 @@ mod tests {
         // either is correct.
         let intent_hashes: Vec<[u8; 32]> = intents
             .iter()
-            .map(|i| *blake3::hash(&bincode::serialize(i).unwrap()).as_bytes())
+            .map(|i| *blake3::hash(&crate::codec::encode(i).unwrap()).as_bytes())
             .collect();
         let mut found = false;
         for _ in 0..30 {
@@ -3128,7 +3128,7 @@ mod tests {
             let block = blocks
                 .get(&cert_hash)
                 .expect("cert hash from tx_to_block must resolve in state.blocks");
-            let stored = bincode::serialize(&block.intents[idx]).unwrap();
+            let stored = crate::codec::encode(&block.intents[idx]).unwrap();
             let stored_hash: [u8; 32] = *blake3::hash(&stored).as_bytes();
             assert_eq!(
                 &stored_hash, h,
@@ -3195,7 +3195,7 @@ mod tests {
             to: [2u8; 20],
             amount: 42,
         };
-        let intent_bincode = bincode::serialize(&intent).unwrap();
+        let intent_bincode = crate::codec::encode(&intent).unwrap();
         let digest = intent_signing_digest(&network_id, &intent);
         let signature = gsx_crypto::mldsa::sign(&digest, &sk).unwrap();
         let pkh = signer_pubkey_hash(pk.as_bytes());
@@ -3306,7 +3306,7 @@ mod tests {
             to: [4u8; 20],
             amount: 7,
         };
-        let intent_bincode = bincode::serialize(&intent).unwrap();
+        let intent_bincode = crate::codec::encode(&intent).unwrap();
         let body = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,

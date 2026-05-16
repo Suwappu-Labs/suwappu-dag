@@ -150,8 +150,13 @@ impl Mempool {
         peer: Option<String>,
         now_ms: u64,
     ) -> Result<IntentHash, MempoolError> {
-        // 1. Canonical hash up front, before taking the lock.
-        let bytes = bincode::serialize(&intent).map_err(|e| MempoolError::Encode(e.to_string()))?;
+        // 1. Canonical hash up front, before taking the lock. The
+        //    bincode config here MUST match the rest of gsx-node's
+        //    intent serialization (`gsx_node::codec::encode`) so the
+        //    hash matches what the wire path computes; `legacy()`
+        //    config preserves bincode-1.x byte layout.
+        let bytes = bincode::serde::encode_to_vec(&intent, bincode::config::legacy())
+            .map_err(|e| MempoolError::Encode(e.to_string()))?;
         let hash: IntentHash = *blake3::hash(&bytes).as_bytes();
 
         let mut inner = self.inner.lock().unwrap();
