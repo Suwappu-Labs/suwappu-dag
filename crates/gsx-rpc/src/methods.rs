@@ -2,7 +2,7 @@
 //!
 //! Each method is an async free function over a generic `StateView`.
 //! The router maps method-name strings to dispatch functions in
-//! [`crate::router`]; method bodies stay focused on snapshot →
+//! [`crate::router()`]; method bodies stay focused on snapshot →
 //! `serde_json::Value`.
 
 use serde::Deserialize;

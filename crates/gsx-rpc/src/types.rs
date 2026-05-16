@@ -1,6 +1,6 @@
 //! JSON-RPC 2.0 wire types.
 //!
-//! Minimal subset of the spec (https://www.jsonrpc.org/specification):
+//! Minimal subset of the spec (<https://www.jsonrpc.org/specification>):
 //! single requests/responses only, no batch, no notifications.
 
 use serde::{Deserialize, Serialize};
