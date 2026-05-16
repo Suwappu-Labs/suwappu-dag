@@ -16,10 +16,12 @@ bun add @gsx/client
 
 ## Quick start
 
+Against the public hosted devnet:
+
 ```ts
 import { Client } from "@gsx/client";
 
-const client = new Client("http://127.0.0.1:9092");
+const client = new Client("https://rpc.devnet.gsx.globalsettlement.com");
 
 const epoch = await client.getEpoch();
 console.log(`epoch=${epoch.current} rounds_per_epoch=${epoch.rounds_per_epoch}`);

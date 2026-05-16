@@ -1,4 +1,102 @@
-# Local devnet — quickstart
+# Devnet — quickstart
+
+Two ways to develop against gsx-dag:
+
+1. **Use the public hosted devnet** (recommended for most devs).
+   No setup; point your SDK at a stable URL; ask the faucet for
+   test tokens. See [§ Public devnet](#public-devnet) below.
+2. **Run a local 4-node cluster on your laptop**. One docker-compose
+   command. See [§ Local devnet](#local-devnet) below.
+
+Use the **public devnet** unless you need to test changes to the
+validator itself.
+
+For mainnet operator procedures, see
+[`docs/architecture/governance-phasing.md`](docs/architecture/governance-phasing.md).
+
+---
+
+## Public devnet
+
+| Endpoint | URL |
+|---|---|
+| JSON-RPC | `https://rpc.devnet.gsx.globalsettlement.com` |
+| WebSocket subscribe | `wss://ws.devnet.gsx.globalsettlement.com/ws` |
+| Faucet (POST `/faucet { address }`) | `https://faucet.devnet.gsx.globalsettlement.com` |
+| Block explorer | `https://explorer.devnet.gsx.globalsettlement.com` *(G7, coming soon)* |
+| Status page | `https://status.devnet.gsx.globalsettlement.com` *(G8, coming soon)* |
+
+| Network | |
+|---|---|
+| `network_id` | `gsx-devnet` |
+| `chain_id` | `2025` |
+| Validators | 4 (us-east-1, eu-west-1, ap-southeast-1, sa-east-1) |
+| Faucet drip | 100 GSX, max 5 drips/hour per IP |
+| Wipe policy | State persists across patch releases; minor-version bumps regenesis (rare) |
+
+### Submit your first transaction
+
+```sh
+# 1. Pick a fresh address (or use one derived from your test
+#    ML-DSA-65 keypair — see examples/rust/submit_transfer.rs).
+ADDR="0x$(openssl rand -hex 20)"
+
+# 2. Ask the faucet for tokens.
+curl -X POST -H 'Content-Type: application/json' \
+     -d "{\"address\":\"$ADDR\"}" \
+     https://faucet.devnet.gsx.globalsettlement.com/faucet
+
+# 3. Confirm the balance landed (wait a few seconds for commit).
+sleep 5
+curl -X POST -H 'Content-Type: application/json' \
+     -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"gsx_getBalance\",\"params\":{\"address\":\"$ADDR\"}}" \
+     https://rpc.devnet.gsx.globalsettlement.com/
+```
+
+### SDKs
+
+Both SDKs work against the public devnet out of the box:
+
+```rust
+// Rust SDK
+let client = gsx_client::Client::new("https://rpc.devnet.gsx.globalsettlement.com");
+```
+
+```ts
+// TypeScript SDK
+import { Client } from "@gsx/client";
+const client = new Client("https://rpc.devnet.gsx.globalsettlement.com");
+```
+
+See [`examples/rust/`](examples/rust/) +
+[`examples/typescript/`](examples/typescript/) for end-to-end
+examples (submit a transfer, watch the commit, look up the
+transaction).
+
+### What we promise about stability
+
+- **Patch releases** (e.g. `0.1.0` → `0.1.1`): no wipe. Your
+  transactions stay queryable.
+- **Minor releases** (e.g. `0.1` → `0.2`): may include a
+  regenesis. Announced ≥ 7 days in advance on the status page +
+  Discord.
+- **API surface**: semver with 0.x carve-outs — see the stability
+  promise in [`clients/rust-sdk/src/lib.rs`](clients/rust-sdk/src/lib.rs).
+  Method signatures stable within a minor version; new methods +
+  `#[non_exhaustive]` enum variants may appear between minor
+  versions.
+
+### Trust posture
+
+This is a **devnet** — tokens have $0 economic security. Per-IP
+faucet rate limit caps the worst spam; no anti-sybil beyond that.
+Do NOT use addresses derived from your mainnet wallet here; the
+`chain_id = 2025` is replay-protective in any well-written SDK,
+but defense in depth is cheaper.
+
+---
+
+## Local devnet
 
 A four-validator gsx-dag cluster on your laptop in one command.
 
@@ -6,8 +104,7 @@ This guide is for developers who want to **try the chain**: spin
 nodes up, submit a transaction, see it commit, query state. It is
 **not** how a mainnet validator is operated — keys are placeholders,
 all four nodes share a host, and the network is closed to the
-host's loopback. For mainnet operator procedures, see
-[`docs/architecture/governance-phasing.md`](docs/architecture/governance-phasing.md).
+host's loopback.
 
 ## Prerequisites
 

@@ -38,9 +38,11 @@
 //!
 //! ## Quick start
 //!
+//! Point at the public hosted devnet:
+//!
 //! ```no_run
 //! # async fn doc() -> Result<(), gsx_client::Error> {
-//! let client = gsx_client::Client::new("http://127.0.0.1:9092");
+//! let client = gsx_client::Client::new("https://rpc.devnet.gsx.globalsettlement.com");
 //! let epoch = client.get_epoch().await?;
 //! println!(
 //!     "epoch={} rounds_per_epoch={} last_boundary_round={}",
@@ -49,6 +51,9 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! Or against a local 4-node devnet
+//! (`./scripts/devnet-local.sh up`): `Client::new("http://127.0.0.1:9092")`.
 //!
 //! Construction returns `Client` directly (no `Result`) — TCP reachability
 //! is deferred to the first method call, which surfaces transport errors

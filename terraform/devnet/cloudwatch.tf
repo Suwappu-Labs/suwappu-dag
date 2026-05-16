@@ -118,14 +118,15 @@ resource "aws_cloudwatch_metric_alarm" "silent_peer" {
   ok_actions    = [aws_sns_topic.ops_pages.arn]
 }
 
-# Faucet liveness via Route53 health check on the faucet EIP. Pre-G2
-# (no DNS yet) the health check targets the EIP directly; G2 will
-# re-aim it at `faucet.devnet.gsx.globalsettlement.com`.
+# G2 — faucet liveness via Route53 HTTPS health check on the DNS
+# name. Uses the wildcard ACM cert + the faucet ALB. Pre-G2 this
+# pointed at the raw EIP:8080; post-G2 it follows the same DNS
+# path external devs use.
 resource "aws_route53_health_check" "faucet" {
   provider          = aws.us_east_1
-  ip_address        = aws_eip.faucet.public_ip
-  port              = 8080
-  type              = "HTTP"
+  fqdn              = "faucet.${var.devnet_subdomain}.${var.apex_domain}"
+  port              = 443
+  type              = "HTTPS"
   resource_path     = "/health"
   request_interval  = 30
   failure_threshold = 3

@@ -42,11 +42,22 @@ output "billing_alarm_topic_arn" {
 }
 
 output "faucet" {
-  description = "Faucet handle. public_ip is the EIP; ALB + DNS land in G2."
+  description = "Faucet handle. public_ip is the EIP behind the ALB; faucet_url is the DNS-fronted endpoint external devs hit."
   value = {
     public_ip   = aws_eip.faucet.public_ip
     instance_id = aws_instance.faucet.id
     secret_arn  = aws_secretsmanager_secret.faucet_sk.arn
     vpc_id      = aws_vpc.faucet.id
+  }
+}
+
+output "public_urls" {
+  description = "Externally-reachable URLs for the devnet. SDKs + DEVNET.md docs use these as the canonical reference."
+  value = {
+    rpc      = "https://rpc.${var.devnet_subdomain}.${var.apex_domain}"
+    ws       = "wss://ws.${var.devnet_subdomain}.${var.apex_domain}/ws"
+    faucet   = "https://faucet.${var.devnet_subdomain}.${var.apex_domain}"
+    explorer = "https://explorer.${var.devnet_subdomain}.${var.apex_domain}"
+    status   = "https://status.${var.devnet_subdomain}.${var.apex_domain}"
   }
 }

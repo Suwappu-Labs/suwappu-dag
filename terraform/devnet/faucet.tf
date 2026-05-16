@@ -203,12 +203,12 @@ resource "aws_instance" "faucet" {
     artifact_bucket = aws_s3_bucket.artifacts.id
     secret_arn      = aws_secretsmanager_secret.faucet_sk.arn
     network_id      = var.network_id
-    # When the team is ready to point the faucet at the live RPC
-    # URL, replace this with `https://rpc.devnet.gsx.globalsettlement.com`.
-    # Pre-G2 (no DNS yet), the faucet talks to the us-east-1
-    # validator's public IP directly. G2's apply will re-render
-    # this value via a terraform variable + restart.
-    rpc_url = "http://${module.us_east_1.public_ip}:${var.rpc_port}"
+    # G2: faucet talks to the validator mesh via the public RPC
+    # DNS name (behind the ALB). The faucet's own per-IP rate
+    # limit is OK to count itself among the IPs the validator
+    # sees — the bucket capacity is generous enough that a few
+    # drips/minute don't saturate it.
+    rpc_url = "https://rpc.${var.devnet_subdomain}.${var.apex_domain}"
   })
 
   tags = {
