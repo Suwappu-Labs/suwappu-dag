@@ -71,3 +71,25 @@ output "billing_alarm_topic_arn" {
   description = "SNS topic ARN that receives billing-cap alarms."
   value       = aws_sns_topic.billing_alarm.arn
 }
+
+output "faucet" {
+  description = "Faucet handle. public_ip is the EIP behind the ALB; the public URL is faucet.testnet.gsx.globalsettlement.com."
+  value = {
+    public_ip   = aws_eip.faucet.public_ip
+    instance_id = aws_instance.faucet.id
+    secret_arn  = aws_secretsmanager_secret.faucet_sk.arn
+    vpc_id      = aws_vpc.faucet.id
+  }
+}
+
+output "public_urls" {
+  description = "Externally-reachable URLs for the testnet. SDKs + dApp examples + docs use these as the canonical reference."
+  value = {
+    rpc      = "https://rpc.${var.testnet_subdomain}.${var.apex_domain}"
+    ws       = "wss://ws.${var.testnet_subdomain}.${var.apex_domain}/ws"
+    faucet   = "https://faucet.${var.testnet_subdomain}.${var.apex_domain}"
+    program  = "https://program.${var.testnet_subdomain}.${var.apex_domain}"
+    explorer = "https://explorer.${var.testnet_subdomain}.${var.apex_domain}"
+    status   = "https://status.${var.testnet_subdomain}.${var.apex_domain}"
+  }
+}
