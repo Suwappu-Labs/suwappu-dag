@@ -23,8 +23,8 @@ For mainnet operator procedures, see
 | JSON-RPC | `https://rpc.devnet.gsx.globalsettlement.com` |
 | WebSocket subscribe | `wss://ws.devnet.gsx.globalsettlement.com/ws` |
 | Faucet (POST `/faucet { address }`) | `https://faucet.devnet.gsx.globalsettlement.com` |
-| Block explorer | `https://explorer.devnet.gsx.globalsettlement.com` *(G7, coming soon)* |
-| Status page | `https://status.devnet.gsx.globalsettlement.com` *(G8, coming soon)* |
+| Block explorer | `https://explorer.devnet.gsx.globalsettlement.com` |
+| Status page | `https://status.devnet.gsx.globalsettlement.com` |
 
 | Network | |
 |---|---|

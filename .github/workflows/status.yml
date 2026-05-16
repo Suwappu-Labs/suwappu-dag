@@ -1,0 +1,82 @@
+name: status-page
+
+# Deploy the gsx-devnet status page on every push to main that
+# touches it. The page is vanilla HTML+JS (no build step), so the
+# job is just: sync to S3 + invalidate CloudFront.
+#
+# Pre-reqs (one-time, set by an operator):
+#   - `STATUS_DEPLOY_ROLE` repo secret: an IAM role ARN with
+#     s3:PutObject on `gsx-dag-devnet-status/*` and
+#     cloudfront:CreateInvalidation on the status distribution.
+#   - terraform/devnet/ already applied so the bucket + distro exist.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'clients/status-page/**'
+      - '.github/workflows/status.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: status-page-deploy
+  cancel-in-progress: true
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  deploy:
+    name: sync + invalidate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Configure AWS credentials
+        if: ${{ env.STATUS_DEPLOY_ROLE != '' }}
+        env:
+          STATUS_DEPLOY_ROLE: ${{ secrets.STATUS_DEPLOY_ROLE }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.STATUS_DEPLOY_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Sync to S3
+        if: ${{ env.STATUS_DEPLOY_ROLE != '' }}
+        env:
+          STATUS_DEPLOY_ROLE: ${{ secrets.STATUS_DEPLOY_ROLE }}
+        run: |
+          aws s3 sync ./clients/status-page/ s3://gsx-dag-devnet-status/ \
+              --delete \
+              --exclude "README.md" \
+              --cache-control "public, max-age=60, must-revalidate"
+          # index.html + app.js are the entry points; no-cache so a
+          # fresh deploy is visible on the next page load.
+          aws s3 cp ./clients/status-page/index.html s3://gsx-dag-devnet-status/index.html \
+              --cache-control "no-cache, no-store, must-revalidate"
+          aws s3 cp ./clients/status-page/app.js s3://gsx-dag-devnet-status/app.js \
+              --cache-control "no-cache, no-store, must-revalidate"
+
+      - name: Invalidate CloudFront
+        if: ${{ env.STATUS_DEPLOY_ROLE != '' }}
+        env:
+          STATUS_DEPLOY_ROLE: ${{ secrets.STATUS_DEPLOY_ROLE }}
+        run: |
+          DIST_ID=$(aws cloudfront list-distributions \
+              --query "DistributionList.Items[?Aliases.Items[?contains(@, 'status.devnet.gsx')]].Id | [0]" \
+              --output text)
+          aws cloudfront create-invalidation \
+              --distribution-id "$DIST_ID" \
+              --paths "/*"
+
+      - name: Deploy step skipped
+        if: ${{ env.STATUS_DEPLOY_ROLE == '' }}
+        env:
+          STATUS_DEPLOY_ROLE: ${{ secrets.STATUS_DEPLOY_ROLE }}
+        run: |
+          echo "STATUS_DEPLOY_ROLE secret not set; nothing to deploy."
+          echo "Set the secret to a role ARN with s3:PutObject + cloudfront:CreateInvalidation."
