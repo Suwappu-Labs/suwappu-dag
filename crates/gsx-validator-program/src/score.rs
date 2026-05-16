@@ -56,16 +56,12 @@ async fn score_once(pool: &PgPool) -> Result<(), crate::ProgramError> {
     let previous_bucket = current_bucket - 1;
 
     // Bucket bounds for the SQL window.
-    let bucket_start = chrono::DateTime::<chrono::Utc>::from_timestamp(
-        previous_bucket * SCORE_BUCKET_SECS,
-        0,
-    )
-    .expect("epoch math");
-    let bucket_end = chrono::DateTime::<chrono::Utc>::from_timestamp(
-        current_bucket * SCORE_BUCKET_SECS,
-        0,
-    )
-    .expect("epoch math");
+    let bucket_start =
+        chrono::DateTime::<chrono::Utc>::from_timestamp(previous_bucket * SCORE_BUCKET_SECS, 0)
+            .expect("epoch math");
+    let bucket_end =
+        chrono::DateTime::<chrono::Utc>::from_timestamp(current_bucket * SCORE_BUCKET_SECS, 0)
+            .expect("epoch math");
 
     // For each known operator, compute the bucket's uptime samples
     // + the resulting uptime_points tier. Cert points stay 0 in

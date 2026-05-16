@@ -186,12 +186,15 @@ impl Faucet {
             .get_balance(self.faucet_address)
             .await
             .map_err(FaucetError::Rpc)?;
-        let bal_u128: u128 = bal
-            .balance
-            .parse()
-            .map_err(|e: std::num::ParseIntError| FaucetError::Rpc(gsx_client::Error::Deserialize(e.to_string())))?;
+        let bal_u128: u128 = bal.balance.parse().map_err(|e: std::num::ParseIntError| {
+            FaucetError::Rpc(gsx_client::Error::Deserialize(e.to_string()))
+        })?;
         if bal_u128 < self.drip_amount {
-            warn!(faucet_balance = bal_u128, drip = self.drip_amount, "faucet: empty");
+            warn!(
+                faucet_balance = bal_u128,
+                drip = self.drip_amount,
+                "faucet: empty"
+            );
             return Err(FaucetError::Empty);
         }
 

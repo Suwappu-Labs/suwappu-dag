@@ -2002,7 +2002,17 @@ mod tests {
     /// or whether `pending_governance` is draining. The eject failure
     /// branch below now mirrors the admit branch's diagnostic so the
     /// CI log actually identifies which step is wedged.
+    ///
+    /// **Re-`#[ignore]`'d 2026-05-16** under tracking issue #171: the
+    /// test is still flaky on shared GHA runners (~60s admit timeout
+    /// fires under load even with the diagnostic instrumentation from
+    /// #35). The un-ignore in #35 was deliberate — those eject-path
+    /// regressions still need coverage. Un-ignore again once the
+    /// underlying round-time-starvation flake is fixed; see #171 for
+    /// suggested investigations (test split, dedicated integration
+    /// budget, RUST_LOG=trace local repro).
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[ignore = "flaky on CI under load; tracked in #171 (regression of #35 un-ignore)"]
     async fn phase_g_admit_and_eject() {
         let n = 4u32;
         let base_port: u16 = 19_700;

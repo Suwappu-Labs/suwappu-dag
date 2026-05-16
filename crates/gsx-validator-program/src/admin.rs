@@ -30,7 +30,10 @@ pub struct AdminState {
     pub admin_token: String,
 }
 
-fn check_auth(headers: &HeaderMap, expected: &str) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+fn check_auth(
+    headers: &HeaderMap,
+    expected: &str,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
     let auth = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())

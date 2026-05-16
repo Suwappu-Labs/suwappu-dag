@@ -102,14 +102,23 @@ async fn main() -> anyhow::Result<()> {
 
     let sk_bytes = fs::read(&args.secret_key_path)?;
     let pk_bytes = fs::read(&args.public_key_path)?;
-    let secret_key = mldsa::SecretKey::from_bytes(&sk_bytes)
-        .map_err(|e| anyhow::anyhow!("invalid ML-DSA secret key at {}: {}", args.secret_key_path, e))?;
-    let public_key = mldsa::PublicKey::from_bytes(&pk_bytes)
-        .map_err(|e| anyhow::anyhow!("invalid ML-DSA public key at {}: {}", args.public_key_path, e))?;
+    let secret_key = mldsa::SecretKey::from_bytes(&sk_bytes).map_err(|e| {
+        anyhow::anyhow!(
+            "invalid ML-DSA secret key at {}: {}",
+            args.secret_key_path,
+            e
+        )
+    })?;
+    let public_key = mldsa::PublicKey::from_bytes(&pk_bytes).map_err(|e| {
+        anyhow::anyhow!(
+            "invalid ML-DSA public key at {}: {}",
+            args.public_key_path,
+            e
+        )
+    })?;
 
     let faucet_address = match args.faucet_address.as_ref() {
-        Some(hex) => parse_address(hex)
-            .map_err(|e| anyhow::anyhow!("--faucet-address: {}", e))?,
+        Some(hex) => parse_address(hex).map_err(|e| anyhow::anyhow!("--faucet-address: {}", e))?,
         None => {
             // Derive from pubkey via the canonical recipe. Loud warn
             // so operators know they're relying on it.
@@ -194,7 +203,10 @@ async fn handle_drip(
         Err(e) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(ErrorBody { error: e, retry_after_ms: None }),
+                Json(ErrorBody {
+                    error: e,
+                    retry_after_ms: None,
+                }),
             )
                 .into_response();
         }
@@ -212,19 +224,28 @@ async fn handle_drip(
             .into_response(),
         Err(FaucetError::Empty) => (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(ErrorBody { error: "faucet wallet empty".into(), retry_after_ms: None }),
+            Json(ErrorBody {
+                error: "faucet wallet empty".into(),
+                retry_after_ms: None,
+            }),
         )
             .into_response(),
         Err(FaucetError::InvalidAddress(e)) => (
             StatusCode::BAD_REQUEST,
-            Json(ErrorBody { error: e, retry_after_ms: None }),
+            Json(ErrorBody {
+                error: e,
+                retry_after_ms: None,
+            }),
         )
             .into_response(),
         Err(other) => {
             warn!(error = %other, "faucet drip failed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorBody { error: other.to_string(), retry_after_ms: None }),
+                Json(ErrorBody {
+                    error: other.to_string(),
+                    retry_after_ms: None,
+                }),
             )
                 .into_response()
         }
@@ -254,7 +275,10 @@ async fn handle_health(State(faucet): State<Arc<Faucet>>) -> impl IntoResponse {
 }
 
 fn parse_address(raw: &str) -> Result<[u8; 20], String> {
-    let trimmed = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")).unwrap_or(raw);
+    let trimmed = raw
+        .strip_prefix("0x")
+        .or_else(|| raw.strip_prefix("0X"))
+        .unwrap_or(raw);
     let bytes = hex::decode(trimmed).map_err(|e| format!("hex: {}", e))?;
     bytes
         .as_slice()

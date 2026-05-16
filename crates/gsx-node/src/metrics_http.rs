@@ -166,7 +166,10 @@ async fn render_metrics(State(state): State<MetricsState>) -> impl IntoResponse 
 
     // gsx_node_info — single-sample identity gauge so dashboards
     // can pivot on (region, authority_id) without parsing.
-    let _ = writeln!(out, "# HELP gsx_node_info Static labels identifying this validator.");
+    let _ = writeln!(
+        out,
+        "# HELP gsx_node_info Static labels identifying this validator."
+    );
     let _ = writeln!(out, "# TYPE gsx_node_info gauge");
     let _ = writeln!(
         out,
@@ -183,11 +186,17 @@ async fn render_metrics(State(state): State<MetricsState>) -> impl IntoResponse 
     let _ = writeln!(out, "# TYPE gsx_committed_rounds_total counter");
     let _ = writeln!(out, "gsx_committed_rounds_total {committed_total}");
 
-    let _ = writeln!(out, "# HELP gsx_mempool_size Current queued-intent count in this validator's mempool.");
+    let _ = writeln!(
+        out,
+        "# HELP gsx_mempool_size Current queued-intent count in this validator's mempool."
+    );
     let _ = writeln!(out, "# TYPE gsx_mempool_size gauge");
     let _ = writeln!(out, "gsx_mempool_size {mempool_size}");
 
-    let _ = writeln!(out, "# HELP gsx_process_uptime_seconds Seconds since the validator process started.");
+    let _ = writeln!(
+        out,
+        "# HELP gsx_process_uptime_seconds Seconds since the validator process started."
+    );
     let _ = writeln!(out, "# TYPE gsx_process_uptime_seconds gauge");
     let _ = writeln!(out, "gsx_process_uptime_seconds {uptime_secs}");
 

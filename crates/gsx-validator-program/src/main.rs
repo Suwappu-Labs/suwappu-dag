@@ -5,12 +5,11 @@
 
 use std::net::SocketAddr;
 
-use axum::{routing::get, routing::post, Router};
+use axum::{
+    routing::{get, post},
+    Router,
+};
 use clap::Parser;
-use sqlx::postgres::PgPoolOptions;
-use tracing::info;
-use tracing_subscriber::EnvFilter;
-
 use gsx_validator_program::{
     admin::{
         handle_award, handle_list_awards, handle_list_operators, handle_register_operator,
@@ -20,9 +19,15 @@ use gsx_validator_program::{
     leaderboard::handle_leaderboard,
     probe, score,
 };
+use sqlx::postgres::PgPoolOptions;
+use tracing::info;
+use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug, Clone)]
-#[command(name = "gsx-validator-program", about = "Testnet points-accumulator daemon")]
+#[command(
+    name = "gsx-validator-program",
+    about = "Testnet points-accumulator daemon"
+)]
 struct Args {
     /// Postgres connection string. Recommended: read from
     /// AWS Secrets Manager + pass via env at systemd unit
@@ -41,11 +46,7 @@ struct Args {
 
     /// HTTP bind address. Behind a Route53 A record for
     /// `program.testnet.gsx.globalsettlement.com`.
-    #[arg(
-        long,
-        default_value = "0.0.0.0:8090",
-        env = "GSX_PROGRAM_BIND"
-    )]
+    #[arg(long, default_value = "0.0.0.0:8090", env = "GSX_PROGRAM_BIND")]
     bind: SocketAddr,
 
     /// Bearer token gating the `/admin/*` endpoints. Foundation-
@@ -57,11 +58,9 @@ struct Args {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                EnvFilter::new("gsx_validator_program=info,axum=warn,tower_http=info,sqlx=warn")
-            }),
-        )
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            EnvFilter::new("gsx_validator_program=info,axum=warn,tower_http=info,sqlx=warn")
+        }))
         .init();
 
     let args = Args::parse();
