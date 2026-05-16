@@ -32,6 +32,11 @@ pub fn router<S: Store>(store: Arc<S>) -> Router {
         .route("/health", get(health))
         .route("/blocks/:round", get(get_block::<S>))
         .route("/blocks", get(list_blocks::<S>))
+        // G7: stub endpoint for the explorer's Address page. Returns
+        // an empty list for now — populating it requires an address
+        // index that tracks every Intent's `from` field at ingest time.
+        // The interface is stable; the impl lands in a v0.2 indexer PR.
+        .route("/address/:addr/txs", get(address_txs::<S>))
         .with_state(store)
 }
 
@@ -65,6 +70,23 @@ async fn list_blocks<S: Store>(
 ) -> Json<Vec<IndexedBlock>> {
     let to = q.to.unwrap_or(q.from);
     Json(store.get_blocks(q.from, to).await)
+}
+
+/// G7 stub: address → recent transactions. Returns an empty list
+/// for now. Wired into the router so the explorer's Address page
+/// (deferred to v0.2) has a stable interface to call against.
+///
+/// Real implementation requires an address index on the `Store`
+/// trait: extend `Store` with `txs_for_address(addr, limit) ->
+/// Vec<IndexedTx>`, plumb a `BTreeMap<Address, Vec<TxRef>>` into
+/// `InMemoryStore::ingest_committed_block`, and add the matching
+/// SQL schema + INSERT path to `PostgresStore`. Out of scope for
+/// G7's initial ship; non-blocking for the v0.1 explorer.
+async fn address_txs<S: Store>(
+    State(_store): State<Arc<S>>,
+    Path(_addr): Path<String>,
+) -> Json<Vec<IndexedBlock>> {
+    Json(Vec::new())
 }
 
 #[cfg(test)]

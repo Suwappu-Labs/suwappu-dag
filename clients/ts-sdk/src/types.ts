@@ -16,6 +16,13 @@ export interface EpochView {
   last_boundary_round: number;
   /** Rounds per epoch (constant across an epoch, set at genesis). */
   rounds_per_epoch: number;
+  /**
+   * Highest round committed on this node (Mysticeti-C direct or
+   * indirect commit; Skip rounds not counted). Zero before the
+   * first commit. Added with F2 alongside the indexer backfill
+   * path; serialized as `0` by pre-F2 daemons via `#[serde(default)]`.
+   */
+  latest_committed_round: number;
 }
 
 /**
@@ -105,6 +112,20 @@ export type IntentView =
       authority_id: number;
       /** 32-byte slashing-proof reference, `0x`-prefixed hex. */
       proof_ref: string;
+    }
+  | {
+      /**
+       * Forward-compat sentinel for `Intent` variants this SDK
+       * version doesn't know about. Surfaces when the validator
+       * has been upgraded with a new variant (Phase G3/G4
+       * governance ops, future LTP-bound intents, etc.) but the
+       * SDK hasn't been bumped. Wallets / explorers should treat
+       * this as "skip, refresh SDK". Pinned post-C4 (the Rust
+       * `Intent` enum is `#[non_exhaustive]`).
+       */
+      kind: "unknown";
+      /** Best-effort discriminant name from the server side. */
+      kind_hint: string;
     };
 
 /**
@@ -117,6 +138,16 @@ export interface BlockView {
   cert_hash: string;
   /** Ordered intents in this block. Empty for governance-only blocks. */
   intents: IntentView[];
+  /**
+   * Per-intent transaction hashes (`0x`-prefixed hex of
+   * `blake3(bincode(intent))`) in commit order. Aligned 1:1 with
+   * `intents` — `tx_hashes[i]` is the hash of `intents[i]`. Empty
+   * when the block has no intents. Added with F2 so the explorer
+   * doesn't need a follow-up `gsx_getTransaction` per intent to
+   * enumerate the block. Pre-F2 daemons omit this field; the SDK
+   * defaults it to `[]`.
+   */
+  tx_hashes: string[];
 }
 
 /**
