@@ -81,7 +81,9 @@ where
 
     let mut ingested: u64 = 0;
     while next <= head {
-        let end = next.saturating_add(max_per_iter).min(head.saturating_add(1));
+        let end = next
+            .saturating_add(max_per_iter)
+            .min(head.saturating_add(1));
         for r in next..end {
             match client.get_block(r).await {
                 Ok(Some(view)) => {
@@ -94,9 +96,8 @@ where
                 }
                 Err(e) => {
                     warn!(round = r, error = %e, "indexer backfill: get_block failed");
-                    return Err(anyhow::anyhow!(e)).with_context(|| {
-                        format!("backfill: get_block(round={r}) failed")
-                    });
+                    return Err(anyhow::anyhow!(e))
+                        .with_context(|| format!("backfill: get_block(round={r}) failed"));
                 }
             }
         }
@@ -106,11 +107,7 @@ where
         next = end;
     }
 
-    info!(
-        chain_head = head,
-        ingested,
-        "indexer backfill: complete"
-    );
+    info!(chain_head = head, ingested, "indexer backfill: complete");
     Ok(ingested)
 }
 

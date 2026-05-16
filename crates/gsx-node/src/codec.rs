@@ -31,8 +31,7 @@
 //! bincode bytes so the canonical hash stays stable independent
 //! of any future frame-version bump.
 
-use std::error::Error as StdError;
-use std::fmt;
+use std::{error::Error as StdError, fmt};
 
 use bincode::config::Configuration;
 use serde::{de::DeserializeOwned, Serialize};

@@ -6,10 +6,7 @@
 //! extension — no real TCP socket, so the test is deterministic and
 //! independent of CI port allocation.
 
-use std::{
-    net::SocketAddr,
-    sync::Arc,
-};
+use std::{net::SocketAddr, sync::Arc};
 
 use axum::{
     body::Body,
@@ -79,11 +76,7 @@ fn ctx() -> Arc<RpcContext<MockState>> {
     Arc::new(RpcContext::new(Arc::new(MockState)))
 }
 
-async fn call_from(
-    app: axum::Router,
-    peer: SocketAddr,
-    body: Value,
-) -> (StatusCode, Value) {
+async fn call_from(app: axum::Router, peer: SocketAddr, body: Value) -> (StatusCode, Value) {
     let mut req = Request::builder()
         .method("POST")
         .uri("/")
@@ -141,11 +134,7 @@ async fn exceeding_capacity_returns_rate_limited_envelope() {
         .unwrap_or_else(|| panic!("expected error envelope, got {body}"));
     assert_eq!(code, -32099, "must be RpcError::RateLimited code");
     let id = body.get("id").cloned().unwrap_or(Value::Null);
-    assert_eq!(
-        id,
-        json!(99),
-        "rejection envelope must echo the request id"
-    );
+    assert_eq!(id, json!(99), "rejection envelope must echo the request id");
 }
 
 #[tokio::test]
@@ -201,9 +190,7 @@ async fn missing_connect_info_admits_request() {
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body: Value = serde_json::from_slice(
-        &resp.into_body().collect().await.unwrap().to_bytes(),
-    )
-    .unwrap();
+    let body: Value =
+        serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert!(body.get("result").is_some(), "should admit; got {body}");
 }

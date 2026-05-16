@@ -91,7 +91,11 @@ fn intent_to_view(intent: &Intent) -> IntentView {
         // `IntentView::Unknown` so old SDKs see a clearly-tagged
         // forward-compat sentinel instead of a decode error.
         other => IntentView::Unknown {
-            kind_hint: format!("{other:?}").split_whitespace().next().unwrap_or("unknown").to_string(),
+            kind_hint: format!("{other:?}")
+                .split_whitespace()
+                .next()
+                .unwrap_or("unknown")
+                .to_string(),
         },
     }
 }

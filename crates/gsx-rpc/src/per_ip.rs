@@ -104,7 +104,10 @@ impl PerIpRateLimiter {
 
     /// Number of live buckets, for observability + tests.
     pub fn bucket_count(&self) -> usize {
-        self.buckets.lock().expect("per-ip bucket map poisoned").len()
+        self.buckets
+            .lock()
+            .expect("per-ip bucket map poisoned")
+            .len()
     }
 }
 

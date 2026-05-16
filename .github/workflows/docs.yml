@@ -54,7 +54,7 @@ jobs:
           CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
           RUSTDOCFLAGS: '-D warnings'
         run: |
-          cargo doc --workspace --no-deps --document-private-items=false
+          cargo doc --workspace --no-deps
           # Pages root convention: an index page that redirects to the
           # main crate doc. `gsx-node` is the integration crate; pick
           # that as the default.
