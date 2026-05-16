@@ -40,3 +40,13 @@ output "billing_alarm_topic_arn" {
   description = "SNS topic ARN that receives billing-cap alarms. Subscribers must confirm out-of-band."
   value       = aws_sns_topic.billing_alarm.arn
 }
+
+output "faucet" {
+  description = "Faucet handle. public_ip is the EIP; ALB + DNS land in G2."
+  value = {
+    public_ip   = aws_eip.faucet.public_ip
+    instance_id = aws_instance.faucet.id
+    secret_arn  = aws_secretsmanager_secret.faucet_sk.arn
+    vpc_id      = aws_vpc.faucet.id
+  }
+}

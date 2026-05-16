@@ -900,6 +900,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "gsx-faucet"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "bincode",
+ "blake3",
+ "clap",
+ "gsx-client",
+ "gsx-crypto",
+ "gsx-execution",
+ "gsx-mempool",
+ "hex",
+ "http-body-util",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "gsx-indexer"
 version = "0.1.0"
 dependencies = [
@@ -3027,6 +3052,7 @@ dependencies = [
  "pin-project-lite",
  "tower-layer",
  "tower-service",
+ "tracing",
 ]
 
 [[package]]
