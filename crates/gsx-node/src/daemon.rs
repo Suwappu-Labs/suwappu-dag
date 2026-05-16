@@ -2171,6 +2171,68 @@ mod tests {
         };
         client.submit(eject).await.unwrap();
 
+        // F3 stage-A probe: before entering the long convergence
+        // loop below, give every daemon a bounded window to RECEIVE
+        // the eject cert (i.e., observe a block carrying the
+        // EjectAuthority{4} intent in its local `state.blocks`).
+        // Decoupling "did the cert propagate?" from "did the
+        // boundary process the pending governance op?" turns a
+        // 180s mystery timeout into a 30s "node vN never observed
+        // the eject cert" panic when the bug is in propagation,
+        // and keeps the rest of the budget for the
+        // boundary-application stage that's the actual bottleneck.
+        let propagate_deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let mut propagate_last_resubmit = std::time::Instant::now();
+        loop {
+            let observers = {
+                let mut who = Vec::with_capacity(daemons.len());
+                for d in &daemons {
+                    let blocks = d.state.blocks.lock();
+                    let observed = blocks.values().any(|b| {
+                        b.intents.iter().any(|x| {
+                            matches!(
+                                x,
+                                Intent::EjectAuthority {
+                                    authority_id: 4,
+                                    ..
+                                }
+                            )
+                        })
+                    });
+                    who.push(observed);
+                }
+                who
+            };
+            if observers.iter().all(|b| *b) {
+                break;
+            }
+            if propagate_last_resubmit.elapsed() >= Duration::from_secs(5) {
+                let resubmit = gsx_execution::Intent::EjectAuthority {
+                    authority_id: 4,
+                    proof_ref: [0u8; 32],
+                };
+                let _ = client.submit(resubmit).await;
+                propagate_last_resubmit = std::time::Instant::now();
+            }
+            if std::time::Instant::now() >= propagate_deadline {
+                let missing: Vec<String> = observers
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, ok)| !**ok)
+                    .map(|(i, _)| format!("v{i}"))
+                    .collect();
+                panic!(
+                    "phase G eject-cert propagation timed out (30s): \
+                     node(s) [{}] never observed a block carrying the \
+                     EjectAuthority{{id=4}} intent. Bug is in cert \
+                     broadcast / orphan-pull, NOT in pending-governance \
+                     drain.",
+                    missing.join(",")
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+
         // Issue #18 + #32 deferred-activation: post-admit the
         // authority_registry has size 5, but `inner.n_authorities`
         // stays at 4 (v4 never authors a cert, so the pending_stake
