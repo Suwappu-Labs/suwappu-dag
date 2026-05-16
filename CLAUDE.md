@@ -117,6 +117,13 @@ Update this table when a sprint closes.
 - Single-binary local builds are fine: `cargo build --release -p gsx-node --bin gsx-metrics`.
 - `cargo fmt -p <crate>` is cheap; run it locally before pushing to avoid
   trivial rustfmt CI failures.
+- When changing a public enum's exhaustiveness (`#[non_exhaustive]`,
+  adding/removing a variant), per-crate `cargo check -p <defining>`
+  misses matches in downstream consumer crates — `#[non_exhaustive]`
+  doesn't apply within the defining crate but DOES across the workspace.
+  Explicitly include every consumer in the `-p` set, e.g.
+  `cargo check -p gsx-execution -p gsx-node -p gsx-rpc -p gsx-fastpath
+  -p gsx-mempool`. CI catches this; local per-crate check does not.
 
 ### Branch naming
 
