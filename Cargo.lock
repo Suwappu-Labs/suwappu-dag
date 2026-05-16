@@ -976,6 +976,7 @@ name = "gsx-node"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "bincode",
  "blake3",
  "clap",

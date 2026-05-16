@@ -39,6 +39,10 @@ gsx-rpc.workspace = true
 gsx-mempool.workspace = true
 
 anyhow.workspace = true
+# G6: minimal Prometheus metrics endpoint (hand-rolled exporter,
+# `metrics_http.rs`). gsx-rpc already pulls axum; consuming it here
+# adds nothing to the binary tree.
+axum = { version = "0.7", features = ["macros"] }
 bincode.workspace = true
 blake3.workspace = true
 clap.workspace = true

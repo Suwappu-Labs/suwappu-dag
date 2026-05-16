@@ -508,6 +508,26 @@ impl Daemon {
             tasks.push(rpc_task);
         }
 
+        // G6: Prometheus text-format metrics endpoint. Off by default
+        // (perf testnet doesn't run it); devnet sets metrics_listen to
+        // 127.0.0.1:9093 so the local CloudWatch agent can scrape it.
+        // Security group never opens 9093 — the endpoint is loopback-only.
+        if let Some(metrics_addr) = cfg.metrics_listen {
+            let identity = crate::metrics_http::NodeIdentity {
+                region: cfg.self_id.clone(),
+                authority_id: cfg.authority_id,
+            };
+            if let Some(handle) = crate::metrics_http::start_if_configured(
+                Some(metrics_addr),
+                state.clone(),
+                identity,
+            )
+            .await?
+            {
+                tasks.push(handle);
+            }
+        }
+
         Ok(Self {
             _log_task: log_task,
             tasks,
@@ -1745,6 +1765,7 @@ mod tests {
             client_per_ip_limit: 8,
             rpc_per_ip_capacity: 60,
             rpc_per_ip_refill_per_sec: 10,
+            metrics_listen: None,
         };
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1827,6 +1848,7 @@ mod tests {
             client_per_ip_limit: 8,
             rpc_per_ip_capacity: 60,
             rpc_per_ip_refill_per_sec: 10,
+            metrics_listen: None,
         };
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1924,6 +1946,7 @@ mod tests {
                 client_per_ip_limit: 8,
                 rpc_per_ip_capacity: 60,
                 rpc_per_ip_refill_per_sec: 10,
+                metrics_listen: None,
             };
             let d = Daemon::start(cfg, manifest.clone()).await.unwrap();
             daemons.push(d);
@@ -2053,6 +2076,7 @@ mod tests {
                 client_per_ip_limit: 8,
                 rpc_per_ip_capacity: 60,
                 rpc_per_ip_refill_per_sec: 10,
+                metrics_listen: None,
             };
             let d = Daemon::start(cfg, manifest.clone()).await.unwrap();
             daemons.push(d);
@@ -2456,6 +2480,7 @@ mod tests {
             client_per_ip_limit: 8,
             rpc_per_ip_capacity: 60,
             rpc_per_ip_refill_per_sec: 10,
+            metrics_listen: None,
         };
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2983,6 +3008,7 @@ mod tests {
             client_per_ip_limit: 8,
             rpc_per_ip_capacity: 60,
             rpc_per_ip_refill_per_sec: 10,
+            metrics_listen: None,
         };
         let _d = Daemon::start(cfg.clone(), manifest).await.unwrap();
         // Give the bound listener a tick to accept connections.
@@ -3072,6 +3098,7 @@ mod tests {
             client_per_ip_limit: 8,
             rpc_per_ip_capacity: 60,
             rpc_per_ip_refill_per_sec: 10,
+            metrics_listen: None,
         };
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -3185,6 +3212,7 @@ mod tests {
             client_per_ip_limit: 8,
             rpc_per_ip_capacity: 60,
             rpc_per_ip_refill_per_sec: 10,
+            metrics_listen: None,
         };
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -3296,6 +3324,7 @@ mod tests {
             client_per_ip_limit: 8,
             rpc_per_ip_capacity: 60,
             rpc_per_ip_refill_per_sec: 10,
+            metrics_listen: None,
         };
         let _d = Daemon::start(cfg.clone(), manifest).await.unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;

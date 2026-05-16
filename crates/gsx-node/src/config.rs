@@ -40,6 +40,15 @@ pub struct NodeConfig {
     #[serde(default)]
     pub rpc_listen: Option<SocketAddr>,
 
+    /// G6: optional local socket for the Prometheus text-format
+    /// metrics endpoint. Defaults to UNSET (perf testnet's posture —
+    /// nothing extra runs unless asked). Devnet sets this to
+    /// `127.0.0.1:9093` so the local amazon-cloudwatch-agent can
+    /// scrape it; the security group does NOT open 9093 to the
+    /// outside.
+    #[serde(default)]
+    pub metrics_listen: Option<SocketAddr>,
+
     /// Peers this node should dial. List excludes self.
     pub peers: Vec<Peer>,
 
@@ -358,6 +367,7 @@ mod tests {
             client_per_ip_limit: 8,
             rpc_per_ip_capacity: 60,
             rpc_per_ip_refill_per_sec: 10,
+            metrics_listen: None,
         };
         let err = manifest.validate_against(&cfg).unwrap_err();
         assert!(matches!(err, ConfigError::LabelMismatch { id: 0, .. }));
