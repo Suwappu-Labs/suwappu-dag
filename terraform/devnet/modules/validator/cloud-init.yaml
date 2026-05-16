@@ -1,0 +1,180 @@
+#cloud-config
+#
+# Bootstrap a GSX devnet validator. Differences from the perf cloud-init:
+#   * Formats + mounts the persistent EBS attached at ${state_device} to
+#     /var/lib/gsx (idempotent — only formats if filesystem absent).
+#   * Installs amazon-cloudwatch-agent and points it at the local
+#     Prometheus exporter (port ${metrics_port}).
+#   * Restarts the gsx-node service on update (relies on a separate
+#     "update binary" SSM run document — see OPERATIONS.md G5).
+
+package_update: true
+package_upgrade: false
+packages:
+  - awscli
+  - jq
+  - amazon-cloudwatch-agent
+
+write_files:
+  - path: /etc/systemd/system/gsx-node.service
+    content: |
+      [Unit]
+      Description=GSX DAG validator (devnet)
+      After=network-online.target gsx-bootstrap.service var-lib-gsx.mount
+      Requires=gsx-bootstrap.service var-lib-gsx.mount
+
+      [Service]
+      Type=simple
+      User=gsx
+      Group=gsx
+      Environment=RUST_LOG=info
+      ExecStart=/opt/gsx/gsx-node --config /etc/gsx/node.toml
+      Restart=on-failure
+      RestartSec=3
+      StandardOutput=append:/var/log/gsx/stdout.log
+      StandardError=append:/var/log/gsx/stderr.log
+      LimitNOFILE=65535
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/systemd/system/gsx-bootstrap.service
+    content: |
+      [Unit]
+      Description=Pull GSX binaries + config from S3
+      After=network-online.target var-lib-gsx.mount
+      Requires=var-lib-gsx.mount
+      Wants=network-online.target
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/opt/gsx/bootstrap.sh
+      StandardOutput=append:/var/log/gsx/bootstrap.log
+      StandardError=append:/var/log/gsx/bootstrap.log
+
+  - path: /etc/systemd/system/var-lib-gsx.mount
+    content: |
+      [Unit]
+      Description=Mount persistent gsx state volume
+      DefaultDependencies=no
+      Before=local-fs.target
+
+      [Mount]
+      What=${state_device}
+      Where=/var/lib/gsx
+      Type=ext4
+      Options=defaults,noatime
+
+      [Install]
+      WantedBy=local-fs.target
+
+  - path: /opt/gsx/mount-state.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      # Format the state EBS volume if it's blank; mount it at /var/lib/gsx.
+      # Idempotent — runs on every boot; only formats if the filesystem is
+      # absent (i.e. first boot of a brand new EBS volume).
+      set -euo pipefail
+      DEV="${state_device}"
+      MNT=/var/lib/gsx
+      mkdir -p "$MNT"
+      # Wait up to 60s for the EBS attach to settle on Nitro instances.
+      for i in $(seq 1 30); do
+        if [[ -b "$DEV" ]]; then break; fi
+        sleep 2
+      done
+      if ! blkid "$DEV" >/dev/null 2>&1; then
+        mkfs.ext4 -L gsx-state "$DEV"
+      fi
+      mount "$DEV" "$MNT" || true
+
+  - path: /opt/gsx/bootstrap.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      BUCKET="${artifact_bucket}"
+      REGION="${region_label}"
+      AUTHORITY="${authority_id}"
+      mkdir -p /opt/gsx /etc/gsx /var/lib/gsx /var/log/gsx
+      # Pull binary + genesis + per-region node.toml.
+      aws s3 cp "s3://$BUCKET/bin/gsx-node" /opt/gsx/gsx-node
+      chmod +x /opt/gsx/gsx-node
+      aws s3 cp "s3://$BUCKET/genesis/genesis.toml" /etc/gsx/genesis.toml
+      aws s3 cp "s3://$BUCKET/configs/$REGION/node.toml" /etc/gsx/node.toml
+      # Per-region keys land on the persistent volume — they survive
+      # instance replacement so we don't have to re-bootstrap keys when
+      # the validator EC2 is rebuilt.
+      if [[ ! -f /var/lib/gsx/mldsa.sk ]]; then
+        aws s3 cp "s3://$BUCKET/keys/$REGION/mldsa.sk" /var/lib/gsx/mldsa.sk
+        chmod 600 /var/lib/gsx/mldsa.sk
+      fi
+      if [[ ! -f /var/lib/gsx/bls.sk ]]; then
+        aws s3 cp "s3://$BUCKET/keys/$REGION/bls.sk" /var/lib/gsx/bls.sk
+        chmod 600 /var/lib/gsx/bls.sk
+      fi
+      chown -R gsx:gsx /opt/gsx /etc/gsx /var/lib/gsx /var/log/gsx
+
+  - path: /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+    content: |
+      {
+        "agent": {
+          "run_as_user": "cwagent"
+        },
+        "metrics": {
+          "namespace": "gsx-devnet",
+          "metrics_collected": {
+            "prometheus": {
+              "prometheus_config_path": "/opt/aws/amazon-cloudwatch-agent/etc/prometheus.yaml",
+              "emf_processor": {
+                "metric_declaration": [
+                  {
+                    "source_labels": ["job"],
+                    "label_matcher": "gsx-node",
+                    "dimensions": [["region", "authority_id"]],
+                    "metric_selectors": [
+                      "^gsx_committed_rounds_total$",
+                      "^gsx_last_committed_round$",
+                      "^gsx_round_driver_lag_seconds$",
+                      "^gsx_inbound_certs_total$",
+                      "^gsx_mempool_size$",
+                      "^gsx_rpc_requests_total$",
+                      "^gsx_rpc_rejected_total$"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+
+  - path: /opt/aws/amazon-cloudwatch-agent/etc/prometheus.yaml
+    content: |
+      global:
+        scrape_interval: 30s
+        scrape_timeout: 10s
+      scrape_configs:
+        - job_name: gsx-node
+          static_configs:
+            - targets:
+                - 127.0.0.1:${metrics_port}
+              labels:
+                region: ${region_label}
+                authority_id: "${authority_id}"
+
+runcmd:
+  - groupadd --system gsx
+  - useradd --system --gid gsx --no-create-home --shell /usr/sbin/nologin gsx
+  - mkdir -p /var/log/gsx
+  - chown gsx:gsx /var/log/gsx
+  - /opt/gsx/mount-state.sh
+  - systemctl daemon-reload
+  - systemctl enable var-lib-gsx.mount
+  - systemctl start var-lib-gsx.mount
+  - systemctl enable gsx-bootstrap.service gsx-node.service
+  - systemctl start gsx-bootstrap.service
+  - systemctl start gsx-node.service
+  - /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s

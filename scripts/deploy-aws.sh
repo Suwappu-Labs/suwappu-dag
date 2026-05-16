@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 # Wrapper for terraform operations against the gsn AWS profile.
 #
-# The default stack is `root` (terraform/) — production validator infra
-# that is intentionally append-only: `destroy` is blocked here AND by the
-# Claude Code denylist (claude-code/settings.json).
+# Stacks:
+#   root    — terraform/ (production validator infra; append-only, destroy blocked)
+#   perf    — terraform/perf/ (geo-perf testnet; destroy allowed, paused between runs)
+#   devnet  — terraform/devnet/ (long-lived public devnet; destroy blocked — devnet
+#             state survives months; an accidental `terraform destroy` would wipe
+#             the chain history that external developers' transactions land in)
 #
-# The `perf` stack (terraform/perf/) is the geographically distributed
-# performance testnet. It exists to be torn down at the end of each
-# campaign, so `destroy` IS allowed there.
+# The destroy-blocked stacks (root, devnet) are protected at THREE layers:
+#   1. this wrapper (refuses the command),
+#   2. the Claude Code denylist (claude-code/settings.json),
+#   3. `prevent_destroy = true` on the EBS state volumes (terraform itself).
 
 set -euo pipefail
 
@@ -17,10 +21,11 @@ STACK="${2:-root}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 case "${STACK}" in
-    root) TF_DIR="${REPO_ROOT}/terraform" ;;
-    perf) TF_DIR="${REPO_ROOT}/terraform/perf" ;;
+    root)   TF_DIR="${REPO_ROOT}/terraform" ;;
+    perf)   TF_DIR="${REPO_ROOT}/terraform/perf" ;;
+    devnet) TF_DIR="${REPO_ROOT}/terraform/devnet" ;;
     *)
-        echo "error: unknown stack '${STACK}' (root|perf)" >&2
+        echo "error: unknown stack '${STACK}' (root|perf|devnet)" >&2
         exit 1
         ;;
 esac
@@ -31,16 +36,18 @@ usage: $(basename "$0") <plan|apply|destroy|status|output> [stack]
 
   plan     — terraform plan (safe; read-only)
   apply    — terraform apply (requires interactive confirmation)
-  destroy  — terraform destroy (perf stack only; root stack is locked)
+  destroy  — terraform destroy (perf stack only; root + devnet are locked)
   status   — print current AWS identity + active stack
   output   — terraform output for the chosen stack
 
   stack:
-    root  — terraform/ (production; default; destroy blocked)
-    perf  — terraform/perf/ (geo-perf testnet; destroy allowed)
+    root    — terraform/ (production; default; destroy blocked)
+    perf    — terraform/perf/ (geo-perf testnet; destroy allowed)
+    devnet  — terraform/devnet/ (public devnet; destroy blocked)
 
-destroy on the root stack is intentionally blocked by this wrapper and by
-the Claude Code denylist (claude-code/settings.json).
+destroy on root + devnet stacks is intentionally blocked by this wrapper,
+the Claude Code denylist (claude-code/settings.json), and lifecycle
+prevent_destroy on EBS state volumes.
 EOF
     exit 1
 fi
@@ -53,9 +60,10 @@ if [[ "${ACTUAL_ACCOUNT}" != "${EXPECTED_ACCOUNT}" ]]; then
     exit 1
 fi
 
-# Per-stack variable assembly. The perf stack needs operator IPs + SSH pubkey.
+# Per-stack variable assembly. The perf + devnet stacks need operator IPs +
+# SSH pubkey. Devnet additionally needs a billing-alarm email subscriber.
 TF_VARS=()
-if [[ "${STACK}" == "perf" && ( "${CMD}" == "plan" || "${CMD}" == "apply" || "${CMD}" == "destroy" ) ]]; then
+if [[ ( "${STACK}" == "perf" || "${STACK}" == "devnet" ) && ( "${CMD}" == "plan" || "${CMD}" == "apply" || "${CMD}" == "destroy" ) ]]; then
     # Operator IP allowlist. By default the script auto-detects the current
     # public IP and uses that as the only entry. Override with
     # OPERATOR_CIDRS="1.2.3.4/32,5.6.7.8/32" (comma-separated) to keep
@@ -86,6 +94,17 @@ if [[ "${STACK}" == "perf" && ( "${CMD}" == "plan" || "${CMD}" == "apply" || "${
     fi
     TF_VARS+=(-var "operator_ip_cidrs=${CIDR_LIST}")
     TF_VARS+=(-var "ssh_public_key=$(cat "${SSH_PUB}")")
+
+    # Devnet requires a billing-alarm email subscriber. Without it, the
+    # SNS topic has no consumer and the cost-cap alarm is non-functional.
+    if [[ "${STACK}" == "devnet" ]]; then
+        if [[ -z "${BILLING_ALARM_EMAIL:-}" ]]; then
+            echo "error: BILLING_ALARM_EMAIL env var required for devnet apply/destroy" >&2
+            echo "  example: BILLING_ALARM_EMAIL=ops@globalsettlement.com ./scripts/deploy-aws.sh apply devnet" >&2
+            exit 1
+        fi
+        TF_VARS+=(-var "billing_alarm_email=${BILLING_ALARM_EMAIL}")
+    fi
 fi
 
 case "${CMD}" in
@@ -113,8 +132,10 @@ case "${CMD}" in
         rm -f plan.tfplan
         ;;
     destroy)
-        if [[ "${STACK}" == "root" ]]; then
-            echo "error: destroy on the root stack is blocked by this wrapper." >&2
+        if [[ "${STACK}" == "root" || "${STACK}" == "devnet" ]]; then
+            echo "error: destroy on the ${STACK} stack is blocked by this wrapper." >&2
+            echo "  devnet state survives months; an accidental destroy wipes" >&2
+            echo "  chain history that external developers' transactions land in." >&2
             exit 1
         fi
         cd "${TF_DIR}"
