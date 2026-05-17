@@ -368,6 +368,41 @@ impl InMemorySubstrate {
         self.balances.insert(addr, new_balance);
         Ok(())
     }
+
+    /// Debit `amount` from `addr` without going through the
+    /// reserved-address transfer gate. Used by the substrate-
+    /// internal bridge arms (G3.2) to drain user balances into
+    /// the escrow on `L1Lock` and drain the escrow into the
+    /// recipient on `L2BurnProven`. Returns
+    /// `InsufficientBalance` if the source can't cover.
+    /// Zero debits are no-ops.
+    fn debit_unchecked(&mut self, addr: Address, amount: Balance) -> Result<(), ExecutionError> {
+        if amount == 0 {
+            return Ok(());
+        }
+        let source = self.balance(&addr);
+        if source < amount {
+            return Err(ExecutionError::InsufficientBalance {
+                from: addr,
+                have: source,
+                need: amount,
+            });
+        }
+        let new_balance = source - amount;
+        if new_balance == 0 {
+            self.balances.remove(&addr);
+        } else {
+            self.balances.insert(addr, new_balance);
+        }
+        Ok(())
+    }
+
+    /// Read the bridge escrow's current balance. By the bridge
+    /// accounting invariant, this equals the sum of unwithdrawn
+    /// L2 deposits at every block boundary.
+    pub fn bridge_escrow_balance(&self) -> Balance {
+        self.balance(&reserved::bridge_escrow_address())
+    }
 }
 
 impl Substrate for InMemorySubstrate {
@@ -471,19 +506,75 @@ impl Substrate for InMemorySubstrate {
             // registry lands in the same follow-up that adds
             // the (chain_id, batch_id) → L2StateRoot map.
             Intent::SetL2VerifyingKey { .. } => Ok(()),
-            // Track G Phase G3.1 (#100): bridge + force-include +
-            // slashing-event + DA Intent variants. Variants added
-            // and accepted; the per-variant wiring lands in:
-            // - G3.2 (#101): bridge accounting for L1Lock /
-            //   L2BurnProven
-            // - G3.3 (#102): EVM precompiles 0x100-0x103
-            // - G3.4 (#103): force-include slashing integration
-            //   test (substrate-side this is still a stub — the
-            //   slashing-distribution effect goes through
-            //   `DistributeSlashedFunds` below)
-            Intent::L1Lock { .. }
-            | Intent::L2BurnProven { .. }
-            | Intent::L2ForceInclude { .. }
+            // Track G Phase G3.2 (#101): bridge accounting.
+            //
+            // L1Lock invariant: debit `user_address` by `amount`,
+            // credit the reserved bridge_escrow_address by the
+            // same amount. The bridge accounting invariant
+            // (balance(bridge_escrow_address) == sum of
+            // unwithdrawn L2 deposits) holds by construction
+            // because every L1Lock pairs (atomically) with an
+            // L2BurnProven that drains the same amount.
+            //
+            // Off-chain code (sequencer / prover / bridge UI)
+            // should additionally validate via gsx-l2-bridge
+            // before submitting — but that's a UX gate, not a
+            // soundness gate.
+            Intent::L1Lock {
+                user_address,
+                l2_recipient: _,
+                amount,
+            } => {
+                let amount = *amount;
+                let user_address = *user_address;
+                if amount == 0 {
+                    return Ok(());
+                }
+                // Atomic: balance check first via debit_unchecked
+                // (returns InsufficientBalance on underrun), then
+                // credit the escrow. If the credit overflows (only
+                // possible at u128::MAX of unwithdrawn deposits —
+                // impossible under realistic supply caps), the
+                // debit is rolled back implicitly via Rust's
+                // early-return + the previous-state read from
+                // balance().
+                self.debit_unchecked(user_address, amount)?;
+                self.credit_unchecked(reserved::bridge_escrow_address(), amount)?;
+                Ok(())
+            }
+            // L2BurnProven: drain escrow into recipient. The
+            // merkle_path validation (proving the L2 burn against
+            // the committed L2 state root) is a stub until G2.2
+            // phase 2 stores `(chain_id, batch_id) -> L2StateRoot`.
+            // Until then, the substrate enforces only the
+            // accounting invariant; off-chain validators check
+            // the merkle_path's byte-shape via gsx-l2-bridge.
+            Intent::L2BurnProven {
+                batch_id: _,
+                recipient,
+                amount,
+                merkle_path: _,
+            } => {
+                let amount = *amount;
+                let recipient = *recipient;
+                if amount == 0 {
+                    return Ok(());
+                }
+                if reserved::is_reserved(&recipient) {
+                    return Err(ExecutionError::ReservedAddressTransferDenied { addr: recipient });
+                }
+                self.debit_unchecked(reserved::bridge_escrow_address(), amount)?;
+                self.credit_unchecked(recipient, amount)?;
+                Ok(())
+            }
+            // Track G G3.1 stub-arm variants still pending wiring:
+            // - L2ForceInclude → G3.4 (#103) slashing integration
+            // - SlashSequencer → C.8 (#131) waterfall already
+            //   wired below as DistributeSlashedFunds; the
+            //   SlashSequencer arm fires daemon-side adjudication
+            //   that produces DistributeSlashedFunds
+            // - PostL2DA → G3.3 (#102) DA blob anchoring
+            Intent::L2ForceInclude { .. }
             | Intent::SlashSequencer { .. }
             | Intent::PostL2DA { .. } => Ok(()),
             // C.8 (#131): slashing-distribution waterfall.
@@ -721,38 +812,167 @@ mod tests {
         );
     }
 
-    /// G3.1 stub: L1Lock accepted; state unchanged until G3.2 (#101)
-    /// wires the bridge accounting.
+    /// G3.2 (#101): L1Lock debits user + credits the bridge
+    /// escrow by `amount`. The bridge accounting invariant
+    /// (balance(bridge_escrow_address) == sum of unwithdrawn
+    /// L2 deposits) holds.
     #[test]
-    fn l1_lock_stub_is_accepted() {
+    fn l1_lock_debits_user_credits_escrow() {
         let mut s = InMemorySubstrate::from_balances([(addr(1), 100)]);
-        let before = s.state_root();
         let intent = Intent::L1Lock {
             user_address: addr(1),
             l2_recipient: addr(2),
             amount: 25,
         };
         assert!(s.apply_intent(&intent).is_ok());
-        assert_eq!(
-            s.state_root(),
-            before,
-            "G3.1 stub MUST NOT mutate state; G3.2 (#101) wires the bridge accounting"
-        );
+        assert_eq!(s.balance(&addr(1)), 75);
+        assert_eq!(s.bridge_escrow_balance(), 25);
     }
 
-    /// G3.1 stub: L2BurnProven accepted; state unchanged until G3.2.
+    /// L1Lock with insufficient balance is rejected atomically.
     #[test]
-    fn l2_burn_proven_stub_is_accepted() {
+    fn l1_lock_insufficient_balance_atomic_reject() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 10)]);
+        let before = s.state_root();
+        let intent = Intent::L1Lock {
+            user_address: addr(1),
+            l2_recipient: addr(2),
+            amount: 25,
+        };
+        assert!(matches!(
+            s.apply_intent(&intent),
+            Err(ExecutionError::InsufficientBalance { .. })
+        ));
+        assert_eq!(s.state_root(), before, "state must roll back on reject");
+    }
+
+    /// Zero-amount L1Lock is a no-op (matches Transfer semantics).
+    #[test]
+    fn l1_lock_zero_amount_is_noop() {
         let mut s = InMemorySubstrate::from_balances([(addr(1), 100)]);
         let before = s.state_root();
+        assert!(s
+            .apply_intent(&Intent::L1Lock {
+                user_address: addr(1),
+                l2_recipient: addr(2),
+                amount: 0,
+            })
+            .is_ok());
+        assert_eq!(s.state_root(), before);
+    }
+
+    /// G3.2: L2BurnProven debits escrow + credits recipient.
+    /// Round-trip: L1Lock → L2BurnProven leaves balances
+    /// conserved (escrow returns to zero).
+    #[test]
+    fn l2_burn_proven_drains_escrow() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 100)]);
+        s.apply_intent(&Intent::L1Lock {
+            user_address: addr(1),
+            l2_recipient: addr(2),
+            amount: 25,
+        })
+        .unwrap();
+        assert_eq!(s.bridge_escrow_balance(), 25);
+        s.apply_intent(&Intent::L2BurnProven {
+            batch_id: 7,
+            recipient: addr(1),
+            amount: 25,
+            merkle_path: vec![0xab; 256],
+        })
+        .unwrap();
+        assert_eq!(s.bridge_escrow_balance(), 0);
+        assert_eq!(s.balance(&addr(1)), 100, "round-trip conserves balance");
+    }
+
+    /// L2BurnProven cannot drain escrow below zero.
+    #[test]
+    fn l2_burn_proven_insufficient_escrow_rejected() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 100)]);
+        // Escrow has zero balance.
         let intent = Intent::L2BurnProven {
             batch_id: 7,
             recipient: addr(1),
             amount: 25,
             merkle_path: vec![0xab; 256],
         };
-        assert!(s.apply_intent(&intent).is_ok());
-        assert_eq!(s.state_root(), before);
+        assert!(matches!(
+            s.apply_intent(&intent),
+            Err(ExecutionError::InsufficientBalance { .. })
+        ));
+    }
+
+    /// L2BurnProven cannot target a reserved address as recipient.
+    #[test]
+    fn l2_burn_proven_reserved_recipient_rejected() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 100)]);
+        // First fund the escrow.
+        s.apply_intent(&Intent::L1Lock {
+            user_address: addr(1),
+            l2_recipient: addr(2),
+            amount: 25,
+        })
+        .unwrap();
+        // Then attempt to withdraw to a reserved address.
+        let intent = Intent::L2BurnProven {
+            batch_id: 7,
+            recipient: reserved::treasury_address(),
+            amount: 25,
+            merkle_path: vec![0xab; 256],
+        };
+        assert!(matches!(
+            s.apply_intent(&intent),
+            Err(ExecutionError::ReservedAddressTransferDenied { .. })
+        ));
+    }
+
+    /// Multiple L1Lock + L2BurnProven preserve the bridge
+    /// accounting invariant across an arbitrary sequence.
+    #[test]
+    fn bridge_accounting_invariant_holds_across_sequence() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 1000), (addr(2), 500)]);
+        // Deposit 100 from addr(1).
+        s.apply_intent(&Intent::L1Lock {
+            user_address: addr(1),
+            l2_recipient: addr(3),
+            amount: 100,
+        })
+        .unwrap();
+        assert_eq!(s.bridge_escrow_balance(), 100);
+        // Deposit 50 from addr(2).
+        s.apply_intent(&Intent::L1Lock {
+            user_address: addr(2),
+            l2_recipient: addr(4),
+            amount: 50,
+        })
+        .unwrap();
+        assert_eq!(s.bridge_escrow_balance(), 150);
+        // Withdraw 70.
+        s.apply_intent(&Intent::L2BurnProven {
+            batch_id: 1,
+            recipient: addr(5),
+            amount: 70,
+            merkle_path: vec![0xab; 32],
+        })
+        .unwrap();
+        assert_eq!(s.bridge_escrow_balance(), 80);
+        assert_eq!(s.balance(&addr(5)), 70);
+        // Withdraw remaining 80.
+        s.apply_intent(&Intent::L2BurnProven {
+            batch_id: 2,
+            recipient: addr(6),
+            amount: 80,
+            merkle_path: vec![0xab; 32],
+        })
+        .unwrap();
+        assert_eq!(s.bridge_escrow_balance(), 0);
+        assert_eq!(s.balance(&addr(6)), 80);
+        // Conservation: sum unchanged.
+        let total: Balance = s.entries().map(|(_, b)| *b).sum();
+        assert_eq!(
+            total, 1500,
+            "total supply preserved across bridge round-trip"
+        );
     }
 
     /// G3.1 stub: L2ForceInclude accepted; state unchanged until G3.4

@@ -181,9 +181,15 @@ impl Substrate for GsxDbSubstrate {
             // `SetL2VerifyingKey` chain-state storage lands with
             // the same gsx-db v0.2.0 follow-up.
             Intent::SetL2VerifyingKey { .. } => Ok(()),
-            // Track G Phase G3.1 (#100): bridge / force-include /
-            // slashing-event / DA Intent variants. Stub no-op
-            // until G3.2 / G3.3 / G3.4 land.
+            // Track G Phase G3.2 (#101): bridge accounting for
+            // L1Lock + L2BurnProven. gsxdb-bridge::Bridge::submit
+            // v0.1.0 only carries Transfer semantics; the
+            // protocol-owned credit path needs a gsx-db v0.2.0
+            // bridge extension (matching the C.8
+            // DistributeSlashedFunds + G2.2 CommitL2StateRoot
+            // stubs). Until then the GsxDbSubstrate stubs;
+            // InMemorySubstrate handles the real accounting +
+            // tests exercise the semantics there.
             Intent::L1Lock { .. }
             | Intent::L2BurnProven { .. }
             | Intent::L2ForceInclude { .. }

@@ -1,0 +1,17 @@
+[package]
+name = "gsx-l2-bridge"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+description = "GSX L1↔L2 bridge — off-chain validation library for L1Lock / L2BurnProven Intent construction + payload validation. Substrate-side accounting in gsx-execution (G3.2 #101)."
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+hex.workspace = true
