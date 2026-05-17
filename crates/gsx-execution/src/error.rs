@@ -153,4 +153,35 @@ pub enum ExecutionError {
     /// unpin.
     #[error("SetL2VerifyingKey rejected: both new_aggregation_vk and new_range_commitment are all-zeros")]
     SetL2VkAllZeros,
+
+    /// `Intent::AddBridgeAsset` re-adds an asset already in
+    /// the registry (the canonical `asset_id` derived from
+    /// `source_chain` + `source_contract` already exists).
+    #[error("bridge asset already registered: 0x{enc_id}", enc_id = hex::encode(asset_id))]
+    BridgeAssetAlreadyRegistered {
+        /// The asset_id that already exists.
+        asset_id: [u8; 32],
+    },
+
+    /// `Intent::PauseBridgeAsset` or `Intent::RemoveBridgeAsset`
+    /// referenced an asset_id not present in the registry.
+    #[error("bridge asset not found: 0x{enc_id}", enc_id = hex::encode(asset_id))]
+    BridgeAssetNotFound {
+        /// The asset_id the Intent pointed at.
+        asset_id: [u8; 32],
+    },
+
+    /// `Intent::AddBridgeAsset` carried a `source_contract`,
+    /// `name`, or `symbol` field exceeding the configured
+    /// maximum width.
+    #[error("bridge asset {field} too long: {got} > {max}")]
+    BridgeAssetFieldTooLong {
+        /// Which field exceeded the limit ("source_contract",
+        /// "name", or "symbol").
+        field: &'static str,
+        /// Observed width.
+        got: usize,
+        /// Configured maximum.
+        max: usize,
+    },
 }

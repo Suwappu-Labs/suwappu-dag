@@ -65,6 +65,11 @@ pub const FORCE_INCLUDE_REGISTRY_DOMAIN: &[u8] = b"gsx-force-include-registry-v1
 /// `Intent::SlashSequencer`.
 pub const SEQUENCER_BOND_DOMAIN: &[u8] = b"gsx-sequencer-bond-v1";
 
+/// Domain tag for the bridge-asset registry account.
+/// Stores `asset_id → AssetRecord` records via the substrate's
+/// bytes_state surface (Track I I.5, #166).
+pub const ASSET_REGISTRY_DOMAIN: &[u8] = b"gsx-asset-registry-v1";
+
 /// Compute the reserved address corresponding to `domain` —
 /// `BLAKE3(domain)[..20]`. Used by the three exposed helpers below.
 /// Inlined per call site (BLAKE3 is sub-microsecond).
@@ -116,6 +121,12 @@ pub fn sequencer_bond_address() -> Address {
     derive(SEQUENCER_BOND_DOMAIN)
 }
 
+/// Reserved address for the bridge-asset registry (Track I
+/// I.5, #166). Stores `asset_id → AssetRecord` records.
+pub fn asset_registry_address() -> Address {
+    derive(ASSET_REGISTRY_DOMAIN)
+}
+
 /// Returns true if `addr` is a reserved protocol-owned registry
 /// account. Both `Substrate` impls reject `Intent::Transfer` into
 /// or out of a reserved address.
@@ -126,6 +137,7 @@ pub fn is_reserved(addr: &Address) -> bool {
         || addr == &bridge_escrow_address()
         || addr == &force_include_registry_address()
         || addr == &sequencer_bond_address()
+        || addr == &asset_registry_address()
 }
 
 #[cfg(test)]
@@ -133,7 +145,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn six_reserved_addresses_are_distinct() {
+    fn seven_reserved_addresses_are_distinct() {
         let all = [
             l2_registry_address(),
             insurance_pool_address(),
@@ -141,6 +153,7 @@ mod tests {
             bridge_escrow_address(),
             force_include_registry_address(),
             sequencer_bond_address(),
+            asset_registry_address(),
         ];
         for (i, a) in all.iter().enumerate() {
             for (j, b) in all.iter().enumerate() {
@@ -162,16 +175,18 @@ mod tests {
             force_include_registry_address()
         );
         assert_eq!(sequencer_bond_address(), sequencer_bond_address());
+        assert_eq!(asset_registry_address(), asset_registry_address());
     }
 
     #[test]
-    fn is_reserved_matches_all_six() {
+    fn is_reserved_matches_all_seven() {
         assert!(is_reserved(&l2_registry_address()));
         assert!(is_reserved(&insurance_pool_address()));
         assert!(is_reserved(&treasury_address()));
         assert!(is_reserved(&bridge_escrow_address()));
         assert!(is_reserved(&force_include_registry_address()));
         assert!(is_reserved(&sequencer_bond_address()));
+        assert!(is_reserved(&asset_registry_address()));
     }
 
     #[test]

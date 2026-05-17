@@ -28,6 +28,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod asset_registry;
 pub mod block;
 pub mod checkpoint;
 pub mod error;

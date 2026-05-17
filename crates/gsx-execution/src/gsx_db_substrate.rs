@@ -210,6 +210,14 @@ impl Substrate for GsxDbSubstrate {
             // exercise the full waterfall semantics there. Once
             // gsx-db ships the credit path this arm calls into it.
             Intent::DistributeSlashedFunds { .. } => Ok(()),
+            // Track I I.5 (#166): asset whitelist Intents stub
+            // until gsx-db v0.2.0 exposes a bytes_state-style
+            // surface. InMemorySubstrate handles the full
+            // accounting; tests exercise the registry logic
+            // there.
+            Intent::AddBridgeAsset { .. }
+            | Intent::PauseBridgeAsset { .. }
+            | Intent::RemoveBridgeAsset { .. } => Ok(()),
         }
     }
 

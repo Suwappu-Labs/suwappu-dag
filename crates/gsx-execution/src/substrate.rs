@@ -261,6 +261,44 @@ pub enum Intent {
         /// Step 3 share to the protocol treasury.
         treasury_share: Balance,
     },
+    /// Add a bridge asset to the whitelist (Track I I.5, #166).
+    /// Governance-gated at the daemon's dispatch layer —
+    /// substrate's job is the deterministic state effect:
+    /// computes the canonical `asset_id` from `source_chain` +
+    /// `source_contract`, then writes the `AssetRecord` to the
+    /// reserved `asset_registry_address` as `Active`.
+    /// Re-adding the same asset is rejected.
+    AddBridgeAsset {
+        /// Source-chain identifier.
+        source_chain: u64,
+        /// Source-chain contract / program address.
+        source_contract: Vec<u8>,
+        /// Asset decimals.
+        decimals: u8,
+        /// Human-readable asset name.
+        name: Vec<u8>,
+        /// Human-readable asset symbol.
+        symbol: Vec<u8>,
+    },
+    /// Pause a whitelisted bridge asset (Track I I.5, #166).
+    /// Flips `AssetStatus` to `Paused`; the registry record
+    /// persists. Bridge operations against the asset (once
+    /// L1Lock/L2BurnProven asset-aware variants land) reject.
+    PauseBridgeAsset {
+        /// Asset identifier per
+        /// `asset_registry::asset_id(source_chain, source_contract)`.
+        asset_id: [u8; 32],
+    },
+    /// Remove a whitelisted bridge asset (Track I I.5, #166).
+    /// Flips `AssetStatus` to `Removed` (irreversible at the
+    /// substrate level — the record stays for audit). To re-
+    /// list the same asset would require a new `AddBridgeAsset`
+    /// against a different `source_chain` / `source_contract`
+    /// combination (yielding a different `asset_id`).
+    RemoveBridgeAsset {
+        /// Asset identifier.
+        asset_id: [u8; 32],
+    },
 }
 
 /// Classification of a sequencer slashing event. Drives the
@@ -521,6 +559,25 @@ impl InMemorySubstrate {
         crate::force_include::decode_map(bytes.as_deref().unwrap_or(&[]))
             .map(|m| m.len())
             .unwrap_or(0)
+    }
+
+    /// Read the bridge-asset registry's full contents. Returns
+    /// an empty registry if no record exists or if decoding
+    /// fails.
+    pub fn asset_registry(&self) -> crate::asset_registry::AssetRegistry {
+        let bytes = self.read_bytes(&reserved::asset_registry_address());
+        crate::asset_registry::decode(bytes.as_deref().unwrap_or(&[])).unwrap_or_default()
+    }
+
+    /// Look up a bridge asset by id. Returns `None` if no
+    /// record is registered for the id.
+    pub fn bridge_asset(&self, asset_id: &[u8; 32]) -> Option<crate::asset_registry::AssetRecord> {
+        self.asset_registry().assets.get(asset_id).cloned()
+    }
+
+    /// Count of registered bridge assets (regardless of status).
+    pub fn bridge_asset_count(&self) -> usize {
+        self.asset_registry().assets.len()
     }
 
     /// Internal: write a bytes-state record at `addr`. Replaces
@@ -948,6 +1005,97 @@ impl Substrate for InMemorySubstrate {
                 self.credit_unchecked(reserved::insurance_pool_address(), *insurance_share)?;
                 // Step 3: protocol treasury.
                 self.credit_unchecked(reserved::treasury_address(), *treasury_share)?;
+                Ok(())
+            }
+            // Track I I.5 (#166): asset whitelist governance.
+            // Substrate validates field widths + dedup; the
+            // daemon governance dispatch is responsible for
+            // Authority Ring quorum authorization before this
+            // Intent reaches apply_intent.
+            Intent::AddBridgeAsset {
+                source_chain,
+                source_contract,
+                decimals,
+                name,
+                symbol,
+            } => {
+                use crate::asset_registry::{
+                    asset_id, decode, encode, AssetRecord, AssetStatus, MAX_ASSET_NAME_BYTES,
+                    MAX_ASSET_SYMBOL_BYTES, MAX_SOURCE_CONTRACT_BYTES,
+                };
+
+                if source_contract.len() > MAX_SOURCE_CONTRACT_BYTES {
+                    return Err(ExecutionError::BridgeAssetFieldTooLong {
+                        field: "source_contract",
+                        got: source_contract.len(),
+                        max: MAX_SOURCE_CONTRACT_BYTES,
+                    });
+                }
+                if name.len() > MAX_ASSET_NAME_BYTES {
+                    return Err(ExecutionError::BridgeAssetFieldTooLong {
+                        field: "name",
+                        got: name.len(),
+                        max: MAX_ASSET_NAME_BYTES,
+                    });
+                }
+                if symbol.len() > MAX_ASSET_SYMBOL_BYTES {
+                    return Err(ExecutionError::BridgeAssetFieldTooLong {
+                        field: "symbol",
+                        got: symbol.len(),
+                        max: MAX_ASSET_SYMBOL_BYTES,
+                    });
+                }
+
+                let id = asset_id(*source_chain, source_contract);
+                let registry_addr = reserved::asset_registry_address();
+                let existing_bytes = self.read_bytes(&registry_addr).unwrap_or_default();
+                let mut registry = decode(&existing_bytes)?;
+                if registry.assets.contains_key(&id) {
+                    return Err(ExecutionError::BridgeAssetAlreadyRegistered { asset_id: id });
+                }
+                registry.assets.insert(
+                    id,
+                    AssetRecord {
+                        source_chain: *source_chain,
+                        source_contract: source_contract.clone(),
+                        decimals: *decimals,
+                        name: name.clone(),
+                        symbol: symbol.clone(),
+                        status: AssetStatus::Active,
+                    },
+                );
+                let new_bytes = encode(&registry);
+                self.write_bytes_unchecked(registry_addr, new_bytes);
+                Ok(())
+            }
+            Intent::PauseBridgeAsset { asset_id } => {
+                use crate::asset_registry::{decode, encode, AssetStatus};
+                let registry_addr = reserved::asset_registry_address();
+                let existing_bytes = self.read_bytes(&registry_addr).unwrap_or_default();
+                let mut registry = decode(&existing_bytes)?;
+                let rec = registry.assets.get_mut(asset_id).ok_or(
+                    ExecutionError::BridgeAssetNotFound {
+                        asset_id: *asset_id,
+                    },
+                )?;
+                rec.status = AssetStatus::Paused;
+                let new_bytes = encode(&registry);
+                self.write_bytes_unchecked(registry_addr, new_bytes);
+                Ok(())
+            }
+            Intent::RemoveBridgeAsset { asset_id } => {
+                use crate::asset_registry::{decode, encode, AssetStatus};
+                let registry_addr = reserved::asset_registry_address();
+                let existing_bytes = self.read_bytes(&registry_addr).unwrap_or_default();
+                let mut registry = decode(&existing_bytes)?;
+                let rec = registry.assets.get_mut(asset_id).ok_or(
+                    ExecutionError::BridgeAssetNotFound {
+                        asset_id: *asset_id,
+                    },
+                )?;
+                rec.status = AssetStatus::Removed;
+                let new_bytes = encode(&registry);
+                self.write_bytes_unchecked(registry_addr, new_bytes);
                 Ok(())
             }
         }
@@ -2000,5 +2148,220 @@ mod tests {
         assert_eq!(s.balance(&addr(5)), 300);
         assert_eq!(s.balance(&reserved::insurance_pool_address()), 150);
         assert_eq!(s.balance(&reserved::treasury_address()), 75);
+    }
+
+    // ----- I.5 asset whitelist governance -----
+
+    /// AddBridgeAsset registers an Active record at the
+    /// canonical asset_id derived from (source_chain,
+    /// source_contract).
+    #[test]
+    fn add_bridge_asset_registers_active_record() {
+        use crate::asset_registry::{asset_id, AssetStatus};
+        let mut s = InMemorySubstrate::new();
+        let intent = Intent::AddBridgeAsset {
+            source_chain: 1,
+            source_contract: vec![0xab; 20],
+            decimals: 6,
+            name: b"USD Coin".to_vec(),
+            symbol: b"USDC".to_vec(),
+        };
+        s.apply_intent(&intent).unwrap();
+
+        let id = asset_id(1, &[0xab; 20]);
+        let rec = s.bridge_asset(&id).expect("asset registered");
+        assert_eq!(rec.status, AssetStatus::Active);
+        assert_eq!(rec.decimals, 6);
+        assert_eq!(rec.name, b"USD Coin");
+        assert_eq!(rec.symbol, b"USDC");
+        assert_eq!(s.bridge_asset_count(), 1);
+    }
+
+    /// Re-adding the same asset is rejected.
+    #[test]
+    fn add_bridge_asset_replay_rejected() {
+        let mut s = InMemorySubstrate::new();
+        let intent = Intent::AddBridgeAsset {
+            source_chain: 1,
+            source_contract: vec![0xab; 20],
+            decimals: 6,
+            name: b"USD Coin".to_vec(),
+            symbol: b"USDC".to_vec(),
+        };
+        s.apply_intent(&intent).unwrap();
+        let err = s.apply_intent(&intent);
+        assert!(matches!(
+            err,
+            Err(ExecutionError::BridgeAssetAlreadyRegistered { .. })
+        ));
+    }
+
+    /// Multi-chain isolation: same source_contract bytes on a
+    /// different source_chain produces a distinct asset_id.
+    #[test]
+    fn add_bridge_asset_multi_chain_isolation() {
+        let mut s = InMemorySubstrate::new();
+        // Ethereum USDC.
+        s.apply_intent(&Intent::AddBridgeAsset {
+            source_chain: 1,
+            source_contract: vec![0xab; 20],
+            decimals: 6,
+            name: b"USD Coin".to_vec(),
+            symbol: b"USDC".to_vec(),
+        })
+        .unwrap();
+        // Solana USDC (different chain id; same shape).
+        s.apply_intent(&Intent::AddBridgeAsset {
+            source_chain: 101,
+            source_contract: vec![0xab; 20],
+            decimals: 6,
+            name: b"USD Coin".to_vec(),
+            symbol: b"USDC".to_vec(),
+        })
+        .unwrap();
+        assert_eq!(s.bridge_asset_count(), 2);
+    }
+
+    /// PauseBridgeAsset flips status to Paused; the record
+    /// persists in the registry.
+    #[test]
+    fn pause_bridge_asset_flips_status() {
+        use crate::asset_registry::{asset_id, AssetStatus};
+        let mut s = InMemorySubstrate::new();
+        s.apply_intent(&Intent::AddBridgeAsset {
+            source_chain: 1,
+            source_contract: vec![0xab; 20],
+            decimals: 6,
+            name: b"USD Coin".to_vec(),
+            symbol: b"USDC".to_vec(),
+        })
+        .unwrap();
+        let id = asset_id(1, &[0xab; 20]);
+        s.apply_intent(&Intent::PauseBridgeAsset { asset_id: id })
+            .unwrap();
+        assert_eq!(s.bridge_asset(&id).unwrap().status, AssetStatus::Paused);
+        assert_eq!(s.bridge_asset_count(), 1);
+    }
+
+    /// RemoveBridgeAsset flips status to Removed; the record
+    /// persists for audit but no further bridge ops accepted.
+    #[test]
+    fn remove_bridge_asset_flips_status() {
+        use crate::asset_registry::{asset_id, AssetStatus};
+        let mut s = InMemorySubstrate::new();
+        s.apply_intent(&Intent::AddBridgeAsset {
+            source_chain: 1,
+            source_contract: vec![0xab; 20],
+            decimals: 6,
+            name: b"USD Coin".to_vec(),
+            symbol: b"USDC".to_vec(),
+        })
+        .unwrap();
+        let id = asset_id(1, &[0xab; 20]);
+        s.apply_intent(&Intent::RemoveBridgeAsset { asset_id: id })
+            .unwrap();
+        assert_eq!(s.bridge_asset(&id).unwrap().status, AssetStatus::Removed);
+        assert_eq!(s.bridge_asset_count(), 1);
+    }
+
+    /// Pause/Remove for an unknown asset is rejected.
+    #[test]
+    fn pause_remove_unknown_asset_rejected() {
+        let mut s = InMemorySubstrate::new();
+        let err = s.apply_intent(&Intent::PauseBridgeAsset {
+            asset_id: [0xff; 32],
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::BridgeAssetNotFound { .. })
+        ));
+        let err = s.apply_intent(&Intent::RemoveBridgeAsset {
+            asset_id: [0xff; 32],
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::BridgeAssetNotFound { .. })
+        ));
+    }
+
+    /// AddBridgeAsset rejects oversized fields.
+    #[test]
+    fn add_bridge_asset_rejects_oversized_fields() {
+        use crate::asset_registry::{
+            MAX_ASSET_NAME_BYTES, MAX_ASSET_SYMBOL_BYTES, MAX_SOURCE_CONTRACT_BYTES,
+        };
+        let mut s = InMemorySubstrate::new();
+        // Oversize source_contract.
+        let err = s.apply_intent(&Intent::AddBridgeAsset {
+            source_chain: 1,
+            source_contract: vec![0xab; MAX_SOURCE_CONTRACT_BYTES + 1],
+            decimals: 6,
+            name: b"USD Coin".to_vec(),
+            symbol: b"USDC".to_vec(),
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::BridgeAssetFieldTooLong {
+                field: "source_contract",
+                ..
+            })
+        ));
+        // Oversize name.
+        let err = s.apply_intent(&Intent::AddBridgeAsset {
+            source_chain: 1,
+            source_contract: vec![0xab; 20],
+            decimals: 6,
+            name: vec![0x41; MAX_ASSET_NAME_BYTES + 1],
+            symbol: b"USDC".to_vec(),
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::BridgeAssetFieldTooLong { field: "name", .. })
+        ));
+        // Oversize symbol.
+        let err = s.apply_intent(&Intent::AddBridgeAsset {
+            source_chain: 1,
+            source_contract: vec![0xab; 20],
+            decimals: 6,
+            name: b"USD Coin".to_vec(),
+            symbol: vec![0x42; MAX_ASSET_SYMBOL_BYTES + 1],
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::BridgeAssetFieldTooLong {
+                field: "symbol",
+                ..
+            })
+        ));
+    }
+
+    /// Asset registry persists across multiple Intents (state-
+    /// root shifts after each).
+    #[test]
+    fn asset_registry_changes_shift_state_root() {
+        let mut s = InMemorySubstrate::new();
+        let r0 = s.state_root();
+        s.apply_intent(&Intent::AddBridgeAsset {
+            source_chain: 1,
+            source_contract: vec![0xab; 20],
+            decimals: 6,
+            name: b"USD Coin".to_vec(),
+            symbol: b"USDC".to_vec(),
+        })
+        .unwrap();
+        let r1 = s.state_root();
+        assert_ne!(r0, r1);
+
+        use crate::asset_registry::asset_id;
+        let id = asset_id(1, &[0xab; 20]);
+        s.apply_intent(&Intent::PauseBridgeAsset { asset_id: id })
+            .unwrap();
+        let r2 = s.state_root();
+        assert_ne!(r1, r2);
+
+        s.apply_intent(&Intent::RemoveBridgeAsset { asset_id: id })
+            .unwrap();
+        let r3 = s.state_root();
+        assert_ne!(r2, r3);
     }
 }
