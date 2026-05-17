@@ -971,6 +971,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "gsx-l2-confidential"
+version = "0.1.0"
+dependencies = [
+ "gsx-crypto",
+ "hex",
+ "proptest",
+ "serde",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "gsx-l2-verifier-precompile"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,19 @@
+[package]
+name = "gsx-l2-confidential"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+description = "GSX L2 PQ-confidential transfer primitives (Track H). Note commitment + nullifier + L2-address derivation. Phase 1 — viewing-key + hybrid AEAD encryption land in phase 2."
+
+[dependencies]
+gsx-crypto.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+hex.workspace = true
+proptest.workspace = true

@@ -17,6 +17,7 @@ members = [
     "crates/gsx-faucet",
     "crates/gsx-validator-program",
     "crates/gsx-l2-verifier-precompile",
+    "crates/gsx-l2-confidential",
     "clients/rust-sdk",
 ]
 # B4: keep the cargo-fuzz workspace out of the main one — cargo-fuzz
@@ -59,6 +60,7 @@ gsx-mempool = { path = "crates/gsx-mempool" }
 gsx-faucet = { path = "crates/gsx-faucet" }
 gsx-validator-program = { path = "crates/gsx-validator-program" }
 gsx-l2-verifier-precompile = { path = "crates/gsx-l2-verifier-precompile" }
+gsx-l2-confidential = { path = "crates/gsx-l2-confidential" }
 gsx-client = { path = "clients/rust-sdk" }
 
 # Post-quantum primitives (FIPS 203 / 204)
