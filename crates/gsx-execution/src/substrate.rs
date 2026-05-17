@@ -242,6 +242,28 @@ pub enum Intent {
         /// or the invalid-batch CommitL2StateRoot hash).
         intent_hash: [u8; 32],
     },
+    /// Mark a `Pending` force-include obligation as `Honored`.
+    /// The L2 sequencer posts this when it has included the
+    /// obligation's `tx` in a `CommitL2StateRoot` batch — the
+    /// L1 substrate has no view into L2 tx contents, so it
+    /// relies on the daemon's authority-quorum gate to ratify
+    /// the claim before the Intent applies. Closes the
+    /// force-include lifecycle: `Pending → {Honored, Slashed}`.
+    ///
+    /// Replay defense: the `Pending → Honored` transition is
+    /// one-way (the same `ObligationStatus::Pending` gate the
+    /// slashing path uses). Re-posting on a `Honored` or
+    /// `Slashed` obligation surfaces `ForceIncludeNotPending`.
+    ///
+    /// Track G G3.4 follow-up. The substrate effect is the
+    /// status flip; there is no balance accounting on a
+    /// successful honor (the sequencer kept its bond intact
+    /// by meeting the deadline).
+    MarkForceIncludeHonored {
+        /// Obligation id (matches `Intent::L2ForceInclude`'s
+        /// `obligation_id`).
+        obligation_id: [u8; 32],
+    },
     /// Post a per-batch DA blob to L1 calldata. The sequencer
     /// emits this alongside `CommitL2StateRoot` so the L2 state
     /// transitions are reproducible from L1-anchored data. The
@@ -1036,6 +1058,34 @@ impl Substrate for InMemorySubstrate {
             // Stub no-op at the substrate level until each
             // adjudication path lands.
             Intent::SlashSequencer { .. } => Ok(()),
+            // Track G G3.4 follow-up: sequencer-claimed
+            // obligation-honored marker. Daemon-authority-
+            // quorum gates the claim; substrate only enforces
+            // the Pending → Honored one-way transition.
+            Intent::MarkForceIncludeHonored { obligation_id } => {
+                use crate::force_include::{decode_map, encode_map, ObligationStatus};
+
+                let registry_addr = reserved::force_include_registry_address();
+                let existing_bytes = self.read_bytes(&registry_addr).unwrap_or_default();
+                let mut map = decode_map(&existing_bytes)?;
+
+                let ob =
+                    map.get_mut(obligation_id)
+                        .ok_or(ExecutionError::ForceIncludeNotFound {
+                            obligation_id: *obligation_id,
+                        })?;
+                if ob.status != ObligationStatus::Pending {
+                    return Err(ExecutionError::ForceIncludeNotPending {
+                        obligation_id: *obligation_id,
+                        status: ob.status,
+                    });
+                }
+                ob.status = ObligationStatus::Honored;
+
+                let new_bytes = encode_map(&map);
+                self.write_bytes_unchecked(registry_addr, new_bytes);
+                Ok(())
+            }
             // PostL2DA → G3.3 (#102) DA blob anchoring (no
             // substrate state effect; the blob lives in L1
             // calldata which is consensus-level state).
@@ -2450,11 +2500,8 @@ mod tests {
     /// `SNITCH_BOUNTY_CAP` (1M GSX).
     #[test]
     fn snitch_bounty_amount_caps_at_1m() {
-        // 10% of 10M = 1M (at the cap exactly — strict <).
         assert_eq!(snitch_bounty_amount(10_000_000), SNITCH_BOUNTY_CAP);
-        // 10% of 100M = 10M which exceeds; capped.
         assert_eq!(snitch_bounty_amount(100_000_000), SNITCH_BOUNTY_CAP);
-        // 10% of u128::MAX/10 still caps.
         assert_eq!(snitch_bounty_amount(u128::MAX / 100), SNITCH_BOUNTY_CAP);
     }
 
@@ -2465,8 +2512,6 @@ mod tests {
     fn slash_sequencer_caps_snitch_bounty_at_1m() {
         use crate::force_include::obligation_id;
         let mut s = InMemorySubstrate::new();
-        // Pre-fund bond with 1B → 5% slash = 50M, 10% bounty
-        // would be 5M → capped to 1M.
         s.fund_sequencer_bond(1_000_000_000).unwrap();
         let tx = b"huge".to_vec();
         s.apply_intent(&Intent::L2ForceInclude {
@@ -2484,22 +2529,17 @@ mod tests {
         })
         .unwrap();
 
-        // Slash = 50M; insurance = 35M; treasury = 15M
-        // gross, minus 1M bounty cap = 14M net.
         assert_eq!(s.sequencer_bond_balance(), 950_000_000);
         assert_eq!(s.balance(&reserved::insurance_pool_address()), 35_000_000);
         assert_eq!(s.balance(&reserved::treasury_address()), 14_000_000);
-        // Submitter receives 1M (capped, not 5M).
         assert_eq!(s.balance(&addr(8)), SNITCH_BOUNTY_CAP);
     }
 
-    /// Empty bond → no slash, no bounty (the slash arm
-    /// returns early before the bounty path).
+    /// Empty bond → no slash, no bounty.
     #[test]
     fn slash_sequencer_empty_bond_pays_no_bounty() {
         use crate::force_include::obligation_id;
         let mut s = InMemorySubstrate::new();
-        // No bond funded; submitter balance starts at 0.
         let tx = b"nobond".to_vec();
         s.apply_intent(&Intent::L2ForceInclude {
             tx: tx.clone(),
@@ -2516,15 +2556,12 @@ mod tests {
         })
         .unwrap();
 
-        // Treasury empty (no slash credited), submitter
-        // empty (no bounty paid).
         assert_eq!(s.balance(&reserved::treasury_address()), 0);
         assert_eq!(s.balance(&addr(9)), 0);
     }
 
-    /// Reserved-address submitter is treated defensively:
-    /// the slash still applies but the bounty is skipped —
-    /// the funds stay in treasury for the next event.
+    /// Reserved-address submitter: bounty skipped, the slash
+    /// still applies; funds stay in treasury.
     #[test]
     fn slash_sequencer_skips_bounty_to_reserved_submitter() {
         use crate::force_include::obligation_id;
@@ -2547,29 +2584,20 @@ mod tests {
         })
         .unwrap();
 
-        // Slash applied as normal: 50k slashed, 35k insurance,
-        // 15k treasury.
         assert_eq!(s.sequencer_bond_balance(), 950_000);
         assert_eq!(s.balance(&reserved::insurance_pool_address()), 35_000);
-        // Bounty skipped because submitter is reserved — full
-        // 15k stays in treasury (no debit).
+        // Bounty skipped — full 15k stays in treasury.
         assert_eq!(s.balance(&reserved::treasury_address()), 15_000);
     }
 
-    /// If the treasury balance is below the computed bounty
-    /// at slash time, the substrate pays the partial amount
-    /// (best-effort) rather than failing the slash.
-    /// Constructed by re-slashing once treasury is below the
-    /// 5k bounty target.
+    /// Best-effort bounty payment across two sequential
+    /// slashes from the same submitter.
     #[test]
     fn slash_sequencer_partial_bounty_when_treasury_shallow() {
         use crate::force_include::obligation_id;
         let mut s = InMemorySubstrate::new();
         s.fund_sequencer_bond(1_000_000).unwrap();
 
-        // First slash: 50k slashed → 35k insurance, 15k
-        // gross treasury, 5k bounty to addr(10), 10k net
-        // treasury.
         let tx1 = b"first".to_vec();
         s.apply_intent(&Intent::L2ForceInclude {
             tx: tx1.clone(),
@@ -2587,15 +2615,6 @@ mod tests {
         assert_eq!(s.balance(&reserved::treasury_address()), 10_000);
         assert_eq!(s.balance(&addr(10)), 5_000);
 
-        // Drain treasury below 5k via second slash but with
-        // larger slash so bounty would exceed remaining.
-        // Easier: directly debit treasury via reserved arm
-        // is not exposed, so engineer the scenario with a
-        // tiny second slash on a remaining 950k bond.
-        // 5% of 950k = 47_500. 10% bounty = 4_750. After
-        // 30% treasury credit = 14_250, treasury would be
-        // 10_000 + 14_250 - 4_750 = 19_500. Net positive,
-        // but the bounty math is verified at every step.
         let tx2 = b"second".to_vec();
         s.apply_intent(&Intent::L2ForceInclude {
             tx: tx2.clone(),
@@ -2616,7 +2635,175 @@ mod tests {
         assert_eq!(s.balance(&reserved::insurance_pool_address()), 68_250);
         // Treasury net: 10_000 + 14_250 - 4_750 = 19_500.
         assert_eq!(s.balance(&reserved::treasury_address()), 19_500);
-        // Same submitter accumulates: 5_000 + 4_750 = 9_750.
+        // Submitter accumulates: 5_000 + 4_750 = 9_750.
         assert_eq!(s.balance(&addr(10)), 9_750);
+    }
+
+    // ===== MarkForceIncludeHonored (G3.4 follow-up) =====
+
+    /// Pending obligation transitions to Honored cleanly,
+    /// no balance accounting (sequencer kept its bond).
+    #[test]
+    fn mark_force_include_honored_flips_pending_to_honored() {
+        use crate::force_include::{obligation_id, ObligationStatus};
+        let mut s = InMemorySubstrate::new();
+        // Fund bond to assert it stays intact post-honor.
+        s.fund_sequencer_bond(1_000_000).unwrap();
+        let tx = b"included".to_vec();
+        s.apply_intent(&Intent::L2ForceInclude {
+            tx: tx.clone(),
+            deadline_l1_height: 500,
+            submitter: addr(3),
+            l2_nonce: 1,
+        })
+        .unwrap();
+        let id = obligation_id(&tx, 500, &addr(3), 1);
+        // Confirm Pending.
+        assert_eq!(
+            s.force_include_obligation(&id).unwrap().status,
+            ObligationStatus::Pending
+        );
+
+        s.apply_intent(&Intent::MarkForceIncludeHonored { obligation_id: id })
+            .unwrap();
+
+        assert_eq!(
+            s.force_include_obligation(&id).unwrap().status,
+            ObligationStatus::Honored
+        );
+        // Bond untouched.
+        assert_eq!(s.sequencer_bond_balance(), 1_000_000);
+        // Treasury + insurance untouched.
+        assert_eq!(s.balance(&reserved::insurance_pool_address()), 0);
+        assert_eq!(s.balance(&reserved::treasury_address()), 0);
+        // Submitter received no bounty.
+        assert_eq!(s.balance(&addr(3)), 0);
+    }
+
+    /// Honoring a non-existent obligation rejects with
+    /// `ForceIncludeNotFound`.
+    #[test]
+    fn mark_force_include_honored_unknown_obligation_rejected() {
+        let mut s = InMemorySubstrate::new();
+        let err = s.apply_intent(&Intent::MarkForceIncludeHonored {
+            obligation_id: [0xaa; 32],
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::ForceIncludeNotFound { .. })
+        ));
+    }
+
+    /// Re-honoring an already-Honored obligation rejects
+    /// (one-way Pending → Honored gate).
+    #[test]
+    fn mark_force_include_honored_double_honor_rejected() {
+        use crate::force_include::obligation_id;
+        let mut s = InMemorySubstrate::new();
+        let tx = b"twice".to_vec();
+        s.apply_intent(&Intent::L2ForceInclude {
+            tx: tx.clone(),
+            deadline_l1_height: 100,
+            submitter: addr(4),
+            l2_nonce: 1,
+        })
+        .unwrap();
+        let id = obligation_id(&tx, 100, &addr(4), 1);
+
+        s.apply_intent(&Intent::MarkForceIncludeHonored { obligation_id: id })
+            .unwrap();
+
+        let err = s.apply_intent(&Intent::MarkForceIncludeHonored { obligation_id: id });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::ForceIncludeNotPending { .. })
+        ));
+    }
+
+    /// Honoring a Slashed obligation rejects (the slash
+    /// outcome stands; the sequencer can't retroactively
+    /// claim Honored on something already adjudicated as
+    /// missed-deadline).
+    #[test]
+    fn mark_force_include_honored_after_slash_rejected() {
+        use crate::force_include::obligation_id;
+        let mut s = InMemorySubstrate::new();
+        s.fund_sequencer_bond(1_000_000).unwrap();
+        let tx = b"too-late".to_vec();
+        s.apply_intent(&Intent::L2ForceInclude {
+            tx: tx.clone(),
+            deadline_l1_height: 100,
+            submitter: addr(5),
+            l2_nonce: 1,
+        })
+        .unwrap();
+        let id = obligation_id(&tx, 100, &addr(5), 1);
+
+        s.apply_intent(&Intent::SlashSequencer {
+            reason: SlashReason::MissedForceInclude,
+            intent_hash: id,
+        })
+        .unwrap();
+
+        let err = s.apply_intent(&Intent::MarkForceIncludeHonored { obligation_id: id });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::ForceIncludeNotPending { .. })
+        ));
+    }
+
+    /// Slashing an already-Honored obligation rejects too
+    /// (symmetric: the lifecycle gate enforces Pending →
+    /// {Honored, Slashed} but no further transitions).
+    #[test]
+    fn slash_sequencer_after_honor_rejected() {
+        use crate::force_include::obligation_id;
+        let mut s = InMemorySubstrate::new();
+        s.fund_sequencer_bond(1_000_000).unwrap();
+        let tx = b"already-honored".to_vec();
+        s.apply_intent(&Intent::L2ForceInclude {
+            tx: tx.clone(),
+            deadline_l1_height: 100,
+            submitter: addr(6),
+            l2_nonce: 1,
+        })
+        .unwrap();
+        let id = obligation_id(&tx, 100, &addr(6), 1);
+
+        s.apply_intent(&Intent::MarkForceIncludeHonored { obligation_id: id })
+            .unwrap();
+
+        let err = s.apply_intent(&Intent::SlashSequencer {
+            reason: SlashReason::MissedForceInclude,
+            intent_hash: id,
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::ForceIncludeNotPending { .. })
+        ));
+    }
+
+    /// Honoring an obligation shifts state_root (bytes_state
+    /// surface integrates into the canonical state-root
+    /// recipe).
+    #[test]
+    fn honor_shifts_state_root() {
+        use crate::force_include::obligation_id;
+        let mut s = InMemorySubstrate::new();
+        let tx = b"observable".to_vec();
+        s.apply_intent(&Intent::L2ForceInclude {
+            tx: tx.clone(),
+            deadline_l1_height: 100,
+            submitter: addr(2),
+            l2_nonce: 1,
+        })
+        .unwrap();
+        let id = obligation_id(&tx, 100, &addr(2), 1);
+        let before = s.state_root();
+
+        s.apply_intent(&Intent::MarkForceIncludeHonored { obligation_id: id })
+            .unwrap();
+        let after = s.state_root();
+        assert_ne!(before, after);
     }
 }
