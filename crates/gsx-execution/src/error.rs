@@ -129,4 +129,28 @@ pub enum ExecutionError {
         /// The obligation's current status.
         status: crate::force_include::ObligationStatus,
     },
+
+    /// `Intent::CommitL2StateRoot::vk_hash` did not match the
+    /// chain-state-pinned `aggregation_vk_hash`. Per the
+    /// op-succinct multiBlockVKey pattern this is the
+    /// load-bearing security gate.
+    #[error(
+        "L2 vk_hash mismatch: expected 0x{enc_expected}, got 0x{enc_got}",
+        enc_expected = hex::encode(expected),
+        enc_got = hex::encode(got),
+    )]
+    L2VkPinMismatch {
+        /// Pinned aggregation_vk_hash from the registry.
+        expected: [u8; 32],
+        /// vk_hash from the Intent.
+        got: [u8; 32],
+    },
+
+    /// `Intent::SetL2VerifyingKey` was called with both fields
+    /// all-zeros. Defense against accidental "unset" via
+    /// rotation; an explicit `Intent::UnsetL2VerifyingKey`
+    /// (not currently defined) would be required to truly
+    /// unpin.
+    #[error("SetL2VerifyingKey rejected: both new_aggregation_vk and new_range_commitment are all-zeros")]
+    SetL2VkAllZeros,
 }

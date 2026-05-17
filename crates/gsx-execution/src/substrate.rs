@@ -389,30 +389,36 @@ impl InMemorySubstrate {
         self.balances.iter()
     }
 
-    /// Read the count of L2 state-root records stored at the
-    /// reserved L2 registry account. Decodes the bytes-state
-    /// record at `reserved::l2_registry_address()` and returns
-    /// the map's size. Returns 0 if no record exists (i.e., no
-    /// successful `Intent::CommitL2StateRoot` has landed yet) or
-    /// if decoding fails (defensive — surfaces silently as 0
-    /// rather than a panic; production callers concerned with
-    /// integrity check via `l2_state_root_record` below).
-    pub fn l2_commit_count(&self) -> usize {
+    /// Read the L2 registry's full contents (VK pair + state-
+    /// roots map). Returns an empty registry if no record exists
+    /// or if decoding fails.
+    pub fn l2_registry(&self) -> crate::l2_state::L2Registry {
         let bytes = self.read_bytes(&reserved::l2_registry_address());
-        let map = crate::l2_state::decode_map(bytes.as_deref().unwrap_or(&[])).unwrap_or_default();
-        map.len()
+        crate::l2_state::decode(bytes.as_deref().unwrap_or(&[])).unwrap_or_default()
+    }
+
+    /// Read the count of L2 state-root records.
+    pub fn l2_commit_count(&self) -> usize {
+        self.l2_registry().state_roots.len()
     }
 
     /// Look up a per-batch L2 state-root record by composite key.
-    /// Returns `None` if no record exists or if the registry
-    /// bytes are corrupt (defensive — see `l2_commit_count`).
     pub fn l2_state_root_record(
         &self,
         key: &crate::l2_state::L2BatchKey,
     ) -> Option<crate::l2_state::L2StateRootRecord> {
-        let bytes = self.read_bytes(&reserved::l2_registry_address())?;
-        let map = crate::l2_state::decode_map(&bytes).ok()?;
-        map.get(key).copied()
+        self.l2_registry().state_roots.get(key).copied()
+    }
+
+    /// Read the currently-pinned L2 aggregation VK hash.
+    /// `[0u8; 32]` if no `Intent::SetL2VerifyingKey` has landed.
+    pub fn l2_aggregation_vk_hash(&self) -> [u8; 32] {
+        self.l2_registry().aggregation_vk_hash
+    }
+
+    /// Read the currently-pinned L2 range-program VK commitment.
+    pub fn l2_range_vk_commitment(&self) -> [u8; 32] {
+        self.l2_registry().range_vk_commitment
     }
 
     /// Credit `amount` to `addr` without going through the
@@ -479,6 +485,21 @@ impl InMemorySubstrate {
     /// Bypasses the reserved-address Transfer gate.
     pub fn fund_sequencer_bond(&mut self, amount: Balance) -> Result<(), ExecutionError> {
         self.credit_unchecked(reserved::sequencer_bond_address(), amount)
+    }
+
+    /// Pin the L2 aggregation + range VK pair. Convenience
+    /// wrapper around `Intent::SetL2VerifyingKey` — production
+    /// callers should go through the Intent; tests can use this
+    /// to skip wiring the Intent dispatch.
+    pub fn pin_l2_verifying_key(
+        &mut self,
+        aggregation_vk_hash: [u8; 32],
+        range_vk_commitment: [u8; 32],
+    ) -> Result<(), ExecutionError> {
+        self.apply_intent(&Intent::SetL2VerifyingKey {
+            new_aggregation_vk: aggregation_vk_hash,
+            new_range_commitment: range_vk_commitment,
+        })
     }
 
     /// Look up a force-include obligation by id. Returns None
@@ -608,13 +629,31 @@ impl Substrate for InMemorySubstrate {
             } => {
                 use gsx_l2_verifier_precompile::public_inputs as pi;
 
-                use crate::l2_state::{decode_map, encode_map, L2BatchKey, L2StateRootRecord};
+                use crate::l2_state::{decode, encode, L2BatchKey, L2StateRootRecord};
 
-                // Verifier format gate.
+                // Verifier format gate (proof = 260 B,
+                // public_inputs = 240 B, vk_hash != all-zeros).
                 gsx_l2_verifier_precompile::verify_l2_batch(proof_bytes, public_inputs, vk_hash)
                     .map_err(|e| ExecutionError::L2VerifierRejected {
                         reason: e.to_string(),
                     })?;
+
+                let registry_addr = reserved::l2_registry_address();
+                let existing_bytes = self.read_bytes(&registry_addr).unwrap_or_default();
+                let mut registry = decode(&existing_bytes)?;
+
+                // VK-pinning gate: the commit's vk_hash must
+                // match the chain-state-pinned aggregation_vk_hash.
+                // Per the op-succinct multiBlockVKey pattern this
+                // is THE security gate; the format-gate's
+                // all-zeros rejection is a sentinel for the
+                // pre-rotation initial state.
+                if registry.aggregation_vk_hash != *vk_hash {
+                    return Err(ExecutionError::L2VkPinMismatch {
+                        expected: registry.aggregation_vk_hash,
+                        got: *vk_hash,
+                    });
+                }
 
                 // Decode L1 anchor height + l2_chain_id_hash +
                 // da_commitment from the public-inputs blob at
@@ -644,27 +683,39 @@ impl Substrate for InMemorySubstrate {
                     vk_hash: *vk_hash,
                     da_commitment,
                 };
-
-                // Read the existing map (empty if first commit),
-                // insert the new record, encode + write back.
-                // The map encoding is the load-bearing substrate
-                // state — the V2 state_root recipe hashes it via
-                // the bytes_state map iteration.
-                let registry_addr = reserved::l2_registry_address();
-                let existing_bytes = self.read_bytes(&registry_addr).unwrap_or_default();
-                let mut map = decode_map(&existing_bytes)?;
-                map.insert(key, record);
-                let new_bytes = encode_map(&map);
+                registry.state_roots.insert(key, record);
+                let new_bytes = encode(&registry);
                 self.write_bytes_unchecked(registry_addr, new_bytes);
                 Ok(())
             }
-            // `SetL2VerifyingKey` rotates a chain-state value
-            // (the aggregation_vk_hash + range_vk_commitment).
-            // Phase 1 (this PR / G2.2) accepts the rotation
-            // without storing it; the real chain-state VK
-            // registry lands in the same follow-up that adds
-            // the (chain_id, batch_id) → L2StateRoot map.
-            Intent::SetL2VerifyingKey { .. } => Ok(()),
+            // Real `SetL2VerifyingKey` arm: rotates the chain-
+            // state VK pair at `l2_registry_address`. Authority
+            // Ring quorum authorization happens at the daemon's
+            // governance dispatch layer (per the v1.1 governance
+            // batch); the substrate's job is the deterministic
+            // state effect.
+            //
+            // Rejecting both fields all-zeros prevents an
+            // accidental "unset" via this Intent — to truly
+            // unpin, governance would need a separate
+            // `Intent::UnsetL2VerifyingKey` (not currently
+            // defined).
+            Intent::SetL2VerifyingKey {
+                new_aggregation_vk,
+                new_range_commitment,
+            } => {
+                if *new_aggregation_vk == [0u8; 32] && *new_range_commitment == [0u8; 32] {
+                    return Err(ExecutionError::SetL2VkAllZeros);
+                }
+                let registry_addr = reserved::l2_registry_address();
+                let existing_bytes = self.read_bytes(&registry_addr).unwrap_or_default();
+                let mut registry = crate::l2_state::decode(&existing_bytes)?;
+                registry.aggregation_vk_hash = *new_aggregation_vk;
+                registry.range_vk_commitment = *new_range_commitment;
+                let new_bytes = crate::l2_state::encode(&registry);
+                self.write_bytes_unchecked(registry_addr, new_bytes);
+                Ok(())
+            }
             // Track G Phase G3.2 (#101): bridge accounting.
             //
             // L1Lock invariant: debit `user_address` by `amount`,
@@ -1027,13 +1078,13 @@ mod tests {
         assert_eq!(s.state_root(), before);
     }
 
-    /// G2.2 #97: valid CommitL2StateRoot increments the L2
-    /// commit counter at the reserved registry address. The
-    /// verifier format gates (proof = 260 B, public_inputs =
-    /// 240 B, vk_hash != all-zeros) all pass.
+    /// G2.2 #97: valid CommitL2StateRoot stores a per-batch
+    /// L2 state-root record. Requires VK pinned via
+    /// `Intent::SetL2VerifyingKey` first.
     #[test]
     fn commit_l2_state_root_increments_counter() {
         let mut s = InMemorySubstrate::from_balances([(addr(1), 100)]);
+        s.pin_l2_verifying_key([0x42; 32], [0x43; 32]).unwrap();
         let before_count = s.l2_commit_count();
         let intent = Intent::CommitL2StateRoot {
             batch_id: 0,
@@ -1106,6 +1157,7 @@ mod tests {
     #[test]
     fn commits_are_monotonic() {
         let mut s = InMemorySubstrate::new();
+        s.pin_l2_verifying_key([0x42; 32], [0x43; 32]).unwrap();
         for batch_id in 0..5 {
             s.apply_intent(&Intent::CommitL2StateRoot {
                 batch_id,
@@ -1145,6 +1197,7 @@ mod tests {
             .copy_from_slice(&[0xc1; 32]);
 
         let mut s = InMemorySubstrate::new();
+        s.pin_l2_verifying_key([0x42; 32], [0x43; 32]).unwrap();
         s.apply_intent(&Intent::CommitL2StateRoot {
             batch_id: 7,
             new_state_root: [0xab; 32],
@@ -1177,6 +1230,7 @@ mod tests {
         use crate::l2_state::L2BatchKey;
 
         let mut s = InMemorySubstrate::new();
+        s.pin_l2_verifying_key([0x42; 32], [0x43; 32]).unwrap();
         let mut prior_root = s.state_root();
 
         // 3 commits to the same chain, different batch_ids.
@@ -1227,6 +1281,7 @@ mod tests {
         use crate::l2_state::L2BatchKey;
 
         let mut s = InMemorySubstrate::new();
+        s.pin_l2_verifying_key([0x42; 32], [0x43; 32]).unwrap();
 
         // Chain A, batch 0.
         let mut pi_a = vec![0u8; 240];
@@ -1284,23 +1339,11 @@ mod tests {
             s2.state_root(),
             "identical balances + empty bytes_state → identical root"
         );
-        // Mutate s2's bytes_state via the public CommitL2StateRoot
-        // path so we don't poke the private field directly.
-        let mut public_inputs = vec![0u8; 240];
-        // l2_chain_id_hash bytes are zero by default — that's fine.
-        s2.apply_intent(&Intent::CommitL2StateRoot {
-            batch_id: 0,
-            new_state_root: [0xab; 32],
-            proof_bytes: vec![0xcd; 260],
-            public_inputs: {
-                public_inputs[gsx_l2_verifier_precompile::public_inputs::L1_ANCHOR_HEIGHT_OFFSET
-                    ..gsx_l2_verifier_precompile::public_inputs::L1_ANCHOR_HEIGHT_OFFSET + 8]
-                    .copy_from_slice(&42u64.to_be_bytes());
-                public_inputs
-            },
-            vk_hash: [0x42; 32],
-        })
-        .unwrap();
+        // Mutate s2's bytes_state via SetL2VerifyingKey (lighter
+        // than CommitL2StateRoot which requires a pinned VK
+        // first). This directly mutates the L2 registry's
+        // bytes_state record.
+        s2.pin_l2_verifying_key([0xab; 32], [0xcd; 32]).unwrap();
         assert_ne!(
             s1.state_root(),
             s2.state_root(),
@@ -1317,22 +1360,90 @@ mod tests {
         assert_eq!(s.read_bytes(&reserved::l2_registry_address()), None);
     }
 
-    /// G2.1 stub: SetL2VerifyingKey accepted; state unchanged until
-    /// G2.2 wires the chain-state VK registry.
+    /// SetL2VerifyingKey actually pins the VK pair in chain state.
     #[test]
-    fn set_l2_verifying_key_stub_is_accepted() {
+    fn set_l2_verifying_key_pins_vk() {
         let mut s = InMemorySubstrate::from_balances([(addr(1), 100)]);
-        let before = s.state_root();
+        assert_eq!(s.l2_aggregation_vk_hash(), [0u8; 32]);
         let intent = Intent::SetL2VerifyingKey {
             new_aggregation_vk: [0x11; 32],
             new_range_commitment: [0x22; 32],
         };
-        assert!(s.apply_intent(&intent).is_ok());
-        assert_eq!(
-            s.state_root(),
-            before,
-            "G2.1 stub MUST NOT mutate state; G2.2 wires the chain-state VK registry"
-        );
+        s.apply_intent(&intent).unwrap();
+        assert_eq!(s.l2_aggregation_vk_hash(), [0x11; 32]);
+        assert_eq!(s.l2_range_vk_commitment(), [0x22; 32]);
+    }
+
+    /// SetL2VerifyingKey rejects an all-zeros rotation
+    /// (defense against accidental unpin).
+    #[test]
+    fn set_l2_verifying_key_rejects_all_zeros() {
+        let mut s = InMemorySubstrate::new();
+        let err = s.apply_intent(&Intent::SetL2VerifyingKey {
+            new_aggregation_vk: [0u8; 32],
+            new_range_commitment: [0u8; 32],
+        });
+        assert!(matches!(err, Err(ExecutionError::SetL2VkAllZeros)));
+    }
+
+    /// SetL2VerifyingKey rotation: subsequent CommitL2StateRoot
+    /// must use the new vk_hash. Old vk_hash rejected.
+    #[test]
+    fn set_l2_verifying_key_rotation_changes_required_vk_hash() {
+        use gsx_l2_verifier_precompile::public_inputs as pi;
+        let mut s = InMemorySubstrate::new();
+        s.pin_l2_verifying_key([0x01; 32], [0x02; 32]).unwrap();
+        let mut public_inputs = vec![0u8; 240];
+        public_inputs[pi::L2_CHAIN_ID_HASH_OFFSET..pi::L2_CHAIN_ID_HASH_OFFSET + 32]
+            .copy_from_slice(&[0xc1; 32]);
+        // Commit with the original VK → ok.
+        s.apply_intent(&Intent::CommitL2StateRoot {
+            batch_id: 0,
+            new_state_root: [0xab; 32],
+            proof_bytes: vec![0xcd; 260],
+            public_inputs: public_inputs.clone(),
+            vk_hash: [0x01; 32],
+        })
+        .unwrap();
+        // Rotate.
+        s.pin_l2_verifying_key([0x99; 32], [0x88; 32]).unwrap();
+        // Commit with the OLD VK → rejected.
+        let err = s.apply_intent(&Intent::CommitL2StateRoot {
+            batch_id: 1,
+            new_state_root: [0xab; 32],
+            proof_bytes: vec![0xcd; 260],
+            public_inputs: public_inputs.clone(),
+            vk_hash: [0x01; 32],
+        });
+        assert!(matches!(err, Err(ExecutionError::L2VkPinMismatch { .. })));
+        // Commit with the NEW VK → ok.
+        s.apply_intent(&Intent::CommitL2StateRoot {
+            batch_id: 1,
+            new_state_root: [0xab; 32],
+            proof_bytes: vec![0xcd; 260],
+            public_inputs,
+            vk_hash: [0x99; 32],
+        })
+        .unwrap();
+    }
+
+    /// CommitL2StateRoot before any VK pin: rejected via
+    /// vk-mismatch (registry has all-zeros agg_vk_hash, commit
+    /// has non-zero vk_hash from the verifier's all-zeros gate).
+    #[test]
+    fn commit_before_vk_pin_rejected() {
+        let mut s = InMemorySubstrate::new();
+        let err = s.apply_intent(&Intent::CommitL2StateRoot {
+            batch_id: 0,
+            new_state_root: [0xab; 32],
+            proof_bytes: vec![0xcd; 260],
+            public_inputs: vec![0u8; 240],
+            vk_hash: [0x42; 32],
+        });
+        // Format gate sentinel (vk_hash != all-zeros) is fine,
+        // but the registry's stored aggregation_vk_hash is all-
+        // zeros → L2VkPinMismatch.
+        assert!(matches!(err, Err(ExecutionError::L2VkPinMismatch { .. })));
     }
 
     /// G3.2 (#101): L1Lock debits user + credits the bridge

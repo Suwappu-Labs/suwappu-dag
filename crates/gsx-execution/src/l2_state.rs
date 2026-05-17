@@ -1,20 +1,24 @@
-//! L2 state-root storage shape (Track G G2.2 phase 2, partial).
+//! L2 registry storage shape (Track G G2.2 phase 2).
 //!
-//! The L2 verifier-precompile arm of `apply_intent` records every
-//! successful `Intent::CommitL2StateRoot` as a per-batch record in
-//! the substrate's bytes-state map at the reserved
+//! The substrate's bytes-state map at the reserved
 //! `l2_registry_address` (per
-//! `docs/iq/IQ-006-l2-state-root-commitment-surface.md`). This
-//! module defines the on-disk encoding of that record + the
-//! container map.
+//! `docs/iq/IQ-006-l2-state-root-commitment-surface.md`) stores a
+//! single `L2Registry` value containing:
+//!
+//! - The chain-pinned VK pair (`aggregation_vk_hash`,
+//!   `range_vk_commitment`) per the op-succinct multiBlockVKey
+//!   pattern. Rotated via `Intent::SetL2VerifyingKey`.
+//! - The per-batch state-roots map (`L2BatchKey ->
+//!   L2StateRootRecord`). Each successful
+//!   `Intent::CommitL2StateRoot` inserts here.
 //!
 //! ## Encoding
 //!
-//! At the L2 registry address the substrate stores a deterministic
-//! byte sequence:
-//!
 //! ```text
-//! u32::BE(count) ||
+//! u32::BE(VERSION = 1) ||
+//! aggregation_vk_hash (32 B) ||
+//! range_vk_commitment (32 B) ||
+//! u32::BE(state_root_count) ||
 //!   foreach (key, record) in ascending key order:
 //!     key.l2_chain_id_hash (32 B) ||
 //!     key.batch_id (u64::BE, 8 B) ||
@@ -24,7 +28,9 @@
 //!     record.da_commitment (32 B)
 //! ```
 //!
-//! Total bytes per entry = 16 (key) + 104 (record) = **120 B**.
+//! Total bytes per state-root entry = 16 (key) + 104 (record) = **120 B**.
+//! Header overhead = 4 (version) + 32 (agg_vk) + 32 (range_vk_commit)
+//!                 + 4 (count) = **72 B**.
 //!
 //! ## Scalability
 //!
@@ -45,6 +51,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{error::ExecutionError, reserved};
 
+/// Current L2 registry encoding version. Bump on incompatible
+/// changes; the decoder rejects any other value.
+pub const L2_REGISTRY_VERSION: u32 = 1;
+
 /// Length of one encoded `L2StateRootRecord` in bytes.
 /// `state_root (32) + committed_at_l1_height (8) + vk_hash (32) +
 ///  da_commitment (32) = 104`.
@@ -54,11 +64,11 @@ pub const L2_STATE_ROOT_RECORD_BYTES: usize = 32 + 8 + 32 + 32;
 /// `key (40) + record (104) = 144`.
 ///
 /// Note: the key is `l2_chain_id_hash (32) + batch_id (8) = 40`.
-/// Storage cost per pair: 144 B.
 pub const ENCODED_ENTRY_BYTES: usize = 32 + 8 + L2_STATE_ROOT_RECORD_BYTES;
 
-/// Length of the encoded map header (a `u32::BE` entry count).
-pub const ENCODED_HEADER_BYTES: usize = 4;
+/// Length of the encoded registry header:
+/// `version (4) + agg_vk_hash (32) + range_vk_commit (32) + count (4) = 72`.
+pub const ENCODED_HEADER_BYTES: usize = 4 + 32 + 32 + 4;
 
 /// Per-batch L2 state-root record. Stored at the reserved
 /// `l2_registry_address` keyed by `(l2_chain_id_hash, batch_id)`.
@@ -92,12 +102,31 @@ pub struct L2BatchKey {
     pub batch_id: u64,
 }
 
-/// Encode the L2 state-root map into the on-disk byte sequence.
-/// Deterministic in BTreeMap ascending-key order.
-pub fn encode_map(map: &BTreeMap<L2BatchKey, L2StateRootRecord>) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(ENCODED_HEADER_BYTES + map.len() * ENCODED_ENTRY_BYTES);
-    buf.extend_from_slice(&(map.len() as u32).to_be_bytes());
-    for (key, rec) in map {
+/// The full L2 registry stored at `l2_registry_address`. Owns
+/// the chain-pinned VK pair + the per-batch state-roots map.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct L2Registry {
+    /// SP1 aggregation VK hash. The L1 verifier requires every
+    /// `Intent::CommitL2StateRoot::vk_hash` field to equal this
+    /// value. Rotated via `Intent::SetL2VerifyingKey`.
+    /// `[0u8; 32]` is the "no VK pinned" sentinel.
+    pub aggregation_vk_hash: [u8; 32],
+    /// Per-batch range-program VK commitment (op-succinct
+    /// multiBlockVKey pattern).
+    pub range_vk_commitment: [u8; 32],
+    /// Per-batch state-roots map keyed by `(l2_chain_id_hash, batch_id)`.
+    pub state_roots: BTreeMap<L2BatchKey, L2StateRootRecord>,
+}
+
+/// Encode the registry to the canonical on-disk byte sequence.
+pub fn encode(reg: &L2Registry) -> Vec<u8> {
+    let mut buf =
+        Vec::with_capacity(ENCODED_HEADER_BYTES + reg.state_roots.len() * ENCODED_ENTRY_BYTES);
+    buf.extend_from_slice(&L2_REGISTRY_VERSION.to_be_bytes());
+    buf.extend_from_slice(&reg.aggregation_vk_hash);
+    buf.extend_from_slice(&reg.range_vk_commitment);
+    buf.extend_from_slice(&(reg.state_roots.len() as u32).to_be_bytes());
+    for (key, rec) in &reg.state_roots {
         buf.extend_from_slice(&key.l2_chain_id_hash);
         buf.extend_from_slice(&key.batch_id.to_be_bytes());
         buf.extend_from_slice(&rec.state_root);
@@ -108,32 +137,39 @@ pub fn encode_map(map: &BTreeMap<L2BatchKey, L2StateRootRecord>) -> Vec<u8> {
     buf
 }
 
-/// Decode the byte sequence back into a map. Returns
-/// `CorruptStateRecord` if the bytes don't match the canonical
-/// encoding (header too short, declared length doesn't match
-/// payload, etc).
-pub fn decode_map(bytes: &[u8]) -> Result<BTreeMap<L2BatchKey, L2StateRootRecord>, ExecutionError> {
+/// Decode the byte sequence back into a registry. Empty bytes
+/// decode to a default (empty) registry — matches the substrate
+/// behavior of "no record at l2_registry_address yet".
+pub fn decode(bytes: &[u8]) -> Result<L2Registry, ExecutionError> {
     if bytes.is_empty() {
-        // Treat empty bytes as an empty map. This is how the
-        // registry account looks before the first commit
-        // (bytes_state.get(&addr) is None → caller passes empty).
-        return Ok(BTreeMap::new());
+        return Ok(L2Registry::default());
     }
     if bytes.len() < ENCODED_HEADER_BYTES {
         return Err(ExecutionError::CorruptStateRecord {
             addr: reserved::l2_registry_address(),
-            reason: "L2 state-root map header missing",
+            reason: "L2 registry header missing",
         });
     }
-    let count = u32::from_be_bytes(bytes[0..ENCODED_HEADER_BYTES].try_into().unwrap()) as usize;
+    let version = u32::from_be_bytes(bytes[0..4].try_into().unwrap());
+    if version != L2_REGISTRY_VERSION {
+        return Err(ExecutionError::CorruptStateRecord {
+            addr: reserved::l2_registry_address(),
+            reason: "L2 registry version mismatch",
+        });
+    }
+    let mut aggregation_vk_hash = [0u8; 32];
+    aggregation_vk_hash.copy_from_slice(&bytes[4..36]);
+    let mut range_vk_commitment = [0u8; 32];
+    range_vk_commitment.copy_from_slice(&bytes[36..68]);
+    let count = u32::from_be_bytes(bytes[68..72].try_into().unwrap()) as usize;
     let expected_len = ENCODED_HEADER_BYTES + count * ENCODED_ENTRY_BYTES;
     if bytes.len() != expected_len {
         return Err(ExecutionError::CorruptStateRecord {
             addr: reserved::l2_registry_address(),
-            reason: "L2 state-root map size mismatch",
+            reason: "L2 registry size mismatch",
         });
     }
-    let mut map = BTreeMap::new();
+    let mut state_roots = BTreeMap::new();
     let mut cursor = ENCODED_HEADER_BYTES;
     for _ in 0..count {
         let mut l2_chain_id_hash = [0u8; 32];
@@ -163,16 +199,18 @@ pub fn decode_map(bytes: &[u8]) -> Result<BTreeMap<L2BatchKey, L2StateRootRecord
             vk_hash,
             da_commitment,
         };
-        // Reject duplicate keys (would silently overwrite in BTreeMap);
-        // the encoder shouldn't produce these, but be defensive.
-        if map.insert(key, rec).is_some() {
+        if state_roots.insert(key, rec).is_some() {
             return Err(ExecutionError::CorruptStateRecord {
                 addr: reserved::l2_registry_address(),
-                reason: "L2 state-root map has duplicate keys",
+                reason: "L2 registry has duplicate keys",
             });
         }
     }
-    Ok(map)
+    Ok(L2Registry {
+        aggregation_vk_hash,
+        range_vk_commitment,
+        state_roots,
+    })
 }
 
 #[cfg(test)]
@@ -195,100 +233,128 @@ mod tests {
         }
     }
 
-    #[test]
-    fn empty_map_round_trips() {
-        let m = BTreeMap::new();
-        let bytes = encode_map(&m);
-        // 4 bytes for the u32::BE(0) header, no entries.
-        assert_eq!(bytes.len(), 4);
-        assert_eq!(bytes, [0, 0, 0, 0]);
-        let m2 = decode_map(&bytes).unwrap();
-        assert_eq!(m, m2);
+    fn empty_registry() -> L2Registry {
+        L2Registry::default()
     }
 
     #[test]
-    fn empty_bytes_decodes_to_empty_map() {
-        // Convenience for the substrate read path: a missing
-        // entry in bytes_state should be treated as an empty
-        // map, not a decode error.
-        let m = decode_map(&[]).unwrap();
-        assert!(m.is_empty());
+    fn empty_registry_round_trips() {
+        let r = empty_registry();
+        let bytes = encode(&r);
+        // 72 B header (version + agg_vk + range_vk + count), no entries.
+        assert_eq!(bytes.len(), ENCODED_HEADER_BYTES);
+        let r2 = decode(&bytes).unwrap();
+        assert_eq!(r, r2);
+    }
+
+    #[test]
+    fn empty_bytes_decodes_to_empty_registry() {
+        let r = decode(&[]).unwrap();
+        assert!(r.state_roots.is_empty());
+        assert_eq!(r.aggregation_vk_hash, [0u8; 32]);
+        assert_eq!(r.range_vk_commitment, [0u8; 32]);
+    }
+
+    #[test]
+    fn vk_pair_round_trips() {
+        let r = L2Registry {
+            aggregation_vk_hash: [0xab; 32],
+            range_vk_commitment: [0xcd; 32],
+            state_roots: BTreeMap::new(),
+        };
+        let bytes = encode(&r);
+        let r2 = decode(&bytes).unwrap();
+        assert_eq!(r, r2);
+        assert_eq!(r2.aggregation_vk_hash, [0xab; 32]);
+        assert_eq!(r2.range_vk_commitment, [0xcd; 32]);
     }
 
     #[test]
     fn single_entry_round_trips() {
-        let mut m = BTreeMap::new();
-        m.insert(key(0x01, 5), record(0xab));
-        let bytes = encode_map(&m);
+        let mut r = empty_registry();
+        r.state_roots.insert(key(0x01, 5), record(0xab));
+        let bytes = encode(&r);
         assert_eq!(bytes.len(), ENCODED_HEADER_BYTES + ENCODED_ENTRY_BYTES);
-        let m2 = decode_map(&bytes).unwrap();
-        assert_eq!(m, m2);
+        let r2 = decode(&bytes).unwrap();
+        assert_eq!(r, r2);
     }
 
     #[test]
-    fn multi_entry_round_trips() {
-        let mut m = BTreeMap::new();
-        m.insert(key(0x01, 0), record(0xa1));
-        m.insert(key(0x01, 1), record(0xa2));
-        m.insert(key(0x02, 0), record(0xb1));
-        m.insert(key(0x02, 7), record(0xb2));
-        let bytes = encode_map(&m);
-        assert_eq!(bytes.len(), ENCODED_HEADER_BYTES + 4 * ENCODED_ENTRY_BYTES);
-        let m2 = decode_map(&bytes).unwrap();
-        assert_eq!(m, m2);
+    fn vk_pair_and_entries_round_trip_together() {
+        let mut r = L2Registry {
+            aggregation_vk_hash: [0xa0; 32],
+            range_vk_commitment: [0xa1; 32],
+            state_roots: BTreeMap::new(),
+        };
+        r.state_roots.insert(key(0x01, 0), record(0xa1));
+        r.state_roots.insert(key(0x02, 7), record(0xb2));
+        let bytes = encode(&r);
+        assert_eq!(bytes.len(), ENCODED_HEADER_BYTES + 2 * ENCODED_ENTRY_BYTES);
+        let r2 = decode(&bytes).unwrap();
+        assert_eq!(r, r2);
     }
 
     #[test]
     fn encoding_is_deterministic_across_runs() {
-        let mut m = BTreeMap::new();
-        m.insert(key(0x01, 1), record(0xab));
-        m.insert(key(0x02, 2), record(0xcd));
-        let bytes_a = encode_map(&m);
-        let bytes_b = encode_map(&m);
+        let mut r = empty_registry();
+        r.state_roots.insert(key(0x01, 1), record(0xab));
+        r.state_roots.insert(key(0x02, 2), record(0xcd));
+        let bytes_a = encode(&r);
+        let bytes_b = encode(&r);
         assert_eq!(bytes_a, bytes_b);
     }
 
     #[test]
     fn encoding_is_ascending_key_order() {
-        // BTreeMap iterates ascending. Verify the encoded bytes
-        // show key(0x01,_) before key(0x02,_) regardless of
-        // insertion order.
-        let mut a = BTreeMap::new();
-        a.insert(key(0x02, 0), record(0xb1));
-        a.insert(key(0x01, 0), record(0xa1));
-        let mut b = BTreeMap::new();
-        b.insert(key(0x01, 0), record(0xa1));
-        b.insert(key(0x02, 0), record(0xb1));
-        assert_eq!(encode_map(&a), encode_map(&b));
+        let mut a = empty_registry();
+        a.state_roots.insert(key(0x02, 0), record(0xb1));
+        a.state_roots.insert(key(0x01, 0), record(0xa1));
+        let mut b = empty_registry();
+        b.state_roots.insert(key(0x01, 0), record(0xa1));
+        b.state_roots.insert(key(0x02, 0), record(0xb1));
+        assert_eq!(encode(&a), encode(&b));
     }
 
     #[test]
     fn decode_rejects_size_mismatch() {
         // Claim 2 entries but provide bytes for 1.
-        let mut bytes = vec![0, 0, 0, 2];
-        bytes.extend_from_slice(&[0u8; ENCODED_ENTRY_BYTES]);
+        let mut bytes = vec![0, 0, 0, L2_REGISTRY_VERSION as u8]; // version
+        bytes.extend_from_slice(&[0u8; 32]); // agg_vk
+        bytes.extend_from_slice(&[0u8; 32]); // range_vk
+        bytes.extend_from_slice(&[0, 0, 0, 2]); // count = 2
+        bytes.extend_from_slice(&[0u8; ENCODED_ENTRY_BYTES]); // only 1 entry payload
         assert!(matches!(
-            decode_map(&bytes),
+            decode(&bytes),
             Err(ExecutionError::CorruptStateRecord { .. })
         ));
     }
 
     #[test]
     fn decode_rejects_short_header() {
-        // 3 bytes — less than the 4-byte header.
+        // 50 bytes — less than the 72-byte header.
         assert!(matches!(
-            decode_map(&[0, 0, 0]),
+            decode(&[0u8; 50]),
+            Err(ExecutionError::CorruptStateRecord { .. })
+        ));
+    }
+
+    #[test]
+    fn decode_rejects_wrong_version() {
+        // Header with version=2 (current is 1).
+        let mut bytes = vec![0, 0, 0, 2]; // version = 2
+        bytes.extend_from_slice(&[0u8; 32]);
+        bytes.extend_from_slice(&[0u8; 32]);
+        bytes.extend_from_slice(&[0, 0, 0, 0]); // count = 0
+        assert!(matches!(
+            decode(&bytes),
             Err(ExecutionError::CorruptStateRecord { .. })
         ));
     }
 
     #[test]
     fn entry_size_constants_match_packed_layout() {
-        // Defensive: the per-entry byte width matches what the
-        // encoder writes. If the L2StateRootRecord struct grows
-        // a field, the constants must be updated in lockstep
-        // and this test pins the relationship.
         assert_eq!(L2_STATE_ROOT_RECORD_BYTES, 32 + 8 + 32 + 32);
         assert_eq!(ENCODED_ENTRY_BYTES, 32 + 8 + L2_STATE_ROOT_RECORD_BYTES);
+        assert_eq!(ENCODED_HEADER_BYTES, 4 + 32 + 32 + 4);
     }
 }
