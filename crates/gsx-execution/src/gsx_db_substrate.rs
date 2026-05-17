@@ -150,6 +150,21 @@ impl Substrate for GsxDbSubstrate {
             // `gsx-l2-verifier-precompile` crate scaffold landing
             // in G2.2.
             Intent::CommitL2StateRoot { .. } | Intent::SetL2VerifyingKey { .. } => Ok(()),
+            // Track G Phase G3.1 (#100): bridge / force-include /
+            // slashing / DA Intent variants. Stub no-op until the
+            // follow-up PRs land:
+            // - G3.2 (#101): bridge accounting handlers for L1Lock /
+            //   L2BurnProven
+            // - G3.3 (#102): EVM precompiles 0x100-0x103
+            // - G3.4 (#103): force-include slashing integration test
+            // - C.8 (#131): slashing-distribution waterfall wiring
+            //   (counterparties → insurance → treasury per
+            //   Tokenomics §8.3)
+            Intent::L1Lock { .. }
+            | Intent::L2BurnProven { .. }
+            | Intent::L2ForceInclude { .. }
+            | Intent::SlashSequencer { .. }
+            | Intent::PostL2DA { .. } => Ok(()),
         }
     }
 
