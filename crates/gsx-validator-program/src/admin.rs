@@ -7,6 +7,11 @@
 //!   display label).
 //! - `POST /admin/award` — credit a bug-bounty or hackathon
 //!   award per the POINTS.md severity matrix.
+//! - `POST /admin/certs` — record an observed-cert count for a
+//!   given `(authority_id, epoch)` bucket. Backfill path for the
+//!   `certs_observed` table that the scoring task reads from;
+//!   used until the (future) S3 NDJSON ingest task auto-populates
+//!   the table from operator-uploaded `events.ndjson` files.
 //! - `GET  /admin/operators` — list operators (audit).
 //! - `GET  /admin/awards/:authority_id` — list awards (audit).
 
@@ -199,6 +204,95 @@ pub async fn handle_award(
         }
         Err(e) => {
             warn!(error = %e, "admin: award failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CertCountIn {
+    pub authority_id: i64,
+    /// Epoch bucket id (`floor(unix_secs / SCORE_BUCKET_SECS)` per
+    /// `score::SCORE_BUCKET_SECS`). The scoring task reads
+    /// `certs_observed.epoch = bucket` when it rolls up the
+    /// previous bucket.
+    pub epoch: i64,
+    /// Count of certs the operator observed in that epoch.
+    /// Schema enforces NON-NULL; this endpoint additionally
+    /// rejects negatives so the cert-points formula sees only
+    /// the schema-clean values.
+    pub count: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CertCountOut {
+    pub authority_id: i64,
+    pub epoch: i64,
+    pub count: i64,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// `POST /admin/certs` — upsert a `certs_observed` row for one
+/// `(authority_id, epoch)` bucket. Used by the foundation to
+/// backfill cert counts pending the (future) S3 NDJSON ingest
+/// task. Re-posting with a different `count` updates in place.
+///
+/// Per the POINTS.md cert-tier formula (see `score::compute_cert_points`),
+/// the points contribution is `min(floor(count / 1000), 50)`
+/// per epoch.
+pub async fn handle_record_certs(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+    Json(body): Json<CertCountIn>,
+) -> impl IntoResponse {
+    if let Err(resp) = check_auth(&headers, &state.admin_token) {
+        return resp.into_response();
+    }
+    if body.count < 0 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "count must be non-negative" })),
+        )
+            .into_response();
+    }
+    if body.epoch < 0 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "epoch must be non-negative" })),
+        )
+            .into_response();
+    }
+
+    let result = sqlx::query(
+        "INSERT INTO certs_observed (authority_id, epoch, count) \
+         VALUES ($1, $2, $3) \
+         ON CONFLICT (authority_id, epoch) DO UPDATE \
+         SET count = EXCLUDED.count, \
+             updated_at = NOW() \
+         RETURNING authority_id, epoch, count, updated_at",
+    )
+    .bind(body.authority_id)
+    .bind(body.epoch)
+    .bind(body.count)
+    .fetch_one(&state.pool)
+    .await;
+
+    match result {
+        Ok(row) => {
+            let out = CertCountOut {
+                authority_id: row.get("authority_id"),
+                epoch: row.get("epoch"),
+                count: row.get("count"),
+                updated_at: row.get("updated_at"),
+            };
+            (StatusCode::OK, Json(serde_json::to_value(out).unwrap())).into_response()
+        }
+        Err(e) => {
+            warn!(error = %e, "admin: record_certs failed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({ "error": e.to_string() })),

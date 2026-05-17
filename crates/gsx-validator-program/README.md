@@ -19,16 +19,22 @@ in [`docs/testnet/POINTS.md`](../../docs/testnet/POINTS.md).
   - `GET  /admin/operators` — bearer-token auth; list operators.
   - `POST /admin/award` — bearer-token auth; credit a
     bug-bounty or hackathon award.
+  - `POST /admin/certs` — bearer-token auth; upsert a
+    `(authority_id, epoch, count)` row into `certs_observed`.
+    Foundation backfill path until the S3 NDJSON ingest task
+    auto-populates the table (v2).
   - `GET  /admin/awards/:authority_id` — bearer-token auth;
     list manual awards for an operator (audit trail).
 
 ## v1 scope limits
 
-- **Cert observation is STUBBED**: the `certs_observed` table is
-  declared but unused — no external operators uploading
-  `events.ndjson` yet. The scoring task JOINs against it
-  (always producing zero cert points) so adding S3 NDJSON
-  ingest in v2 is a single workstream addition.
+- **Cert observation reads, doesn't auto-ingest**: the scoring
+  task now consumes `certs_observed` (LEFT JOIN against
+  uptime samples per bucket), and the foundation can populate
+  the table via `POST /admin/certs`. The auto-ingest pipeline
+  that pulls `events.ndjson` from per-operator S3 prefixes is
+  a v2 workstream — backfill via the admin endpoint covers
+  the gap.
 - **Single foundation instance**: the daemon is one host. Per
   POINTS.md, decentralized scoring (multi-party MPC across
   seed validators) is a v2 consideration.

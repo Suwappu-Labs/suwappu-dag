@@ -12,8 +12,8 @@ use axum::{
 use clap::Parser;
 use gsx_validator_program::{
     admin::{
-        handle_award, handle_list_awards, handle_list_operators, handle_register_operator,
-        AdminState,
+        handle_award, handle_list_awards, handle_list_operators, handle_record_certs,
+        handle_register_operator, AdminState,
     },
     init_db,
     leaderboard::handle_leaderboard,
@@ -107,6 +107,7 @@ async fn main() -> anyhow::Result<()> {
                 .route("/admin/operators", post(handle_register_operator))
                 .route("/admin/operators", get(handle_list_operators))
                 .route("/admin/award", post(handle_award))
+                .route("/admin/certs", post(handle_record_certs))
                 .route(
                     "/admin/awards/:authority_id",
                     get(handle_list_awards),

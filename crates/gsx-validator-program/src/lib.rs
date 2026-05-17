@@ -16,11 +16,13 @@
 //!
 //! ## v1 scope limits
 //!
-//! - **Cert observation is STUBBED**: the `certs_observed` table
-//!   stays empty in v1 because no external operators are
-//!   onboarded yet. The scoring task still JOINs against it so
-//!   adding S3 ingest in v2 is a single workstream addition
-//!   rather than a schema change.
+//! - **Cert observation reads but does not auto-ingest**: the
+//!   `certs_observed` table is now consumed by the scoring task
+//!   (per `score::compute_cert_points`), and the foundation can
+//!   populate it via `POST /admin/certs` (see `admin.rs`). The
+//!   auto-ingest pipeline that consumes operator-uploaded
+//!   `events.ndjson` files from S3 is a v2 workstream — gives
+//!   the foundation a backfill path until then.
 //! - **Single foundation instance**: the daemon is single-host.
 //!   Decentralized scoring (multi-party MPC across seed
 //!   validators) is a v2 consideration per POINTS.md.
@@ -93,8 +95,9 @@ pub struct LeaderboardEntry {
     /// Breakdown — sums the per-epoch components from `epoch_points`
     /// plus manual awards.
     pub uptime_points: i64,
-    /// Cert-observation points (always 0 in v1 — see crate-level
-    /// doc-comment).
+    /// Cert-observation points. Populated by the scoring task
+    /// from `certs_observed` per the POINTS.md formula
+    /// (`floor(count/1000)`, capped at 50/epoch).
     pub cert_points: i64,
     /// Bug-bounty awards from `manual_awards`.
     pub bug_bounty_points: i64,

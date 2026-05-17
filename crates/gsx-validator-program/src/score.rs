@@ -7,9 +7,14 @@
 //!
 //! - **Uptime tier**: probe success rate within the epoch window
 //!   →  ≥ 99% → 100; ≥ 95% → 50; else 0.
-//! - **Cert tier**: count of certs in `certs_observed` / 1000, up
-//!   to a cap of 50/epoch. STUBBED at 0 in v1 because the S3
-//!   NDJSON ingest doesn't run yet (no external operators).
+//! - **Cert tier**: `floor(count / 1000)`, capped at 50 points per
+//!   epoch. Reads from the `certs_observed` table; populated either
+//!   by the foundation-admin endpoint `POST /admin/certs` or by
+//!   the (future) S3 NDJSON ingest task that consumes operator-
+//!   uploaded `events.ndjson` rotations. Operators with no
+//!   `certs_observed` row for an epoch score 0 cert points
+//!   (LEFT JOIN), so the rollup query is uniform regardless of
+//!   whether ingest has populated the table.
 //! - **Manual awards (bug bounty + hackathon)** stay out of the
 //!   epoch rollup — they're summed at read time in
 //!   `compute_leaderboard`.
@@ -64,18 +69,29 @@ async fn score_once(pool: &PgPool) -> Result<(), crate::ProgramError> {
             .expect("epoch math");
 
     // For each known operator, compute the bucket's uptime samples
-    // + the resulting uptime_points tier. Cert points stay 0 in
-    // v1.
+    // + the cert count for the bucket. LEFT JOIN against
+    // certs_observed so operators with no cert rows for the bucket
+    // still get a 0-count row.
     let rows = sqlx::query(
-        "SELECT authority_id, \
-                COUNT(*) FILTER (WHERE ok)        AS ok_samples, \
-                COUNT(*)                           AS total_samples \
-           FROM uptime_samples \
-          WHERE sample_at >= $1 AND sample_at < $2 \
-          GROUP BY authority_id",
+        "SELECT u.authority_id, \
+                u.ok_samples, \
+                u.total_samples, \
+                COALESCE(c.count, 0) AS cert_count \
+           FROM ( \
+                SELECT authority_id, \
+                       COUNT(*) FILTER (WHERE ok) AS ok_samples, \
+                       COUNT(*)                    AS total_samples \
+                  FROM uptime_samples \
+                 WHERE sample_at >= $1 AND sample_at < $2 \
+                 GROUP BY authority_id \
+           ) u \
+           LEFT JOIN certs_observed c \
+                  ON c.authority_id = u.authority_id \
+                 AND c.epoch        = $3",
     )
     .bind(bucket_start)
     .bind(bucket_end)
+    .bind(previous_bucket)
     .fetch_all(pool)
     .await?;
 
@@ -89,13 +105,10 @@ async fn score_once(pool: &PgPool) -> Result<(), crate::ProgramError> {
         let aid: i64 = row.try_get("authority_id")?;
         let ok_samples: i64 = row.try_get("ok_samples")?;
         let total_samples: i64 = row.try_get("total_samples")?;
+        let cert_count: i64 = row.try_get("cert_count")?;
 
         let uptime_points = compute_uptime_points(ok_samples, total_samples);
-
-        // Cert points: STUB. The query reads from certs_observed
-        // (always empty in v1); replace with the real lookup
-        // when S3 NDJSON ingest lands.
-        let cert_points: i64 = 0;
+        let cert_points = compute_cert_points(cert_count);
 
         sqlx::query(
             "INSERT INTO epoch_points \
@@ -117,6 +130,23 @@ async fn score_once(pool: &PgPool) -> Result<(), crate::ProgramError> {
 
     info!(epoch = previous_bucket, "scoring: rolled up bucket");
     Ok(())
+}
+
+/// Maximum cert points per epoch bucket. Caps the contribution
+/// of a single epoch so a burst of cert observations can't
+/// dominate the leaderboard.
+pub const CERT_POINTS_CAP_PER_EPOCH: i64 = 50;
+
+/// Per POINTS.md: 1 cert point per 1000 observed certs in the
+/// epoch, capped at `CERT_POINTS_CAP_PER_EPOCH` (50/epoch).
+/// `cert_count == 0` returns 0; negative inputs are clamped to
+/// 0 (defensive; the schema disallows negatives but the JOIN
+/// path produces an `i64`).
+pub fn compute_cert_points(cert_count: i64) -> i64 {
+    if cert_count <= 0 {
+        return 0;
+    }
+    (cert_count / 1000).min(CERT_POINTS_CAP_PER_EPOCH)
 }
 
 /// Pure compute — extracted for unit testing.
@@ -170,5 +200,45 @@ mod tests {
     #[test]
     fn uptime_all_failed() {
         assert_eq!(compute_uptime_points(0, 60), 0);
+    }
+
+    #[test]
+    fn cert_points_zero_count_zero() {
+        assert_eq!(compute_cert_points(0), 0);
+    }
+
+    #[test]
+    fn cert_points_below_first_step_zero() {
+        // 999 certs is still < 1 point.
+        assert_eq!(compute_cert_points(999), 0);
+    }
+
+    #[test]
+    fn cert_points_per_thousand() {
+        assert_eq!(compute_cert_points(1_000), 1);
+        assert_eq!(compute_cert_points(1_500), 1); // floor
+        assert_eq!(compute_cert_points(2_000), 2);
+        assert_eq!(compute_cert_points(25_000), 25);
+    }
+
+    #[test]
+    fn cert_points_capped_at_50() {
+        // Per POINTS.md the cap is 50/epoch regardless of count.
+        assert_eq!(compute_cert_points(50_000), CERT_POINTS_CAP_PER_EPOCH);
+        assert_eq!(compute_cert_points(50_999), CERT_POINTS_CAP_PER_EPOCH);
+        assert_eq!(compute_cert_points(1_000_000), CERT_POINTS_CAP_PER_EPOCH);
+        assert_eq!(
+            compute_cert_points(i64::MAX),
+            CERT_POINTS_CAP_PER_EPOCH,
+            "huge counts must not overflow the cap"
+        );
+    }
+
+    /// Defensive: negative counts (impossible per schema) clamp to 0
+    /// rather than producing a negative-points oddity.
+    #[test]
+    fn cert_points_negative_clamps_to_zero() {
+        assert_eq!(compute_cert_points(-1), 0);
+        assert_eq!(compute_cert_points(i64::MIN), 0);
     }
 }
