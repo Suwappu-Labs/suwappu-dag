@@ -288,25 +288,58 @@ pub trait Substrate {
     /// Read the balance of `addr`. Returns zero for any unseen address.
     fn balance(&self, addr: &Address) -> Balance;
 
+    /// Read a bytes-state record at `addr`. Returns `None` if no
+    /// record is stored there. Used by reserved-address registry
+    /// records (e.g., the L2 state-root registry per IQ-006 +
+    /// `l2_state` module).
+    ///
+    /// Default impl returns `None` — implementations that don't
+    /// support bytes-state (gsx-db v0.1.0) inherit the safe
+    /// behavior of "no record found anywhere".
+    fn read_bytes(&self, _addr: &Address) -> Option<Vec<u8>> {
+        None
+    }
+
     /// Apply a single intent. On error, the substrate's state is
     /// guaranteed identical to before the call (atomicity).
     fn apply_intent(&mut self, intent: &Intent) -> Result<(), ExecutionError>;
 
     /// Compute the canonical state root.
     ///
-    /// Encoding: BLAKE3 over `tag || for each (addr, balance) in
-    /// ascending address order: addr (20 B) || balance (16 B BE)`.
+    /// Encoding (V2 — extended for bytes-state in this PR):
+    /// BLAKE3 over:
+    ///   `"GSX-STATE-ROOT-V2"
+    ///    || balances_root
+    ///    || bytes_state_root`
+    /// where
+    ///   balances_root    = BLAKE3("GSX-BALANCES-V1"  || foreach (addr,bal) asc: addr(20) || bal_be(16))
+    ///   bytes_state_root = BLAKE3("GSX-BYTES-STATE-V1" || foreach (addr,data) asc: addr(20) || data.len() as u32 BE || data)
+    ///
+    /// The V1 → V2 recipe migration is a hard fork at the
+    /// substrate-state-root level. No mainnet state exists yet,
+    /// so this is free; testnet wipes on next re-genesis per
+    /// `docs/operations/testnet-regenesis-runbook.md`.
     fn state_root(&self) -> [u8; 32];
 }
 
 /// Phase-1 in-memory substrate adapter.
 ///
-/// Mirrors `gsx-db`'s `InMemoryBalanceStore` semantics. State is a
-/// `BTreeMap<Address, Balance>`; zero balances are represented by absent
-/// keys (the map and the explicit-zero balance produce identical roots).
+/// Two parallel state maps:
+/// - `balances`: 20-byte address → u128 balance (the existing
+///   surface)
+/// - `bytes_state`: 20-byte address → opaque variable-length
+///   bytes (the new surface added in this PR for L2 state-root
+///   registry storage + future governance/asset/registry data)
+///
+/// Both maps participate in the canonical `state_root` via the
+/// V2 recipe documented on `Substrate::state_root`. Zero
+/// balances and empty bytes-records are represented by absent
+/// keys (the map and the explicit-empty/zero record produce
+/// identical roots).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InMemorySubstrate {
     balances: BTreeMap<Address, Balance>,
+    bytes_state: BTreeMap<Address, Vec<u8>>,
 }
 
 impl InMemorySubstrate {
@@ -340,15 +373,30 @@ impl InMemorySubstrate {
         self.balances.iter()
     }
 
-    /// Read the cumulative count of successful L2 batch commits
-    /// (G2.2 Phase 1 marker). Reads from the balance at the
-    /// reserved L2 registry account; each successful
-    /// `Intent::CommitL2StateRoot` increments this by 1.
-    /// Used by tests + diagnostics; the production
-    /// (chain_id, batch_id) → L2StateRoot lookup lands in the
-    /// follow-up that extends the substrate state surface.
-    pub fn l2_commit_count(&self) -> Balance {
-        self.balance(&reserved::l2_registry_address())
+    /// Read the count of L2 state-root records stored at the
+    /// reserved L2 registry account. Decodes the bytes-state
+    /// record at `reserved::l2_registry_address()` and returns
+    /// the map's size. Returns 0 if no record exists (i.e., no
+    /// successful `Intent::CommitL2StateRoot` has landed yet) or
+    /// if decoding fails (defensive — surfaces silently as 0
+    /// rather than a panic; production callers concerned with
+    /// integrity check via `l2_state_root_record` below).
+    pub fn l2_commit_count(&self) -> usize {
+        let bytes = self.read_bytes(&reserved::l2_registry_address());
+        let map = crate::l2_state::decode_map(bytes.as_deref().unwrap_or(&[])).unwrap_or_default();
+        map.len()
+    }
+
+    /// Look up a per-batch L2 state-root record by composite key.
+    /// Returns `None` if no record exists or if the registry
+    /// bytes are corrupt (defensive — see `l2_commit_count`).
+    pub fn l2_state_root_record(
+        &self,
+        key: &crate::l2_state::L2BatchKey,
+    ) -> Option<crate::l2_state::L2StateRootRecord> {
+        let bytes = self.read_bytes(&reserved::l2_registry_address())?;
+        let map = crate::l2_state::decode_map(&bytes).ok()?;
+        map.get(key).copied()
     }
 
     /// Credit `amount` to `addr` without going through the
@@ -403,11 +451,27 @@ impl InMemorySubstrate {
     pub fn bridge_escrow_balance(&self) -> Balance {
         self.balance(&reserved::bridge_escrow_address())
     }
+
+    /// Internal: write a bytes-state record at `addr`. Replaces
+    /// any prior record. Empty bytes are stored as absent (matches
+    /// the balance map's zero-is-absent invariant + keeps the
+    /// state_root canonical).
+    fn write_bytes_unchecked(&mut self, addr: Address, bytes: Vec<u8>) {
+        if bytes.is_empty() {
+            self.bytes_state.remove(&addr);
+        } else {
+            self.bytes_state.insert(addr, bytes);
+        }
+    }
 }
 
 impl Substrate for InMemorySubstrate {
     fn balance(&self, addr: &Address) -> Balance {
         self.balances.get(addr).copied().unwrap_or(0)
+    }
+
+    fn read_bytes(&self, addr: &Address) -> Option<Vec<u8>> {
+        self.bytes_state.get(addr).cloned()
     }
 
     fn apply_intent(&mut self, intent: &Intent) -> Result<(), ExecutionError> {
@@ -471,32 +535,77 @@ impl Substrate for InMemorySubstrate {
             | Intent::EjectAuthority { .. } => Ok(()),
             // Track G Phase G2.2 (#97): wired through the
             // gsx-l2-verifier-precompile crate. The verifier
-            // currently runs format gates (proof = 260 B,
-            // public_inputs = 240 B, vk_hash != all-zeros); the
-            // Groth16 BN254 pairing check lands in G2.2 phase 2
-            // once sp1-verifier is added as a workspace dep.
+            // runs format gates (proof = 260 B, public_inputs =
+            // 240 B, vk_hash != all-zeros); the Groth16 BN254
+            // pairing check lands once sp1-verifier is added as
+            // a workspace dep.
             //
-            // On verify success: increment the L2 commit counter
-            // at the reserved l2_registry_address. Phase 1 stores
-            // the count only (a marker for "the dispatch path
-            // works"); the real (chain_id, batch_id) → L2StateRoot
-            // mapping lands in a follow-up that extends the
-            // substrate state surface (tracked under Phase G2
-            // epic #89).
+            // On verify success this PR records the per-batch
+            // L2 state-root record at the reserved
+            // l2_registry_address. The composite key
+            // `(l2_chain_id_hash, batch_id)` is decoded from the
+            // public-inputs blob at the canonical offsets per
+            // gsx_l2_verifier_precompile::public_inputs.
+            //
+            // The map shape + encoding is defined in
+            // crates/gsx-execution/src/l2_state.rs.
             Intent::CommitL2StateRoot {
+                batch_id,
+                new_state_root,
                 proof_bytes,
                 public_inputs,
                 vk_hash,
-                ..
             } => {
+                use gsx_l2_verifier_precompile::public_inputs as pi;
+
+                use crate::l2_state::{decode_map, encode_map, L2BatchKey, L2StateRootRecord};
+
+                // Verifier format gate.
                 gsx_l2_verifier_precompile::verify_l2_batch(proof_bytes, public_inputs, vk_hash)
                     .map_err(|e| ExecutionError::L2VerifierRejected {
                         reason: e.to_string(),
                     })?;
-                // Increment the commit-counter at the reserved
-                // L2 registry account. Uses credit_unchecked so
-                // it bypasses the reserved-address Transfer gate.
-                self.credit_unchecked(reserved::l2_registry_address(), 1)?;
+
+                // Decode L1 anchor height + l2_chain_id_hash +
+                // da_commitment from the public-inputs blob at
+                // their canonical offsets. The verifier's format
+                // gate already guaranteed the blob is 240 B.
+                let l1_anchor_height = u64::from_be_bytes(
+                    public_inputs[pi::L1_ANCHOR_HEIGHT_OFFSET..pi::L1_ANCHOR_HEIGHT_OFFSET + 8]
+                        .try_into()
+                        .expect("public_inputs is 240 B per verifier format gate"),
+                );
+                let mut l2_chain_id_hash = [0u8; 32];
+                l2_chain_id_hash.copy_from_slice(
+                    &public_inputs[pi::L2_CHAIN_ID_HASH_OFFSET..pi::L2_CHAIN_ID_HASH_OFFSET + 32],
+                );
+                let mut da_commitment = [0u8; 32];
+                da_commitment.copy_from_slice(
+                    &public_inputs[pi::DA_COMMITMENT_OFFSET..pi::DA_COMMITMENT_OFFSET + 32],
+                );
+
+                let key = L2BatchKey {
+                    l2_chain_id_hash,
+                    batch_id: *batch_id,
+                };
+                let record = L2StateRootRecord {
+                    state_root: *new_state_root,
+                    committed_at_l1_height: l1_anchor_height,
+                    vk_hash: *vk_hash,
+                    da_commitment,
+                };
+
+                // Read the existing map (empty if first commit),
+                // insert the new record, encode + write back.
+                // The map encoding is the load-bearing substrate
+                // state — the V2 state_root recipe hashes it via
+                // the bytes_state map iteration.
+                let registry_addr = reserved::l2_registry_address();
+                let existing_bytes = self.read_bytes(&registry_addr).unwrap_or_default();
+                let mut map = decode_map(&existing_bytes)?;
+                map.insert(key, record);
+                let new_bytes = encode_map(&map);
+                self.write_bytes_unchecked(registry_addr, new_bytes);
                 Ok(())
             }
             // `SetL2VerifyingKey` rotates a chain-state value
@@ -613,14 +722,49 @@ impl Substrate for InMemorySubstrate {
     }
 
     fn state_root(&self) -> [u8; 32] {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(b"GSX-STATE-ROOT-V1");
-        for (addr, balance) in &self.balances {
-            hasher.update(addr);
-            hasher.update(&balance.to_be_bytes());
-        }
+        // V2 recipe: hash the balances + bytes-state with
+        // domain-separated child hashes, then combine. See the
+        // Substrate trait state_root doc for the byte-by-byte
+        // recipe.
+
+        // Child 1: balances root.
+        let balances_root = {
+            let mut h = blake3::Hasher::new();
+            h.update(b"GSX-BALANCES-V1");
+            for (addr, balance) in &self.balances {
+                h.update(addr);
+                h.update(&balance.to_be_bytes());
+            }
+            let mut out = [0u8; 32];
+            out.copy_from_slice(h.finalize().as_bytes());
+            out
+        };
+
+        // Child 2: bytes-state root. Length-prefix each record
+        // so the encoding is unambiguous across the variable-
+        // length records (`u32::BE(len) || data` matches the
+        // sha3_256_domain length-prefix pattern from
+        // gsx-crypto::hash).
+        let bytes_state_root = {
+            let mut h = blake3::Hasher::new();
+            h.update(b"GSX-BYTES-STATE-V1");
+            for (addr, data) in &self.bytes_state {
+                h.update(addr);
+                h.update(&(data.len() as u32).to_be_bytes());
+                h.update(data);
+            }
+            let mut out = [0u8; 32];
+            out.copy_from_slice(h.finalize().as_bytes());
+            out
+        };
+
+        // Top-level combination.
+        let mut h = blake3::Hasher::new();
+        h.update(b"GSX-STATE-ROOT-V2");
+        h.update(&balances_root);
+        h.update(&bytes_state_root);
         let mut out = [0u8; 32];
-        out.copy_from_slice(hasher.finalize().as_bytes());
+        out.copy_from_slice(h.finalize().as_bytes());
         out
     }
 }
@@ -792,6 +936,204 @@ mod tests {
             .unwrap();
         }
         assert_eq!(s.l2_commit_count(), 5);
+    }
+
+    /// Heavy: CommitL2StateRoot stores the per-batch L2 state-
+    /// root record at the reserved L2 registry account, keyed by
+    /// (l2_chain_id_hash, batch_id). The record carries the
+    /// state_root + l1_anchor_height + vk_hash + da_commitment
+    /// decoded from the public-inputs blob at the verifier-
+    /// precompile's canonical offsets.
+    #[test]
+    fn commit_l2_state_root_stores_record() {
+        use gsx_l2_verifier_precompile::public_inputs as pi;
+
+        use crate::l2_state::L2BatchKey;
+
+        // Construct a public-inputs blob with deterministic
+        // values at each canonical offset.
+        let mut public_inputs = vec![0u8; 240];
+        // l1_anchor_height = 12345 at offset 104.
+        public_inputs[pi::L1_ANCHOR_HEIGHT_OFFSET..pi::L1_ANCHOR_HEIGHT_OFFSET + 8]
+            .copy_from_slice(&12345u64.to_be_bytes());
+        // da_commitment = [0xdd; 32] at offset 72.
+        public_inputs[pi::DA_COMMITMENT_OFFSET..pi::DA_COMMITMENT_OFFSET + 32]
+            .copy_from_slice(&[0xdd; 32]);
+        // l2_chain_id_hash = [0xc1; 32] at offset 176.
+        public_inputs[pi::L2_CHAIN_ID_HASH_OFFSET..pi::L2_CHAIN_ID_HASH_OFFSET + 32]
+            .copy_from_slice(&[0xc1; 32]);
+
+        let mut s = InMemorySubstrate::new();
+        s.apply_intent(&Intent::CommitL2StateRoot {
+            batch_id: 7,
+            new_state_root: [0xab; 32],
+            proof_bytes: vec![0xcd; 260],
+            public_inputs: public_inputs.clone(),
+            vk_hash: [0x42; 32],
+        })
+        .unwrap();
+
+        let key = L2BatchKey {
+            l2_chain_id_hash: [0xc1; 32],
+            batch_id: 7,
+        };
+        let rec = s
+            .l2_state_root_record(&key)
+            .expect("record must exist after commit");
+        assert_eq!(rec.state_root, [0xab; 32]);
+        assert_eq!(rec.committed_at_l1_height, 12345);
+        assert_eq!(rec.vk_hash, [0x42; 32]);
+        assert_eq!(rec.da_commitment, [0xdd; 32]);
+    }
+
+    /// Multi-batch storage: each commit lands its own record;
+    /// the registry map grows monotonically; the state_root
+    /// shifts after each commit.
+    #[test]
+    fn commit_l2_state_root_multi_batch_storage() {
+        use gsx_l2_verifier_precompile::public_inputs as pi;
+
+        use crate::l2_state::L2BatchKey;
+
+        let mut s = InMemorySubstrate::new();
+        let mut prior_root = s.state_root();
+
+        // 3 commits to the same chain, different batch_ids.
+        for batch_id in 0..3 {
+            let mut public_inputs = vec![0u8; 240];
+            public_inputs[pi::L1_ANCHOR_HEIGHT_OFFSET..pi::L1_ANCHOR_HEIGHT_OFFSET + 8]
+                .copy_from_slice(&(100u64 + batch_id).to_be_bytes());
+            public_inputs[pi::L2_CHAIN_ID_HASH_OFFSET..pi::L2_CHAIN_ID_HASH_OFFSET + 32]
+                .copy_from_slice(&[0xc1; 32]);
+
+            s.apply_intent(&Intent::CommitL2StateRoot {
+                batch_id,
+                new_state_root: [batch_id as u8; 32],
+                proof_bytes: vec![0xcd; 260],
+                public_inputs,
+                vk_hash: [0x42; 32],
+            })
+            .unwrap();
+
+            // state_root must change after each commit.
+            let new_root = s.state_root();
+            assert_ne!(prior_root, new_root, "commit must shift state_root");
+            prior_root = new_root;
+        }
+        assert_eq!(s.l2_commit_count(), 3);
+
+        // Every record retrievable by key.
+        for batch_id in 0..3 {
+            let key = L2BatchKey {
+                l2_chain_id_hash: [0xc1; 32],
+                batch_id,
+            };
+            let rec = s
+                .l2_state_root_record(&key)
+                .expect("each commit's record is retrievable");
+            assert_eq!(rec.state_root, [batch_id as u8; 32]);
+            assert_eq!(rec.committed_at_l1_height, 100 + batch_id);
+        }
+    }
+
+    /// Multi-chain isolation: different `l2_chain_id_hash`
+    /// values produce independent records; one chain's commits
+    /// don't collide with another's even at the same batch_id.
+    #[test]
+    fn commit_l2_state_root_multi_chain_isolation() {
+        use gsx_l2_verifier_precompile::public_inputs as pi;
+
+        use crate::l2_state::L2BatchKey;
+
+        let mut s = InMemorySubstrate::new();
+
+        // Chain A, batch 0.
+        let mut pi_a = vec![0u8; 240];
+        pi_a[pi::L2_CHAIN_ID_HASH_OFFSET..pi::L2_CHAIN_ID_HASH_OFFSET + 32]
+            .copy_from_slice(&[0xa1; 32]);
+        s.apply_intent(&Intent::CommitL2StateRoot {
+            batch_id: 0,
+            new_state_root: [0x11; 32],
+            proof_bytes: vec![0xcd; 260],
+            public_inputs: pi_a,
+            vk_hash: [0x42; 32],
+        })
+        .unwrap();
+
+        // Chain B, batch 0 — same batch_id, different chain.
+        let mut pi_b = vec![0u8; 240];
+        pi_b[pi::L2_CHAIN_ID_HASH_OFFSET..pi::L2_CHAIN_ID_HASH_OFFSET + 32]
+            .copy_from_slice(&[0xb1; 32]);
+        s.apply_intent(&Intent::CommitL2StateRoot {
+            batch_id: 0,
+            new_state_root: [0x22; 32],
+            proof_bytes: vec![0xcd; 260],
+            public_inputs: pi_b,
+            vk_hash: [0x42; 32],
+        })
+        .unwrap();
+
+        let rec_a = s
+            .l2_state_root_record(&L2BatchKey {
+                l2_chain_id_hash: [0xa1; 32],
+                batch_id: 0,
+            })
+            .unwrap();
+        let rec_b = s
+            .l2_state_root_record(&L2BatchKey {
+                l2_chain_id_hash: [0xb1; 32],
+                batch_id: 0,
+            })
+            .unwrap();
+        assert_eq!(rec_a.state_root, [0x11; 32]);
+        assert_eq!(rec_b.state_root, [0x22; 32]);
+        assert_eq!(s.l2_commit_count(), 2);
+    }
+
+    /// state_root V2 recipe: bytes_state changes must shift the
+    /// state_root even when balances are identical. Locks the
+    /// invariant against a future regression that hashes only
+    /// the balance map.
+    #[test]
+    fn state_root_v2_includes_bytes_state() {
+        let s1 = InMemorySubstrate::from_balances([(addr(1), 100)]);
+        let mut s2 = InMemorySubstrate::from_balances([(addr(1), 100)]);
+        assert_eq!(
+            s1.state_root(),
+            s2.state_root(),
+            "identical balances + empty bytes_state → identical root"
+        );
+        // Mutate s2's bytes_state via the public CommitL2StateRoot
+        // path so we don't poke the private field directly.
+        let mut public_inputs = vec![0u8; 240];
+        // l2_chain_id_hash bytes are zero by default — that's fine.
+        s2.apply_intent(&Intent::CommitL2StateRoot {
+            batch_id: 0,
+            new_state_root: [0xab; 32],
+            proof_bytes: vec![0xcd; 260],
+            public_inputs: {
+                public_inputs[gsx_l2_verifier_precompile::public_inputs::L1_ANCHOR_HEIGHT_OFFSET
+                    ..gsx_l2_verifier_precompile::public_inputs::L1_ANCHOR_HEIGHT_OFFSET + 8]
+                    .copy_from_slice(&42u64.to_be_bytes());
+                public_inputs
+            },
+            vk_hash: [0x42; 32],
+        })
+        .unwrap();
+        assert_ne!(
+            s1.state_root(),
+            s2.state_root(),
+            "bytes_state change MUST shift the state_root (V2 recipe)"
+        );
+    }
+
+    /// read_bytes returns None for unseen addresses (matches
+    /// the balance read's zero-for-unseen semantics).
+    #[test]
+    fn read_bytes_returns_none_for_unseen() {
+        let s = InMemorySubstrate::new();
+        assert_eq!(s.read_bytes(&addr(1)), None);
+        assert_eq!(s.read_bytes(&reserved::l2_registry_address()), None);
     }
 
     /// G2.1 stub: SetL2VerifyingKey accepted; state unchanged until

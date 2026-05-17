@@ -32,6 +32,7 @@ pub mod block;
 pub mod checkpoint;
 pub mod error;
 pub mod gsx_db_substrate;
+pub mod l2_state;
 pub mod reserved;
 pub mod substrate;
 

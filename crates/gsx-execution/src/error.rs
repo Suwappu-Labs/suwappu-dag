@@ -82,4 +82,18 @@ pub enum ExecutionError {
         /// Human-readable reason from the verifier crate.
         reason: String,
     },
+
+    /// A bytes-state record stored at `addr` is malformed and
+    /// cannot be decoded. Indicates either a state-corruption
+    /// regression or an encoder/decoder version drift; either
+    /// way, the only recoverable behavior is to refuse the
+    /// Intent that would have written to this record (the
+    /// substrate would otherwise propagate the corruption).
+    #[error("corrupt state record at 0x{enc_addr}: {reason}", enc_addr = hex::encode(addr))]
+    CorruptStateRecord {
+        /// Address of the corrupt record.
+        addr: Address,
+        /// Static reason string for diagnostics.
+        reason: &'static str,
+    },
 }
