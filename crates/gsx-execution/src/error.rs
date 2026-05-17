@@ -33,4 +33,43 @@ pub enum ExecutionError {
         /// Destination address whose balance would overflow.
         to: Address,
     },
+
+    /// A user `Intent::Transfer` named a reserved registry address
+    /// as `from` or `to`. Reserved addresses (per
+    /// `crates/gsx-execution/src/reserved.rs`: L2 registry,
+    /// insurance pool, treasury) are protocol-owned and only mutated
+    /// by dedicated substrate arms — not by user transfers.
+    #[error(
+        "reserved address mutated by transfer: 0x{addr}",
+        addr = hex::encode(addr),
+    )]
+    ReservedAddressTransferDenied {
+        /// The reserved address the transfer named.
+        addr: Address,
+    },
+
+    /// `DistributeSlashedFunds` named a counterparty address that
+    /// is itself a reserved registry address. Counterparty
+    /// reimbursement may NOT be redirected into the insurance pool
+    /// or treasury (those have their own dedicated shares in the
+    /// same Intent).
+    #[error(
+        "reserved address in counterparties list: 0x{addr}",
+        addr = hex::encode(addr),
+    )]
+    ReservedAddressInCounterparties {
+        /// The reserved address that appeared in `counterparties`.
+        addr: Address,
+    },
+
+    /// `DistributeSlashedFunds` accounting overflowed when crediting
+    /// a counterparty / insurance pool / treasury.
+    #[error(
+        "distribution overflow on credit: target 0x{to}",
+        to = hex::encode(to),
+    )]
+    DistributionOverflow {
+        /// Destination whose credit would overflow.
+        to: Address,
+    },
 }

@@ -18,6 +18,7 @@ use gsxdb_state::{Address as GsxAddress, State};
 
 use crate::{
     error::ExecutionError,
+    reserved,
     substrate::{Address, Balance, Intent, Substrate},
 };
 
@@ -108,6 +109,16 @@ impl Substrate for GsxDbSubstrate {
         match intent {
             Intent::Transfer { from, to, amount } => {
                 let (from, to, amount) = (*from, *to, *amount);
+                // C.8 reserved-address invariant (matches
+                // InMemorySubstrate). The protocol-owned registry
+                // accounts may only be mutated by the substrate-
+                // internal arms below.
+                if reserved::is_reserved(&from) {
+                    return Err(ExecutionError::ReservedAddressTransferDenied { addr: from });
+                }
+                if reserved::is_reserved(&to) {
+                    return Err(ExecutionError::ReservedAddressTransferDenied { addr: to });
+                }
                 let result = bridge.submit(GsxIntent::Transfer {
                     from: GsxAddress(from),
                     to: GsxAddress(to),
@@ -151,20 +162,28 @@ impl Substrate for GsxDbSubstrate {
             // in G2.2.
             Intent::CommitL2StateRoot { .. } | Intent::SetL2VerifyingKey { .. } => Ok(()),
             // Track G Phase G3.1 (#100): bridge / force-include /
-            // slashing / DA Intent variants. Stub no-op until the
-            // follow-up PRs land:
-            // - G3.2 (#101): bridge accounting handlers for L1Lock /
-            //   L2BurnProven
-            // - G3.3 (#102): EVM precompiles 0x100-0x103
-            // - G3.4 (#103): force-include slashing integration test
-            // - C.8 (#131): slashing-distribution waterfall wiring
-            //   (counterparties → insurance → treasury per
-            //   Tokenomics §8.3)
+            // slashing-event / DA Intent variants. Stub no-op
+            // until G3.2 / G3.3 / G3.4 land.
             Intent::L1Lock { .. }
             | Intent::L2BurnProven { .. }
             | Intent::L2ForceInclude { .. }
             | Intent::SlashSequencer { .. }
             | Intent::PostL2DA { .. } => Ok(()),
+            // C.8 (#131): slashing-distribution waterfall.
+            // gsx-db v0.1.0's `Bridge::submit` only exposes the
+            // capability-gated Transfer path — no `credit_unchecked`
+            // analogue that bypasses transfer semantics. Production
+            // wire-up requires a gsx-db v0.2.0 bridge extension
+            // (tracked separately) that exposes a protocol-owned
+            // credit path for the slashed-stake source +
+            // counterparty/insurance/treasury destinations.
+            //
+            // For phase-1 we accept the Intent so the dispatch path
+            // is exercised through the consensus pipeline; the
+            // InMemorySubstrate handles the real accounting + tests
+            // exercise the full waterfall semantics there. Once
+            // gsx-db ships the credit path this arm calls into it.
+            Intent::DistributeSlashedFunds { .. } => Ok(()),
         }
     }
 

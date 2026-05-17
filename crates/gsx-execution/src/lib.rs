@@ -32,6 +32,7 @@ pub mod block;
 pub mod checkpoint;
 pub mod error;
 pub mod gsx_db_substrate;
+pub mod reserved;
 pub mod substrate;
 
 pub use block::{execute_block, Block, ExecutionReport};

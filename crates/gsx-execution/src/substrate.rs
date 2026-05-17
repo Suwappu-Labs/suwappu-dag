@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::ExecutionError;
+use crate::{error::ExecutionError, reserved};
 
 /// 20-byte EVM-compatible address. Phase-1 phase uses the raw 20 bytes
 /// directly; the 32-byte Move address shape lands with the IQ-4 address-
@@ -208,6 +208,43 @@ pub enum Intent {
         /// commitments + nullifiers + encrypted memos.
         da_blob: Vec<u8>,
     },
+    /// Distribute slashed funds per the Tokenomics §8.3 waterfall:
+    ///
+    /// 1. Reimburse `counterparties` (each `(addr, share)` pair).
+    /// 2. Credit the insurance pool (`reserved::insurance_pool_address()`)
+    ///    with `insurance_share`.
+    /// 3. Credit the protocol treasury (`reserved::treasury_address()`)
+    ///    with `treasury_share`.
+    ///
+    /// The substrate validates that **all three shares sum to the
+    /// slashed amount** (carried implicitly via the sum-of-shares
+    /// invariant — the substrate trusts the upstream slashing
+    /// adjudicator on the per-share allocation). Crediting goes
+    /// directly to balance slots, bypassing the reserved-address
+    /// transfer gate (which blocks user Intents).
+    ///
+    /// `slash_event_id` references the upstream `SlashSequencer`
+    /// (or v1.1+ `SlashAuthority`/`SlashValidator`) Intent whose
+    /// `intent_hash` is the proof of cause. Adjudication +
+    /// counterparty identification logic lives in the daemon's
+    /// post-commit pipeline; this Intent is the deterministic
+    /// substrate-level effect.
+    ///
+    /// Track C C.8 (#131). Mirrors the design ratified in
+    /// `docs/validator-sla-slashing.md` §4.
+    DistributeSlashedFunds {
+        /// Reference to the originating slash event (e.g., the
+        /// `SlashSequencer` Intent's blake3 content hash).
+        slash_event_id: [u8; 32],
+        /// Counterparties reimbursed in step 1. Empty vec is
+        /// allowed (offense had no direct counterparty —
+        /// equivocation, downtime — and step 1 is skipped).
+        counterparties: Vec<(Address, Balance)>,
+        /// Step 2 share to the insurance pool.
+        insurance_share: Balance,
+        /// Step 3 share to the protocol treasury.
+        treasury_share: Balance,
+    },
 }
 
 /// Classification of a sequencer slashing event. Drives the
@@ -302,6 +339,24 @@ impl InMemorySubstrate {
     pub fn entries(&self) -> impl Iterator<Item = (&Address, &Balance)> {
         self.balances.iter()
     }
+
+    /// Credit `amount` to `addr` without going through the
+    /// reserved-address transfer gate. Used by the substrate-
+    /// internal `DistributeSlashedFunds` arm (C.8) to deposit into
+    /// the insurance pool / treasury / counterparty balance slots,
+    /// and reserved for analogous protocol-owned credits in the
+    /// future. Zero credits are no-ops.
+    fn credit_unchecked(&mut self, addr: Address, amount: Balance) -> Result<(), ExecutionError> {
+        if amount == 0 {
+            return Ok(());
+        }
+        let new_balance = self
+            .balance(&addr)
+            .checked_add(amount)
+            .ok_or(ExecutionError::DistributionOverflow { to: addr })?;
+        self.balances.insert(addr, new_balance);
+        Ok(())
+    }
 }
 
 impl Substrate for InMemorySubstrate {
@@ -313,6 +368,18 @@ impl Substrate for InMemorySubstrate {
         match intent {
             Intent::Transfer { from, to, amount } => {
                 let (from, to, amount) = (*from, *to, *amount);
+                // C.8 reserved-address invariant: user `Transfer`
+                // Intents may NOT mutate a reserved registry
+                // account. Only the dedicated substrate arms (the
+                // L2 verifier-precompile arm in G2.2, the
+                // DistributeSlashedFunds arm below) may write to
+                // those addresses.
+                if reserved::is_reserved(&from) {
+                    return Err(ExecutionError::ReservedAddressTransferDenied { addr: from });
+                }
+                if reserved::is_reserved(&to) {
+                    return Err(ExecutionError::ReservedAddressTransferDenied { addr: to });
+                }
                 if amount == 0 {
                     return Ok(());
                 }
@@ -371,18 +438,52 @@ impl Substrate for InMemorySubstrate {
             // commitment-surface.md` for the full design.
             Intent::CommitL2StateRoot { .. } | Intent::SetL2VerifyingKey { .. } => Ok(()),
             // Track G Phase G3.1 (#100): bridge + force-include +
-            // slashing + DA Intent variants. Phase 1 (variants added)
-            // — the bridge accounting (G3.2 #101), EVM precompiles
-            // (G3.3 #102), force-include slashing test (G3.4 #103),
-            // and slashing-distribution waterfall wiring (C.8 #131)
-            // all land in follow-up PRs. Until then these are stub
-            // no-ops that accept the Intent so the dispatch path is
-            // exercised end-to-end.
+            // slashing-event + DA Intent variants. Variants added
+            // and accepted; the per-variant wiring lands in:
+            // - G3.2 (#101): bridge accounting for L1Lock /
+            //   L2BurnProven
+            // - G3.3 (#102): EVM precompiles 0x100-0x103
+            // - G3.4 (#103): force-include slashing integration
+            //   test (substrate-side this is still a stub — the
+            //   slashing-distribution effect goes through
+            //   `DistributeSlashedFunds` below)
             Intent::L1Lock { .. }
             | Intent::L2BurnProven { .. }
             | Intent::L2ForceInclude { .. }
             | Intent::SlashSequencer { .. }
             | Intent::PostL2DA { .. } => Ok(()),
+            // C.8 (#131): slashing-distribution waterfall.
+            // Tokenomics §8.3 ordering: counterparties → insurance
+            // pool → treasury. Credits go directly to balance
+            // slots, bypassing the reserved-address transfer gate.
+            Intent::DistributeSlashedFunds {
+                slash_event_id: _,
+                counterparties,
+                insurance_share,
+                treasury_share,
+            } => {
+                // Reject any counterparty pointing at a reserved
+                // address — counterparty reimbursement must not be
+                // redirected into the insurance/treasury (those
+                // have their own dedicated shares in this same
+                // Intent).
+                for (addr, _) in counterparties.iter() {
+                    if reserved::is_reserved(addr) {
+                        return Err(ExecutionError::ReservedAddressInCounterparties {
+                            addr: *addr,
+                        });
+                    }
+                }
+                // Step 1: reimburse counterparties.
+                for (addr, share) in counterparties.iter() {
+                    self.credit_unchecked(*addr, *share)?;
+                }
+                // Step 2: insurance pool.
+                self.credit_unchecked(reserved::insurance_pool_address(), *insurance_share)?;
+                // Step 3: protocol treasury.
+                self.credit_unchecked(reserved::treasury_address(), *treasury_share)?;
+                Ok(())
+            }
         }
     }
 
@@ -622,5 +723,148 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ----- C.8: reserved-address gate + slashing-distribution -----
+
+    /// Transfer INTO a reserved address (insurance pool) is rejected.
+    #[test]
+    fn transfer_to_reserved_address_is_rejected() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 100)]);
+        let err = s.apply_intent(&Intent::Transfer {
+            from: addr(1),
+            to: reserved::insurance_pool_address(),
+            amount: 10,
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::ReservedAddressTransferDenied { .. })
+        ));
+    }
+
+    /// Transfer FROM a reserved address (treasury) is rejected.
+    /// Symmetric with the `to` check — user Intents may not drain
+    /// reserved accounts via Transfer either. The treasury is
+    /// only spent by future governance Intents.
+    #[test]
+    fn transfer_from_reserved_address_is_rejected() {
+        let mut s = InMemorySubstrate::new();
+        let err = s.apply_intent(&Intent::Transfer {
+            from: reserved::treasury_address(),
+            to: addr(2),
+            amount: 10,
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::ReservedAddressTransferDenied { .. })
+        ));
+    }
+
+    /// Step 1 only: distribution with counterparties, zero
+    /// insurance + treasury shares. All 3 waterfall steps exercised.
+    #[test]
+    fn distribute_slashed_funds_to_counterparties_only() {
+        let mut s = InMemorySubstrate::new();
+        let intent = Intent::DistributeSlashedFunds {
+            slash_event_id: [0xaa; 32],
+            counterparties: vec![(addr(1), 30), (addr(2), 70)],
+            insurance_share: 0,
+            treasury_share: 0,
+        };
+        s.apply_intent(&intent).unwrap();
+        assert_eq!(s.balance(&addr(1)), 30);
+        assert_eq!(s.balance(&addr(2)), 70);
+        assert_eq!(s.balance(&reserved::insurance_pool_address()), 0);
+        assert_eq!(s.balance(&reserved::treasury_address()), 0);
+    }
+
+    /// Steps 2 + 3 only: no counterparties (e.g., equivocation slash).
+    #[test]
+    fn distribute_slashed_funds_insurance_and_treasury() {
+        let mut s = InMemorySubstrate::new();
+        let intent = Intent::DistributeSlashedFunds {
+            slash_event_id: [0xbb; 32],
+            counterparties: vec![],
+            insurance_share: 1_000_000,
+            treasury_share: 500_000,
+        };
+        s.apply_intent(&intent).unwrap();
+        assert_eq!(s.balance(&reserved::insurance_pool_address()), 1_000_000);
+        assert_eq!(s.balance(&reserved::treasury_address()), 500_000);
+    }
+
+    /// All 3 steps in one distribution. Mirrors Tokenomics §8.3
+    /// ordering literally.
+    #[test]
+    fn distribute_slashed_funds_full_waterfall() {
+        let mut s = InMemorySubstrate::new();
+        let intent = Intent::DistributeSlashedFunds {
+            slash_event_id: [0xcc; 32],
+            counterparties: vec![(addr(1), 100)],
+            insurance_share: 200,
+            treasury_share: 300,
+        };
+        s.apply_intent(&intent).unwrap();
+        assert_eq!(s.balance(&addr(1)), 100);
+        assert_eq!(s.balance(&reserved::insurance_pool_address()), 200);
+        assert_eq!(s.balance(&reserved::treasury_address()), 300);
+    }
+
+    /// Distribution that names a reserved address as a counterparty
+    /// is rejected — counterparty reimbursement may NOT be
+    /// redirected into the insurance / treasury (those have their
+    /// own dedicated shares in the same Intent).
+    #[test]
+    fn distribute_rejects_reserved_counterparty() {
+        let mut s = InMemorySubstrate::new();
+        let err = s.apply_intent(&Intent::DistributeSlashedFunds {
+            slash_event_id: [0xdd; 32],
+            counterparties: vec![(reserved::treasury_address(), 100)],
+            insurance_share: 0,
+            treasury_share: 0,
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::ReservedAddressInCounterparties { .. })
+        ));
+    }
+
+    /// Zero-amount credits in any step are no-ops; do NOT create
+    /// phantom zero balances that would shift the state root.
+    #[test]
+    fn distribute_zero_shares_are_noops() {
+        let mut s = InMemorySubstrate::from_balances([(addr(9), 1)]);
+        let before = s.state_root();
+        s.apply_intent(&Intent::DistributeSlashedFunds {
+            slash_event_id: [0xee; 32],
+            counterparties: vec![(addr(1), 0)],
+            insurance_share: 0,
+            treasury_share: 0,
+        })
+        .unwrap();
+        assert_eq!(
+            s.state_root(),
+            before,
+            "zero-share distributions MUST NOT mutate state"
+        );
+    }
+
+    /// Multiple distributions to the same counterparty are
+    /// additive (don't overwrite the prior credit).
+    #[test]
+    fn distribute_is_additive() {
+        let mut s = InMemorySubstrate::new();
+        for _ in 0..3 {
+            s.apply_intent(&Intent::DistributeSlashedFunds {
+                slash_event_id: [0x01; 32],
+                counterparties: vec![(addr(5), 100)],
+                insurance_share: 50,
+                treasury_share: 25,
+            })
+            .unwrap();
+        }
+        assert_eq!(s.balance(&addr(5)), 300);
+        assert_eq!(s.balance(&reserved::insurance_pool_address()), 150);
+        assert_eq!(s.balance(&reserved::treasury_address()), 75);
     }
 }

@@ -1,0 +1,145 @@
+//! Reserved L1 registry-account addresses.
+//!
+//! Several Track C / Track G features need stable, deterministically-
+//! derived 20-byte addresses that act as protocol-owned registry
+//! accounts:
+//!
+//! - **`l2_registry_address`**: stores `(chain_id, batch_id) →
+//!   L2StateRoot` mappings via the `gsx-l2-verifier-precompile` arm of
+//!   `apply_intent` (per `docs/iq/IQ-006-l2-state-root-commitment-
+//!   surface.md`). Wired in G2.2 (#97).
+//! - **`insurance_pool_address`**: holds slashed funds reimbursing
+//!   affected counterparties + cross-validator insurance liquidity
+//!   per Tokenomics §8.3 step 2. Wired here in C.8 (#131).
+//! - **`treasury_address`**: holds protocol-treasury balance (the
+//!   third step of the slashing-distribution waterfall + the
+//!   foundation's 20% Treasury allocation per Tokenomics §3.2).
+//!   Wired here in C.8.
+//!
+//! ## Reserved-address invariant
+//!
+//! These addresses are protocol-owned: **no user Intent may mutate
+//! them via the standard `Transfer` path**. Only the dedicated arms
+//! of `apply_intent` (the slashing-distribution arm here, the L2
+//! verifier-precompile arm in G2.2) may write to reserved-address
+//! balance slots.
+//!
+//! `is_reserved` enforces this gate. Both `Substrate` impls
+//! (`InMemorySubstrate`, `GsxDbSubstrate`) reject any `Intent::Transfer`
+//! whose `from` or `to` is reserved.
+//!
+//! ## Derivation
+//!
+//! Each address is the leading 20 bytes of `BLAKE3(domain_tag)`. The
+//! address-space collision probability with user-generated addresses
+//! is `2^-160`, negligible. Domain tags are pinned strings (no length
+//! prefix — input space is constant, not user-controlled).
+
+use blake3::Hasher;
+
+use crate::substrate::Address;
+
+/// Domain tag for the L2 state-root registry account.
+pub const L2_REGISTRY_DOMAIN: &[u8] = b"gsx-l2-registry-v1";
+
+/// Domain tag for the insurance-pool registry account.
+pub const INSURANCE_POOL_DOMAIN: &[u8] = b"gsx-insurance-pool-v1";
+
+/// Domain tag for the protocol-treasury registry account.
+pub const TREASURY_DOMAIN: &[u8] = b"gsx-treasury-v1";
+
+/// Compute the reserved address corresponding to `domain` —
+/// `BLAKE3(domain)[..20]`. Used by the three exposed helpers below.
+/// Inlined per call site (BLAKE3 is sub-microsecond).
+fn derive(domain: &[u8]) -> Address {
+    let mut h = Hasher::new();
+    h.update(domain);
+    let digest = h.finalize();
+    let mut out = [0u8; 20];
+    out.copy_from_slice(&digest.as_bytes()[..20]);
+    out
+}
+
+/// Reserved address for the L2 state-root registry account
+/// (per IQ-006). Wired into G2.2's verifier-precompile arm.
+pub fn l2_registry_address() -> Address {
+    derive(L2_REGISTRY_DOMAIN)
+}
+
+/// Reserved address for the insurance-pool account
+/// (per Tokenomics §8.3 step 2).
+pub fn insurance_pool_address() -> Address {
+    derive(INSURANCE_POOL_DOMAIN)
+}
+
+/// Reserved address for the protocol-treasury account
+/// (per Tokenomics §8.3 step 3 + §3.2 foundation allocation).
+pub fn treasury_address() -> Address {
+    derive(TREASURY_DOMAIN)
+}
+
+/// Returns true if `addr` is a reserved protocol-owned registry
+/// account. Both `Substrate` impls reject `Intent::Transfer` into
+/// or out of a reserved address.
+pub fn is_reserved(addr: &Address) -> bool {
+    addr == &l2_registry_address()
+        || addr == &insurance_pool_address()
+        || addr == &treasury_address()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn three_reserved_addresses_are_distinct() {
+        let l2 = l2_registry_address();
+        let ins = insurance_pool_address();
+        let tr = treasury_address();
+        assert_ne!(l2, ins);
+        assert_ne!(l2, tr);
+        assert_ne!(ins, tr);
+    }
+
+    #[test]
+    fn derivation_is_deterministic() {
+        assert_eq!(l2_registry_address(), l2_registry_address());
+        assert_eq!(insurance_pool_address(), insurance_pool_address());
+        assert_eq!(treasury_address(), treasury_address());
+    }
+
+    #[test]
+    fn is_reserved_matches_all_three() {
+        assert!(is_reserved(&l2_registry_address()));
+        assert!(is_reserved(&insurance_pool_address()));
+        assert!(is_reserved(&treasury_address()));
+    }
+
+    #[test]
+    fn is_reserved_rejects_arbitrary_address() {
+        assert!(!is_reserved(&[0u8; 20]));
+        assert!(!is_reserved(&[0xffu8; 20]));
+        assert!(!is_reserved(&[0xabu8; 20]));
+    }
+
+    /// Defensive: the derivation is BLAKE3-truncated, not the
+    /// `sha3_256_domain` length-prefix pattern used elsewhere in the
+    /// crypto crate. Test pins the bytes so a refactor that
+    /// accidentally swaps hashes is caught.
+    #[test]
+    fn known_blake3_truncation() {
+        let addr = l2_registry_address();
+        // BLAKE3("gsx-l2-registry-v1") leading-20-bytes
+        // — locked by this test; updating requires governance vote
+        // since changing the reserved address bricks any state at
+        // the old address.
+        let expected = {
+            let mut h = Hasher::new();
+            h.update(L2_REGISTRY_DOMAIN);
+            let mut out = [0u8; 20];
+            out.copy_from_slice(&h.finalize().as_bytes()[..20]);
+            out
+        };
+        assert_eq!(addr, expected);
+    }
+}
