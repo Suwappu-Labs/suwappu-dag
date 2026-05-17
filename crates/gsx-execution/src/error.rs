@@ -72,4 +72,14 @@ pub enum ExecutionError {
         /// Destination whose credit would overflow.
         to: Address,
     },
+
+    /// L2 verifier precompile rejected the proof (Track G G2.2).
+    /// Wraps `gsx_l2_verifier_precompile::VerifyError`'s display
+    /// for diagnostics; the substrate side does not further
+    /// classify (the per-variant error is preserved as text).
+    #[error("l2 verifier rejected proof: {reason}")]
+    L2VerifierRejected {
+        /// Human-readable reason from the verifier crate.
+        reason: String,
+    },
 }

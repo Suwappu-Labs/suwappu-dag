@@ -13,6 +13,7 @@ description = "DAG block executor — wires the gsx-db state substrate into the 
 gsx-authority.workspace = true
 gsx-consensus.workspace = true
 gsx-crypto.workspace = true
+gsx-l2-verifier-precompile.workspace = true
 gsxdb-bridge.workspace = true
 gsxdb-state.workspace = true
 blake3.workspace = true

@@ -340,6 +340,17 @@ impl InMemorySubstrate {
         self.balances.iter()
     }
 
+    /// Read the cumulative count of successful L2 batch commits
+    /// (G2.2 Phase 1 marker). Reads from the balance at the
+    /// reserved L2 registry account; each successful
+    /// `Intent::CommitL2StateRoot` increments this by 1.
+    /// Used by tests + diagnostics; the production
+    /// (chain_id, batch_id) → L2StateRoot lookup lands in the
+    /// follow-up that extends the substrate state surface.
+    pub fn l2_commit_count(&self) -> Balance {
+        self.balance(&reserved::l2_registry_address())
+    }
+
     /// Credit `amount` to `addr` without going through the
     /// reserved-address transfer gate. Used by the substrate-
     /// internal `DistributeSlashedFunds` arm (C.8) to deposit into
@@ -423,20 +434,43 @@ impl Substrate for InMemorySubstrate {
             Intent::AdmitAuthority { .. }
             | Intent::ExitAuthority { .. }
             | Intent::EjectAuthority { .. } => Ok(()),
-            // Track G Phase G2.1 (#96): L2 state-root commitment +
-            // verifying-key rotation. Phase 1 (variants added) — the
-            // verifier-precompile body lands in G2.2 (#97). Until
-            // then these are stub no-ops that accept the Intent so
-            // upstream RPC + daemon dispatch can be exercised.
+            // Track G Phase G2.2 (#97): wired through the
+            // gsx-l2-verifier-precompile crate. The verifier
+            // currently runs format gates (proof = 260 B,
+            // public_inputs = 240 B, vk_hash != all-zeros); the
+            // Groth16 BN254 pairing check lands in G2.2 phase 2
+            // once sp1-verifier is added as a workspace dep.
             //
-            // **Reserved address invariant**: the production handler
-            // in G2.2 will validate that the resulting state mutation
-            // targets the `gsx_dag_l2_registry` reserved address
-            // (BLAKE3("gsx-l2-registry-v1")[..20]) and reject any
-            // Intent that would mutate balances at that address by
-            // any other path. See `docs/iq/IQ-006-l2-state-root-
-            // commitment-surface.md` for the full design.
-            Intent::CommitL2StateRoot { .. } | Intent::SetL2VerifyingKey { .. } => Ok(()),
+            // On verify success: increment the L2 commit counter
+            // at the reserved l2_registry_address. Phase 1 stores
+            // the count only (a marker for "the dispatch path
+            // works"); the real (chain_id, batch_id) → L2StateRoot
+            // mapping lands in a follow-up that extends the
+            // substrate state surface (tracked under Phase G2
+            // epic #89).
+            Intent::CommitL2StateRoot {
+                proof_bytes,
+                public_inputs,
+                vk_hash,
+                ..
+            } => {
+                gsx_l2_verifier_precompile::verify_l2_batch(proof_bytes, public_inputs, vk_hash)
+                    .map_err(|e| ExecutionError::L2VerifierRejected {
+                        reason: e.to_string(),
+                    })?;
+                // Increment the commit-counter at the reserved
+                // L2 registry account. Uses credit_unchecked so
+                // it bypasses the reserved-address Transfer gate.
+                self.credit_unchecked(reserved::l2_registry_address(), 1)?;
+                Ok(())
+            }
+            // `SetL2VerifyingKey` rotates a chain-state value
+            // (the aggregation_vk_hash + range_vk_commitment).
+            // Phase 1 (this PR / G2.2) accepts the rotation
+            // without storing it; the real chain-state VK
+            // registry lands in the same follow-up that adds
+            // the (chain_id, batch_id) → L2StateRoot map.
+            Intent::SetL2VerifyingKey { .. } => Ok(()),
             // Track G Phase G3.1 (#100): bridge + force-include +
             // slashing-event + DA Intent variants. Variants added
             // and accepted; the per-variant wiring lands in:
@@ -577,12 +611,14 @@ mod tests {
         assert_eq!(s.state_root(), before);
     }
 
-    /// G2.1 stub: CommitL2StateRoot accepted; state unchanged until
-    /// G2.2 wires the verifier precompile + reserved registry account.
+    /// G2.2 #97: valid CommitL2StateRoot increments the L2
+    /// commit counter at the reserved registry address. The
+    /// verifier format gates (proof = 260 B, public_inputs =
+    /// 240 B, vk_hash != all-zeros) all pass.
     #[test]
-    fn commit_l2_state_root_stub_is_accepted() {
+    fn commit_l2_state_root_increments_counter() {
         let mut s = InMemorySubstrate::from_balances([(addr(1), 100)]);
-        let before = s.state_root();
+        let before_count = s.l2_commit_count();
         let intent = Intent::CommitL2StateRoot {
             batch_id: 0,
             new_state_root: [0xab; 32],
@@ -591,11 +627,80 @@ mod tests {
             vk_hash: [0x42; 32],
         };
         assert!(s.apply_intent(&intent).is_ok());
-        assert_eq!(
-            s.state_root(),
-            before,
-            "G2.1 stub MUST NOT mutate state; G2.2 wires the registry account"
-        );
+        assert_eq!(s.l2_commit_count(), before_count + 1);
+    }
+
+    /// Verifier rejects under-sized proof bytes → state unchanged.
+    #[test]
+    fn commit_rejects_short_proof() {
+        let mut s = InMemorySubstrate::new();
+        let intent = Intent::CommitL2StateRoot {
+            batch_id: 0,
+            new_state_root: [0xab; 32],
+            proof_bytes: vec![0xcd; 259], // one byte short
+            public_inputs: vec![0xef; 240],
+            vk_hash: [0x42; 32],
+        };
+        assert!(matches!(
+            s.apply_intent(&intent),
+            Err(ExecutionError::L2VerifierRejected { .. })
+        ));
+        assert_eq!(s.l2_commit_count(), 0, "counter must not move on reject");
+    }
+
+    /// Verifier rejects wrong public-inputs width → state unchanged.
+    #[test]
+    fn commit_rejects_wrong_public_inputs_length() {
+        let mut s = InMemorySubstrate::new();
+        let intent = Intent::CommitL2StateRoot {
+            batch_id: 0,
+            new_state_root: [0xab; 32],
+            proof_bytes: vec![0xcd; 260],
+            public_inputs: vec![0xef; 100], // way too short
+            vk_hash: [0x42; 32],
+        };
+        assert!(matches!(
+            s.apply_intent(&intent),
+            Err(ExecutionError::L2VerifierRejected { .. })
+        ));
+        assert_eq!(s.l2_commit_count(), 0);
+    }
+
+    /// Verifier rejects all-zeros vk_hash (no VK pinned in chain
+    /// state) → state unchanged.
+    #[test]
+    fn commit_rejects_unpinned_vk() {
+        let mut s = InMemorySubstrate::new();
+        let intent = Intent::CommitL2StateRoot {
+            batch_id: 0,
+            new_state_root: [0xab; 32],
+            proof_bytes: vec![0xcd; 260],
+            public_inputs: vec![0xef; 240],
+            vk_hash: [0u8; 32], // all-zeros = unpinned
+        };
+        assert!(matches!(
+            s.apply_intent(&intent),
+            Err(ExecutionError::L2VerifierRejected { .. })
+        ));
+        assert_eq!(s.l2_commit_count(), 0);
+    }
+
+    /// Repeated successful commits monotonically increment the
+    /// commit counter.
+    #[test]
+    fn commits_are_monotonic() {
+        let mut s = InMemorySubstrate::new();
+        for batch_id in 0..5 {
+            s.apply_intent(&Intent::CommitL2StateRoot {
+                batch_id,
+                new_state_root: [batch_id as u8; 32],
+                proof_bytes: vec![0xcd; 260],
+                public_inputs: vec![0xef; 240],
+                vk_hash: [0x42; 32],
+            })
+            .unwrap();
+        }
+        assert_eq!(s.l2_commit_count(), 5);
     }
 
     /// G2.1 stub: SetL2VerifyingKey accepted; state unchanged until

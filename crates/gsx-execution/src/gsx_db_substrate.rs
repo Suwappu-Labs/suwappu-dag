@@ -153,14 +153,34 @@ impl Substrate for GsxDbSubstrate {
             Intent::AdmitAuthority { .. }
             | Intent::ExitAuthority { .. }
             | Intent::EjectAuthority { .. } => Ok(()),
-            // Track G Phase G2.1 (#96): L2 state-root commitment +
-            // verifying-key rotation. Stub no-op until G2.2 (#97)
-            // wires the verifier precompile + reserved registry-
-            // account. See `docs/iq/IQ-006-l2-state-root-commitment-
-            // surface.md` for the full design + the
-            // `gsx-l2-verifier-precompile` crate scaffold landing
-            // in G2.2.
-            Intent::CommitL2StateRoot { .. } | Intent::SetL2VerifyingKey { .. } => Ok(()),
+            // Track G Phase G2.2 (#97): wired through the
+            // gsx-l2-verifier-precompile crate. The verifier
+            // format gates (proof = 260 B, public_inputs = 240 B,
+            // vk_hash != all-zeros) run regardless of substrate.
+            //
+            // The GsxDbSubstrate side cannot yet write the commit
+            // marker (gsxdb-bridge::Bridge::submit only carries
+            // Transfer semantics; the production wire-up needs a
+            // gsx-db v0.2.0 bridge extension that exposes a
+            // protocol-owned credit path matching
+            // InMemorySubstrate::credit_unchecked). The verifier
+            // gate still runs so an invalid proof rejects
+            // uniformly across both impls.
+            Intent::CommitL2StateRoot {
+                proof_bytes,
+                public_inputs,
+                vk_hash,
+                ..
+            } => {
+                gsx_l2_verifier_precompile::verify_l2_batch(proof_bytes, public_inputs, vk_hash)
+                    .map_err(|e| ExecutionError::L2VerifierRejected {
+                        reason: e.to_string(),
+                    })?;
+                Ok(())
+            }
+            // `SetL2VerifyingKey` chain-state storage lands with
+            // the same gsx-db v0.2.0 follow-up.
+            Intent::SetL2VerifyingKey { .. } => Ok(()),
             // Track G Phase G3.1 (#100): bridge / force-include /
             // slashing-event / DA Intent variants. Stub no-op
             // until G3.2 / G3.3 / G3.4 land.

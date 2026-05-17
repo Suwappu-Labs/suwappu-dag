@@ -901,6 +901,7 @@ dependencies = [
  "gsx-authority",
  "gsx-consensus",
  "gsx-crypto",
+ "gsx-l2-verifier-precompile",
  "gsxdb-bridge",
  "gsxdb-state",
  "hex",
@@ -967,6 +968,14 @@ dependencies = [
  "tokio-tungstenite 0.21.0",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "gsx-l2-verifier-precompile"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
