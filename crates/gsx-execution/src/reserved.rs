@@ -55,6 +55,16 @@ pub const TREASURY_DOMAIN: &[u8] = b"gsx-treasury-v1";
 /// boundary, `balance(bridge_escrow_address) == sum_of_unwithdrawn_L2_deposits`.
 pub const BRIDGE_ESCROW_DOMAIN: &[u8] = b"gsx-bridge-escrow-v1";
 
+/// Domain tag for the force-include obligation registry.
+/// Stores `obligation_id → ForceIncludeObligation` records via
+/// the substrate's bytes_state surface (Track G G3.4, #103).
+pub const FORCE_INCLUDE_REGISTRY_DOMAIN: &[u8] = b"gsx-force-include-registry-v1";
+
+/// Domain tag for the foundation-operated sequencer's bond
+/// account. Holds the liveness + safety bonds; drains on
+/// `Intent::SlashSequencer`.
+pub const SEQUENCER_BOND_DOMAIN: &[u8] = b"gsx-sequencer-bond-v1";
+
 /// Compute the reserved address corresponding to `domain` —
 /// `BLAKE3(domain)[..20]`. Used by the three exposed helpers below.
 /// Inlined per call site (BLAKE3 is sub-microsecond).
@@ -92,6 +102,20 @@ pub fn bridge_escrow_address() -> Address {
     derive(BRIDGE_ESCROW_DOMAIN)
 }
 
+/// Reserved address for the force-include obligation registry
+/// (Track G G3.4, #103). Stores `obligation_id →
+/// ForceIncludeObligation` records in the substrate's bytes_state.
+pub fn force_include_registry_address() -> Address {
+    derive(FORCE_INCLUDE_REGISTRY_DOMAIN)
+}
+
+/// Reserved address for the sequencer's liveness + safety bond.
+/// Track G G3.4: per-slash drain via
+/// `Intent::SlashSequencer { reason: MissedForceInclude, ... }`.
+pub fn sequencer_bond_address() -> Address {
+    derive(SEQUENCER_BOND_DOMAIN)
+}
+
 /// Returns true if `addr` is a reserved protocol-owned registry
 /// account. Both `Substrate` impls reject `Intent::Transfer` into
 /// or out of a reserved address.
@@ -100,6 +124,8 @@ pub fn is_reserved(addr: &Address) -> bool {
         || addr == &insurance_pool_address()
         || addr == &treasury_address()
         || addr == &bridge_escrow_address()
+        || addr == &force_include_registry_address()
+        || addr == &sequencer_bond_address()
 }
 
 #[cfg(test)]
@@ -107,12 +133,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn four_reserved_addresses_are_distinct() {
-        let l2 = l2_registry_address();
-        let ins = insurance_pool_address();
-        let tr = treasury_address();
-        let br = bridge_escrow_address();
-        let all = [l2, ins, tr, br];
+    fn six_reserved_addresses_are_distinct() {
+        let all = [
+            l2_registry_address(),
+            insurance_pool_address(),
+            treasury_address(),
+            bridge_escrow_address(),
+            force_include_registry_address(),
+            sequencer_bond_address(),
+        ];
         for (i, a) in all.iter().enumerate() {
             for (j, b) in all.iter().enumerate() {
                 if i != j {
@@ -128,14 +157,21 @@ mod tests {
         assert_eq!(insurance_pool_address(), insurance_pool_address());
         assert_eq!(treasury_address(), treasury_address());
         assert_eq!(bridge_escrow_address(), bridge_escrow_address());
+        assert_eq!(
+            force_include_registry_address(),
+            force_include_registry_address()
+        );
+        assert_eq!(sequencer_bond_address(), sequencer_bond_address());
     }
 
     #[test]
-    fn is_reserved_matches_all_four() {
+    fn is_reserved_matches_all_six() {
         assert!(is_reserved(&l2_registry_address()));
         assert!(is_reserved(&insurance_pool_address()));
         assert!(is_reserved(&treasury_address()));
         assert!(is_reserved(&bridge_escrow_address()));
+        assert!(is_reserved(&force_include_registry_address()));
+        assert!(is_reserved(&sequencer_bond_address()));
     }
 
     #[test]

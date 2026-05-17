@@ -96,4 +96,37 @@ pub enum ExecutionError {
         /// Static reason string for diagnostics.
         reason: &'static str,
     },
+
+    /// `Intent::L2ForceInclude` re-registers an obligation that
+    /// already exists in the force-include registry. Replay
+    /// defense — per the SLA doc §3, the L1 dedup hash blocks
+    /// re-submission of `(tx, deadline, submitter, l2_nonce)`.
+    #[error("force-include obligation already registered: 0x{enc_id}", enc_id = hex::encode(obligation_id))]
+    ForceIncludeAlreadyRegistered {
+        /// The deterministic obligation_id that already exists.
+        obligation_id: [u8; 32],
+    },
+
+    /// `Intent::SlashSequencer` referenced an obligation_id
+    /// not present in the registry. Either the snitch made a
+    /// mistake or the obligation expired + was evicted.
+    #[error("force-include obligation not found: 0x{enc_id}", enc_id = hex::encode(obligation_id))]
+    ForceIncludeNotFound {
+        /// The obligation_id the SlashSequencer pointed at.
+        obligation_id: [u8; 32],
+    },
+
+    /// `Intent::SlashSequencer` referenced an obligation that
+    /// is no longer `Pending` (it was already honored or
+    /// slashed). Replay defense against double-slashing.
+    #[error(
+        "force-include obligation 0x{enc_id} is not pending (current status: {status:?})",
+        enc_id = hex::encode(obligation_id),
+    )]
+    ForceIncludeNotPending {
+        /// The obligation_id pointed at.
+        obligation_id: [u8; 32],
+        /// The obligation's current status.
+        status: crate::force_include::ObligationStatus,
+    },
 }
