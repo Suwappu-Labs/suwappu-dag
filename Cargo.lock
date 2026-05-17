@@ -991,6 +991,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "gsx-l2-sequencer"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "gsx-l2-verifier-precompile",
+ "hex",
+ "serde",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "gsx-l2-verifier-precompile"
 version = "0.1.0"
 dependencies = [
