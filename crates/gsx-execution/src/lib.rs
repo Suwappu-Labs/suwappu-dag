@@ -50,7 +50,7 @@ pub use checkpoint::{
 };
 pub use error::ExecutionError;
 pub use gsx_db_substrate::GsxDbSubstrate;
-pub use substrate::{Address, Balance, InMemorySubstrate, Intent, Substrate};
+pub use substrate::{Address, Balance, InMemorySubstrate, Intent, RewardsRing, Substrate};
 
 /// Checkpoint cadence C — the rate at which the Authority Ring co-signs a
 /// (Σ_EVM, Σ_Move) snapshot. Configured per testnet/mainnet; default below

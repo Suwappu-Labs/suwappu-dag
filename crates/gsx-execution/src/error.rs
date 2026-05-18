@@ -438,4 +438,21 @@ pub enum ExecutionError {
         /// The last epoch already recorded as minted.
         last_minted_epoch: u64,
     },
+
+    /// `Intent::DistributeRewards { epoch, ring, .. }`
+    /// carried an epoch number ≤ the ring's last distributed
+    /// epoch on record. Replay defense per-ring at
+    /// `rewards_distribution_registry_address`.
+    #[error(
+        "{ring} rewards already distributed for epoch {last_distributed_epoch} (attempted: {attempted_epoch})"
+    )]
+    RewardsEpochAlreadyDistributed {
+        /// Which ring ("authority" or "validator").
+        ring: &'static str,
+        /// The epoch the Intent carried.
+        attempted_epoch: u64,
+        /// The last epoch already recorded as distributed
+        /// for this ring.
+        last_distributed_epoch: u64,
+    },
 }

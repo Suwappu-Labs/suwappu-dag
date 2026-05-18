@@ -136,6 +136,31 @@ pub enum Intent {
         /// post-credit balance fits in `u128`).
         allocations: Vec<(Address, Balance)>,
     },
+    /// Daemon-emitted: drain a per-epoch reward tranche from
+    /// the named rewards pool to the listed recipients.
+    /// Companion to `MintInflation` — `MintInflation` fills
+    /// the pool, `DistributeRewards` empties it to the active
+    /// set's payout addresses.
+    ///
+    /// Replay defense: per-ring last-distributed-epoch in
+    /// `rewards_distribution_registry_address`. The Intent's
+    /// `epoch` must be strictly greater than the ring's
+    /// recorded last value.
+    ///
+    /// Atomicity: the consensus layer is expected to
+    /// sum-check `recipients` against the pool balance
+    /// before emission. The substrate's per-iter debit
+    /// surfaces `InsufficientBalance` if the sum overshoots
+    /// — but any prior credit in the same Intent is NOT
+    /// rolled back. Reserved-address recipients are rejected.
+    DistributeRewards {
+        /// Epoch number; replay-defended per-ring.
+        epoch: u64,
+        /// Which rewards pool to drain.
+        ring: RewardsRing,
+        /// `(address, amount)` payouts to credit.
+        recipients: Vec<(Address, Balance)>,
+    },
     /// Daemon-emitted: mint a per-epoch inflation tranche,
     /// crediting the three protocol-owned destination pools
     /// (Authority rewards, Validator rewards, treasury).
@@ -717,6 +742,29 @@ pub enum Intent {
 /// per-class penalty + recovery path in the slashing-distribution
 /// waterfall (see `docs/validator-sla-slashing.md` §3).
 ///
+/// Selects which rewards pool `Intent::DistributeRewards`
+/// drains. The Authority and Validator rings have independent
+/// pools per the dual-ring economic model (Authority: smaller
+/// set, higher per-slot reward; Validator: larger set, lower
+/// per-slot reward).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum RewardsRing {
+    /// Drain `authority_rewards_pool_address`.
+    Authority,
+    /// Drain `validator_rewards_pool_address`.
+    Validator,
+}
+
+impl RewardsRing {
+    fn as_str(&self) -> &'static str {
+        match self {
+            RewardsRing::Authority => "authority",
+            RewardsRing::Validator => "validator",
+        }
+    }
+}
+
 /// `#[non_exhaustive]` for the same forward-compat reasons as `Intent`
 /// — additional slash classes (e.g., DA non-availability post-v1.1)
 /// must be added without breaking SDK consumers.
@@ -1226,6 +1274,25 @@ impl InMemorySubstrate {
         }
     }
 
+    /// Last epoch for which `Intent::DistributeRewards` ran
+    /// against `ring`. Returns `0` if no payout has been
+    /// recorded for that ring (the bootstrap state).
+    pub fn last_distributed_rewards_epoch(&self, ring: RewardsRing) -> u64 {
+        let bytes = self
+            .read_bytes(&reserved::rewards_distribution_registry_address())
+            .unwrap_or_default();
+        if bytes.len() == 16 {
+            let auth = u64::from_be_bytes(bytes[0..8].try_into().unwrap());
+            let val = u64::from_be_bytes(bytes[8..16].try_into().unwrap());
+            match ring {
+                RewardsRing::Authority => auth,
+                RewardsRing::Validator => val,
+            }
+        } else {
+            0
+        }
+    }
+
     /// Validate a bridge asset is registered + Active.
     /// Returns `Err(BridgeAssetNotFound)` if no record exists,
     /// `Err(BridgeAssetNotActive)` if status is Paused or
@@ -1401,6 +1468,75 @@ impl Substrate for InMemorySubstrate {
                     self.credit_unchecked(reserved::treasury_address(), *treasury_share)?;
                 }
                 self.write_bytes_unchecked(registry_addr, epoch.to_be_bytes().to_vec());
+                Ok(())
+            }
+            // Per-epoch reward payout from the named ring's
+            // pool. Replay-defended via per-ring
+            // last-distributed-epoch in
+            // rewards_distribution_registry_address (16 BE
+            // bytes: 8 authority, 8 validator).
+            Intent::DistributeRewards {
+                epoch,
+                ring,
+                recipients,
+            } => {
+                let epoch = *epoch;
+                let ring = *ring;
+                let registry_addr = reserved::rewards_distribution_registry_address();
+                let existing = self.read_bytes(&registry_addr).unwrap_or_default();
+                let (mut last_auth, mut last_val) = if existing.is_empty() {
+                    (0u64, 0u64)
+                } else if existing.len() == 16 {
+                    (
+                        u64::from_be_bytes(existing[0..8].try_into().unwrap()),
+                        u64::from_be_bytes(existing[8..16].try_into().unwrap()),
+                    )
+                } else {
+                    return Err(ExecutionError::CorruptStateRecord {
+                        addr: registry_addr,
+                        reason: "rewards distribution registry size mismatch",
+                    });
+                };
+                let last_ring = match ring {
+                    RewardsRing::Authority => last_auth,
+                    RewardsRing::Validator => last_val,
+                };
+                if epoch <= last_ring {
+                    return Err(ExecutionError::RewardsEpochAlreadyDistributed {
+                        ring: ring.as_str(),
+                        attempted_epoch: epoch,
+                        last_distributed_epoch: last_ring,
+                    });
+                }
+                let pool_addr = match ring {
+                    RewardsRing::Authority => reserved::authority_rewards_pool_address(),
+                    RewardsRing::Validator => reserved::validator_rewards_pool_address(),
+                };
+                // Reject reserved-address recipients before
+                // any debit — we never move from one
+                // protocol pool to another via this Intent.
+                for (recipient, _) in recipients {
+                    if reserved::is_reserved(recipient) {
+                        return Err(ExecutionError::ReservedAddressTransferDenied {
+                            addr: *recipient,
+                        });
+                    }
+                }
+                for (recipient, amount) in recipients {
+                    if *amount == 0 {
+                        continue;
+                    }
+                    self.debit_unchecked(pool_addr, *amount)?;
+                    self.credit_unchecked(*recipient, *amount)?;
+                }
+                match ring {
+                    RewardsRing::Authority => last_auth = epoch,
+                    RewardsRing::Validator => last_val = epoch,
+                }
+                let mut new_bytes = Vec::with_capacity(16);
+                new_bytes.extend_from_slice(&last_auth.to_be_bytes());
+                new_bytes.extend_from_slice(&last_val.to_be_bytes());
+                self.write_bytes_unchecked(registry_addr, new_bytes);
                 Ok(())
             }
             // Phase G governance — Authority Ring registry
@@ -7855,5 +7991,182 @@ mod tests {
     fn last_minted_inflation_epoch_initially_zero() {
         let s = InMemorySubstrate::new();
         assert_eq!(s.last_minted_inflation_epoch(), 0);
+    }
+
+    // ===== DistributeRewards =====
+
+    fn fill_authority_pool(s: &mut InMemorySubstrate, epoch: u64, amount: Balance) {
+        s.apply_intent(&Intent::MintInflation {
+            epoch,
+            authority_share: amount,
+            validator_share: 0,
+            treasury_share: 0,
+        })
+        .unwrap();
+    }
+
+    fn fill_validator_pool(s: &mut InMemorySubstrate, epoch: u64, amount: Balance) {
+        s.apply_intent(&Intent::MintInflation {
+            epoch,
+            authority_share: 0,
+            validator_share: amount,
+            treasury_share: 0,
+        })
+        .unwrap();
+    }
+
+    /// Happy path: distribute authority rewards to three
+    /// recipients; pool drains exactly; per-recipient credits
+    /// match.
+    #[test]
+    fn distribute_authority_rewards_happy_path() {
+        let mut s = InMemorySubstrate::new();
+        fill_authority_pool(&mut s, 1, 1_000);
+        s.apply_intent(&Intent::DistributeRewards {
+            epoch: 1,
+            ring: RewardsRing::Authority,
+            recipients: vec![(addr(1), 500), (addr(2), 300), (addr(3), 200)],
+        })
+        .unwrap();
+        assert_eq!(s.balance(&reserved::authority_rewards_pool_address()), 0);
+        assert_eq!(s.balance(&addr(1)), 500);
+        assert_eq!(s.balance(&addr(2)), 300);
+        assert_eq!(s.balance(&addr(3)), 200);
+        assert_eq!(s.last_distributed_rewards_epoch(RewardsRing::Authority), 1);
+    }
+
+    /// Validator ring mirror.
+    #[test]
+    fn distribute_validator_rewards_happy_path() {
+        let mut s = InMemorySubstrate::new();
+        fill_validator_pool(&mut s, 1, 400);
+        s.apply_intent(&Intent::DistributeRewards {
+            epoch: 1,
+            ring: RewardsRing::Validator,
+            recipients: vec![(addr(1), 100), (addr(2), 300)],
+        })
+        .unwrap();
+        assert_eq!(s.balance(&reserved::validator_rewards_pool_address()), 0);
+        assert_eq!(s.balance(&addr(1)), 100);
+        assert_eq!(s.balance(&addr(2)), 300);
+        assert_eq!(s.last_distributed_rewards_epoch(RewardsRing::Validator), 1);
+    }
+
+    /// Per-ring replay defense is independent: distributing
+    /// authority at epoch 5 doesn't affect validator's epoch.
+    #[test]
+    fn distribute_rewards_replay_defense_is_per_ring() {
+        let mut s = InMemorySubstrate::new();
+        fill_authority_pool(&mut s, 5, 100);
+        s.apply_intent(&Intent::DistributeRewards {
+            epoch: 5,
+            ring: RewardsRing::Authority,
+            recipients: vec![(addr(1), 100)],
+        })
+        .unwrap();
+        // Validator ring still at 0; distribute @ epoch 1 ok.
+        fill_validator_pool(&mut s, 6, 100);
+        s.apply_intent(&Intent::DistributeRewards {
+            epoch: 1,
+            ring: RewardsRing::Validator,
+            recipients: vec![(addr(2), 100)],
+        })
+        .unwrap();
+        assert_eq!(s.last_distributed_rewards_epoch(RewardsRing::Authority), 5);
+        assert_eq!(s.last_distributed_rewards_epoch(RewardsRing::Validator), 1);
+    }
+
+    /// Same-epoch replay rejects.
+    #[test]
+    fn distribute_rewards_same_epoch_replay_rejected() {
+        let mut s = InMemorySubstrate::new();
+        fill_authority_pool(&mut s, 1, 200);
+        s.apply_intent(&Intent::DistributeRewards {
+            epoch: 1,
+            ring: RewardsRing::Authority,
+            recipients: vec![(addr(1), 100)],
+        })
+        .unwrap();
+        let err = s.apply_intent(&Intent::DistributeRewards {
+            epoch: 1,
+            ring: RewardsRing::Authority,
+            recipients: vec![(addr(2), 100)],
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::RewardsEpochAlreadyDistributed {
+                ring: "authority",
+                attempted_epoch: 1,
+                last_distributed_epoch: 1,
+            })
+        ));
+    }
+
+    /// Reserved-address recipient rejects atomically.
+    #[test]
+    fn distribute_rewards_reserved_recipient_rejected_atomically() {
+        let mut s = InMemorySubstrate::new();
+        fill_authority_pool(&mut s, 1, 200);
+        let before = s.state_root();
+        let err = s.apply_intent(&Intent::DistributeRewards {
+            epoch: 1,
+            ring: RewardsRing::Authority,
+            recipients: vec![(addr(1), 50), (reserved::treasury_address(), 100)],
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::ReservedAddressTransferDenied { .. })
+        ));
+        // Pre-check loop rejects before any credit lands.
+        assert_eq!(s.state_root(), before);
+    }
+
+    /// Sum overshoots the pool — debit_unchecked fires
+    /// InsufficientBalance.
+    #[test]
+    fn distribute_rewards_overshoots_pool_rejects() {
+        let mut s = InMemorySubstrate::new();
+        fill_authority_pool(&mut s, 1, 100);
+        let err = s.apply_intent(&Intent::DistributeRewards {
+            epoch: 1,
+            ring: RewardsRing::Authority,
+            recipients: vec![(addr(1), 200)],
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::InsufficientBalance { .. })
+        ));
+    }
+
+    /// Authority distribution does NOT touch validator pool.
+    #[test]
+    fn distribute_authority_rewards_does_not_drain_validator_pool() {
+        let mut s = InMemorySubstrate::new();
+        fill_authority_pool(&mut s, 1, 100);
+        fill_validator_pool(&mut s, 2, 999);
+        s.apply_intent(&Intent::DistributeRewards {
+            epoch: 1,
+            ring: RewardsRing::Authority,
+            recipients: vec![(addr(1), 100)],
+        })
+        .unwrap();
+        assert_eq!(s.balance(&reserved::validator_rewards_pool_address()), 999);
+    }
+
+    /// Zero-amount entries are skipped but the epoch counter
+    /// still bumps.
+    #[test]
+    fn distribute_rewards_zero_entries_skip_credits_but_bump_counter() {
+        let mut s = InMemorySubstrate::new();
+        fill_authority_pool(&mut s, 1, 50);
+        s.apply_intent(&Intent::DistributeRewards {
+            epoch: 1,
+            ring: RewardsRing::Authority,
+            recipients: vec![(addr(1), 0)],
+        })
+        .unwrap();
+        assert_eq!(s.balance(&addr(1)), 0);
+        assert_eq!(s.balance(&reserved::authority_rewards_pool_address()), 50);
+        assert_eq!(s.last_distributed_rewards_epoch(RewardsRing::Authority), 1);
     }
 }
