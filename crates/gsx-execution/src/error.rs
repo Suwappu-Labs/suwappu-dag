@@ -314,4 +314,42 @@ pub enum ExecutionError {
         /// Configured maximum.
         max: usize,
     },
+
+    /// `Intent::AdmitValidator` named a `validator_id`
+    /// already in the Validator Ring registry.
+    #[error("validator slot {validator_id} already occupied")]
+    ValidatorSlotAlreadyOccupied {
+        /// The slot the AdmitValidator Intent tried to claim.
+        validator_id: u32,
+    },
+
+    /// `Intent::ExitValidator` or `Intent::EjectValidator`
+    /// named a `validator_id` not in the registry.
+    #[error("validator slot {validator_id} not found")]
+    ValidatorNotFound {
+        /// The slot the Intent referenced.
+        validator_id: u32,
+    },
+
+    /// `Intent::ExitValidator` named a validator that's
+    /// not currently `Active` — already exiting or ejected.
+    #[error("validator slot {validator_id} is not active (status: {status:?})")]
+    ValidatorNotActive {
+        /// The slot the ExitValidator Intent referenced.
+        validator_id: u32,
+        /// The current non-Active status.
+        status: crate::validator_registry::ValidatorStatus,
+    },
+
+    /// `Intent::AdmitValidator` carried a pubkey field
+    /// exceeding the configured maximum width.
+    #[error("validator {field} pubkey too long: {got} > {max}")]
+    ValidatorFieldTooLong {
+        /// Which field exceeded ("mldsa_pk" or "bls_pk").
+        field: &'static str,
+        /// Observed width.
+        got: usize,
+        /// Configured maximum.
+        max: usize,
+    },
 }

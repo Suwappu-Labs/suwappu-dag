@@ -41,6 +41,7 @@ pub mod gsx_db_substrate;
 pub mod l2_state;
 pub mod reserved;
 pub mod substrate;
+pub mod validator_registry;
 
 pub use block::{execute_block, Block, ExecutionReport};
 pub use checkpoint::{

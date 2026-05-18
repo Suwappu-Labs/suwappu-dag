@@ -125,6 +125,37 @@ pub enum Intent {
         /// EquivocationProof commitment).
         proof_ref: [u8; 32],
     },
+    /// Admit a new Validator Ring member (Tier B PoS slot).
+    /// Mirror of `AdmitAuthority` for the 200-slot Validator
+    /// Ring. Per Tokenomics §4 the Validator Ring carries
+    /// emissions-based block rewards + delegated PoS stake;
+    /// substrate-level shape matches Authority Ring for
+    /// uniform daemon handling.
+    AdmitValidator {
+        /// Candidate validator id (zero-indexed slot the caller wants).
+        validator_id: u32,
+        /// Stake the candidate is locking. Must be ≥ floor.
+        stake_gsx: u64,
+        /// ML-DSA-65 public key (1952 B canonical).
+        mldsa_public_key: Vec<u8>,
+        /// BLS12-381 G1 public key (48 B compressed).
+        bls_public_key: Vec<u8>,
+    },
+    /// Voluntary withdrawal from the Validator Ring.
+    /// Mirrors `ExitAuthority`. Applied at the next epoch
+    /// boundary.
+    ExitValidator {
+        /// Validator id to remove from the active set.
+        validator_id: u32,
+    },
+    /// Ejection of a Validator Ring member on confirmed
+    /// offense. Mirrors `EjectAuthority`.
+    EjectValidator {
+        /// Validator id being ejected.
+        validator_id: u32,
+        /// Reference to the offense proof.
+        proof_ref: [u8; 32],
+    },
     /// Commit a per-batch L2 state root to the L1 chain. Submitted by
     /// the L2 prover after successfully proving an L2 batch with SP1
     /// (Track G Phase G2 + G4). The verifier-precompile arm in
@@ -957,6 +988,29 @@ impl InMemorySubstrate {
             .unwrap_or(0)
     }
 
+    /// Look up a Validator Ring registry record by slot.
+    /// Returns `None` if the slot is unoccupied or the
+    /// registry bytes are corrupt.
+    pub fn validator_record(
+        &self,
+        validator_id: u32,
+    ) -> Option<crate::validator_registry::ValidatorRecord> {
+        let bytes = self.read_bytes(&reserved::validator_registry_address())?;
+        let map = crate::validator_registry::decode(&bytes).ok()?;
+        map.get(&validator_id).cloned()
+    }
+
+    /// Count of recorded Validator Ring slots (across all
+    /// statuses).
+    pub fn validator_count(&self) -> usize {
+        let bytes = self
+            .read_bytes(&reserved::validator_registry_address())
+            .unwrap_or_default();
+        crate::validator_registry::decode(&bytes)
+            .map(|m| m.len())
+            .unwrap_or(0)
+    }
+
     /// Validate a bridge asset is registered + Active.
     /// Returns `Err(BridgeAssetNotFound)` if no record exists,
     /// `Err(BridgeAssetNotActive)` if status is Paused or
@@ -1138,6 +1192,92 @@ impl Substrate for InMemorySubstrate {
                 // Ejected (e.g., an Exiting validator
                 // caught equivocating still loses stake).
                 rec.status = AuthorityStatus::Ejected;
+                let new_bytes = encode(&map);
+                self.write_bytes_unchecked(registry_addr, new_bytes);
+                Ok(())
+            }
+            // Validator Ring registry — mirrors Authority Ring
+            // but at the validator_registry_address.
+            Intent::AdmitValidator {
+                validator_id,
+                stake_gsx,
+                mldsa_public_key,
+                bls_public_key,
+            } => {
+                use crate::validator_registry::{
+                    decode, encode, ValidatorRecord, ValidatorStatus, MAX_BLS_PK_BYTES,
+                    MAX_MLDSA_PK_BYTES,
+                };
+                if mldsa_public_key.len() > MAX_MLDSA_PK_BYTES {
+                    return Err(ExecutionError::ValidatorFieldTooLong {
+                        field: "mldsa_pk",
+                        got: mldsa_public_key.len(),
+                        max: MAX_MLDSA_PK_BYTES,
+                    });
+                }
+                if bls_public_key.len() > MAX_BLS_PK_BYTES {
+                    return Err(ExecutionError::ValidatorFieldTooLong {
+                        field: "bls_pk",
+                        got: bls_public_key.len(),
+                        max: MAX_BLS_PK_BYTES,
+                    });
+                }
+                let registry_addr = reserved::validator_registry_address();
+                let existing_bytes = self.read_bytes(&registry_addr).unwrap_or_default();
+                let mut map = decode(&existing_bytes)?;
+                if map.contains_key(validator_id) {
+                    return Err(ExecutionError::ValidatorSlotAlreadyOccupied {
+                        validator_id: *validator_id,
+                    });
+                }
+                map.insert(
+                    *validator_id,
+                    ValidatorRecord {
+                        mldsa_public_key: mldsa_public_key.clone(),
+                        bls_public_key: bls_public_key.clone(),
+                        stake_gsx: *stake_gsx,
+                        status: ValidatorStatus::Active,
+                    },
+                );
+                let new_bytes = encode(&map);
+                self.write_bytes_unchecked(registry_addr, new_bytes);
+                Ok(())
+            }
+            Intent::ExitValidator { validator_id } => {
+                use crate::validator_registry::{decode, encode, ValidatorStatus};
+                let registry_addr = reserved::validator_registry_address();
+                let existing_bytes = self.read_bytes(&registry_addr).unwrap_or_default();
+                let mut map = decode(&existing_bytes)?;
+                let rec = map
+                    .get_mut(validator_id)
+                    .ok_or(ExecutionError::ValidatorNotFound {
+                        validator_id: *validator_id,
+                    })?;
+                if rec.status != ValidatorStatus::Active {
+                    return Err(ExecutionError::ValidatorNotActive {
+                        validator_id: *validator_id,
+                        status: rec.status,
+                    });
+                }
+                rec.status = ValidatorStatus::Exiting;
+                let new_bytes = encode(&map);
+                self.write_bytes_unchecked(registry_addr, new_bytes);
+                Ok(())
+            }
+            Intent::EjectValidator {
+                validator_id,
+                proof_ref: _,
+            } => {
+                use crate::validator_registry::{decode, encode, ValidatorStatus};
+                let registry_addr = reserved::validator_registry_address();
+                let existing_bytes = self.read_bytes(&registry_addr).unwrap_or_default();
+                let mut map = decode(&existing_bytes)?;
+                let rec = map
+                    .get_mut(validator_id)
+                    .ok_or(ExecutionError::ValidatorNotFound {
+                        validator_id: *validator_id,
+                    })?;
+                rec.status = ValidatorStatus::Ejected;
                 let new_bytes = encode(&map);
                 self.write_bytes_unchecked(registry_addr, new_bytes);
                 Ok(())
@@ -5470,5 +5610,243 @@ mod tests {
         })
         .unwrap();
         assert_ne!(s.state_root(), before);
+    }
+
+    // ===== Validator Ring registry (Phase G dual-ring) =====
+
+    /// AdmitValidator inserts an Active record.
+    #[test]
+    fn admit_validator_inserts_active_record() {
+        use crate::validator_registry::ValidatorStatus;
+        let mut s = InMemorySubstrate::new();
+        s.apply_intent(&Intent::AdmitValidator {
+            validator_id: 0,
+            stake_gsx: 3_000_000,
+            mldsa_public_key: vec![0xaa; 1952],
+            bls_public_key: vec![0xbb; 48],
+        })
+        .unwrap();
+        let rec = s.validator_record(0).unwrap();
+        assert_eq!(rec.status, ValidatorStatus::Active);
+        assert_eq!(rec.stake_gsx, 3_000_000);
+        assert_eq!(s.validator_count(), 1);
+    }
+
+    /// Duplicate validator slot rejects.
+    #[test]
+    fn admit_validator_duplicate_slot_rejected() {
+        let mut s = InMemorySubstrate::new();
+        s.apply_intent(&Intent::AdmitValidator {
+            validator_id: 42,
+            stake_gsx: 3_000_000,
+            mldsa_public_key: vec![0xaa; 1952],
+            bls_public_key: vec![0xbb; 48],
+        })
+        .unwrap();
+        let err = s.apply_intent(&Intent::AdmitValidator {
+            validator_id: 42,
+            stake_gsx: 5_000_000,
+            mldsa_public_key: vec![0xcc; 1952],
+            bls_public_key: vec![0xdd; 48],
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::ValidatorSlotAlreadyOccupied { validator_id: 42 })
+        ));
+        assert_eq!(s.validator_record(42).unwrap().stake_gsx, 3_000_000);
+    }
+
+    /// Oversized validator pubkey rejects.
+    #[test]
+    fn admit_validator_oversized_mldsa_pk_rejected() {
+        let mut s = InMemorySubstrate::new();
+        let err = s.apply_intent(&Intent::AdmitValidator {
+            validator_id: 0,
+            stake_gsx: 1,
+            mldsa_public_key: vec![0xaa; 3000],
+            bls_public_key: vec![0xbb; 48],
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::ValidatorFieldTooLong {
+                field: "mldsa_pk",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn admit_validator_oversized_bls_pk_rejected() {
+        let mut s = InMemorySubstrate::new();
+        let err = s.apply_intent(&Intent::AdmitValidator {
+            validator_id: 0,
+            stake_gsx: 1,
+            mldsa_public_key: vec![0xaa; 1952],
+            bls_public_key: vec![0xbb; 256],
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::ValidatorFieldTooLong {
+                field: "bls_pk",
+                ..
+            })
+        ));
+    }
+
+    /// ExitValidator flips Active → Exiting.
+    #[test]
+    fn exit_validator_flips_active_to_exiting() {
+        use crate::validator_registry::ValidatorStatus;
+        let mut s = InMemorySubstrate::new();
+        s.apply_intent(&Intent::AdmitValidator {
+            validator_id: 0,
+            stake_gsx: 1_000,
+            mldsa_public_key: vec![0xaa; 1952],
+            bls_public_key: vec![0xbb; 48],
+        })
+        .unwrap();
+        s.apply_intent(&Intent::ExitValidator { validator_id: 0 })
+            .unwrap();
+        let rec = s.validator_record(0).unwrap();
+        assert_eq!(rec.status, ValidatorStatus::Exiting);
+    }
+
+    #[test]
+    fn exit_validator_unknown_slot_rejected() {
+        let mut s = InMemorySubstrate::new();
+        let err = s.apply_intent(&Intent::ExitValidator { validator_id: 42 });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::ValidatorNotFound { validator_id: 42 })
+        ));
+    }
+
+    #[test]
+    fn exit_validator_double_exit_rejected() {
+        let mut s = InMemorySubstrate::new();
+        s.apply_intent(&Intent::AdmitValidator {
+            validator_id: 0,
+            stake_gsx: 1_000,
+            mldsa_public_key: vec![0xaa; 1952],
+            bls_public_key: vec![0xbb; 48],
+        })
+        .unwrap();
+        s.apply_intent(&Intent::ExitValidator { validator_id: 0 })
+            .unwrap();
+        let err = s.apply_intent(&Intent::ExitValidator { validator_id: 0 });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::ValidatorNotActive { .. })
+        ));
+    }
+
+    #[test]
+    fn eject_validator_flips_to_ejected() {
+        use crate::validator_registry::ValidatorStatus;
+        let mut s = InMemorySubstrate::new();
+        s.apply_intent(&Intent::AdmitValidator {
+            validator_id: 0,
+            stake_gsx: 1_000,
+            mldsa_public_key: vec![0xaa; 1952],
+            bls_public_key: vec![0xbb; 48],
+        })
+        .unwrap();
+        s.apply_intent(&Intent::EjectValidator {
+            validator_id: 0,
+            proof_ref: [0xee; 32],
+        })
+        .unwrap();
+        assert_eq!(
+            s.validator_record(0).unwrap().status,
+            ValidatorStatus::Ejected
+        );
+    }
+
+    /// Authority Ring and Validator Ring are independent
+    /// namespaces — same numeric id maps to distinct slots
+    /// in each registry.
+    #[test]
+    fn authority_and_validator_id_namespaces_independent() {
+        use crate::{authority_registry::AuthorityStatus, validator_registry::ValidatorStatus};
+        let mut s = InMemorySubstrate::new();
+        s.apply_intent(&Intent::AdmitAuthority {
+            authority_id: 0,
+            stake_gsx: 15_000_000,
+            mldsa_public_key: vec![0xaa; 1952],
+            bls_public_key: vec![0xbb; 48],
+        })
+        .unwrap();
+        // Same numeric id, different registry.
+        s.apply_intent(&Intent::AdmitValidator {
+            validator_id: 0,
+            stake_gsx: 3_000_000,
+            mldsa_public_key: vec![0xcc; 1952],
+            bls_public_key: vec![0xdd; 48],
+        })
+        .unwrap();
+
+        assert_eq!(
+            s.authority_record(0).unwrap().status,
+            AuthorityStatus::Active
+        );
+        assert_eq!(
+            s.validator_record(0).unwrap().status,
+            ValidatorStatus::Active
+        );
+        // Ejecting the authority doesn't touch the validator.
+        s.apply_intent(&Intent::EjectAuthority {
+            authority_id: 0,
+            proof_ref: [0; 32],
+        })
+        .unwrap();
+        assert_eq!(
+            s.authority_record(0).unwrap().status,
+            AuthorityStatus::Ejected
+        );
+        assert_eq!(
+            s.validator_record(0).unwrap().status,
+            ValidatorStatus::Active
+        );
+    }
+
+    /// Multi-validator independence (200-slot capacity in
+    /// production; test exercises a reasonable subset).
+    #[test]
+    fn multiple_validators_independent() {
+        use crate::validator_registry::ValidatorStatus;
+        let mut s = InMemorySubstrate::new();
+        for i in 0..10 {
+            s.apply_intent(&Intent::AdmitValidator {
+                validator_id: i,
+                stake_gsx: 3_000_000 + i as u64,
+                mldsa_public_key: vec![i as u8; 1952],
+                bls_public_key: vec![i as u8; 48],
+            })
+            .unwrap();
+        }
+        assert_eq!(s.validator_count(), 10);
+        s.apply_intent(&Intent::ExitValidator { validator_id: 5 })
+            .unwrap();
+        s.apply_intent(&Intent::EjectValidator {
+            validator_id: 7,
+            proof_ref: [0xff; 32],
+        })
+        .unwrap();
+        assert_eq!(
+            s.validator_record(0).unwrap().status,
+            ValidatorStatus::Active
+        );
+        assert_eq!(
+            s.validator_record(5).unwrap().status,
+            ValidatorStatus::Exiting
+        );
+        assert_eq!(
+            s.validator_record(7).unwrap().status,
+            ValidatorStatus::Ejected
+        );
+        assert_eq!(
+            s.validator_record(9).unwrap().status,
+            ValidatorStatus::Active
+        );
     }
 }

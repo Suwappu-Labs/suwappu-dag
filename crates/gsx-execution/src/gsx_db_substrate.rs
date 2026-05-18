@@ -152,7 +152,10 @@ impl Substrate for GsxDbSubstrate {
             // see DAG-S25.2 in `substrate.rs::apply_intent`.
             Intent::AdmitAuthority { .. }
             | Intent::ExitAuthority { .. }
-            | Intent::EjectAuthority { .. } => Ok(()),
+            | Intent::EjectAuthority { .. }
+            | Intent::AdmitValidator { .. }
+            | Intent::ExitValidator { .. }
+            | Intent::EjectValidator { .. } => Ok(()),
             // Track G Phase G2.2 (#97): wired through the
             // gsx-l2-verifier-precompile crate. The verifier
             // format gates (proof = 260 B, public_inputs = 240 B,
