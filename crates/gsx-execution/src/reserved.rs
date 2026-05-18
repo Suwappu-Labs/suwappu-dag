@@ -138,6 +138,12 @@ pub const VALIDATOR_REWARDS_POOL_DOMAIN: &[u8] = b"gsx-validator-rewards-pool-v1
 /// can replay-defend its own emission.
 pub const INFLATION_REGISTRY_DOMAIN: &[u8] = b"gsx-inflation-registry-v1";
 
+/// Domain tag for the rewards-distribution registry. Stores
+/// per-ring last-distributed-epoch (16 BE bytes: 8 for
+/// authority, 8 for validator) so `Intent::DistributeRewards`
+/// can replay-defend its own emission per ring.
+pub const REWARDS_DISTRIBUTION_REGISTRY_DOMAIN: &[u8] = b"gsx-rewards-distribution-registry-v1";
+
 /// Compute the reserved address corresponding to `domain` —
 /// `BLAKE3(domain)[..20]`. Used by the three exposed helpers below.
 /// Inlined per call site (BLAKE3 is sub-microsecond).
@@ -278,6 +284,14 @@ pub fn inflation_registry_address() -> Address {
     derive(INFLATION_REGISTRY_DOMAIN)
 }
 
+/// Reserved address for the rewards-distribution registry.
+/// Bytes_state holds per-ring last-distributed-epoch (16 BE
+/// bytes: 8 for authority, 8 for validator) for replay
+/// defense on `Intent::DistributeRewards`.
+pub fn rewards_distribution_registry_address() -> Address {
+    derive(REWARDS_DISTRIBUTION_REGISTRY_DOMAIN)
+}
+
 /// Returns true if `addr` is a reserved protocol-owned registry
 /// account. Both `Substrate` impls reject `Intent::Transfer` into
 /// or out of a reserved address.
@@ -300,6 +314,7 @@ pub fn is_reserved(addr: &Address) -> bool {
         || addr == &authority_rewards_pool_address()
         || addr == &validator_rewards_pool_address()
         || addr == &inflation_registry_address()
+        || addr == &rewards_distribution_registry_address()
 }
 
 #[cfg(test)]
@@ -307,7 +322,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn eighteen_reserved_addresses_are_distinct() {
+    fn nineteen_reserved_addresses_are_distinct() {
         let all = [
             l2_registry_address(),
             insurance_pool_address(),
@@ -327,6 +342,7 @@ mod tests {
             authority_rewards_pool_address(),
             validator_rewards_pool_address(),
             inflation_registry_address(),
+            rewards_distribution_registry_address(),
         ];
         for (i, a) in all.iter().enumerate() {
             for (j, b) in all.iter().enumerate() {
