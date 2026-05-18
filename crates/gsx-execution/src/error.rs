@@ -414,4 +414,14 @@ pub enum ExecutionError {
         /// The ambient height at the withdrawal attempt.
         current_block_height: u64,
     },
+
+    /// `Intent::GenesisAllocation` was submitted in a block
+    /// past the genesis height (block 0). Genesis allocations
+    /// are bootstrap-only — runtime credits go through
+    /// inflation / reward / disbursement Intents.
+    #[error("genesis allocation attempted at block {current_block_height} (must be 0)")]
+    GenesisAfterBootstrap {
+        /// The ambient block height at the rejected attempt.
+        current_block_height: u64,
+    },
 }

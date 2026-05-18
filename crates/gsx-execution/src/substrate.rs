@@ -110,6 +110,32 @@ pub enum Intent {
         /// Transfer amount.
         amount: Balance,
     },
+    /// Bootstrap initial supply at genesis. Each
+    /// `(address, balance)` entry is credited to the
+    /// substrate. Allowed only when the ambient block
+    /// height is 0 (the first block of the chain); later
+    /// blocks reject with `ExecutionError::GenesisAfterBootstrap`.
+    ///
+    /// Unlike `Transfer`, this Intent CAN credit reserved
+    /// addresses — the foundation allocations to
+    /// `treasury_address` / `insurance_pool_address` / etc.
+    /// at TGE are the canonical use case.
+    ///
+    /// Multiple `GenesisAllocation` Intents may appear in
+    /// block 0; they all apply additively. An empty list is
+    /// a no-op.
+    GenesisAllocation {
+        /// `(address, amount)` allocations to credit. The
+        /// substrate processes them in iteration order; the
+        /// per-entry credit goes through `credit_unchecked`,
+        /// so a per-address overflow surfaces as
+        /// `ExecutionError::BalanceOverflow` and rolls back
+        /// the current allocation list (any prior entries
+        /// processed before the overflowing one are NOT
+        /// rolled back — callers should ensure each entry's
+        /// post-credit balance fits in `u128`).
+        allocations: Vec<(Address, Balance)>,
+    },
     /// Admit a new Authority Ring member, applied at the next epoch
     /// boundary. Stake gates whether the candidate makes the active
     /// set (selection logic lands in S25.3); pubkey material is the
@@ -1255,6 +1281,27 @@ impl Substrate for InMemorySubstrate {
                     self.balances.insert(from, new_source);
                 }
                 self.balances.insert(to, new_dest);
+                Ok(())
+            }
+            // Genesis bootstrap: credit each (addr, amount) at
+            // block 0 only. Reserved addresses ARE permitted
+            // here (foundation allocations land at treasury /
+            // insurance_pool / etc. at TGE). Past block 0 this
+            // Intent is rejected so the runtime can't fork the
+            // total supply.
+            Intent::GenesisAllocation { allocations } => {
+                let height = self.current_block_height();
+                if height != 0 {
+                    return Err(ExecutionError::GenesisAfterBootstrap {
+                        current_block_height: height,
+                    });
+                }
+                for (addr, amount) in allocations {
+                    if *amount == 0 {
+                        continue;
+                    }
+                    self.credit_unchecked(*addr, *amount)?;
+                }
                 Ok(())
             }
             // Phase G governance — Authority Ring registry
@@ -7430,5 +7477,122 @@ mod tests {
         };
         let _ = execute_block(&mut s, &block);
         assert_eq!(s.current_block_height(), 12345);
+    }
+
+    // ===== Genesis allocation =====
+
+    /// Happy path: credit multiple addresses at block 0.
+    #[test]
+    fn genesis_allocation_credits_all_at_block_zero() {
+        let mut s = InMemorySubstrate::new();
+        assert_eq!(s.current_block_height(), 0);
+        s.apply_intent(&Intent::GenesisAllocation {
+            allocations: vec![
+                (addr(1), 100_000_000),
+                (addr(2), 50_000_000),
+                (addr(3), 25_000_000),
+            ],
+        })
+        .unwrap();
+        assert_eq!(s.balance(&addr(1)), 100_000_000);
+        assert_eq!(s.balance(&addr(2)), 50_000_000);
+        assert_eq!(s.balance(&addr(3)), 25_000_000);
+    }
+
+    /// Genesis allocations are additive — multiple Intents
+    /// in the same block 0 accumulate.
+    #[test]
+    fn genesis_allocation_is_additive_across_intents() {
+        let mut s = InMemorySubstrate::new();
+        s.apply_intent(&Intent::GenesisAllocation {
+            allocations: vec![(addr(1), 10_000_000)],
+        })
+        .unwrap();
+        s.apply_intent(&Intent::GenesisAllocation {
+            allocations: vec![(addr(1), 5_000_000)],
+        })
+        .unwrap();
+        assert_eq!(s.balance(&addr(1)), 15_000_000);
+    }
+
+    /// Genesis CAN credit reserved addresses — TGE
+    /// allocations to treasury / insurance_pool / etc.
+    #[test]
+    fn genesis_allocation_can_credit_reserved_addresses() {
+        let mut s = InMemorySubstrate::new();
+        s.apply_intent(&Intent::GenesisAllocation {
+            allocations: vec![
+                (reserved::treasury_address(), 200_000_000_000),
+                (reserved::insurance_pool_address(), 100_000_000_000),
+            ],
+        })
+        .unwrap();
+        assert_eq!(s.balance(&reserved::treasury_address()), 200_000_000_000);
+        assert_eq!(
+            s.balance(&reserved::insurance_pool_address()),
+            100_000_000_000
+        );
+    }
+
+    /// Past block 0, genesis allocation rejects.
+    #[test]
+    fn genesis_allocation_after_bootstrap_rejected() {
+        let mut s = InMemorySubstrate::new();
+        s.set_current_block_height(1);
+        let before = s.state_root();
+        let err = s.apply_intent(&Intent::GenesisAllocation {
+            allocations: vec![(addr(1), 100)],
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::GenesisAfterBootstrap {
+                current_block_height: 1,
+            })
+        ));
+        assert_eq!(s.state_root(), before);
+    }
+
+    /// Zero-amount entries are skipped (matches Transfer
+    /// no-op semantics).
+    #[test]
+    fn genesis_allocation_zero_amount_entry_is_skipped() {
+        let mut s = InMemorySubstrate::new();
+        s.apply_intent(&Intent::GenesisAllocation {
+            allocations: vec![(addr(1), 0), (addr(2), 1_000)],
+        })
+        .unwrap();
+        assert_eq!(s.balance(&addr(1)), 0);
+        assert_eq!(s.balance(&addr(2)), 1_000);
+    }
+
+    /// Empty allocation list is a no-op.
+    #[test]
+    fn genesis_allocation_empty_is_noop() {
+        let mut s = InMemorySubstrate::new();
+        let before = s.state_root();
+        s.apply_intent(&Intent::GenesisAllocation {
+            allocations: vec![],
+        })
+        .unwrap();
+        assert_eq!(s.state_root(), before);
+    }
+
+    /// Determinism: two substrates given the same genesis
+    /// Intent (in different iteration orders within the
+    /// `allocations` Vec) produce identical state when both
+    /// allocations are unique per-address.
+    #[test]
+    fn genesis_allocation_state_root_independent_of_entry_order() {
+        let mut s1 = InMemorySubstrate::new();
+        s1.apply_intent(&Intent::GenesisAllocation {
+            allocations: vec![(addr(1), 100), (addr(2), 200), (addr(3), 300)],
+        })
+        .unwrap();
+        let mut s2 = InMemorySubstrate::new();
+        s2.apply_intent(&Intent::GenesisAllocation {
+            allocations: vec![(addr(3), 300), (addr(1), 100), (addr(2), 200)],
+        })
+        .unwrap();
+        assert_eq!(s1.state_root(), s2.state_root());
     }
 }
