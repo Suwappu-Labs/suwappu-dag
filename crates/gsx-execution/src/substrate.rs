@@ -858,6 +858,29 @@ impl InMemorySubstrate {
             .unwrap_or(0)
     }
 
+    /// Look up the equivocation record for a given proof_hash.
+    /// Returns `None` if no slash has been recorded for that
+    /// hash, or if the registry bytes are corrupt.
+    pub fn equivocation_record(
+        &self,
+        proof_hash: &[u8; 32],
+    ) -> Option<crate::equivocation_registry::EquivocationRecord> {
+        let bytes = self.read_bytes(&reserved::equivocation_registry_address())?;
+        let map = crate::equivocation_registry::decode(&bytes).ok()?;
+        map.get(proof_hash).copied()
+    }
+
+    /// Count of recorded equivocation slashes (across both
+    /// Equivocation and InvalidBatch offense kinds).
+    pub fn equivocation_count(&self) -> usize {
+        let bytes = self
+            .read_bytes(&reserved::equivocation_registry_address())
+            .unwrap_or_default();
+        crate::equivocation_registry::decode(&bytes)
+            .map(|m| m.len())
+            .unwrap_or(0)
+    }
+
     /// Validate a bridge asset is registered + Active.
     /// Returns `Err(BridgeAssetNotFound)` if no record exists,
     /// `Err(BridgeAssetNotActive)` if status is Paused or
@@ -1396,9 +1419,47 @@ impl Substrate for InMemorySubstrate {
             // reaches `apply_intent`).
             Intent::SlashSequencer {
                 reason: reason @ (SlashReason::Equivocation | SlashReason::InvalidBatch),
-                intent_hash: _,
+                intent_hash,
             } => {
-                let _ = reason;
+                use crate::equivocation_registry::{
+                    decode, encode, EquivocationRecord, OffenseKind,
+                };
+
+                // Replay defense: reject if this proof_hash is
+                // already in the equivocation registry. Without
+                // this gate, topping the safety bond back up
+                // via DepositSafetyBond after a drain would let
+                // anyone re-slash the same offense.
+                let registry_addr = reserved::equivocation_registry_address();
+                let existing_bytes = self.read_bytes(&registry_addr).unwrap_or_default();
+                let mut map = decode(&existing_bytes)?;
+                if let Some(prior) = map.get(intent_hash) {
+                    return Err(ExecutionError::EquivocationAlreadyRecorded {
+                        proof_hash: *intent_hash,
+                        kind: prior.kind,
+                    });
+                }
+
+                let kind = match reason {
+                    SlashReason::Equivocation => OffenseKind::Equivocation,
+                    SlashReason::InvalidBatch => OffenseKind::InvalidBatch,
+                    _ => unreachable!("arm pattern restricts reason"),
+                };
+                map.insert(
+                    *intent_hash,
+                    EquivocationRecord {
+                        kind,
+                        slashed_at_l1_height: 0,
+                    },
+                );
+                let new_bytes = encode(&map);
+                self.write_bytes_unchecked(registry_addr, new_bytes);
+
+                // Drain safety bond + waterfall. The replay
+                // gate above is the load-bearing defense; the
+                // empty-bond no-op below remains as a secondary
+                // guard (e.g., if the safety bond was never
+                // funded for some reason).
                 let bond_addr = reserved::safety_bond_address();
                 let bond_balance = self.balance(&bond_addr);
                 if bond_balance == 0 {
@@ -2568,25 +2629,21 @@ mod tests {
         // the obligation through other channels.
     }
 
-    /// Other SlashSequencer variants (non-force-include) are
-    /// no-ops at the substrate level pending dedicated
-    /// adjudication wiring.
+    /// Downtime SlashSequencer is a substrate-level no-op
+    /// (validator-program daemon adjudication path lands
+    /// separately). Equivocation/InvalidBatch are NOT
+    /// no-ops anymore — they drain the safety bond + record
+    /// in the equivocation registry (see #197 + #99).
     #[test]
-    fn slash_sequencer_other_variants_noop_at_substrate() {
+    fn slash_sequencer_downtime_variant_noop_at_substrate() {
         let mut s = InMemorySubstrate::from_balances([(addr(1), 100)]);
         let before = s.state_root();
-        for reason in [
-            SlashReason::Equivocation,
-            SlashReason::InvalidBatch,
-            SlashReason::Downtime,
-        ] {
-            s.apply_intent(&Intent::SlashSequencer {
-                reason,
-                intent_hash: [0x42; 32],
-            })
-            .unwrap();
-            assert_eq!(s.state_root(), before, "{reason:?} should be no-op");
-        }
+        s.apply_intent(&Intent::SlashSequencer {
+            reason: SlashReason::Downtime,
+            intent_hash: [0x42; 32],
+        })
+        .unwrap();
+        assert_eq!(s.state_root(), before);
     }
 
     /// liveness_slash_amount math: 5% of an arbitrary bond.
@@ -3571,51 +3628,65 @@ mod tests {
         assert_eq!(s.balance(&reserved::treasury_address()), 3_000_000);
     }
 
-    /// Empty safety bond → slash is a no-op at substrate level.
+    /// Empty safety bond → slash still records in the
+    /// equivocation registry (state-root drifts via the
+    /// registry write), but no funds move. Documents the
+    /// post-#99 behavior: the registry write is the
+    /// primary load-bearing side effect; the bond drain
+    /// is secondary.
     #[test]
-    fn slash_sequencer_equivocation_empty_bond_is_noop() {
+    fn slash_sequencer_equivocation_empty_bond_records_in_registry() {
         let mut s = InMemorySubstrate::new();
         let before = s.state_root();
         s.apply_intent(&Intent::SlashSequencer {
             reason: SlashReason::Equivocation,
-            intent_hash: [0; 32],
+            intent_hash: [0x55; 32],
         })
         .unwrap();
+        // No funds moved.
         assert_eq!(s.safety_bond_balance(), 0);
         assert_eq!(s.balance(&reserved::insurance_pool_address()), 0);
         assert_eq!(s.balance(&reserved::treasury_address()), 0);
-        assert_eq!(s.state_root(), before);
+        // But registry record exists → state_root drifts.
+        assert_ne!(s.state_root(), before);
+        assert!(s.equivocation_record(&[0x55; 32]).is_some());
     }
 
-    /// Double-equivocation: second slash sees empty bond → no-op.
+    /// Replay defense via the equivocation registry: a
+    /// second slash with the SAME intent_hash rejects with
+    /// `EquivocationAlreadyRecorded`, even if the safety
+    /// bond was refilled after the first drain. This is the
+    /// load-bearing security property of the registry
+    /// (closes the safety-bond-refill replay gap).
     #[test]
-    fn slash_sequencer_equivocation_idempotent_after_drain() {
+    fn slash_sequencer_equivocation_replay_rejected_after_refill() {
         let mut s = InMemorySubstrate::new();
         s.fund_safety_bond(10_000_000).unwrap();
 
+        // First slash drains the bond + records in registry.
         s.apply_intent(&Intent::SlashSequencer {
             reason: SlashReason::Equivocation,
             intent_hash: [0x77; 32],
         })
         .unwrap();
         assert_eq!(s.safety_bond_balance(), 0);
-        let insurance_after_first = s.balance(&reserved::insurance_pool_address());
-        let treasury_after_first = s.balance(&reserved::treasury_address());
+        assert!(s.equivocation_record(&[0x77; 32]).is_some());
 
-        s.apply_intent(&Intent::SlashSequencer {
+        // Refill the safety bond.
+        s.fund_safety_bond(10_000_000).unwrap();
+        assert_eq!(s.safety_bond_balance(), 10_000_000);
+
+        // Second slash with same intent_hash → rejected,
+        // bond untouched.
+        let err = s.apply_intent(&Intent::SlashSequencer {
             reason: SlashReason::Equivocation,
             intent_hash: [0x77; 32],
-        })
-        .unwrap();
-        assert_eq!(s.safety_bond_balance(), 0);
-        assert_eq!(
-            s.balance(&reserved::insurance_pool_address()),
-            insurance_after_first
-        );
-        assert_eq!(
-            s.balance(&reserved::treasury_address()),
-            treasury_after_first
-        );
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::EquivocationAlreadyRecorded { .. })
+        ));
+        assert_eq!(s.safety_bond_balance(), 10_000_000);
     }
 
     /// Equivocation slash leaves force-include registry untouched.
@@ -4439,6 +4510,154 @@ mod tests {
         assert_eq!(s1.burn_nullifier_count(), 0);
         assert_eq!(s2.burn_nullifier_count(), 0);
         let _ = (&mut s1, &mut s2);
+    }
+
+    // ===== Equivocation registry (replay defense) =====
+
+    /// Equivocation slash records `OffenseKind::Equivocation`.
+    /// InvalidBatch slash records `OffenseKind::InvalidBatch`.
+    /// The registry preserves the offense kind for audit.
+    #[test]
+    fn equivocation_registry_records_offense_kind() {
+        use crate::equivocation_registry::OffenseKind;
+        let mut s = InMemorySubstrate::new();
+        s.fund_safety_bond(10_000_000).unwrap();
+        s.apply_intent(&Intent::SlashSequencer {
+            reason: SlashReason::Equivocation,
+            intent_hash: [0xa1; 32],
+        })
+        .unwrap();
+
+        s.fund_safety_bond(10_000_000).unwrap();
+        s.apply_intent(&Intent::SlashSequencer {
+            reason: SlashReason::InvalidBatch,
+            intent_hash: [0xb1; 32],
+        })
+        .unwrap();
+
+        assert_eq!(s.equivocation_count(), 2);
+        assert_eq!(
+            s.equivocation_record(&[0xa1; 32]).unwrap().kind,
+            OffenseKind::Equivocation
+        );
+        assert_eq!(
+            s.equivocation_record(&[0xb1; 32]).unwrap().kind,
+            OffenseKind::InvalidBatch
+        );
+    }
+
+    /// A proof_hash claimed as Equivocation cannot be
+    /// re-claimed as InvalidBatch. The registry dedups on
+    /// hash, regardless of offense kind.
+    #[test]
+    fn equivocation_cross_kind_replay_rejected() {
+        let mut s = InMemorySubstrate::new();
+        s.fund_safety_bond(10_000_000).unwrap();
+        s.apply_intent(&Intent::SlashSequencer {
+            reason: SlashReason::Equivocation,
+            intent_hash: [0xab; 32],
+        })
+        .unwrap();
+
+        s.fund_safety_bond(10_000_000).unwrap();
+        let err = s.apply_intent(&Intent::SlashSequencer {
+            reason: SlashReason::InvalidBatch,
+            intent_hash: [0xab; 32],
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::EquivocationAlreadyRecorded { .. })
+        ));
+    }
+
+    /// Different proof_hashes both succeed (no dedup by
+    /// proximity, only by exact hash equality).
+    #[test]
+    fn equivocation_distinct_hashes_both_succeed() {
+        let mut s = InMemorySubstrate::new();
+        s.fund_safety_bond(10_000_000).unwrap();
+        s.apply_intent(&Intent::SlashSequencer {
+            reason: SlashReason::Equivocation,
+            intent_hash: [0x11; 32],
+        })
+        .unwrap();
+
+        s.fund_safety_bond(10_000_000).unwrap();
+        s.apply_intent(&Intent::SlashSequencer {
+            reason: SlashReason::Equivocation,
+            intent_hash: [0x22; 32],
+        })
+        .unwrap();
+
+        assert_eq!(s.equivocation_count(), 2);
+    }
+
+    /// Even an empty-bond slash records in the registry —
+    /// the registry-write gate fires before the bond-empty
+    /// short-circuit. This ensures replay defense even in
+    /// the corner case of a never-funded safety bond.
+    #[test]
+    fn equivocation_empty_bond_still_blocks_replay() {
+        let mut s = InMemorySubstrate::new();
+        // No bond funded.
+        s.apply_intent(&Intent::SlashSequencer {
+            reason: SlashReason::Equivocation,
+            intent_hash: [0x42; 32],
+        })
+        .unwrap();
+        assert_eq!(s.equivocation_count(), 1);
+
+        // Refill the bond NOW (post-recording).
+        s.fund_safety_bond(10_000_000).unwrap();
+        // Replay → rejected.
+        let err = s.apply_intent(&Intent::SlashSequencer {
+            reason: SlashReason::Equivocation,
+            intent_hash: [0x42; 32],
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::EquivocationAlreadyRecorded { .. })
+        ));
+        // Bond untouched after the rejection.
+        assert_eq!(s.safety_bond_balance(), 10_000_000);
+    }
+
+    /// Downtime slash doesn't touch the equivocation
+    /// registry (it's a separate adjudication path).
+    #[test]
+    fn equivocation_registry_untouched_by_downtime_slash() {
+        let mut s = InMemorySubstrate::new();
+        s.apply_intent(&Intent::SlashSequencer {
+            reason: SlashReason::Downtime,
+            intent_hash: [0xff; 32],
+        })
+        .unwrap();
+        assert_eq!(s.equivocation_count(), 0);
+    }
+
+    /// MissedForceInclude slash doesn't touch the
+    /// equivocation registry either (it's a separate path
+    /// with its own registry).
+    #[test]
+    fn equivocation_registry_untouched_by_missed_force_include() {
+        use crate::force_include::obligation_id;
+        let mut s = InMemorySubstrate::new();
+        s.fund_sequencer_bond(1_000_000).unwrap();
+        let tx = b"unrelated-fi".to_vec();
+        s.apply_intent(&Intent::L2ForceInclude {
+            tx: tx.clone(),
+            deadline_l1_height: 100,
+            submitter: addr(5),
+            l2_nonce: 1,
+        })
+        .unwrap();
+        let id = obligation_id(&tx, 100, &addr(5), 1);
+        s.apply_intent(&Intent::SlashSequencer {
+            reason: SlashReason::MissedForceInclude,
+            intent_hash: id,
+        })
+        .unwrap();
+        assert_eq!(s.equivocation_count(), 0);
     }
 
     // ===== Multi-chain VK registry =====

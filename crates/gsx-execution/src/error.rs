@@ -259,4 +259,21 @@ pub enum ExecutionError {
         /// nullifier set.
         burn_id: [u8; 32],
     },
+
+    /// `Intent::SlashSequencer { reason: Equivocation |
+    /// InvalidBatch, intent_hash, .. }` was submitted with an
+    /// `intent_hash` already in the equivocation registry.
+    /// Defends against re-slashing the same offense after
+    /// a safety-bond refill (Track G G3.4 hardening).
+    #[error(
+        "equivocation 0x{enc_id} already recorded (offense: {kind:?})",
+        enc_id = hex::encode(proof_hash),
+    )]
+    EquivocationAlreadyRecorded {
+        /// The `intent_hash` that's already in the
+        /// equivocation registry.
+        proof_hash: [u8; 32],
+        /// The offense kind that originally claimed the slot.
+        kind: crate::equivocation_registry::OffenseKind,
+    },
 }

@@ -33,6 +33,7 @@ pub mod block;
 pub mod burn_nullifier;
 pub mod checkpoint;
 pub mod eject_registry;
+pub mod equivocation_registry;
 pub mod error;
 pub mod force_include;
 pub mod gsx_db_substrate;
