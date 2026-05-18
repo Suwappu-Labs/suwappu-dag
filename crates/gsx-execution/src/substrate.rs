@@ -319,6 +319,45 @@ pub enum Intent {
         /// owner. Receives the snitch bounty.
         ejector: Address,
     },
+    /// Deposit into the sequencer's liveness bond. Debits
+    /// `from` and credits the reserved
+    /// `sequencer_bond_address`. Production-shape Intent
+    /// replacing the `fund_sequencer_bond` test helper.
+    ///
+    /// Track G "Sequencer bonding": the sequencer (or any
+    /// party staking on its behalf) posts the liveness bond
+    /// via this Intent; the bond drains 5%-medium-tier per
+    /// `SlashSequencer { MissedForceInclude, .. }`.
+    ///
+    /// `from` may NOT be a reserved address — bond
+    /// deposits must originate from user-owned balances,
+    /// not from protocol-owned registry accounts.
+    /// Zero-amount deposits are a no-op (matches Transfer
+    /// semantics).
+    DepositSequencerBond {
+        /// Address paying for the bond deposit.
+        from: Address,
+        /// Amount being deposited.
+        amount: Balance,
+    },
+    /// Deposit into the sequencer's safety bond. Debits
+    /// `from` and credits the reserved
+    /// `safety_bond_address`. Production-shape Intent
+    /// replacing the `fund_safety_bond` test helper.
+    ///
+    /// Track G "Sequencer bonding": 15M GSX safety bond,
+    /// 100% forfeit on `Equivocation` / `InvalidBatch`
+    /// slashes. The separation from the liveness bond is
+    /// load-bearing — see #197.
+    ///
+    /// Same `from`-not-reserved + zero-amount-noop
+    /// semantics as `DepositSequencerBond`.
+    DepositSafetyBond {
+        /// Address paying for the bond deposit.
+        from: Address,
+        /// Amount being deposited.
+        amount: Balance,
+    },
     /// Post a per-batch DA blob to L1 calldata. The sequencer
     /// emits this alongside `CommitL2StateRoot` so the L2 state
     /// transitions are reproducible from L1-anchored data. The
@@ -1333,6 +1372,37 @@ impl Substrate for InMemorySubstrate {
                         self.credit_unchecked(*ejector, paid)?;
                     }
                 }
+                Ok(())
+            }
+            // Production-shape bond deposit Intents
+            // (replaces fund_sequencer_bond / fund_safety_bond
+            // test helpers). Standard debit-first atomic flow:
+            // reserved-address gate on `from`, then debit user
+            // + credit bond. Zero amount is a no-op.
+            Intent::DepositSequencerBond { from, amount } => {
+                let from = *from;
+                let amount = *amount;
+                if amount == 0 {
+                    return Ok(());
+                }
+                if reserved::is_reserved(&from) {
+                    return Err(ExecutionError::ReservedAddressTransferDenied { addr: from });
+                }
+                self.debit_unchecked(from, amount)?;
+                self.credit_unchecked(reserved::sequencer_bond_address(), amount)?;
+                Ok(())
+            }
+            Intent::DepositSafetyBond { from, amount } => {
+                let from = *from;
+                let amount = *amount;
+                if amount == 0 {
+                    return Ok(());
+                }
+                if reserved::is_reserved(&from) {
+                    return Err(ExecutionError::ReservedAddressTransferDenied { addr: from });
+                }
+                self.debit_unchecked(from, amount)?;
+                self.credit_unchecked(reserved::safety_bond_address(), amount)?;
                 Ok(())
             }
             // PostL2DA → G3.3 (#102) DA blob anchoring (no
@@ -3613,5 +3683,180 @@ mod tests {
         .unwrap();
         let after = s.state_root();
         assert_ne!(before, after);
+    }
+
+    // ===== DepositSequencerBond / DepositSafetyBond =====
+
+    /// Happy path: user deposits into liveness bond. Balance
+    /// debited, bond credited.
+    #[test]
+    fn deposit_sequencer_bond_credits_bond() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 5_000_000)]);
+        s.apply_intent(&Intent::DepositSequencerBond {
+            from: addr(1),
+            amount: 3_000_000,
+        })
+        .unwrap();
+        assert_eq!(s.balance(&addr(1)), 2_000_000);
+        assert_eq!(s.sequencer_bond_balance(), 3_000_000);
+        // Safety bond untouched.
+        assert_eq!(s.safety_bond_balance(), 0);
+    }
+
+    /// Insufficient balance rejects atomically — bond
+    /// unchanged.
+    #[test]
+    fn deposit_sequencer_bond_insufficient_balance_atomic() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 100)]);
+        let before = s.state_root();
+        let err = s.apply_intent(&Intent::DepositSequencerBond {
+            from: addr(1),
+            amount: 1_000,
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::InsufficientBalance { .. })
+        ));
+        assert_eq!(s.balance(&addr(1)), 100);
+        assert_eq!(s.sequencer_bond_balance(), 0);
+        assert_eq!(s.state_root(), before);
+    }
+
+    /// Zero-amount deposit is a no-op.
+    #[test]
+    fn deposit_sequencer_bond_zero_amount_is_noop() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 1_000)]);
+        let before = s.state_root();
+        s.apply_intent(&Intent::DepositSequencerBond {
+            from: addr(1),
+            amount: 0,
+        })
+        .unwrap();
+        assert_eq!(s.balance(&addr(1)), 1_000);
+        assert_eq!(s.sequencer_bond_balance(), 0);
+        assert_eq!(s.state_root(), before);
+    }
+
+    /// Deposit from a reserved address rejects via the
+    /// reserved-address gate.
+    #[test]
+    fn deposit_sequencer_bond_reserved_from_rejected() {
+        let mut s = InMemorySubstrate::new();
+        // Seed treasury with some funds to ensure the
+        // rejection isn't masked by an empty balance.
+        s.credit_unchecked(reserved::treasury_address(), 1_000)
+            .unwrap();
+        let err = s.apply_intent(&Intent::DepositSequencerBond {
+            from: reserved::treasury_address(),
+            amount: 500,
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::ReservedAddressTransferDenied { .. })
+        ));
+        // Treasury balance unchanged.
+        assert_eq!(s.balance(&reserved::treasury_address()), 1_000);
+    }
+
+    /// Same shape for safety bond — happy path.
+    #[test]
+    fn deposit_safety_bond_credits_bond() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 20_000_000)]);
+        s.apply_intent(&Intent::DepositSafetyBond {
+            from: addr(1),
+            amount: 15_000_000,
+        })
+        .unwrap();
+        assert_eq!(s.balance(&addr(1)), 5_000_000);
+        assert_eq!(s.safety_bond_balance(), 15_000_000);
+        // Liveness bond untouched.
+        assert_eq!(s.sequencer_bond_balance(), 0);
+    }
+
+    /// Safety bond: insufficient balance atomic reject.
+    #[test]
+    fn deposit_safety_bond_insufficient_balance_atomic() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 100)]);
+        let err = s.apply_intent(&Intent::DepositSafetyBond {
+            from: addr(1),
+            amount: 1_000,
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::InsufficientBalance { .. })
+        ));
+        assert_eq!(s.balance(&addr(1)), 100);
+        assert_eq!(s.safety_bond_balance(), 0);
+    }
+
+    /// Safety bond: zero-amount no-op.
+    #[test]
+    fn deposit_safety_bond_zero_amount_is_noop() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 1_000)]);
+        s.apply_intent(&Intent::DepositSafetyBond {
+            from: addr(1),
+            amount: 0,
+        })
+        .unwrap();
+        assert_eq!(s.balance(&addr(1)), 1_000);
+        assert_eq!(s.safety_bond_balance(), 0);
+    }
+
+    /// Safety bond: reserved-from rejection.
+    #[test]
+    fn deposit_safety_bond_reserved_from_rejected() {
+        let mut s = InMemorySubstrate::new();
+        s.credit_unchecked(reserved::insurance_pool_address(), 1_000)
+            .unwrap();
+        let err = s.apply_intent(&Intent::DepositSafetyBond {
+            from: reserved::insurance_pool_address(),
+            amount: 500,
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::ReservedAddressTransferDenied { .. })
+        ));
+    }
+
+    /// Liveness and safety bond deposits are independent —
+    /// depositing one doesn't credit the other.
+    #[test]
+    fn deposit_to_both_bonds_separate() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 20_000_000)]);
+        s.apply_intent(&Intent::DepositSequencerBond {
+            from: addr(1),
+            amount: 3_000_000,
+        })
+        .unwrap();
+        s.apply_intent(&Intent::DepositSafetyBond {
+            from: addr(1),
+            amount: 15_000_000,
+        })
+        .unwrap();
+        assert_eq!(s.balance(&addr(1)), 2_000_000);
+        assert_eq!(s.sequencer_bond_balance(), 3_000_000);
+        assert_eq!(s.safety_bond_balance(), 15_000_000);
+    }
+
+    /// Multiple deposits from different accounts accumulate
+    /// in the same bond.
+    #[test]
+    fn deposit_sequencer_bond_multi_depositor_accumulates() {
+        let mut s = InMemorySubstrate::from_balances([
+            (addr(1), 1_000_000),
+            (addr(2), 1_000_000),
+            (addr(3), 1_000_000),
+        ]);
+        for i in 1..=3 {
+            s.apply_intent(&Intent::DepositSequencerBond {
+                from: addr(i),
+                amount: 500_000,
+            })
+            .unwrap();
+        }
+        assert_eq!(s.sequencer_bond_balance(), 1_500_000);
+        assert_eq!(s.balance(&addr(1)), 500_000);
+        assert_eq!(s.balance(&addr(2)), 500_000);
+        assert_eq!(s.balance(&addr(3)), 500_000);
     }
 }

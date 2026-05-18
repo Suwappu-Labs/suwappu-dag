@@ -196,6 +196,8 @@ impl Substrate for GsxDbSubstrate {
             | Intent::SlashSequencer { .. }
             | Intent::MarkForceIncludeHonored { .. }
             | Intent::EjectSequencer { .. }
+            | Intent::DepositSequencerBond { .. }
+            | Intent::DepositSafetyBond { .. }
             | Intent::PostL2DA { .. } => Ok(()),
             // C.8 (#131): slashing-distribution waterfall.
             // gsx-db v0.1.0's `Bridge::submit` only exposes the
