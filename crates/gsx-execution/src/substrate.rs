@@ -995,6 +995,148 @@ impl InMemorySubstrate {
         Ok(())
     }
 
+    /// Atomic protocol-owned transfer. Pre-flights both the
+    /// source's `InsufficientBalance` check and the
+    /// destination's `DistributionOverflow` check **before**
+    /// any mutation, so a failure of either leaves balances
+    /// untouched. Preferred over chaining `debit_unchecked` +
+    /// `credit_unchecked` (which is not atomic against a
+    /// destination-side overflow). Zero amounts are no-ops.
+    fn transfer_internal(
+        &mut self,
+        from: Address,
+        to: Address,
+        amount: Balance,
+    ) -> Result<(), ExecutionError> {
+        if amount == 0 {
+            return Ok(());
+        }
+        let source = self.balance(&from);
+        if source < amount {
+            return Err(ExecutionError::InsufficientBalance {
+                from,
+                have: source,
+                need: amount,
+            });
+        }
+        if from == to {
+            // Self-transfer is a no-op after the source check.
+            return Ok(());
+        }
+        let dest = self.balance(&to);
+        let new_dest = dest
+            .checked_add(amount)
+            .ok_or(ExecutionError::DistributionOverflow { to })?;
+        let new_source = source - amount;
+        if new_source == 0 {
+            self.balances.remove(&from);
+        } else {
+            self.balances.insert(from, new_source);
+        }
+        self.balances.insert(to, new_dest);
+        Ok(())
+    }
+
+    /// Atomic multi-credit. Pre-flights overflow on every
+    /// destination (accounting for accumulating credits to
+    /// the same address) before mutating any balance. Used
+    /// by arms that fan out into multiple destinations
+    /// without a single source debit (e.g., `MintInflation`,
+    /// `GenesisAllocation`).
+    ///
+    /// Zero-amount entries are skipped during both the
+    /// pre-flight and the apply pass — they cannot overflow
+    /// and have no balance effect.
+    fn credit_many_atomic(&mut self, credits: &[(Address, Balance)]) -> Result<(), ExecutionError> {
+        use std::collections::BTreeMap;
+        let mut staged: BTreeMap<Address, Balance> = BTreeMap::new();
+        for (to, amount) in credits {
+            if *amount == 0 {
+                continue;
+            }
+            let base = match staged.get(to) {
+                Some(v) => *v,
+                None => self.balance(to),
+            };
+            let new = base
+                .checked_add(*amount)
+                .ok_or(ExecutionError::DistributionOverflow { to: *to })?;
+            staged.insert(*to, new);
+        }
+        for (to, new_balance) in staged {
+            self.balances.insert(to, new_balance);
+        }
+        Ok(())
+    }
+
+    /// Atomic drain-and-credit-many. Drains `from` by the
+    /// sum of all `credits` amounts and credits each
+    /// destination, with full pre-flight (source sufficiency
+    /// plus per-destination overflow) before any mutation.
+    /// Used by `DistributeRewards`.
+    ///
+    /// Reserved-address recipients are NOT checked here —
+    /// callers are responsible for the reserved-address
+    /// invariant.
+    fn drain_and_credit_atomic(
+        &mut self,
+        from: Address,
+        credits: &[(Address, Balance)],
+    ) -> Result<(), ExecutionError> {
+        use std::collections::BTreeMap;
+        let mut total: Balance = 0;
+        for (_, amount) in credits {
+            total = total
+                .checked_add(*amount)
+                .ok_or(ExecutionError::DistributionOverflow { to: from })?;
+        }
+        if total == 0 {
+            return Ok(());
+        }
+        let source = self.balance(&from);
+        if source < total {
+            return Err(ExecutionError::InsufficientBalance {
+                from,
+                have: source,
+                need: total,
+            });
+        }
+        let mut staged: BTreeMap<Address, Balance> = BTreeMap::new();
+        for (to, amount) in credits {
+            if *amount == 0 {
+                continue;
+            }
+            // The source itself is being debited by `total`,
+            // so a self-credit starts from `source - total`.
+            let base = if let Some(v) = staged.get(to) {
+                *v
+            } else if *to == from {
+                source - total
+            } else {
+                self.balance(to)
+            };
+            let new = base
+                .checked_add(*amount)
+                .ok_or(ExecutionError::DistributionOverflow { to: *to })?;
+            staged.insert(*to, new);
+        }
+        // If `from` is not among the staged credits, debit
+        // it separately. (If it is, its staged value already
+        // accounts for the debit baseline.)
+        if !staged.contains_key(&from) {
+            let new_source = source - total;
+            if new_source == 0 {
+                self.balances.remove(&from);
+            } else {
+                self.balances.insert(from, new_source);
+            }
+        }
+        for (to, new_balance) in staged {
+            self.balances.insert(to, new_balance);
+        }
+        Ok(())
+    }
+
     /// Debit `amount` from `addr` without going through the
     /// reserved-address transfer gate. Used by the substrate-
     /// internal bridge arms (G3.2) to drain user balances into
@@ -1463,12 +1605,11 @@ impl Substrate for InMemorySubstrate {
                         current_block_height: height,
                     });
                 }
-                for (addr, amount) in allocations {
-                    if *amount == 0 {
-                        continue;
-                    }
-                    self.credit_unchecked(*addr, *amount)?;
-                }
+                // Atomic across all entries: any single entry
+                // overflowing rolls back the whole list. Same
+                // address appearing multiple times accumulates
+                // correctly via the staging map.
+                self.credit_many_atomic(allocations)?;
                 Ok(())
             }
             // Per-epoch inflation tranche. Replay-defended by
@@ -1507,21 +1648,16 @@ impl Substrate for InMemorySubstrate {
                         last_minted_epoch: last_epoch,
                     });
                 }
-                if *authority_share > 0 {
-                    self.credit_unchecked(
-                        reserved::authority_rewards_pool_address(),
-                        *authority_share,
-                    )?;
-                }
-                if *validator_share > 0 {
-                    self.credit_unchecked(
-                        reserved::validator_rewards_pool_address(),
-                        *validator_share,
-                    )?;
-                }
-                if *treasury_share > 0 {
-                    self.credit_unchecked(reserved::treasury_address(), *treasury_share)?;
-                }
+                // Atomic across all three credits: if any of
+                // the pool balances would overflow, no credit
+                // lands and the epoch counter is NOT bumped
+                // (so the consensus layer can retry the same
+                // epoch with a smaller tranche).
+                self.credit_many_atomic(&[
+                    (reserved::authority_rewards_pool_address(), *authority_share),
+                    (reserved::validator_rewards_pool_address(), *validator_share),
+                    (reserved::treasury_address(), *treasury_share),
+                ])?;
                 self.write_bytes_unchecked(registry_addr, epoch.to_be_bytes().to_vec());
                 Ok(())
             }
@@ -1577,13 +1713,11 @@ impl Substrate for InMemorySubstrate {
                         });
                     }
                 }
-                for (recipient, amount) in recipients {
-                    if *amount == 0 {
-                        continue;
-                    }
-                    self.debit_unchecked(pool_addr, *amount)?;
-                    self.credit_unchecked(*recipient, *amount)?;
-                }
+                // Atomic across the whole payout: pool overrun
+                // or any recipient overflow rolls the full
+                // distribution back, so the epoch counter
+                // below only bumps if every credit lands.
+                self.drain_and_credit_atomic(pool_addr, recipients)?;
                 match ring {
                     RewardsRing::Authority => last_auth = epoch,
                     RewardsRing::Validator => last_val = epoch,
@@ -1649,8 +1783,7 @@ impl Substrate for InMemorySubstrate {
                             ring: "delegation",
                             slot_id: *validator_id,
                         })?;
-                self.debit_unchecked(from, amount)?;
-                self.credit_unchecked(reserved::validator_stake_pool_address(), amount)?;
+                self.transfer_internal(from, reserved::validator_stake_pool_address(), amount)?;
                 self.write_bytes_unchecked(reg_addr, delegation_registry::encode(&reg));
                 Ok(())
             }
@@ -1751,36 +1884,37 @@ impl Substrate for InMemorySubstrate {
                 // (no direct counterparty for an Authority
                 // ejection — 70% insurance, 30% treasury).
                 let drained = rec.deposited_stake as Balance;
+                // Defensive clamp: pool balance is the
+                // authoritative ceiling. Per-slot tracking
+                // started at v2 of the registry; v1 slots
+                // decode with deposited_stake = 0, so the
+                // clamp is mainly for safety against any
+                // accounting drift between the pool and the
+                // per-slot counters.
+                let pool_addr = reserved::authority_stake_pool_address();
+                let drained = drained.min(self.balance(&pool_addr));
+                // Pre-flight the slashing waterfall atomically
+                // BEFORE writing the registry record: if the
+                // drain or its credits would fail, the
+                // ejection rolls back (no orphan ejected slot
+                // with funds stuck in the pool).
+                if drained > 0 {
+                    let insurance_share = drained * 70 / 100;
+                    let treasury_share = drained - insurance_share;
+                    self.drain_and_credit_atomic(
+                        pool_addr,
+                        &[
+                            (reserved::insurance_pool_address(), insurance_share),
+                            (reserved::treasury_address(), treasury_share),
+                        ],
+                    )?;
+                }
+                // Only now mutate the registry — the drain
+                // succeeded (or there was nothing to drain).
                 rec.deposited_stake = 0;
-                // Ejection is one-way; any status →
-                // Ejected (e.g., an Exiting validator
-                // caught equivocating still loses stake).
                 rec.status = AuthorityStatus::Ejected;
                 let new_bytes = encode(&map);
                 self.write_bytes_unchecked(registry_addr, new_bytes);
-                if drained > 0 {
-                    let pool_addr = reserved::authority_stake_pool_address();
-                    let pool_balance = self.balance(&pool_addr);
-                    // Defensive clamp: pool balance is the
-                    // authoritative ceiling. Per-slot tracking
-                    // started at v2 of the registry; v1 slots
-                    // decode with deposited_stake = 0, so the
-                    // clamp is mainly for safety against any
-                    // accounting drift between the pool and the
-                    // per-slot counters.
-                    let drained = if drained > pool_balance {
-                        pool_balance
-                    } else {
-                        drained
-                    };
-                    if drained > 0 {
-                        self.debit_unchecked(pool_addr, drained)?;
-                        let insurance_share = drained * 70 / 100;
-                        let treasury_share = drained - insurance_share;
-                        self.credit_unchecked(reserved::insurance_pool_address(), insurance_share)?;
-                        self.credit_unchecked(reserved::treasury_address(), treasury_share)?;
-                    }
-                }
                 Ok(())
             }
             // Validator Ring registry — mirrors Authority Ring
@@ -1868,30 +2002,28 @@ impl Substrate for InMemorySubstrate {
                     .ok_or(ExecutionError::ValidatorNotFound {
                         validator_id: *validator_id,
                     })?;
-                // Mirror of EjectAuthority: drain bonded capital
-                // through the Tokenomics §8.3 waterfall before
-                // flipping the status.
+                // Mirror of EjectAuthority. Drain the bonded
+                // capital through the waterfall FIRST so a
+                // failure mid-drain doesn't leave the slot
+                // ejected-but-funded.
                 let drained = rec.deposited_stake as Balance;
+                let pool_addr = reserved::validator_stake_pool_address();
+                let drained = drained.min(self.balance(&pool_addr));
+                if drained > 0 {
+                    let insurance_share = drained * 70 / 100;
+                    let treasury_share = drained - insurance_share;
+                    self.drain_and_credit_atomic(
+                        pool_addr,
+                        &[
+                            (reserved::insurance_pool_address(), insurance_share),
+                            (reserved::treasury_address(), treasury_share),
+                        ],
+                    )?;
+                }
                 rec.deposited_stake = 0;
                 rec.status = ValidatorStatus::Ejected;
                 let new_bytes = encode(&map);
                 self.write_bytes_unchecked(registry_addr, new_bytes);
-                if drained > 0 {
-                    let pool_addr = reserved::validator_stake_pool_address();
-                    let pool_balance = self.balance(&pool_addr);
-                    let drained = if drained > pool_balance {
-                        pool_balance
-                    } else {
-                        drained
-                    };
-                    if drained > 0 {
-                        self.debit_unchecked(pool_addr, drained)?;
-                        let insurance_share = drained * 70 / 100;
-                        let treasury_share = drained - insurance_share;
-                        self.credit_unchecked(reserved::insurance_pool_address(), insurance_share)?;
-                        self.credit_unchecked(reserved::treasury_address(), treasury_share)?;
-                    }
-                }
                 Ok(())
             }
             // Track G Phase G2.2 (#97): wired through the
@@ -2570,8 +2702,10 @@ impl Substrate for InMemorySubstrate {
                         slot_id: *authority_id,
                     },
                 )?;
-                self.debit_unchecked(from, amount)?;
-                self.credit_unchecked(reserved::authority_stake_pool_address(), amount)?;
+                // Atomic: pre-flights both source sufficiency
+                // and stake-pool overflow before any mutation,
+                // so a failure on either rolls back cleanly.
+                self.transfer_internal(from, reserved::authority_stake_pool_address(), amount)?;
                 self.write_bytes_unchecked(registry_addr, encode(&map));
                 Ok(())
             }
@@ -2615,8 +2749,7 @@ impl Substrate for InMemorySubstrate {
                         slot_id: *validator_id,
                     },
                 )?;
-                self.debit_unchecked(from, amount)?;
-                self.credit_unchecked(reserved::validator_stake_pool_address(), amount)?;
+                self.transfer_internal(from, reserved::validator_stake_pool_address(), amount)?;
                 self.write_bytes_unchecked(registry_addr, encode(&map));
                 Ok(())
             }
@@ -2681,8 +2814,10 @@ impl Substrate for InMemorySubstrate {
                 // amount ≤ have ≤ u64::MAX, so the narrowing
                 // cast is safe.
                 rec.deposited_stake -= amount as u64;
-                self.debit_unchecked(reserved::authority_stake_pool_address(), amount)?;
-                self.credit_unchecked(to, amount)?;
+                // Atomic pool → recipient: pre-flights both
+                // the pool's sufficiency and the recipient's
+                // overflow before any mutation.
+                self.transfer_internal(reserved::authority_stake_pool_address(), to, amount)?;
                 self.write_bytes_unchecked(registry_addr, encode(&map));
                 Ok(())
             }
@@ -2742,8 +2877,7 @@ impl Substrate for InMemorySubstrate {
                     });
                 }
                 rec.deposited_stake -= amount as u64;
-                self.debit_unchecked(reserved::validator_stake_pool_address(), amount)?;
-                self.credit_unchecked(to, amount)?;
+                self.transfer_internal(reserved::validator_stake_pool_address(), to, amount)?;
                 self.write_bytes_unchecked(registry_addr, encode(&map));
                 Ok(())
             }
@@ -8462,5 +8596,207 @@ mod tests {
         let s = InMemorySubstrate::new();
         assert_eq!(s.delegation(0, addr(1)), 0);
         assert_eq!(s.total_delegated_to_validator(0), 0);
+    }
+
+    // ===== Atomicity hardening =====
+    //
+    // These tests lock in the all-or-nothing invariant for
+    // arms that fan a single source into multiple credits
+    // (or vice versa). Each construct an adversarial mid-arm
+    // overflow and assert the substrate state is byte-identical
+    // to the pre-arm snapshot via state_root.
+
+    /// MintInflation: if the third credit (treasury) would
+    /// overflow, the prior two credits are rolled back and
+    /// the epoch counter does NOT bump.
+    #[test]
+    fn mint_inflation_overflow_rolls_back_atomically() {
+        let mut s = InMemorySubstrate::new();
+        // Park the treasury at u128::MAX so any non-zero
+        // credit overflows.
+        s.apply_intent(&Intent::GenesisAllocation {
+            allocations: vec![(reserved::treasury_address(), Balance::MAX)],
+        })
+        .unwrap();
+        let before = s.state_root();
+        let err = s.apply_intent(&Intent::MintInflation {
+            epoch: 1,
+            authority_share: 100,
+            validator_share: 200,
+            treasury_share: 1,
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::DistributionOverflow { .. })
+        ));
+        assert_eq!(s.state_root(), before);
+        // Pool balances unchanged.
+        assert_eq!(s.balance(&reserved::authority_rewards_pool_address()), 0);
+        assert_eq!(s.balance(&reserved::validator_rewards_pool_address()), 0);
+        // Epoch counter did NOT bump — the next attempt with
+        // epoch=1 (and non-overflowing shares) succeeds.
+        assert_eq!(s.last_minted_inflation_epoch(), 0);
+    }
+
+    /// GenesisAllocation: a single entry overflow rolls back
+    /// every prior credit in the same Intent.
+    #[test]
+    fn genesis_allocation_entry_overflow_rolls_back_atomically() {
+        let mut s = InMemorySubstrate::new();
+        let before = s.state_root();
+        let err = s.apply_intent(&Intent::GenesisAllocation {
+            allocations: vec![
+                (addr(1), 100),
+                (addr(2), 200),
+                // Park addr(3) at MAX-50 first via a separate
+                // pre-flight is not possible in genesis (we're
+                // in block 0 ourselves); instead, use a u128
+                // amount that overflows after the first credit:
+                // give addr(3) MAX, then try to credit it again.
+                (addr(3), Balance::MAX),
+                (addr(3), 1),
+            ],
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::DistributionOverflow { .. })
+        ));
+        assert_eq!(s.state_root(), before);
+        assert_eq!(s.balance(&addr(1)), 0);
+        assert_eq!(s.balance(&addr(2)), 0);
+        assert_eq!(s.balance(&addr(3)), 0);
+    }
+
+    /// DistributeRewards: a recipient overflow rolls back the
+    /// pool debit AND any prior credit in the same Intent;
+    /// the epoch counter for the ring does NOT bump.
+    #[test]
+    fn distribute_rewards_recipient_overflow_rolls_back_atomically() {
+        let mut s = InMemorySubstrate::new();
+        fill_authority_pool(&mut s, 1, 500);
+        // Park addr(2) at MAX so a 1-GSX credit overflows.
+        s.apply_intent(&Intent::GenesisAllocation {
+            allocations: vec![(addr(2), Balance::MAX)],
+        })
+        .unwrap();
+        let before = s.state_root();
+        let err = s.apply_intent(&Intent::DistributeRewards {
+            epoch: 1,
+            ring: RewardsRing::Authority,
+            recipients: vec![(addr(1), 100), (addr(2), 1)],
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::DistributionOverflow { .. })
+        ));
+        assert_eq!(s.state_root(), before);
+        assert_eq!(s.balance(&addr(1)), 0);
+        assert_eq!(s.balance(&reserved::authority_rewards_pool_address()), 500);
+        // Epoch counter did NOT bump.
+        assert_eq!(s.last_distributed_rewards_epoch(RewardsRing::Authority), 0);
+    }
+
+    /// DepositAuthorityStake: pool-side overflow rolls back
+    /// the depositor debit. We can't actually overflow the
+    /// pool under realistic supply, but the test exercises
+    /// the path by parking the pool at MAX first.
+    #[test]
+    fn deposit_authority_stake_pool_overflow_rolls_back_atomically() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 1_000)]);
+        s.apply_intent(&Intent::AdmitAuthority {
+            authority_id: 0,
+            stake_gsx: 1,
+            mldsa_public_key: vec![0xaa; 1952],
+            bls_public_key: vec![0xbb; 48],
+        })
+        .unwrap();
+        // Pre-fund the pool to u128::MAX so any credit
+        // overflows.
+        s.apply_intent(&Intent::GenesisAllocation {
+            allocations: vec![(reserved::authority_stake_pool_address(), Balance::MAX)],
+        })
+        .unwrap();
+        let before = s.state_root();
+        let err = s.apply_intent(&Intent::DepositAuthorityStake {
+            from: addr(1),
+            authority_id: 0,
+            amount: 100,
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::DistributionOverflow { .. })
+        ));
+        assert_eq!(s.state_root(), before);
+        assert_eq!(s.balance(&addr(1)), 1_000);
+        assert_eq!(s.authority_deposited_stake(0), 0);
+    }
+
+    /// WithdrawAuthorityStake: recipient overflow rolls back
+    /// the pool debit AND leaves the per-slot counter
+    /// untouched.
+    #[test]
+    fn withdraw_authority_stake_recipient_overflow_rolls_back_atomically() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 10_000_000)]);
+        // Set up a fully-funded, exiting, cooldown-elapsed
+        // authority slot.
+        admit_and_exit_authority(&mut s, addr(1), 5_000_000);
+        // Park the recipient at MAX (direct map insert —
+        // GenesisAllocation can't be invoked here since
+        // admit_and_exit_authority advanced past block 0).
+        s.balances.insert(addr(2), Balance::MAX);
+        let before = s.state_root();
+        let err = s.apply_intent(&Intent::WithdrawAuthorityStake {
+            to: addr(2),
+            authority_id: 0,
+            amount: 1,
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::DistributionOverflow { .. })
+        ));
+        assert_eq!(s.state_root(), before);
+        // Per-slot counter unchanged.
+        assert_eq!(s.authority_deposited_stake(0), 5_000_000);
+    }
+
+    /// EjectAuthority: if the slashing waterfall would
+    /// overflow either destination, the ejection itself rolls
+    /// back — registry status remains untouched.
+    #[test]
+    fn eject_authority_waterfall_overflow_rolls_back_atomically() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 10_000_000)]);
+        s.apply_intent(&Intent::AdmitAuthority {
+            authority_id: 0,
+            stake_gsx: 1,
+            mldsa_public_key: vec![0xaa; 1952],
+            bls_public_key: vec![0xbb; 48],
+        })
+        .unwrap();
+        s.apply_intent(&Intent::DepositAuthorityStake {
+            from: addr(1),
+            authority_id: 0,
+            amount: 1_000_000,
+        })
+        .unwrap();
+        // Park insurance pool at u128::MAX so the 70% share
+        // overflows.
+        s.balances
+            .insert(reserved::insurance_pool_address(), Balance::MAX);
+        let before = s.state_root();
+        let err = s.apply_intent(&Intent::EjectAuthority {
+            authority_id: 0,
+            proof_ref: [0xee; 32],
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::DistributionOverflow { .. })
+        ));
+        assert_eq!(s.state_root(), before);
+        // Slot still Active with its full deposit.
+        assert_eq!(
+            s.authority_record(0).unwrap().status,
+            crate::authority_registry::AuthorityStatus::Active
+        );
+        assert_eq!(s.authority_deposited_stake(0), 1_000_000);
     }
 }
