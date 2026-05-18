@@ -158,7 +158,8 @@ impl Substrate for GsxDbSubstrate {
             | Intent::EjectValidator { .. }
             | Intent::GenesisAllocation { .. }
             | Intent::MintInflation { .. }
-            | Intent::DistributeRewards { .. } => Ok(()),
+            | Intent::DistributeRewards { .. }
+            | Intent::Delegate { .. } => Ok(()),
             // Track G Phase G2.2 (#97): wired through the
             // gsx-l2-verifier-precompile crate. The verifier
             // format gates (proof = 260 B, public_inputs = 240 B,

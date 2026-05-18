@@ -161,6 +161,33 @@ pub enum Intent {
         /// `(address, amount)` payouts to credit.
         recipients: Vec<(Address, Balance)>,
     },
+    /// Delegator → Validator stake routing (Tokenomics §4
+    /// delegated PoS). Debits `from`, credits the shared
+    /// `validator_stake_pool_address`, and records the
+    /// per-(validator_id, delegator) amount in the
+    /// validator-delegation registry.
+    ///
+    /// Substrate gating:
+    /// - `from` must not be reserved.
+    /// - `validator_id` must exist + be `Active`. Exiting /
+    ///   Ejected slots reject — delegating to a winding-down
+    ///   validator is a footgun the substrate prevents.
+    /// - Zero `amount` is a no-op.
+    /// - Insufficient `from` balance rejects atomically.
+    ///
+    /// The delegated amount stacks per-(validator_id,
+    /// delegator): repeated `Intent::Delegate` from the same
+    /// caller against the same validator slot accumulates
+    /// linearly. A separate `Intent::Undelegate` (follow-up)
+    /// will reverse the routing with a cooldown.
+    Delegate {
+        /// Address paying the delegation.
+        from: Address,
+        /// Validator slot the delegation backs.
+        validator_id: u32,
+        /// Amount delegated.
+        amount: Balance,
+    },
     /// Daemon-emitted: mint a per-epoch inflation tranche,
     /// crediting the three protocol-owned destination pools
     /// (Authority rewards, Validator rewards, treasury).
@@ -1274,6 +1301,34 @@ impl InMemorySubstrate {
         }
     }
 
+    /// Delegated stake for the `(validator_id, delegator)`
+    /// pair. Returns 0 if no delegation has been recorded
+    /// or if the registry bytes are corrupt.
+    pub fn delegation(&self, validator_id: u32, delegator: Address) -> u64 {
+        let bytes = self
+            .read_bytes(&reserved::validator_delegation_registry_address())
+            .unwrap_or_default();
+        crate::delegation_registry::decode(&bytes)
+            .map(|m| m.get(&(validator_id, delegator)).copied().unwrap_or(0))
+            .unwrap_or(0)
+    }
+
+    /// Total delegated stake routed to `validator_id` across
+    /// all delegators.
+    pub fn total_delegated_to_validator(&self, validator_id: u32) -> u64 {
+        let bytes = self
+            .read_bytes(&reserved::validator_delegation_registry_address())
+            .unwrap_or_default();
+        let map = match crate::delegation_registry::decode(&bytes) {
+            Ok(m) => m,
+            Err(_) => return 0,
+        };
+        map.iter()
+            .filter(|((vid, _), _)| *vid == validator_id)
+            .map(|(_, amount)| *amount)
+            .sum()
+    }
+
     /// Last epoch for which `Intent::DistributeRewards` ran
     /// against `ring`. Returns `0` if no payout has been
     /// recorded for that ring (the bootstrap state).
@@ -1537,6 +1592,66 @@ impl Substrate for InMemorySubstrate {
                 new_bytes.extend_from_slice(&last_auth.to_be_bytes());
                 new_bytes.extend_from_slice(&last_val.to_be_bytes());
                 self.write_bytes_unchecked(registry_addr, new_bytes);
+                Ok(())
+            }
+            // Delegator → Validator stake routing
+            // (Tokenomics §4 delegated PoS). Debits `from`,
+            // credits the shared `validator_stake_pool_address`,
+            // and accumulates the per-(validator_id, delegator)
+            // amount in the delegation registry.
+            Intent::Delegate {
+                from,
+                validator_id,
+                amount,
+            } => {
+                use crate::{
+                    delegation_registry,
+                    validator_registry::{decode as decode_validators, ValidatorStatus},
+                };
+                let from = *from;
+                let amount = *amount;
+                if amount == 0 {
+                    return Ok(());
+                }
+                if reserved::is_reserved(&from) {
+                    return Err(ExecutionError::ReservedAddressTransferDenied { addr: from });
+                }
+                // Validate the validator slot exists + Active.
+                let v_bytes = self
+                    .read_bytes(&reserved::validator_registry_address())
+                    .unwrap_or_default();
+                let v_map = decode_validators(&v_bytes)?;
+                let rec = v_map
+                    .get(validator_id)
+                    .ok_or(ExecutionError::ValidatorNotFound {
+                        validator_id: *validator_id,
+                    })?;
+                if rec.status != ValidatorStatus::Active {
+                    return Err(ExecutionError::ValidatorNotActive {
+                        validator_id: *validator_id,
+                        status: rec.status,
+                    });
+                }
+                // Load delegation registry + accumulate.
+                let delta =
+                    u64::try_from(amount).map_err(|_| ExecutionError::DepositedStakeOverflow {
+                        ring: "delegation",
+                        slot_id: *validator_id,
+                    })?;
+                let reg_addr = reserved::validator_delegation_registry_address();
+                let reg_bytes = self.read_bytes(&reg_addr).unwrap_or_default();
+                let mut reg = delegation_registry::decode(&reg_bytes)?;
+                let entry = reg.entry((*validator_id, from)).or_insert(0);
+                *entry =
+                    entry
+                        .checked_add(delta)
+                        .ok_or(ExecutionError::DepositedStakeOverflow {
+                            ring: "delegation",
+                            slot_id: *validator_id,
+                        })?;
+                self.debit_unchecked(from, amount)?;
+                self.credit_unchecked(reserved::validator_stake_pool_address(), amount)?;
+                self.write_bytes_unchecked(reg_addr, delegation_registry::encode(&reg));
                 Ok(())
             }
             // Phase G governance — Authority Ring registry
@@ -8168,5 +8283,184 @@ mod tests {
         assert_eq!(s.balance(&addr(1)), 0);
         assert_eq!(s.balance(&reserved::authority_rewards_pool_address()), 50);
         assert_eq!(s.last_distributed_rewards_epoch(RewardsRing::Authority), 1);
+    }
+
+    // ===== Delegate =====
+
+    fn admit_validator(s: &mut InMemorySubstrate, vid: u32) {
+        s.apply_intent(&Intent::AdmitValidator {
+            validator_id: vid,
+            stake_gsx: 1,
+            mldsa_public_key: vec![0xaa; 1952],
+            bls_public_key: vec![0xbb; 48],
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn delegate_happy_path() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 10_000_000)]);
+        admit_validator(&mut s, 0);
+        s.apply_intent(&Intent::Delegate {
+            from: addr(1),
+            validator_id: 0,
+            amount: 4_000_000,
+        })
+        .unwrap();
+        assert_eq!(s.balance(&addr(1)), 6_000_000);
+        assert_eq!(
+            s.balance(&reserved::validator_stake_pool_address()),
+            4_000_000
+        );
+        assert_eq!(s.delegation(0, addr(1)), 4_000_000);
+        assert_eq!(s.total_delegated_to_validator(0), 4_000_000);
+    }
+
+    /// Sequential delegations from the same delegator stack.
+    #[test]
+    fn delegate_accumulates_per_pair() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 10_000_000)]);
+        admit_validator(&mut s, 0);
+        for amt in [1_000_000u128, 2_000_000, 500_000] {
+            s.apply_intent(&Intent::Delegate {
+                from: addr(1),
+                validator_id: 0,
+                amount: amt,
+            })
+            .unwrap();
+        }
+        assert_eq!(s.delegation(0, addr(1)), 3_500_000);
+    }
+
+    /// Different delegators against the same validator each
+    /// track independently.
+    #[test]
+    fn delegate_per_delegator_tracking_is_independent() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 5_000_000), (addr(2), 7_000_000)]);
+        admit_validator(&mut s, 0);
+        s.apply_intent(&Intent::Delegate {
+            from: addr(1),
+            validator_id: 0,
+            amount: 3_000_000,
+        })
+        .unwrap();
+        s.apply_intent(&Intent::Delegate {
+            from: addr(2),
+            validator_id: 0,
+            amount: 5_000_000,
+        })
+        .unwrap();
+        assert_eq!(s.delegation(0, addr(1)), 3_000_000);
+        assert_eq!(s.delegation(0, addr(2)), 5_000_000);
+        assert_eq!(s.total_delegated_to_validator(0), 8_000_000);
+    }
+
+    /// Delegations to different validators are isolated.
+    #[test]
+    fn delegate_per_validator_tracking_is_isolated() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 10_000_000)]);
+        admit_validator(&mut s, 0);
+        admit_validator(&mut s, 1);
+        s.apply_intent(&Intent::Delegate {
+            from: addr(1),
+            validator_id: 0,
+            amount: 2_000_000,
+        })
+        .unwrap();
+        s.apply_intent(&Intent::Delegate {
+            from: addr(1),
+            validator_id: 1,
+            amount: 3_000_000,
+        })
+        .unwrap();
+        assert_eq!(s.delegation(0, addr(1)), 2_000_000);
+        assert_eq!(s.delegation(1, addr(1)), 3_000_000);
+        assert_eq!(s.total_delegated_to_validator(0), 2_000_000);
+        assert_eq!(s.total_delegated_to_validator(1), 3_000_000);
+    }
+
+    #[test]
+    fn delegate_unknown_validator_rejected() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 1_000_000)]);
+        let err = s.apply_intent(&Intent::Delegate {
+            from: addr(1),
+            validator_id: 42,
+            amount: 100,
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::ValidatorNotFound { validator_id: 42 })
+        ));
+    }
+
+    #[test]
+    fn delegate_inactive_validator_rejected() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 1_000_000)]);
+        admit_validator(&mut s, 0);
+        s.apply_intent(&Intent::ExitValidator { validator_id: 0 })
+            .unwrap();
+        let err = s.apply_intent(&Intent::Delegate {
+            from: addr(1),
+            validator_id: 0,
+            amount: 100,
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::ValidatorNotActive { .. })
+        ));
+    }
+
+    #[test]
+    fn delegate_reserved_from_rejected() {
+        let mut s = InMemorySubstrate::new();
+        admit_validator(&mut s, 0);
+        let err = s.apply_intent(&Intent::Delegate {
+            from: reserved::treasury_address(),
+            validator_id: 0,
+            amount: 100,
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::ReservedAddressTransferDenied { .. })
+        ));
+    }
+
+    #[test]
+    fn delegate_insufficient_balance_atomic() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 100)]);
+        admit_validator(&mut s, 0);
+        let before = s.state_root();
+        let err = s.apply_intent(&Intent::Delegate {
+            from: addr(1),
+            validator_id: 0,
+            amount: 1_000,
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::InsufficientBalance { .. })
+        ));
+        assert_eq!(s.state_root(), before);
+        assert_eq!(s.delegation(0, addr(1)), 0);
+    }
+
+    #[test]
+    fn delegate_zero_amount_is_noop() {
+        let mut s = InMemorySubstrate::new();
+        admit_validator(&mut s, 0);
+        let before = s.state_root();
+        s.apply_intent(&Intent::Delegate {
+            from: addr(1),
+            validator_id: 0,
+            amount: 0,
+        })
+        .unwrap();
+        assert_eq!(s.state_root(), before);
+    }
+
+    #[test]
+    fn delegation_helper_returns_zero_for_unknown_pair() {
+        let s = InMemorySubstrate::new();
+        assert_eq!(s.delegation(0, addr(1)), 0);
+        assert_eq!(s.total_delegated_to_validator(0), 0);
     }
 }
