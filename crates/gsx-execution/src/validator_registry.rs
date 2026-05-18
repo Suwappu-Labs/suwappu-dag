@@ -44,8 +44,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::{error::ExecutionError, reserved};
 
-/// Current encoding version.
-pub const VALIDATOR_REGISTRY_VERSION: u32 = 1;
+/// Current encoding version. Bumped to v2 to add the
+/// `deposited_stake` field tracking real economic bonding
+/// per-slot. v1 records decode with `deposited_stake = 0`.
+pub const VALIDATOR_REGISTRY_VERSION: u32 = 2;
+
+/// Legacy v1 encoding version. The decoder still accepts v1
+/// bytes; the encoder always emits v2.
+pub const VALIDATOR_REGISTRY_VERSION_V1: u32 = 1;
 
 /// Same caps as authority_registry — canonical ML-DSA-65 =
 /// 1952 B, BLS12-381 G1 compressed = 48 B; defensive
@@ -58,8 +64,11 @@ pub const MAX_BLS_PK_BYTES: usize = 128;
 /// Encoded-header bytes: `version (4) + count (4) = 8`.
 pub const ENCODED_HEADER_BYTES: usize = 4 + 4;
 
-/// Fixed per-entry overhead.
-pub const ENTRY_FIXED_BYTES: usize = 4 + 8 + 1 + 4 + 4;
+/// V1 fixed per-entry overhead.
+pub const ENTRY_FIXED_BYTES_V1: usize = 4 + 8 + 1 + 4 + 4;
+
+/// V2 fixed per-entry overhead (V1 + `deposited_stake (8)`).
+pub const ENTRY_FIXED_BYTES: usize = ENTRY_FIXED_BYTES_V1 + 8;
 
 /// Lifecycle status for a Validator Ring slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -102,13 +111,19 @@ pub struct ValidatorRecord {
     pub mldsa_public_key: Vec<u8>,
     /// BLS12-381 G1 compressed pubkey bytes.
     pub bls_public_key: Vec<u8>,
-    /// Declared stake at admission.
+    /// Declared stake at admission (the minimum the
+    /// candidate committed to bond when admitted).
     pub stake_gsx: u64,
+    /// Actual bonded stake — running total credited via
+    /// `Intent::DepositValidatorStake`. `0` for v1-decoded
+    /// records.
+    #[serde(default)]
+    pub deposited_stake: u64,
     /// Current lifecycle status.
     pub status: ValidatorStatus,
 }
 
-/// Encode the validator map to the canonical byte sequence.
+/// Encode the validator map to the canonical v2 byte sequence.
 pub fn encode(map: &BTreeMap<u32, ValidatorRecord>) -> Vec<u8> {
     let mut buf = Vec::new();
     buf.extend_from_slice(&VALIDATOR_REGISTRY_VERSION.to_be_bytes());
@@ -116,6 +131,7 @@ pub fn encode(map: &BTreeMap<u32, ValidatorRecord>) -> Vec<u8> {
     for (id, rec) in map {
         buf.extend_from_slice(&id.to_be_bytes());
         buf.extend_from_slice(&rec.stake_gsx.to_be_bytes());
+        buf.extend_from_slice(&rec.deposited_stake.to_be_bytes());
         buf.push(rec.status.as_byte());
         buf.extend_from_slice(&(rec.mldsa_public_key.len() as u32).to_be_bytes());
         buf.extend_from_slice(&rec.mldsa_public_key);
@@ -137,17 +153,26 @@ pub fn decode(bytes: &[u8]) -> Result<BTreeMap<u32, ValidatorRecord>, ExecutionE
         });
     }
     let version = u32::from_be_bytes(bytes[0..4].try_into().unwrap());
-    if version != VALIDATOR_REGISTRY_VERSION {
-        return Err(ExecutionError::CorruptStateRecord {
-            addr: reserved::validator_registry_address(),
-            reason: "validator registry version mismatch",
-        });
-    }
+    let v2 = match version {
+        VALIDATOR_REGISTRY_VERSION => true,
+        VALIDATOR_REGISTRY_VERSION_V1 => false,
+        _ => {
+            return Err(ExecutionError::CorruptStateRecord {
+                addr: reserved::validator_registry_address(),
+                reason: "validator registry version mismatch",
+            });
+        }
+    };
     let count = u32::from_be_bytes(bytes[4..8].try_into().unwrap()) as usize;
+    let entry_fixed_bytes = if v2 {
+        ENTRY_FIXED_BYTES
+    } else {
+        ENTRY_FIXED_BYTES_V1
+    };
     let mut map = BTreeMap::new();
     let mut cursor = ENCODED_HEADER_BYTES;
     for _ in 0..count {
-        if cursor + ENTRY_FIXED_BYTES > bytes.len() {
+        if cursor + entry_fixed_bytes > bytes.len() {
             return Err(ExecutionError::CorruptStateRecord {
                 addr: reserved::validator_registry_address(),
                 reason: "validator registry entry truncated",
@@ -157,6 +182,13 @@ pub fn decode(bytes: &[u8]) -> Result<BTreeMap<u32, ValidatorRecord>, ExecutionE
         cursor += 4;
         let stake_gsx = u64::from_be_bytes(bytes[cursor..cursor + 8].try_into().unwrap());
         cursor += 8;
+        let deposited_stake = if v2 {
+            let v = u64::from_be_bytes(bytes[cursor..cursor + 8].try_into().unwrap());
+            cursor += 8;
+            v
+        } else {
+            0
+        };
         let status = ValidatorStatus::from_byte(bytes[cursor])?;
         cursor += 1;
 
@@ -195,6 +227,7 @@ pub fn decode(bytes: &[u8]) -> Result<BTreeMap<u32, ValidatorRecord>, ExecutionE
                     mldsa_public_key,
                     bls_public_key,
                     stake_gsx,
+                    deposited_stake,
                     status,
                 },
             )
@@ -224,6 +257,7 @@ mod tests {
             mldsa_public_key: vec![0xaa; 1952],
             bls_public_key: vec![0xbb; 48],
             stake_gsx: stake,
+            deposited_stake: 0,
             status,
         }
     }
@@ -304,9 +338,10 @@ mod tests {
         let mut bytes = vec![];
         bytes.extend_from_slice(&VALIDATOR_REGISTRY_VERSION.to_be_bytes());
         bytes.extend_from_slice(&1u32.to_be_bytes());
-        bytes.extend_from_slice(&0u32.to_be_bytes());
-        bytes.extend_from_slice(&0u64.to_be_bytes());
-        bytes.push(0);
+        bytes.extend_from_slice(&0u32.to_be_bytes()); // validator_id
+        bytes.extend_from_slice(&0u64.to_be_bytes()); // stake_gsx
+        bytes.extend_from_slice(&0u64.to_be_bytes()); // deposited_stake (v2)
+        bytes.push(0); // Active
         bytes.extend_from_slice(&((MAX_MLDSA_PK_BYTES + 1) as u32).to_be_bytes());
         assert!(matches!(
             decode(&bytes),
@@ -323,5 +358,44 @@ mod tests {
             decode(&bytes),
             Err(ExecutionError::CorruptStateRecord { .. })
         ));
+    }
+
+    /// V1 bytes (no `deposited_stake`) decode cleanly,
+    /// lifting `deposited_stake` to 0.
+    #[test]
+    fn v1_bytes_decode_to_v2_with_zero_deposited_stake() {
+        let mut bytes = vec![];
+        bytes.extend_from_slice(&VALIDATOR_REGISTRY_VERSION_V1.to_be_bytes());
+        bytes.extend_from_slice(&1u32.to_be_bytes());
+        bytes.extend_from_slice(&7u32.to_be_bytes()); // validator_id
+        bytes.extend_from_slice(&3_000_000u64.to_be_bytes()); // stake
+        bytes.push(0); // Active
+        bytes.extend_from_slice(&1952u32.to_be_bytes());
+        bytes.extend_from_slice(&[0xaa; 1952]);
+        bytes.extend_from_slice(&48u32.to_be_bytes());
+        bytes.extend_from_slice(&[0xbb; 48]);
+
+        let decoded = decode(&bytes).unwrap();
+        let rec = decoded.get(&7).unwrap();
+        assert_eq!(rec.stake_gsx, 3_000_000);
+        assert_eq!(rec.deposited_stake, 0);
+        assert_eq!(rec.status, ValidatorStatus::Active);
+    }
+
+    #[test]
+    fn deposited_stake_round_trips() {
+        let mut m = BTreeMap::new();
+        m.insert(
+            0,
+            ValidatorRecord {
+                mldsa_public_key: vec![0xaa; 1952],
+                bls_public_key: vec![0xbb; 48],
+                stake_gsx: 3_000_000,
+                deposited_stake: 2_500_000,
+                status: ValidatorStatus::Active,
+            },
+        );
+        let decoded = decode(&encode(&m)).unwrap();
+        assert_eq!(decoded.get(&0).unwrap().deposited_stake, 2_500_000);
     }
 }

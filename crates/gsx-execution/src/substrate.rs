@@ -1056,6 +1056,25 @@ impl InMemorySubstrate {
             .unwrap_or(0)
     }
 
+    /// Per-slot Authority Ring bonded capital, in GSX base units.
+    /// Reflects the sum of all `Intent::DepositAuthorityStake`
+    /// against this `authority_id` minus any future
+    /// withdrawals/slashes. Returns `0` for unoccupied slots or
+    /// slots that never received a deposit.
+    pub fn authority_deposited_stake(&self, authority_id: u32) -> u64 {
+        self.authority_record(authority_id)
+            .map(|r| r.deposited_stake)
+            .unwrap_or(0)
+    }
+
+    /// Mirror of `authority_deposited_stake` for the Validator
+    /// Ring.
+    pub fn validator_deposited_stake(&self, validator_id: u32) -> u64 {
+        self.validator_record(validator_id)
+            .map(|r| r.deposited_stake)
+            .unwrap_or(0)
+    }
+
     /// Validate a bridge asset is registered + Active.
     /// Returns `Err(BridgeAssetNotFound)` if no record exists,
     /// `Err(BridgeAssetNotActive)` if status is Paused or
@@ -1192,6 +1211,7 @@ impl Substrate for InMemorySubstrate {
                         mldsa_public_key: mldsa_public_key.clone(),
                         bls_public_key: bls_public_key.clone(),
                         stake_gsx: *stake_gsx,
+                        deposited_stake: 0,
                         status: AuthorityStatus::Active,
                     },
                 );
@@ -1281,6 +1301,7 @@ impl Substrate for InMemorySubstrate {
                         mldsa_public_key: mldsa_public_key.clone(),
                         bls_public_key: bls_public_key.clone(),
                         stake_gsx: *stake_gsx,
+                        deposited_stake: 0,
                         status: ValidatorStatus::Active,
                     },
                 );
@@ -1959,15 +1980,17 @@ impl Substrate for InMemorySubstrate {
                 Ok(())
             }
             // Authority Ring stake deposit — debits `from`,
-            // credits authority_stake_pool_address. Validates
-            // the slot exists + is Active first (no point
-            // posting stake for an exiting/ejected slot).
+            // credits authority_stake_pool_address, and bumps
+            // the per-slot `deposited_stake` counter so a future
+            // Withdraw/Eject can reason about exactly how much
+            // capital this slot has at risk. Validates the slot
+            // exists + is Active first.
             Intent::DepositAuthorityStake {
                 from,
                 authority_id,
                 amount,
             } => {
-                use crate::authority_registry::{decode, AuthorityStatus};
+                use crate::authority_registry::{decode, encode, AuthorityStatus};
                 let from = *from;
                 let amount = *amount;
                 if amount == 0 {
@@ -1978,9 +2001,9 @@ impl Substrate for InMemorySubstrate {
                 }
                 let registry_addr = reserved::authority_registry_address();
                 let existing_bytes = self.read_bytes(&registry_addr).unwrap_or_default();
-                let map = decode(&existing_bytes)?;
+                let mut map = decode(&existing_bytes)?;
                 let rec = map
-                    .get(authority_id)
+                    .get_mut(authority_id)
                     .ok_or(ExecutionError::AuthorityNotFound {
                         authority_id: *authority_id,
                     })?;
@@ -1990,8 +2013,20 @@ impl Substrate for InMemorySubstrate {
                         status: rec.status,
                     });
                 }
+                let delta =
+                    u64::try_from(amount).map_err(|_| ExecutionError::DepositedStakeOverflow {
+                        ring: "authority",
+                        slot_id: *authority_id,
+                    })?;
+                rec.deposited_stake = rec.deposited_stake.checked_add(delta).ok_or(
+                    ExecutionError::DepositedStakeOverflow {
+                        ring: "authority",
+                        slot_id: *authority_id,
+                    },
+                )?;
                 self.debit_unchecked(from, amount)?;
                 self.credit_unchecked(reserved::authority_stake_pool_address(), amount)?;
+                self.write_bytes_unchecked(registry_addr, encode(&map));
                 Ok(())
             }
             // Mirror for the Validator Ring.
@@ -2000,7 +2035,7 @@ impl Substrate for InMemorySubstrate {
                 validator_id,
                 amount,
             } => {
-                use crate::validator_registry::{decode, ValidatorStatus};
+                use crate::validator_registry::{decode, encode, ValidatorStatus};
                 let from = *from;
                 let amount = *amount;
                 if amount == 0 {
@@ -2011,9 +2046,9 @@ impl Substrate for InMemorySubstrate {
                 }
                 let registry_addr = reserved::validator_registry_address();
                 let existing_bytes = self.read_bytes(&registry_addr).unwrap_or_default();
-                let map = decode(&existing_bytes)?;
+                let mut map = decode(&existing_bytes)?;
                 let rec = map
-                    .get(validator_id)
+                    .get_mut(validator_id)
                     .ok_or(ExecutionError::ValidatorNotFound {
                         validator_id: *validator_id,
                     })?;
@@ -2023,8 +2058,20 @@ impl Substrate for InMemorySubstrate {
                         status: rec.status,
                     });
                 }
+                let delta =
+                    u64::try_from(amount).map_err(|_| ExecutionError::DepositedStakeOverflow {
+                        ring: "validator",
+                        slot_id: *validator_id,
+                    })?;
+                rec.deposited_stake = rec.deposited_stake.checked_add(delta).ok_or(
+                    ExecutionError::DepositedStakeOverflow {
+                        ring: "validator",
+                        slot_id: *validator_id,
+                    },
+                )?;
                 self.debit_unchecked(from, amount)?;
                 self.credit_unchecked(reserved::validator_stake_pool_address(), amount)?;
+                self.write_bytes_unchecked(registry_addr, encode(&map));
                 Ok(())
             }
             // Track C: governance-gated treasury disbursement.
@@ -6101,10 +6148,10 @@ mod tests {
         assert_eq!(s.state_root(), before);
     }
 
-    /// Multiple authorities accumulate in the SAME pool.
-    /// Per-slot accounting is daemon-side (consensus log)
-    /// until a follow-up extends AuthorityRecord with a
-    /// `deposited_stake` field.
+    /// Multiple authorities accumulate in the SAME pool, but
+    /// per-slot accounting is tracked in `deposited_stake` on
+    /// each `AuthorityRecord` so the eventual Withdraw / Eject
+    /// arms can reason about how much capital each slot owns.
     #[test]
     fn deposit_authority_stake_multi_slot_pools_together() {
         let mut s =
@@ -6240,5 +6287,166 @@ mod tests {
             3_000_000
         );
         assert_eq!(s.balance(&addr(1)), 12_000_000);
+    }
+
+    // ===== Per-slot deposited_stake tracking =====
+
+    /// A successful `DepositAuthorityStake` bumps the
+    /// `deposited_stake` field on the AuthorityRecord by
+    /// exactly `amount`.
+    #[test]
+    fn deposit_authority_stake_bumps_per_slot_deposited_stake() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 10_000_000)]);
+        s.apply_intent(&Intent::AdmitAuthority {
+            authority_id: 0,
+            stake_gsx: 1,
+            mldsa_public_key: vec![0xaa; 1952],
+            bls_public_key: vec![0xbb; 48],
+        })
+        .unwrap();
+        assert_eq!(s.authority_deposited_stake(0), 0);
+        s.apply_intent(&Intent::DepositAuthorityStake {
+            from: addr(1),
+            authority_id: 0,
+            amount: 7_500_000,
+        })
+        .unwrap();
+        assert_eq!(s.authority_deposited_stake(0), 7_500_000);
+    }
+
+    /// Sequential deposits onto the same slot accumulate.
+    #[test]
+    fn deposit_authority_stake_accumulates_per_slot() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 10_000_000)]);
+        s.apply_intent(&Intent::AdmitAuthority {
+            authority_id: 0,
+            stake_gsx: 1,
+            mldsa_public_key: vec![0xaa; 1952],
+            bls_public_key: vec![0xbb; 48],
+        })
+        .unwrap();
+        for amt in [1_000_000u128, 2_000_000, 3_000_000] {
+            s.apply_intent(&Intent::DepositAuthorityStake {
+                from: addr(1),
+                authority_id: 0,
+                amount: amt,
+            })
+            .unwrap();
+        }
+        assert_eq!(s.authority_deposited_stake(0), 6_000_000);
+        assert_eq!(s.balance(&addr(1)), 4_000_000);
+        assert_eq!(
+            s.balance(&reserved::authority_stake_pool_address()),
+            6_000_000
+        );
+    }
+
+    /// Per-slot tracking is independent across slots — the
+    /// shared pool balance is the sum, but each slot has its
+    /// own counter.
+    #[test]
+    fn deposit_authority_stake_per_slot_tracking_is_independent() {
+        let mut s =
+            InMemorySubstrate::from_balances([(addr(1), 20_000_000), (addr(2), 20_000_000)]);
+        for i in 0..2 {
+            s.apply_intent(&Intent::AdmitAuthority {
+                authority_id: i,
+                stake_gsx: 1,
+                mldsa_public_key: vec![i as u8; 1952],
+                bls_public_key: vec![i as u8; 48],
+            })
+            .unwrap();
+        }
+        s.apply_intent(&Intent::DepositAuthorityStake {
+            from: addr(1),
+            authority_id: 0,
+            amount: 4_000_000,
+        })
+        .unwrap();
+        s.apply_intent(&Intent::DepositAuthorityStake {
+            from: addr(2),
+            authority_id: 1,
+            amount: 11_000_000,
+        })
+        .unwrap();
+        assert_eq!(s.authority_deposited_stake(0), 4_000_000);
+        assert_eq!(s.authority_deposited_stake(1), 11_000_000);
+        assert_eq!(
+            s.balance(&reserved::authority_stake_pool_address()),
+            15_000_000
+        );
+    }
+
+    /// A rejected deposit (insufficient balance) does NOT bump
+    /// the per-slot counter — atomicity invariant.
+    #[test]
+    fn deposit_authority_stake_rejected_leaves_deposited_stake_unchanged() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 100)]);
+        s.apply_intent(&Intent::AdmitAuthority {
+            authority_id: 0,
+            stake_gsx: 1,
+            mldsa_public_key: vec![0xaa; 1952],
+            bls_public_key: vec![0xbb; 48],
+        })
+        .unwrap();
+        let _ = s.apply_intent(&Intent::DepositAuthorityStake {
+            from: addr(1),
+            authority_id: 0,
+            amount: 1_000,
+        });
+        assert_eq!(s.authority_deposited_stake(0), 0);
+    }
+
+    /// Validator-Ring mirror.
+    #[test]
+    fn deposit_validator_stake_bumps_per_slot_deposited_stake() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 10_000_000)]);
+        s.apply_intent(&Intent::AdmitValidator {
+            validator_id: 0,
+            stake_gsx: 1,
+            mldsa_public_key: vec![0xaa; 1952],
+            bls_public_key: vec![0xbb; 48],
+        })
+        .unwrap();
+        assert_eq!(s.validator_deposited_stake(0), 0);
+        s.apply_intent(&Intent::DepositValidatorStake {
+            from: addr(1),
+            validator_id: 0,
+            amount: 4_200_000,
+        })
+        .unwrap();
+        assert_eq!(s.validator_deposited_stake(0), 4_200_000);
+    }
+
+    #[test]
+    fn deposit_validator_stake_accumulates_per_slot() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 10_000_000)]);
+        s.apply_intent(&Intent::AdmitValidator {
+            validator_id: 0,
+            stake_gsx: 1,
+            mldsa_public_key: vec![0xaa; 1952],
+            bls_public_key: vec![0xbb; 48],
+        })
+        .unwrap();
+        for amt in [500_000u128, 1_500_000, 2_000_000] {
+            s.apply_intent(&Intent::DepositValidatorStake {
+                from: addr(1),
+                validator_id: 0,
+                amount: amt,
+            })
+            .unwrap();
+        }
+        assert_eq!(s.validator_deposited_stake(0), 4_000_000);
+    }
+
+    /// `authority_deposited_stake` returns 0 for an unoccupied
+    /// slot (no read panic).
+    #[test]
+    fn deposited_stake_helpers_return_zero_for_unknown_slots() {
+        let s = InMemorySubstrate::new();
+        assert_eq!(s.authority_deposited_stake(0), 0);
+        assert_eq!(s.validator_deposited_stake(0), 0);
+        assert_eq!(s.authority_deposited_stake(99_999), 0);
+        assert_eq!(s.validator_deposited_stake(99_999), 0);
     }
 }
