@@ -352,4 +352,17 @@ pub enum ExecutionError {
         /// Configured maximum.
         max: usize,
     },
+
+    /// `Intent::DepositAuthorityStake` or
+    /// `Intent::DepositValidatorStake` would push the per-slot
+    /// `deposited_stake` counter above `u64::MAX`. Unreachable
+    /// under realistic GSX supply caps, but surfaced defensively
+    /// rather than wrapping.
+    #[error("deposited stake overflow on slot {slot_id} ({ring})")]
+    DepositedStakeOverflow {
+        /// Which ring ("authority" or "validator").
+        ring: &'static str,
+        /// The slot id whose `deposited_stake` overflowed.
+        slot_id: u32,
+    },
 }
