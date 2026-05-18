@@ -365,4 +365,34 @@ pub enum ExecutionError {
         /// The slot id whose `deposited_stake` overflowed.
         slot_id: u32,
     },
+
+    /// `Intent::WithdrawAuthorityStake` or
+    /// `Intent::WithdrawValidatorStake` targeted a slot whose
+    /// status is not `Exiting`. Active slots are still bonded;
+    /// Ejected slots have already been slashed. Only a slot
+    /// that has gracefully exited can reclaim its capital.
+    #[error("{ring} slot {slot_id} is not exiting (status: {status})")]
+    SlotNotExiting {
+        /// Which ring ("authority" or "validator").
+        ring: &'static str,
+        /// The slot id the withdrawal targeted.
+        slot_id: u32,
+        /// Stringified current status (Active / Ejected).
+        status: &'static str,
+    },
+
+    /// `Intent::WithdrawAuthorityStake` or
+    /// `Intent::WithdrawValidatorStake` tried to withdraw more
+    /// than the slot's `deposited_stake`.
+    #[error("withdrawal exceeds deposit on slot {slot_id} ({ring}): want {want}, have {have}")]
+    WithdrawalExceedsDeposit {
+        /// Which ring ("authority" or "validator").
+        ring: &'static str,
+        /// The slot id the withdrawal targeted.
+        slot_id: u32,
+        /// Amount the Intent requested.
+        want: Balance,
+        /// Current `deposited_stake` on the slot.
+        have: Balance,
+    },
 }

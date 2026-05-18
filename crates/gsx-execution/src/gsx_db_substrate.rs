@@ -203,6 +203,8 @@ impl Substrate for GsxDbSubstrate {
             | Intent::DepositSafetyBond { .. }
             | Intent::DepositAuthorityStake { .. }
             | Intent::DepositValidatorStake { .. }
+            | Intent::WithdrawAuthorityStake { .. }
+            | Intent::WithdrawValidatorStake { .. }
             | Intent::ClaimInsurance { .. }
             | Intent::DisburseTreasury { .. }
             | Intent::PostL2DA { .. } => Ok(()),

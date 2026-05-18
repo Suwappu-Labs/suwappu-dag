@@ -437,13 +437,11 @@ pub enum Intent {
     /// - Atomic via debit-first: `InsufficientBalance`
     ///   surfaces before any pool credit.
     ///
-    /// Per-slot deposit tracking lives in a follow-up PR
-    /// (extends `AuthorityRecord` with a `deposited_stake`
-    /// field requiring an encoding version bump). For now,
-    /// this Intent's deterministic side effect is the
-    /// transfer; off-chain indexers can attribute deposits
-    /// per-slot via the Intent's `authority_id` field +
-    /// the consensus log.
+    /// Per-slot tracking lives on the `AuthorityRecord`'s
+    /// `deposited_stake` field; this Intent increments it by
+    /// `amount` so the `WithdrawAuthorityStake` and per-slot
+    /// `EjectAuthority` slashing path can reason about how
+    /// much capital each slot has at risk.
     DepositAuthorityStake {
         /// Address paying for the stake deposit.
         from: Address,
@@ -461,6 +459,44 @@ pub enum Intent {
         /// Validator slot the deposit backs.
         validator_id: u32,
         /// Amount being deposited.
+        amount: Balance,
+    },
+    /// Graceful-path stake withdrawal for an Authority slot.
+    /// Reverses a prior `DepositAuthorityStake` by debiting
+    /// the `authority_stake_pool_address` and crediting `to`.
+    /// Decrements the slot's `deposited_stake` counter by
+    /// `amount`.
+    ///
+    /// Gating:
+    /// - Slot must exist.
+    /// - Slot status must be `Exiting`. Active slots are
+    ///   still under bonding obligations and cannot withdraw;
+    ///   Ejected slots have already been slashed and have no
+    ///   capital to withdraw.
+    /// - `amount` must not exceed the slot's
+    ///   `deposited_stake`.
+    /// - `to` must not be a reserved address.
+    ///
+    /// The 8.3 waterfall does not apply here — this is the
+    /// good-path exit (operator gracefully chose
+    /// `ExitAuthority`, served out the cooldown, now reclaims
+    /// their bonded capital).
+    WithdrawAuthorityStake {
+        /// Address receiving the withdrawn stake.
+        to: Address,
+        /// Authority slot the withdrawal debits.
+        authority_id: u32,
+        /// Amount being withdrawn.
+        amount: Balance,
+    },
+    /// Mirror of `WithdrawAuthorityStake` for the Validator
+    /// Ring.
+    WithdrawValidatorStake {
+        /// Address receiving the withdrawn stake.
+        to: Address,
+        /// Validator slot the withdrawal debits.
+        validator_id: u32,
+        /// Amount being withdrawn.
         amount: Balance,
     },
     /// Governance-gated disbursement from the protocol
@@ -2110,6 +2146,109 @@ impl Substrate for InMemorySubstrate {
                 )?;
                 self.debit_unchecked(from, amount)?;
                 self.credit_unchecked(reserved::validator_stake_pool_address(), amount)?;
+                self.write_bytes_unchecked(registry_addr, encode(&map));
+                Ok(())
+            }
+            // Graceful-path Authority stake withdrawal. Reverses
+            // a prior DepositAuthorityStake — debits the stake
+            // pool + per-slot counter, credits `to`. Gated on
+            // the slot being in Exiting status.
+            Intent::WithdrawAuthorityStake {
+                to,
+                authority_id,
+                amount,
+            } => {
+                use crate::authority_registry::{decode, encode, AuthorityStatus};
+                let to = *to;
+                let amount = *amount;
+                if amount == 0 {
+                    return Ok(());
+                }
+                if reserved::is_reserved(&to) {
+                    return Err(ExecutionError::ReservedAddressTransferDenied { addr: to });
+                }
+                let registry_addr = reserved::authority_registry_address();
+                let existing_bytes = self.read_bytes(&registry_addr).unwrap_or_default();
+                let mut map = decode(&existing_bytes)?;
+                let rec = map
+                    .get_mut(authority_id)
+                    .ok_or(ExecutionError::AuthorityNotFound {
+                        authority_id: *authority_id,
+                    })?;
+                if rec.status != AuthorityStatus::Exiting {
+                    let status = match rec.status {
+                        AuthorityStatus::Active => "Active",
+                        AuthorityStatus::Exiting => "Exiting",
+                        AuthorityStatus::Ejected => "Ejected",
+                    };
+                    return Err(ExecutionError::SlotNotExiting {
+                        ring: "authority",
+                        slot_id: *authority_id,
+                        status,
+                    });
+                }
+                let have = rec.deposited_stake as Balance;
+                if amount > have {
+                    return Err(ExecutionError::WithdrawalExceedsDeposit {
+                        ring: "authority",
+                        slot_id: *authority_id,
+                        want: amount,
+                        have,
+                    });
+                }
+                rec.deposited_stake -= amount as u64;
+                self.debit_unchecked(reserved::authority_stake_pool_address(), amount)?;
+                self.credit_unchecked(to, amount)?;
+                self.write_bytes_unchecked(registry_addr, encode(&map));
+                Ok(())
+            }
+            // Mirror for the Validator Ring.
+            Intent::WithdrawValidatorStake {
+                to,
+                validator_id,
+                amount,
+            } => {
+                use crate::validator_registry::{decode, encode, ValidatorStatus};
+                let to = *to;
+                let amount = *amount;
+                if amount == 0 {
+                    return Ok(());
+                }
+                if reserved::is_reserved(&to) {
+                    return Err(ExecutionError::ReservedAddressTransferDenied { addr: to });
+                }
+                let registry_addr = reserved::validator_registry_address();
+                let existing_bytes = self.read_bytes(&registry_addr).unwrap_or_default();
+                let mut map = decode(&existing_bytes)?;
+                let rec = map
+                    .get_mut(validator_id)
+                    .ok_or(ExecutionError::ValidatorNotFound {
+                        validator_id: *validator_id,
+                    })?;
+                if rec.status != ValidatorStatus::Exiting {
+                    let status = match rec.status {
+                        ValidatorStatus::Active => "Active",
+                        ValidatorStatus::Exiting => "Exiting",
+                        ValidatorStatus::Ejected => "Ejected",
+                    };
+                    return Err(ExecutionError::SlotNotExiting {
+                        ring: "validator",
+                        slot_id: *validator_id,
+                        status,
+                    });
+                }
+                let have = rec.deposited_stake as Balance;
+                if amount > have {
+                    return Err(ExecutionError::WithdrawalExceedsDeposit {
+                        ring: "validator",
+                        slot_id: *validator_id,
+                        want: amount,
+                        have,
+                    });
+                }
+                rec.deposited_stake -= amount as u64;
+                self.debit_unchecked(reserved::validator_stake_pool_address(), amount)?;
+                self.credit_unchecked(to, amount)?;
                 self.write_bytes_unchecked(registry_addr, encode(&map));
                 Ok(())
             }
@@ -6734,5 +6873,314 @@ mod tests {
         assert_eq!(s.balance(&reserved::insurance_pool_address()), 0);
         assert_eq!(s.balance(&reserved::treasury_address()), 0);
         assert_eq!(s.validator_deposited_stake(0), 0);
+    }
+
+    // ===== Withdraw stake (graceful exit path) =====
+
+    fn admit_and_exit_authority(s: &mut InMemorySubstrate, src: Address, amount: Balance) {
+        s.apply_intent(&Intent::AdmitAuthority {
+            authority_id: 0,
+            stake_gsx: 1,
+            mldsa_public_key: vec![0xaa; 1952],
+            bls_public_key: vec![0xbb; 48],
+        })
+        .unwrap();
+        s.apply_intent(&Intent::DepositAuthorityStake {
+            from: src,
+            authority_id: 0,
+            amount,
+        })
+        .unwrap();
+        s.apply_intent(&Intent::ExitAuthority { authority_id: 0 })
+            .unwrap();
+    }
+
+    fn admit_and_exit_validator(s: &mut InMemorySubstrate, src: Address, amount: Balance) {
+        s.apply_intent(&Intent::AdmitValidator {
+            validator_id: 0,
+            stake_gsx: 1,
+            mldsa_public_key: vec![0xaa; 1952],
+            bls_public_key: vec![0xbb; 48],
+        })
+        .unwrap();
+        s.apply_intent(&Intent::DepositValidatorStake {
+            from: src,
+            validator_id: 0,
+            amount,
+        })
+        .unwrap();
+        s.apply_intent(&Intent::ExitValidator { validator_id: 0 })
+            .unwrap();
+    }
+
+    #[test]
+    fn withdraw_authority_stake_happy_path() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 10_000_000)]);
+        admit_and_exit_authority(&mut s, addr(1), 7_000_000);
+        s.apply_intent(&Intent::WithdrawAuthorityStake {
+            to: addr(2),
+            authority_id: 0,
+            amount: 7_000_000,
+        })
+        .unwrap();
+        assert_eq!(s.authority_deposited_stake(0), 0);
+        assert_eq!(s.balance(&reserved::authority_stake_pool_address()), 0);
+        assert_eq!(s.balance(&addr(2)), 7_000_000);
+    }
+
+    /// Partial withdrawals leave the residual in the per-slot
+    /// counter and the pool.
+    #[test]
+    fn withdraw_authority_stake_partial() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 10_000_000)]);
+        admit_and_exit_authority(&mut s, addr(1), 8_000_000);
+        s.apply_intent(&Intent::WithdrawAuthorityStake {
+            to: addr(2),
+            authority_id: 0,
+            amount: 3_000_000,
+        })
+        .unwrap();
+        assert_eq!(s.authority_deposited_stake(0), 5_000_000);
+        assert_eq!(
+            s.balance(&reserved::authority_stake_pool_address()),
+            5_000_000
+        );
+        assert_eq!(s.balance(&addr(2)), 3_000_000);
+    }
+
+    /// Active slot cannot withdraw — Active is the bonded state.
+    #[test]
+    fn withdraw_authority_stake_active_slot_rejected() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 10_000_000)]);
+        s.apply_intent(&Intent::AdmitAuthority {
+            authority_id: 0,
+            stake_gsx: 1,
+            mldsa_public_key: vec![0xaa; 1952],
+            bls_public_key: vec![0xbb; 48],
+        })
+        .unwrap();
+        s.apply_intent(&Intent::DepositAuthorityStake {
+            from: addr(1),
+            authority_id: 0,
+            amount: 5_000_000,
+        })
+        .unwrap();
+        let before = s.state_root();
+        let err = s.apply_intent(&Intent::WithdrawAuthorityStake {
+            to: addr(2),
+            authority_id: 0,
+            amount: 1_000_000,
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::SlotNotExiting {
+                ring: "authority",
+                slot_id: 0,
+                ..
+            })
+        ));
+        assert_eq!(s.state_root(), before);
+    }
+
+    /// Ejected slot has already been slashed — withdraw rejects.
+    #[test]
+    fn withdraw_authority_stake_ejected_slot_rejected() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 10_000_000)]);
+        s.apply_intent(&Intent::AdmitAuthority {
+            authority_id: 0,
+            stake_gsx: 1,
+            mldsa_public_key: vec![0xaa; 1952],
+            bls_public_key: vec![0xbb; 48],
+        })
+        .unwrap();
+        s.apply_intent(&Intent::EjectAuthority {
+            authority_id: 0,
+            proof_ref: [0; 32],
+        })
+        .unwrap();
+        let err = s.apply_intent(&Intent::WithdrawAuthorityStake {
+            to: addr(2),
+            authority_id: 0,
+            amount: 1,
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::SlotNotExiting {
+                ring: "authority",
+                slot_id: 0,
+                ..
+            })
+        ));
+    }
+
+    /// Withdrawal exceeding the per-slot deposit rejects
+    /// atomically — no debit, no credit.
+    #[test]
+    fn withdraw_authority_stake_over_deposit_rejected_atomically() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 10_000_000)]);
+        admit_and_exit_authority(&mut s, addr(1), 4_000_000);
+        let before = s.state_root();
+        let err = s.apply_intent(&Intent::WithdrawAuthorityStake {
+            to: addr(2),
+            authority_id: 0,
+            amount: 5_000_000,
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::WithdrawalExceedsDeposit {
+                ring: "authority",
+                slot_id: 0,
+                want: 5_000_000,
+                have: 4_000_000,
+            })
+        ));
+        assert_eq!(s.state_root(), before);
+    }
+
+    /// Withdraw to a reserved address rejects.
+    #[test]
+    fn withdraw_authority_stake_reserved_destination_rejected() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 10_000_000)]);
+        admit_and_exit_authority(&mut s, addr(1), 4_000_000);
+        let err = s.apply_intent(&Intent::WithdrawAuthorityStake {
+            to: reserved::treasury_address(),
+            authority_id: 0,
+            amount: 1_000_000,
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::ReservedAddressTransferDenied { .. })
+        ));
+    }
+
+    /// Unknown slot rejects.
+    #[test]
+    fn withdraw_authority_stake_unknown_slot_rejected() {
+        let mut s = InMemorySubstrate::new();
+        let err = s.apply_intent(&Intent::WithdrawAuthorityStake {
+            to: addr(2),
+            authority_id: 42,
+            amount: 1_000_000,
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::AuthorityNotFound { authority_id: 42 })
+        ));
+    }
+
+    /// Zero-amount no-op.
+    #[test]
+    fn withdraw_authority_stake_zero_amount_is_noop() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 10_000_000)]);
+        admit_and_exit_authority(&mut s, addr(1), 4_000_000);
+        let before = s.state_root();
+        s.apply_intent(&Intent::WithdrawAuthorityStake {
+            to: addr(2),
+            authority_id: 0,
+            amount: 0,
+        })
+        .unwrap();
+        assert_eq!(s.state_root(), before);
+        assert_eq!(s.authority_deposited_stake(0), 4_000_000);
+    }
+
+    /// Validator-Ring mirror of the happy path.
+    #[test]
+    fn withdraw_validator_stake_happy_path() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 5_000_000)]);
+        admit_and_exit_validator(&mut s, addr(1), 3_000_000);
+        s.apply_intent(&Intent::WithdrawValidatorStake {
+            to: addr(2),
+            validator_id: 0,
+            amount: 3_000_000,
+        })
+        .unwrap();
+        assert_eq!(s.validator_deposited_stake(0), 0);
+        assert_eq!(s.balance(&reserved::validator_stake_pool_address()), 0);
+        assert_eq!(s.balance(&addr(2)), 3_000_000);
+    }
+
+    /// Validator partial withdrawal mirror.
+    #[test]
+    fn withdraw_validator_stake_partial() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 5_000_000)]);
+        admit_and_exit_validator(&mut s, addr(1), 4_000_000);
+        s.apply_intent(&Intent::WithdrawValidatorStake {
+            to: addr(2),
+            validator_id: 0,
+            amount: 1_500_000,
+        })
+        .unwrap();
+        assert_eq!(s.validator_deposited_stake(0), 2_500_000);
+        assert_eq!(
+            s.balance(&reserved::validator_stake_pool_address()),
+            2_500_000
+        );
+        assert_eq!(s.balance(&addr(2)), 1_500_000);
+    }
+
+    /// Validator withdraw on Active slot rejects.
+    #[test]
+    fn withdraw_validator_stake_active_slot_rejected() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 5_000_000)]);
+        s.apply_intent(&Intent::AdmitValidator {
+            validator_id: 0,
+            stake_gsx: 1,
+            mldsa_public_key: vec![0xaa; 1952],
+            bls_public_key: vec![0xbb; 48],
+        })
+        .unwrap();
+        s.apply_intent(&Intent::DepositValidatorStake {
+            from: addr(1),
+            validator_id: 0,
+            amount: 3_000_000,
+        })
+        .unwrap();
+        let err = s.apply_intent(&Intent::WithdrawValidatorStake {
+            to: addr(2),
+            validator_id: 0,
+            amount: 1,
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::SlotNotExiting {
+                ring: "validator",
+                slot_id: 0,
+                ..
+            })
+        ));
+    }
+
+    /// Withdraws on one ring do not touch the other ring's pool.
+    #[test]
+    fn withdraw_authority_does_not_touch_validator_pool() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 20_000_000)]);
+        admit_and_exit_authority(&mut s, addr(1), 5_000_000);
+        // Independently bond on the validator ring (active).
+        s.apply_intent(&Intent::AdmitValidator {
+            validator_id: 0,
+            stake_gsx: 1,
+            mldsa_public_key: vec![0xcc; 1952],
+            bls_public_key: vec![0xdd; 48],
+        })
+        .unwrap();
+        s.apply_intent(&Intent::DepositValidatorStake {
+            from: addr(1),
+            validator_id: 0,
+            amount: 4_000_000,
+        })
+        .unwrap();
+        s.apply_intent(&Intent::WithdrawAuthorityStake {
+            to: addr(2),
+            authority_id: 0,
+            amount: 5_000_000,
+        })
+        .unwrap();
+        assert_eq!(s.balance(&reserved::authority_stake_pool_address()), 0);
+        assert_eq!(
+            s.balance(&reserved::validator_stake_pool_address()),
+            4_000_000
+        );
+        assert_eq!(s.validator_deposited_stake(0), 4_000_000);
     }
 }
