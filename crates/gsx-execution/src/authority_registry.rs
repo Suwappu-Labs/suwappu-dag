@@ -8,28 +8,20 @@
 //! - `mldsa_public_key` (ML-DSA-65, ~1952 B)
 //! - `bls_public_key` (BLS12-381 G1 compressed, 48 B)
 //! - declared stake (`stake_gsx`)
+//! - actual bonded stake (`deposited_stake`)
+//! - exit-cooldown anchor (`exit_block_height`)
 //! - current `AuthorityStatus`: Active / Exiting / Ejected
-//!
-//! ## Lifecycle
-//!
-//! - `AdmitAuthority`: insert a new record in `Active` state.
-//!   Rejects if `authority_id` is already occupied; pubkey
-//!   widths must be within configured caps.
-//! - `ExitAuthority`: flip status `Active → Exiting`. The
-//!   actual epoch-boundary set rotation (paper §4.4) is
-//!   daemon-side; the substrate just records the intent.
-//! - `EjectAuthority`: flip status to `Ejected`. Carries a
-//!   `proof_ref` (opaque to substrate) linking to the
-//!   equivocation proof that justified the ejection.
 //!
 //! ## Encoding
 //!
 //! ```text
-//! u32::BE(VERSION = 1) ||
+//! u32::BE(VERSION = 3) ||
 //! u32::BE(count) ||
 //!   foreach (authority_id, rec) in ascending authority_id order:
 //!     authority_id (u32::BE, 4 B) ||
 //!     stake_gsx (u64::BE, 8 B) ||
+//!     deposited_stake (u64::BE, 8 B) ||
+//!     exit_block_height (u64::BE, 8 B) ||
 //!     status (1 B: 0=Active, 1=Exiting, 2=Ejected) ||
 //!     u32::BE(mldsa_pk_len) || mldsa_pk ||
 //!     u32::BE(bls_pk_len) || bls_pk
@@ -41,14 +33,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::{error::ExecutionError, reserved};
 
-/// Current encoding version. Bumped to v2 to add the
-/// `deposited_stake` field tracking real economic bonding
-/// per-slot. v1 records decode with `deposited_stake = 0`.
-pub const AUTHORITY_REGISTRY_VERSION: u32 = 2;
+/// Current encoding version. Bumped to v3 to add the
+/// `exit_block_height` field that anchors the
+/// `EXIT_COOLDOWN_BLOCKS` gate on `WithdrawAuthorityStake`.
+/// v2 records decode with `exit_block_height = 0`. v1 records
+/// decode with `deposited_stake = 0` and `exit_block_height = 0`.
+pub const AUTHORITY_REGISTRY_VERSION: u32 = 3;
 
-/// Legacy v1 encoding version. The decoder still accepts v1
-/// bytes (treats `deposited_stake` as 0); the encoder always
-/// emits v2.
+/// Legacy v2 encoding version. Decoder accepts v2 bytes
+/// (lifts `exit_block_height` to 0).
+pub const AUTHORITY_REGISTRY_VERSION_V2: u32 = 2;
+
+/// Legacy v1 encoding version. Decoder accepts v1 bytes
+/// (lifts both `deposited_stake` and `exit_block_height` to 0).
 pub const AUTHORITY_REGISTRY_VERSION_V1: u32 = 1;
 
 /// Max ML-DSA-65 public-key bytes accepted in
@@ -69,7 +66,10 @@ pub const ENCODED_HEADER_BYTES: usize = 4 + 4;
 pub const ENTRY_FIXED_BYTES_V1: usize = 4 + 8 + 1 + 4 + 4;
 
 /// V2 fixed per-entry overhead: V1 + `deposited_stake (8) = 29 B`.
-pub const ENTRY_FIXED_BYTES: usize = ENTRY_FIXED_BYTES_V1 + 8;
+pub const ENTRY_FIXED_BYTES_V2: usize = ENTRY_FIXED_BYTES_V1 + 8;
+
+/// V3 fixed per-entry overhead: V2 + `exit_block_height (8) = 37 B`.
+pub const ENTRY_FIXED_BYTES: usize = ENTRY_FIXED_BYTES_V2 + 8;
 
 /// Lifecycle status for an Authority Ring slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -123,15 +123,24 @@ pub struct AuthorityRecord {
     pub stake_gsx: u64,
     /// Actual bonded stake — running total credited via
     /// `Intent::DepositAuthorityStake`. Drained on
-    /// `EjectAuthority` (slashing waterfall, follow-up).
-    /// `[0]` for v1-decoded records.
+    /// `EjectAuthority` (slashing waterfall) or
+    /// `WithdrawAuthorityStake` (graceful exit). `0` for
+    /// v1-decoded records.
     #[serde(default)]
     pub deposited_stake: u64,
+    /// Block height at which `ExitAuthority` flipped this
+    /// slot to `Exiting`. The exit cooldown gate on
+    /// `WithdrawAuthorityStake` enforces
+    /// `current_block_height >= exit_block_height +
+    /// EXIT_COOLDOWN_BLOCKS`. `0` for slots that never
+    /// exited or for v1/v2-decoded records.
+    #[serde(default)]
+    pub exit_block_height: u64,
     /// Current lifecycle status.
     pub status: AuthorityStatus,
 }
 
-/// Encode the authority map to the canonical v2 byte sequence.
+/// Encode the authority map to the canonical v3 byte sequence.
 pub fn encode(map: &BTreeMap<u32, AuthorityRecord>) -> Vec<u8> {
     let mut buf = Vec::new();
     buf.extend_from_slice(&AUTHORITY_REGISTRY_VERSION.to_be_bytes());
@@ -140,6 +149,7 @@ pub fn encode(map: &BTreeMap<u32, AuthorityRecord>) -> Vec<u8> {
         buf.extend_from_slice(&id.to_be_bytes());
         buf.extend_from_slice(&rec.stake_gsx.to_be_bytes());
         buf.extend_from_slice(&rec.deposited_stake.to_be_bytes());
+        buf.extend_from_slice(&rec.exit_block_height.to_be_bytes());
         buf.push(rec.status.as_byte());
         buf.extend_from_slice(&(rec.mldsa_public_key.len() as u32).to_be_bytes());
         buf.extend_from_slice(&rec.mldsa_public_key);
@@ -150,8 +160,8 @@ pub fn encode(map: &BTreeMap<u32, AuthorityRecord>) -> Vec<u8> {
 }
 
 /// Decode the byte sequence back into the authority map.
-/// Accepts both v1 and v2 encoding; v1 records lift to v2
-/// with `deposited_stake = 0`.
+/// Accepts v1, v2, and v3 encodings; older records lift
+/// missing fields to 0.
 pub fn decode(bytes: &[u8]) -> Result<BTreeMap<u32, AuthorityRecord>, ExecutionError> {
     if bytes.is_empty() {
         return Ok(BTreeMap::new());
@@ -163,9 +173,10 @@ pub fn decode(bytes: &[u8]) -> Result<BTreeMap<u32, AuthorityRecord>, ExecutionE
         });
     }
     let version = u32::from_be_bytes(bytes[0..4].try_into().unwrap());
-    let v2 = match version {
-        AUTHORITY_REGISTRY_VERSION => true,
-        AUTHORITY_REGISTRY_VERSION_V1 => false,
+    let (has_deposited, has_exit_height, entry_fixed_bytes) = match version {
+        AUTHORITY_REGISTRY_VERSION => (true, true, ENTRY_FIXED_BYTES),
+        AUTHORITY_REGISTRY_VERSION_V2 => (true, false, ENTRY_FIXED_BYTES_V2),
+        AUTHORITY_REGISTRY_VERSION_V1 => (false, false, ENTRY_FIXED_BYTES_V1),
         _ => {
             return Err(ExecutionError::CorruptStateRecord {
                 addr: reserved::authority_registry_address(),
@@ -174,11 +185,6 @@ pub fn decode(bytes: &[u8]) -> Result<BTreeMap<u32, AuthorityRecord>, ExecutionE
         }
     };
     let count = u32::from_be_bytes(bytes[4..8].try_into().unwrap()) as usize;
-    let entry_fixed_bytes = if v2 {
-        ENTRY_FIXED_BYTES
-    } else {
-        ENTRY_FIXED_BYTES_V1
-    };
     let mut map = BTreeMap::new();
     let mut cursor = ENCODED_HEADER_BYTES;
     for _ in 0..count {
@@ -192,7 +198,14 @@ pub fn decode(bytes: &[u8]) -> Result<BTreeMap<u32, AuthorityRecord>, ExecutionE
         cursor += 4;
         let stake_gsx = u64::from_be_bytes(bytes[cursor..cursor + 8].try_into().unwrap());
         cursor += 8;
-        let deposited_stake = if v2 {
+        let deposited_stake = if has_deposited {
+            let v = u64::from_be_bytes(bytes[cursor..cursor + 8].try_into().unwrap());
+            cursor += 8;
+            v
+        } else {
+            0
+        };
+        let exit_block_height = if has_exit_height {
             let v = u64::from_be_bytes(bytes[cursor..cursor + 8].try_into().unwrap());
             cursor += 8;
             v
@@ -238,6 +251,7 @@ pub fn decode(bytes: &[u8]) -> Result<BTreeMap<u32, AuthorityRecord>, ExecutionE
                     bls_public_key,
                     stake_gsx,
                     deposited_stake,
+                    exit_block_height,
                     status,
                 },
             )
@@ -268,6 +282,7 @@ mod tests {
             bls_public_key: vec![0xbb; 48],
             stake_gsx: stake,
             deposited_stake: 0,
+            exit_block_height: 0,
             status,
         }
     }
@@ -351,7 +366,8 @@ mod tests {
         bytes.extend_from_slice(&1u32.to_be_bytes());
         bytes.extend_from_slice(&0u32.to_be_bytes()); // authority_id
         bytes.extend_from_slice(&0u64.to_be_bytes()); // stake_gsx
-        bytes.extend_from_slice(&0u64.to_be_bytes()); // deposited_stake (v2)
+        bytes.extend_from_slice(&0u64.to_be_bytes()); // deposited_stake (v2+)
+        bytes.extend_from_slice(&0u64.to_be_bytes()); // exit_block_height (v3)
         bytes.push(0); // Active
         bytes.extend_from_slice(&((MAX_MLDSA_PK_BYTES + 1) as u32).to_be_bytes());
         // even though we don't include the bytes the length check fires
@@ -372,17 +388,15 @@ mod tests {
         ));
     }
 
-    /// Hand-rolled v1 bytes (without `deposited_stake`)
-    /// decode cleanly, lifting `deposited_stake` to 0.
+    /// Hand-rolled v1 bytes (without `deposited_stake` or
+    /// `exit_block_height`) decode cleanly, lifting both
+    /// fields to 0.
     #[test]
-    fn v1_bytes_decode_to_v2_with_zero_deposited_stake() {
+    fn v1_bytes_decode_with_zero_fields() {
         let mut bytes = vec![];
-        // v1 header: version=1, count=1.
         bytes.extend_from_slice(&AUTHORITY_REGISTRY_VERSION_V1.to_be_bytes());
         bytes.extend_from_slice(&1u32.to_be_bytes());
-        // v1 entry: authority_id (4) + stake (8) + status (1) +
-        // mldsa_len (4) + mldsa + bls_len (4) + bls.
-        bytes.extend_from_slice(&7u32.to_be_bytes()); // authority_id = 7
+        bytes.extend_from_slice(&7u32.to_be_bytes()); // authority_id
         bytes.extend_from_slice(&15_000_000u64.to_be_bytes()); // stake
         bytes.push(0); // Active
         bytes.extend_from_slice(&1952u32.to_be_bytes());
@@ -393,11 +407,35 @@ mod tests {
         let decoded = decode(&bytes).unwrap();
         let rec = decoded.get(&7).unwrap();
         assert_eq!(rec.stake_gsx, 15_000_000);
-        assert_eq!(rec.deposited_stake, 0); // v1 lifted to 0
+        assert_eq!(rec.deposited_stake, 0);
+        assert_eq!(rec.exit_block_height, 0);
         assert_eq!(rec.status, AuthorityStatus::Active);
     }
 
-    /// Round-trip with a non-zero deposited_stake (v2-native).
+    /// Hand-rolled v2 bytes (with `deposited_stake`, without
+    /// `exit_block_height`) decode cleanly.
+    #[test]
+    fn v2_bytes_decode_to_v3_with_zero_exit_block_height() {
+        let mut bytes = vec![];
+        bytes.extend_from_slice(&AUTHORITY_REGISTRY_VERSION_V2.to_be_bytes());
+        bytes.extend_from_slice(&1u32.to_be_bytes());
+        bytes.extend_from_slice(&7u32.to_be_bytes()); // authority_id
+        bytes.extend_from_slice(&15_000_000u64.to_be_bytes()); // stake
+        bytes.extend_from_slice(&12_500_000u64.to_be_bytes()); // deposited
+        bytes.push(1); // Exiting
+        bytes.extend_from_slice(&1952u32.to_be_bytes());
+        bytes.extend_from_slice(&[0xaa; 1952]);
+        bytes.extend_from_slice(&48u32.to_be_bytes());
+        bytes.extend_from_slice(&[0xbb; 48]);
+
+        let decoded = decode(&bytes).unwrap();
+        let rec = decoded.get(&7).unwrap();
+        assert_eq!(rec.deposited_stake, 12_500_000);
+        assert_eq!(rec.exit_block_height, 0); // v2 lifted to 0
+        assert_eq!(rec.status, AuthorityStatus::Exiting);
+    }
+
+    /// Round-trip with a non-zero deposited_stake (v3-native).
     #[test]
     fn deposited_stake_round_trips() {
         let mut m = BTreeMap::new();
@@ -408,10 +446,30 @@ mod tests {
                 bls_public_key: vec![0xbb; 48],
                 stake_gsx: 15_000_000,
                 deposited_stake: 12_500_000,
+                exit_block_height: 0,
                 status: AuthorityStatus::Active,
             },
         );
         let decoded = decode(&encode(&m)).unwrap();
         assert_eq!(decoded.get(&0).unwrap().deposited_stake, 12_500_000);
+    }
+
+    /// Round-trip with a non-zero exit_block_height (v3-native).
+    #[test]
+    fn exit_block_height_round_trips() {
+        let mut m = BTreeMap::new();
+        m.insert(
+            0,
+            AuthorityRecord {
+                mldsa_public_key: vec![0xaa; 1952],
+                bls_public_key: vec![0xbb; 48],
+                stake_gsx: 15_000_000,
+                deposited_stake: 12_500_000,
+                exit_block_height: 1_234_567,
+                status: AuthorityStatus::Exiting,
+            },
+        );
+        let decoded = decode(&encode(&m)).unwrap();
+        assert_eq!(decoded.get(&0).unwrap().exit_block_height, 1_234_567);
     }
 }

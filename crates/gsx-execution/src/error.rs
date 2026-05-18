@@ -395,4 +395,23 @@ pub enum ExecutionError {
         /// Current `deposited_stake` on the slot.
         have: Balance,
     },
+
+    /// `Intent::WithdrawAuthorityStake` or
+    /// `Intent::WithdrawValidatorStake` was submitted before
+    /// the slot's exit cooldown window elapsed
+    /// (`current_block_height < exit_block_height +
+    /// EXIT_COOLDOWN_BLOCKS`).
+    #[error(
+        "{ring} slot {slot_id} still in exit cooldown: at block {current_block_height}, withdraw allowed at {required_block_height}"
+    )]
+    ExitCooldownNotElapsed {
+        /// Which ring ("authority" or "validator").
+        ring: &'static str,
+        /// The slot id the withdrawal targeted.
+        slot_id: u32,
+        /// `exit_block_height + EXIT_COOLDOWN_BLOCKS`.
+        required_block_height: u64,
+        /// The ambient height at the withdrawal attempt.
+        current_block_height: u64,
+    },
 }
