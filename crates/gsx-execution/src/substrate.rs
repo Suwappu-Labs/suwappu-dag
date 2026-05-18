@@ -1252,12 +1252,42 @@ impl Substrate for InMemorySubstrate {
                     .ok_or(ExecutionError::AuthorityNotFound {
                         authority_id: *authority_id,
                     })?;
+                // Per-slot slashing: drain the ejected slot's
+                // bonded capital from the authority stake pool
+                // through the standard Tokenomics §8.3 waterfall
+                // (no direct counterparty for an Authority
+                // ejection — 70% insurance, 30% treasury).
+                let drained = rec.deposited_stake as Balance;
+                rec.deposited_stake = 0;
                 // Ejection is one-way; any status →
                 // Ejected (e.g., an Exiting validator
                 // caught equivocating still loses stake).
                 rec.status = AuthorityStatus::Ejected;
                 let new_bytes = encode(&map);
                 self.write_bytes_unchecked(registry_addr, new_bytes);
+                if drained > 0 {
+                    let pool_addr = reserved::authority_stake_pool_address();
+                    let pool_balance = self.balance(&pool_addr);
+                    // Defensive clamp: pool balance is the
+                    // authoritative ceiling. Per-slot tracking
+                    // started at v2 of the registry; v1 slots
+                    // decode with deposited_stake = 0, so the
+                    // clamp is mainly for safety against any
+                    // accounting drift between the pool and the
+                    // per-slot counters.
+                    let drained = if drained > pool_balance {
+                        pool_balance
+                    } else {
+                        drained
+                    };
+                    if drained > 0 {
+                        self.debit_unchecked(pool_addr, drained)?;
+                        let insurance_share = drained * 70 / 100;
+                        let treasury_share = drained - insurance_share;
+                        self.credit_unchecked(reserved::insurance_pool_address(), insurance_share)?;
+                        self.credit_unchecked(reserved::treasury_address(), treasury_share)?;
+                    }
+                }
                 Ok(())
             }
             // Validator Ring registry — mirrors Authority Ring
@@ -1341,9 +1371,30 @@ impl Substrate for InMemorySubstrate {
                     .ok_or(ExecutionError::ValidatorNotFound {
                         validator_id: *validator_id,
                     })?;
+                // Mirror of EjectAuthority: drain bonded capital
+                // through the Tokenomics §8.3 waterfall before
+                // flipping the status.
+                let drained = rec.deposited_stake as Balance;
+                rec.deposited_stake = 0;
                 rec.status = ValidatorStatus::Ejected;
                 let new_bytes = encode(&map);
                 self.write_bytes_unchecked(registry_addr, new_bytes);
+                if drained > 0 {
+                    let pool_addr = reserved::validator_stake_pool_address();
+                    let pool_balance = self.balance(&pool_addr);
+                    let drained = if drained > pool_balance {
+                        pool_balance
+                    } else {
+                        drained
+                    };
+                    if drained > 0 {
+                        self.debit_unchecked(pool_addr, drained)?;
+                        let insurance_share = drained * 70 / 100;
+                        let treasury_share = drained - insurance_share;
+                        self.credit_unchecked(reserved::insurance_pool_address(), insurance_share)?;
+                        self.credit_unchecked(reserved::treasury_address(), treasury_share)?;
+                    }
+                }
                 Ok(())
             }
             // Track G Phase G2.2 (#97): wired through the
@@ -6436,5 +6487,252 @@ mod tests {
         assert_eq!(s.validator_deposited_stake(0), 0);
         assert_eq!(s.authority_deposited_stake(99_999), 0);
         assert_eq!(s.validator_deposited_stake(99_999), 0);
+    }
+
+    // ===== Per-slot slash on EjectAuthority / EjectValidator =====
+
+    /// Ejecting an Authority with non-zero bonded capital drains
+    /// the slot's `deposited_stake` from the authority stake pool
+    /// through the §8.3 waterfall (70% insurance, 30% treasury)
+    /// and zeroes the per-slot counter.
+    #[test]
+    fn eject_authority_drains_deposited_stake_to_waterfall() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 10_000_000)]);
+        s.apply_intent(&Intent::AdmitAuthority {
+            authority_id: 0,
+            stake_gsx: 1,
+            mldsa_public_key: vec![0xaa; 1952],
+            bls_public_key: vec![0xbb; 48],
+        })
+        .unwrap();
+        s.apply_intent(&Intent::DepositAuthorityStake {
+            from: addr(1),
+            authority_id: 0,
+            amount: 10_000_000,
+        })
+        .unwrap();
+        assert_eq!(s.authority_deposited_stake(0), 10_000_000);
+        assert_eq!(
+            s.balance(&reserved::authority_stake_pool_address()),
+            10_000_000
+        );
+
+        s.apply_intent(&Intent::EjectAuthority {
+            authority_id: 0,
+            proof_ref: [0xee; 32],
+        })
+        .unwrap();
+
+        assert_eq!(s.authority_deposited_stake(0), 0);
+        assert_eq!(s.balance(&reserved::authority_stake_pool_address()), 0);
+        assert_eq!(s.balance(&reserved::insurance_pool_address()), 7_000_000);
+        assert_eq!(s.balance(&reserved::treasury_address()), 3_000_000);
+        assert_eq!(
+            s.authority_record(0).unwrap().status,
+            crate::authority_registry::AuthorityStatus::Ejected
+        );
+    }
+
+    /// Ejecting an Authority with zero bonded capital is still
+    /// idempotent — status flips, no pool drain.
+    #[test]
+    fn eject_authority_zero_deposit_is_status_only() {
+        let mut s = InMemorySubstrate::new();
+        s.apply_intent(&Intent::AdmitAuthority {
+            authority_id: 0,
+            stake_gsx: 1,
+            mldsa_public_key: vec![0xaa; 1952],
+            bls_public_key: vec![0xbb; 48],
+        })
+        .unwrap();
+        s.apply_intent(&Intent::EjectAuthority {
+            authority_id: 0,
+            proof_ref: [0; 32],
+        })
+        .unwrap();
+        assert_eq!(s.balance(&reserved::authority_stake_pool_address()), 0);
+        assert_eq!(s.balance(&reserved::insurance_pool_address()), 0);
+        assert_eq!(s.balance(&reserved::treasury_address()), 0);
+        assert_eq!(
+            s.authority_record(0).unwrap().status,
+            crate::authority_registry::AuthorityStatus::Ejected
+        );
+    }
+
+    /// Ejecting one Authority drains only THAT slot's deposit —
+    /// peer slots remain whole in the pool.
+    #[test]
+    fn eject_authority_drain_is_per_slot_independent() {
+        let mut s =
+            InMemorySubstrate::from_balances([(addr(1), 20_000_000), (addr(2), 20_000_000)]);
+        for i in 0..2 {
+            s.apply_intent(&Intent::AdmitAuthority {
+                authority_id: i,
+                stake_gsx: 1,
+                mldsa_public_key: vec![i as u8; 1952],
+                bls_public_key: vec![i as u8; 48],
+            })
+            .unwrap();
+        }
+        s.apply_intent(&Intent::DepositAuthorityStake {
+            from: addr(1),
+            authority_id: 0,
+            amount: 6_000_000,
+        })
+        .unwrap();
+        s.apply_intent(&Intent::DepositAuthorityStake {
+            from: addr(2),
+            authority_id: 1,
+            amount: 14_000_000,
+        })
+        .unwrap();
+
+        s.apply_intent(&Intent::EjectAuthority {
+            authority_id: 0,
+            proof_ref: [0; 32],
+        })
+        .unwrap();
+
+        // Slot 0 drained, slot 1 untouched.
+        assert_eq!(s.authority_deposited_stake(0), 0);
+        assert_eq!(s.authority_deposited_stake(1), 14_000_000);
+        assert_eq!(
+            s.balance(&reserved::authority_stake_pool_address()),
+            14_000_000
+        );
+        assert_eq!(s.balance(&reserved::insurance_pool_address()), 4_200_000);
+        assert_eq!(s.balance(&reserved::treasury_address()), 1_800_000);
+    }
+
+    /// An Authority that was already Exiting still loses its
+    /// bonded capital when ejected (e.g., caught equivocating
+    /// during the cooldown).
+    #[test]
+    fn eject_authority_from_exiting_still_slashes() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 10_000_000)]);
+        s.apply_intent(&Intent::AdmitAuthority {
+            authority_id: 0,
+            stake_gsx: 1,
+            mldsa_public_key: vec![0xaa; 1952],
+            bls_public_key: vec![0xbb; 48],
+        })
+        .unwrap();
+        s.apply_intent(&Intent::DepositAuthorityStake {
+            from: addr(1),
+            authority_id: 0,
+            amount: 5_000_000,
+        })
+        .unwrap();
+        s.apply_intent(&Intent::ExitAuthority { authority_id: 0 })
+            .unwrap();
+        s.apply_intent(&Intent::EjectAuthority {
+            authority_id: 0,
+            proof_ref: [0; 32],
+        })
+        .unwrap();
+        assert_eq!(s.authority_deposited_stake(0), 0);
+        assert_eq!(s.balance(&reserved::authority_stake_pool_address()), 0);
+        assert_eq!(s.balance(&reserved::insurance_pool_address()), 3_500_000);
+        assert_eq!(s.balance(&reserved::treasury_address()), 1_500_000);
+    }
+
+    /// Validator-Ring mirror of the happy path.
+    #[test]
+    fn eject_validator_drains_deposited_stake_to_waterfall() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 5_000_000)]);
+        s.apply_intent(&Intent::AdmitValidator {
+            validator_id: 0,
+            stake_gsx: 1,
+            mldsa_public_key: vec![0xaa; 1952],
+            bls_public_key: vec![0xbb; 48],
+        })
+        .unwrap();
+        s.apply_intent(&Intent::DepositValidatorStake {
+            from: addr(1),
+            validator_id: 0,
+            amount: 5_000_000,
+        })
+        .unwrap();
+        s.apply_intent(&Intent::EjectValidator {
+            validator_id: 0,
+            proof_ref: [0xee; 32],
+        })
+        .unwrap();
+        assert_eq!(s.validator_deposited_stake(0), 0);
+        assert_eq!(s.balance(&reserved::validator_stake_pool_address()), 0);
+        assert_eq!(s.balance(&reserved::insurance_pool_address()), 3_500_000);
+        assert_eq!(s.balance(&reserved::treasury_address()), 1_500_000);
+        assert_eq!(
+            s.validator_record(0).unwrap().status,
+            crate::validator_registry::ValidatorStatus::Ejected
+        );
+    }
+
+    /// Authority and Validator ring ejections drain their own
+    /// pools — never the other ring's.
+    #[test]
+    fn eject_authority_does_not_touch_validator_pool() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 20_000_000)]);
+        s.apply_intent(&Intent::AdmitAuthority {
+            authority_id: 0,
+            stake_gsx: 1,
+            mldsa_public_key: vec![0xaa; 1952],
+            bls_public_key: vec![0xbb; 48],
+        })
+        .unwrap();
+        s.apply_intent(&Intent::AdmitValidator {
+            validator_id: 0,
+            stake_gsx: 1,
+            mldsa_public_key: vec![0xcc; 1952],
+            bls_public_key: vec![0xdd; 48],
+        })
+        .unwrap();
+        s.apply_intent(&Intent::DepositAuthorityStake {
+            from: addr(1),
+            authority_id: 0,
+            amount: 8_000_000,
+        })
+        .unwrap();
+        s.apply_intent(&Intent::DepositValidatorStake {
+            from: addr(1),
+            validator_id: 0,
+            amount: 2_000_000,
+        })
+        .unwrap();
+        s.apply_intent(&Intent::EjectAuthority {
+            authority_id: 0,
+            proof_ref: [0; 32],
+        })
+        .unwrap();
+        // Authority pool drained, validator pool unchanged.
+        assert_eq!(s.balance(&reserved::authority_stake_pool_address()), 0);
+        assert_eq!(
+            s.balance(&reserved::validator_stake_pool_address()),
+            2_000_000
+        );
+        assert_eq!(s.validator_deposited_stake(0), 2_000_000);
+    }
+
+    /// Eject on a never-deposited slot is a status-only flip
+    /// (deposited_stake = 0 → nothing to drain).
+    #[test]
+    fn eject_validator_never_deposited_is_status_only() {
+        let mut s = InMemorySubstrate::new();
+        s.apply_intent(&Intent::AdmitValidator {
+            validator_id: 0,
+            stake_gsx: 1,
+            mldsa_public_key: vec![0xaa; 1952],
+            bls_public_key: vec![0xbb; 48],
+        })
+        .unwrap();
+        s.apply_intent(&Intent::EjectValidator {
+            validator_id: 0,
+            proof_ref: [0; 32],
+        })
+        .unwrap();
+        assert_eq!(s.balance(&reserved::validator_stake_pool_address()), 0);
+        assert_eq!(s.balance(&reserved::insurance_pool_address()), 0);
+        assert_eq!(s.balance(&reserved::treasury_address()), 0);
+        assert_eq!(s.validator_deposited_stake(0), 0);
     }
 }
