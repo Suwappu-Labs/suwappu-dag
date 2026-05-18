@@ -100,7 +100,6 @@ when defined.
 
 ## See also
 
-- [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) — community standards.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — non-security contribution
   workflow.
 - [`docs/architecture/security.md`](docs/architecture/security.md) —
