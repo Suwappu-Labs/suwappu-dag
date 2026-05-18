@@ -276,4 +276,42 @@ pub enum ExecutionError {
         /// The offense kind that originally claimed the slot.
         kind: crate::equivocation_registry::OffenseKind,
     },
+
+    /// `Intent::AdmitAuthority` named an `authority_id`
+    /// already in the Authority Ring registry.
+    #[error("authority slot {authority_id} already occupied")]
+    AuthoritySlotAlreadyOccupied {
+        /// The slot the AdmitAuthority Intent tried to claim.
+        authority_id: u32,
+    },
+
+    /// `Intent::ExitAuthority` or `Intent::EjectAuthority`
+    /// named an `authority_id` not in the registry.
+    #[error("authority slot {authority_id} not found")]
+    AuthorityNotFound {
+        /// The slot the Intent referenced.
+        authority_id: u32,
+    },
+
+    /// `Intent::ExitAuthority` named an authority that's
+    /// not currently `Active` — already exiting or ejected.
+    #[error("authority slot {authority_id} is not active (status: {status:?})")]
+    AuthorityNotActive {
+        /// The slot the ExitAuthority Intent referenced.
+        authority_id: u32,
+        /// The current non-Active status.
+        status: crate::authority_registry::AuthorityStatus,
+    },
+
+    /// `Intent::AdmitAuthority` carried a pubkey field
+    /// exceeding the configured maximum width.
+    #[error("authority {field} pubkey too long: {got} > {max}")]
+    AuthorityFieldTooLong {
+        /// Which field exceeded ("mldsa_pk" or "bls_pk").
+        field: &'static str,
+        /// Observed width.
+        got: usize,
+        /// Configured maximum.
+        max: usize,
+    },
 }

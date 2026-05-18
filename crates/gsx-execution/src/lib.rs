@@ -29,6 +29,7 @@
 #![warn(missing_docs)]
 
 pub mod asset_registry;
+pub mod authority_registry;
 pub mod block;
 pub mod burn_nullifier;
 pub mod checkpoint;

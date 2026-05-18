@@ -934,6 +934,29 @@ impl InMemorySubstrate {
             .unwrap_or(0)
     }
 
+    /// Look up an Authority Ring registry record by slot.
+    /// Returns `None` if the slot is unoccupied or the
+    /// registry bytes are corrupt.
+    pub fn authority_record(
+        &self,
+        authority_id: u32,
+    ) -> Option<crate::authority_registry::AuthorityRecord> {
+        let bytes = self.read_bytes(&reserved::authority_registry_address())?;
+        let map = crate::authority_registry::decode(&bytes).ok()?;
+        map.get(&authority_id).cloned()
+    }
+
+    /// Count of recorded Authority Ring slots (across all
+    /// statuses).
+    pub fn authority_count(&self) -> usize {
+        let bytes = self
+            .read_bytes(&reserved::authority_registry_address())
+            .unwrap_or_default();
+        crate::authority_registry::decode(&bytes)
+            .map(|m| m.len())
+            .unwrap_or(0)
+    }
+
     /// Validate a bridge asset is registered + Active.
     /// Returns `Err(BridgeAssetNotFound)` if no record exists,
     /// `Err(BridgeAssetNotActive)` if status is Paused or
@@ -1028,14 +1051,97 @@ impl Substrate for InMemorySubstrate {
                 self.balances.insert(to, new_dest);
                 Ok(())
             }
-            // Governance variants (DAG-S25 Phase G) are no-ops at the
-            // substrate level — they don't mutate balance state. The
-            // daemon picks them up out of committed blocks and queues
-            // them for atomic application at the next epoch boundary
-            // (S25.3 + S25.4).
-            Intent::AdmitAuthority { .. }
-            | Intent::ExitAuthority { .. }
-            | Intent::EjectAuthority { .. } => Ok(()),
+            // Phase G governance — Authority Ring registry
+            // (paper §4.2). Substrate enforces slot
+            // uniqueness + lifecycle transitions; actual
+            // epoch-boundary set rotation is daemon-side.
+            Intent::AdmitAuthority {
+                authority_id,
+                stake_gsx,
+                mldsa_public_key,
+                bls_public_key,
+            } => {
+                use crate::authority_registry::{
+                    decode, encode, AuthorityRecord, AuthorityStatus, MAX_BLS_PK_BYTES,
+                    MAX_MLDSA_PK_BYTES,
+                };
+                if mldsa_public_key.len() > MAX_MLDSA_PK_BYTES {
+                    return Err(ExecutionError::AuthorityFieldTooLong {
+                        field: "mldsa_pk",
+                        got: mldsa_public_key.len(),
+                        max: MAX_MLDSA_PK_BYTES,
+                    });
+                }
+                if bls_public_key.len() > MAX_BLS_PK_BYTES {
+                    return Err(ExecutionError::AuthorityFieldTooLong {
+                        field: "bls_pk",
+                        got: bls_public_key.len(),
+                        max: MAX_BLS_PK_BYTES,
+                    });
+                }
+                let registry_addr = reserved::authority_registry_address();
+                let existing_bytes = self.read_bytes(&registry_addr).unwrap_or_default();
+                let mut map = decode(&existing_bytes)?;
+                if map.contains_key(authority_id) {
+                    return Err(ExecutionError::AuthoritySlotAlreadyOccupied {
+                        authority_id: *authority_id,
+                    });
+                }
+                map.insert(
+                    *authority_id,
+                    AuthorityRecord {
+                        mldsa_public_key: mldsa_public_key.clone(),
+                        bls_public_key: bls_public_key.clone(),
+                        stake_gsx: *stake_gsx,
+                        status: AuthorityStatus::Active,
+                    },
+                );
+                let new_bytes = encode(&map);
+                self.write_bytes_unchecked(registry_addr, new_bytes);
+                Ok(())
+            }
+            Intent::ExitAuthority { authority_id } => {
+                use crate::authority_registry::{decode, encode, AuthorityStatus};
+                let registry_addr = reserved::authority_registry_address();
+                let existing_bytes = self.read_bytes(&registry_addr).unwrap_or_default();
+                let mut map = decode(&existing_bytes)?;
+                let rec = map
+                    .get_mut(authority_id)
+                    .ok_or(ExecutionError::AuthorityNotFound {
+                        authority_id: *authority_id,
+                    })?;
+                if rec.status != AuthorityStatus::Active {
+                    return Err(ExecutionError::AuthorityNotActive {
+                        authority_id: *authority_id,
+                        status: rec.status,
+                    });
+                }
+                rec.status = AuthorityStatus::Exiting;
+                let new_bytes = encode(&map);
+                self.write_bytes_unchecked(registry_addr, new_bytes);
+                Ok(())
+            }
+            Intent::EjectAuthority {
+                authority_id,
+                proof_ref: _,
+            } => {
+                use crate::authority_registry::{decode, encode, AuthorityStatus};
+                let registry_addr = reserved::authority_registry_address();
+                let existing_bytes = self.read_bytes(&registry_addr).unwrap_or_default();
+                let mut map = decode(&existing_bytes)?;
+                let rec = map
+                    .get_mut(authority_id)
+                    .ok_or(ExecutionError::AuthorityNotFound {
+                        authority_id: *authority_id,
+                    })?;
+                // Ejection is one-way; any status →
+                // Ejected (e.g., an Exiting validator
+                // caught equivocating still loses stake).
+                rec.status = AuthorityStatus::Ejected;
+                let new_bytes = encode(&map);
+                self.write_bytes_unchecked(registry_addr, new_bytes);
+                Ok(())
+            }
             // Track G Phase G2.2 (#97): wired through the
             // gsx-l2-verifier-precompile crate. The verifier
             // runs format gates (proof = 260 B, public_inputs =
@@ -5111,5 +5217,258 @@ mod tests {
         assert_eq!(s.l2_aggregation_vk_hash(&[0u8; 32]), [0xab; 32]);
         // Other chains untouched.
         assert_eq!(s.l2_aggregation_vk_hash(&[0xff; 32]), [0u8; 32]);
+    }
+
+    // ===== Authority Ring registry (Phase G) =====
+
+    /// Happy path: AdmitAuthority inserts an Active record.
+    #[test]
+    fn admit_authority_inserts_active_record() {
+        use crate::authority_registry::AuthorityStatus;
+        let mut s = InMemorySubstrate::new();
+        s.apply_intent(&Intent::AdmitAuthority {
+            authority_id: 0,
+            stake_gsx: 15_000_000,
+            mldsa_public_key: vec![0xaa; 1952],
+            bls_public_key: vec![0xbb; 48],
+        })
+        .unwrap();
+        let rec = s.authority_record(0).unwrap();
+        assert_eq!(rec.status, AuthorityStatus::Active);
+        assert_eq!(rec.stake_gsx, 15_000_000);
+        assert_eq!(rec.mldsa_public_key.len(), 1952);
+        assert_eq!(s.authority_count(), 1);
+    }
+
+    /// Duplicate slot rejects with AuthoritySlotAlreadyOccupied.
+    #[test]
+    fn admit_authority_duplicate_slot_rejected() {
+        let mut s = InMemorySubstrate::new();
+        s.apply_intent(&Intent::AdmitAuthority {
+            authority_id: 7,
+            stake_gsx: 15_000_000,
+            mldsa_public_key: vec![0xaa; 1952],
+            bls_public_key: vec![0xbb; 48],
+        })
+        .unwrap();
+        let err = s.apply_intent(&Intent::AdmitAuthority {
+            authority_id: 7,
+            stake_gsx: 20_000_000,
+            mldsa_public_key: vec![0xcc; 1952],
+            bls_public_key: vec![0xdd; 48],
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::AuthoritySlotAlreadyOccupied { authority_id: 7 })
+        ));
+        // First slot's record preserved.
+        let rec = s.authority_record(7).unwrap();
+        assert_eq!(rec.stake_gsx, 15_000_000);
+    }
+
+    /// Oversized mldsa pubkey rejects.
+    #[test]
+    fn admit_authority_oversized_mldsa_pk_rejected() {
+        let mut s = InMemorySubstrate::new();
+        let err = s.apply_intent(&Intent::AdmitAuthority {
+            authority_id: 0,
+            stake_gsx: 15_000_000,
+            mldsa_public_key: vec![0xaa; 3000],
+            bls_public_key: vec![0xbb; 48],
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::AuthorityFieldTooLong {
+                field: "mldsa_pk",
+                ..
+            })
+        ));
+    }
+
+    /// Oversized bls pubkey rejects.
+    #[test]
+    fn admit_authority_oversized_bls_pk_rejected() {
+        let mut s = InMemorySubstrate::new();
+        let err = s.apply_intent(&Intent::AdmitAuthority {
+            authority_id: 0,
+            stake_gsx: 15_000_000,
+            mldsa_public_key: vec![0xaa; 1952],
+            bls_public_key: vec![0xbb; 256],
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::AuthorityFieldTooLong {
+                field: "bls_pk",
+                ..
+            })
+        ));
+    }
+
+    /// ExitAuthority flips Active → Exiting.
+    #[test]
+    fn exit_authority_flips_active_to_exiting() {
+        use crate::authority_registry::AuthorityStatus;
+        let mut s = InMemorySubstrate::new();
+        s.apply_intent(&Intent::AdmitAuthority {
+            authority_id: 0,
+            stake_gsx: 1_000,
+            mldsa_public_key: vec![0xaa; 1952],
+            bls_public_key: vec![0xbb; 48],
+        })
+        .unwrap();
+        s.apply_intent(&Intent::ExitAuthority { authority_id: 0 })
+            .unwrap();
+        let rec = s.authority_record(0).unwrap();
+        assert_eq!(rec.status, AuthorityStatus::Exiting);
+    }
+
+    /// ExitAuthority on unknown slot rejects.
+    #[test]
+    fn exit_authority_unknown_slot_rejected() {
+        let mut s = InMemorySubstrate::new();
+        let err = s.apply_intent(&Intent::ExitAuthority { authority_id: 42 });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::AuthorityNotFound { authority_id: 42 })
+        ));
+    }
+
+    /// ExitAuthority on already-exiting slot rejects.
+    #[test]
+    fn exit_authority_double_exit_rejected() {
+        let mut s = InMemorySubstrate::new();
+        s.apply_intent(&Intent::AdmitAuthority {
+            authority_id: 0,
+            stake_gsx: 1_000,
+            mldsa_public_key: vec![0xaa; 1952],
+            bls_public_key: vec![0xbb; 48],
+        })
+        .unwrap();
+        s.apply_intent(&Intent::ExitAuthority { authority_id: 0 })
+            .unwrap();
+        let err = s.apply_intent(&Intent::ExitAuthority { authority_id: 0 });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::AuthorityNotActive { .. })
+        ));
+    }
+
+    /// EjectAuthority flips status to Ejected from any state.
+    #[test]
+    fn eject_authority_flips_to_ejected() {
+        use crate::authority_registry::AuthorityStatus;
+        let mut s = InMemorySubstrate::new();
+        s.apply_intent(&Intent::AdmitAuthority {
+            authority_id: 0,
+            stake_gsx: 1_000,
+            mldsa_public_key: vec![0xaa; 1952],
+            bls_public_key: vec![0xbb; 48],
+        })
+        .unwrap();
+        s.apply_intent(&Intent::EjectAuthority {
+            authority_id: 0,
+            proof_ref: [0xee; 32],
+        })
+        .unwrap();
+        let rec = s.authority_record(0).unwrap();
+        assert_eq!(rec.status, AuthorityStatus::Ejected);
+    }
+
+    /// EjectAuthority of an Exiting validator still works
+    /// (caught equivocating on the way out → still loses stake).
+    #[test]
+    fn eject_authority_exiting_validator_succeeds() {
+        use crate::authority_registry::AuthorityStatus;
+        let mut s = InMemorySubstrate::new();
+        s.apply_intent(&Intent::AdmitAuthority {
+            authority_id: 0,
+            stake_gsx: 1_000,
+            mldsa_public_key: vec![0xaa; 1952],
+            bls_public_key: vec![0xbb; 48],
+        })
+        .unwrap();
+        s.apply_intent(&Intent::ExitAuthority { authority_id: 0 })
+            .unwrap();
+        s.apply_intent(&Intent::EjectAuthority {
+            authority_id: 0,
+            proof_ref: [0xee; 32],
+        })
+        .unwrap();
+        let rec = s.authority_record(0).unwrap();
+        assert_eq!(rec.status, AuthorityStatus::Ejected);
+    }
+
+    /// EjectAuthority on unknown slot rejects.
+    #[test]
+    fn eject_authority_unknown_slot_rejected() {
+        let mut s = InMemorySubstrate::new();
+        let err = s.apply_intent(&Intent::EjectAuthority {
+            authority_id: 99,
+            proof_ref: [0; 32],
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::AuthorityNotFound { authority_id: 99 })
+        ));
+    }
+
+    /// Multiple authorities can coexist independently.
+    #[test]
+    fn multiple_authorities_independent() {
+        use crate::authority_registry::AuthorityStatus;
+        let mut s = InMemorySubstrate::new();
+        for i in 0..5 {
+            s.apply_intent(&Intent::AdmitAuthority {
+                authority_id: i,
+                stake_gsx: 1_000 + i as u64,
+                mldsa_public_key: vec![i as u8; 1952],
+                bls_public_key: vec![i as u8; 48],
+            })
+            .unwrap();
+        }
+        assert_eq!(s.authority_count(), 5);
+        // Exit one, eject another, others stay Active.
+        s.apply_intent(&Intent::ExitAuthority { authority_id: 2 })
+            .unwrap();
+        s.apply_intent(&Intent::EjectAuthority {
+            authority_id: 3,
+            proof_ref: [0xff; 32],
+        })
+        .unwrap();
+        assert_eq!(
+            s.authority_record(0).unwrap().status,
+            AuthorityStatus::Active
+        );
+        assert_eq!(
+            s.authority_record(1).unwrap().status,
+            AuthorityStatus::Active
+        );
+        assert_eq!(
+            s.authority_record(2).unwrap().status,
+            AuthorityStatus::Exiting
+        );
+        assert_eq!(
+            s.authority_record(3).unwrap().status,
+            AuthorityStatus::Ejected
+        );
+        assert_eq!(
+            s.authority_record(4).unwrap().status,
+            AuthorityStatus::Active
+        );
+    }
+
+    /// Authority Ring writes shift the state_root.
+    #[test]
+    fn admit_authority_shifts_state_root() {
+        let mut s = InMemorySubstrate::new();
+        let before = s.state_root();
+        s.apply_intent(&Intent::AdmitAuthority {
+            authority_id: 0,
+            stake_gsx: 1,
+            mldsa_public_key: vec![0xaa; 1952],
+            bls_public_key: vec![0xbb; 48],
+        })
+        .unwrap();
+        assert_ne!(s.state_root(), before);
     }
 }
