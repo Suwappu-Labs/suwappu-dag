@@ -33,6 +33,7 @@ pub mod authority_registry;
 pub mod block;
 pub mod burn_nullifier;
 pub mod checkpoint;
+pub mod delegation_registry;
 pub mod eject_registry;
 pub mod equivocation_registry;
 pub mod error;
