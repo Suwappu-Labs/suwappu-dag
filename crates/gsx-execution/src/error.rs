@@ -184,4 +184,19 @@ pub enum ExecutionError {
         /// Configured maximum.
         max: usize,
     },
+
+    /// `Intent::L1Lock` or `Intent::L2BurnProven` referenced
+    /// an asset that exists in the registry but is not in
+    /// `AssetStatus::Active` state (i.e., it's Paused or
+    /// Removed). Bridge ops on inactive assets are rejected.
+    #[error(
+        "bridge asset 0x{enc_id} is not active (status: {status:?})",
+        enc_id = hex::encode(asset_id),
+    )]
+    BridgeAssetNotActive {
+        /// The asset_id the bridge op pointed at.
+        asset_id: [u8; 32],
+        /// The asset's current (non-Active) status.
+        status: crate::asset_registry::AssetStatus,
+    },
 }

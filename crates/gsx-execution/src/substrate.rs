@@ -191,6 +191,15 @@ pub enum Intent {
         l2_recipient: Address,
         /// Amount being locked (and credited on L2).
         amount: Balance,
+        /// Asset being bridged. `None` = native GSX (current
+        /// behavior). `Some(asset_id)` = a registered bridge
+        /// asset; the substrate validates against the asset
+        /// registry (Track I I.5, #166): asset must exist and
+        /// be `AssetStatus::Active`. Native-GSX balance
+        /// accounting still applies for now; per-asset balance
+        /// state lands in a follow-up.
+        #[serde(default)]
+        asset_id: Option<[u8; 32]>,
     },
     /// L2→L1 withdrawal. Only valid AFTER a `CommitL2StateRoot` for
     /// `batch_id` has been accepted. Verifies the user's burn
@@ -205,6 +214,11 @@ pub enum Intent {
         amount: Balance,
         /// Merkle proof binding the burn to the proven L2 state.
         merkle_path: Vec<u8>,
+        /// Asset being unlocked. Same semantics as
+        /// `L1Lock::asset_id`. `None` = native GSX,
+        /// `Some(asset_id)` = registered + Active asset.
+        #[serde(default)]
+        asset_id: Option<[u8; 32]>,
     },
     /// L1-quorum-enforced force-inclusion. The L2 sequencer is
     /// mandated to include `tx` in an L2 batch by
@@ -633,6 +647,27 @@ impl InMemorySubstrate {
         self.asset_registry().assets.len()
     }
 
+    /// Validate a bridge asset is registered + Active.
+    /// Returns `Err(BridgeAssetNotFound)` if no record exists,
+    /// `Err(BridgeAssetNotActive)` if status is Paused or
+    /// Removed. Used by Track I I.5 (#166) to gate
+    /// `Intent::L1Lock` + `Intent::L2BurnProven`.
+    fn assert_bridge_asset_active(&self, asset_id: &[u8; 32]) -> Result<(), ExecutionError> {
+        use crate::asset_registry::AssetStatus;
+        let record = self
+            .bridge_asset(asset_id)
+            .ok_or(ExecutionError::BridgeAssetNotFound {
+                asset_id: *asset_id,
+            })?;
+        match record.status {
+            AssetStatus::Active => Ok(()),
+            status => Err(ExecutionError::BridgeAssetNotActive {
+                asset_id: *asset_id,
+                status,
+            }),
+        }
+    }
+
     /// Internal: write a bytes-state record at `addr`. Replaces
     /// any prior record. Empty bytes are stored as absent (matches
     /// the balance map's zero-is-absent invariant + keeps the
@@ -844,11 +879,20 @@ impl Substrate for InMemorySubstrate {
                 user_address,
                 l2_recipient: _,
                 amount,
+                asset_id,
             } => {
                 let amount = *amount;
                 let user_address = *user_address;
                 if amount == 0 {
                     return Ok(());
+                }
+                // Track I I.5 (#166): if the lock specifies a
+                // bridge asset, gate on the registry — asset
+                // must exist + be Active. Native-GSX
+                // accounting still applies (per-asset balance
+                // state is a follow-up).
+                if let Some(id) = asset_id {
+                    self.assert_bridge_asset_active(id)?;
                 }
                 // Atomic: balance check first via debit_unchecked
                 // (returns InsufficientBalance on underrun), then
@@ -874,6 +918,7 @@ impl Substrate for InMemorySubstrate {
                 recipient,
                 amount,
                 merkle_path: _,
+                asset_id,
             } => {
                 let amount = *amount;
                 let recipient = *recipient;
@@ -882,6 +927,11 @@ impl Substrate for InMemorySubstrate {
                 }
                 if reserved::is_reserved(&recipient) {
                     return Err(ExecutionError::ReservedAddressTransferDenied { addr: recipient });
+                }
+                // Track I I.5 (#166): same registry gate as
+                // L1Lock.
+                if let Some(id) = asset_id {
+                    self.assert_bridge_asset_active(id)?;
                 }
                 self.debit_unchecked(reserved::bridge_escrow_address(), amount)?;
                 self.credit_unchecked(recipient, amount)?;
@@ -1720,6 +1770,7 @@ mod tests {
             user_address: addr(1),
             l2_recipient: addr(2),
             amount: 25,
+            asset_id: None,
         };
         assert!(s.apply_intent(&intent).is_ok());
         assert_eq!(s.balance(&addr(1)), 75);
@@ -1735,6 +1786,7 @@ mod tests {
             user_address: addr(1),
             l2_recipient: addr(2),
             amount: 25,
+            asset_id: None,
         };
         assert!(matches!(
             s.apply_intent(&intent),
@@ -1753,6 +1805,7 @@ mod tests {
                 user_address: addr(1),
                 l2_recipient: addr(2),
                 amount: 0,
+                asset_id: None,
             })
             .is_ok());
         assert_eq!(s.state_root(), before);
@@ -1768,6 +1821,7 @@ mod tests {
             user_address: addr(1),
             l2_recipient: addr(2),
             amount: 25,
+            asset_id: None,
         })
         .unwrap();
         assert_eq!(s.bridge_escrow_balance(), 25);
@@ -1776,6 +1830,7 @@ mod tests {
             recipient: addr(1),
             amount: 25,
             merkle_path: vec![0xab; 256],
+            asset_id: None,
         })
         .unwrap();
         assert_eq!(s.bridge_escrow_balance(), 0);
@@ -1792,6 +1847,7 @@ mod tests {
             recipient: addr(1),
             amount: 25,
             merkle_path: vec![0xab; 256],
+            asset_id: None,
         };
         assert!(matches!(
             s.apply_intent(&intent),
@@ -1808,6 +1864,7 @@ mod tests {
             user_address: addr(1),
             l2_recipient: addr(2),
             amount: 25,
+            asset_id: None,
         })
         .unwrap();
         // Then attempt to withdraw to a reserved address.
@@ -1816,6 +1873,7 @@ mod tests {
             recipient: reserved::treasury_address(),
             amount: 25,
             merkle_path: vec![0xab; 256],
+            asset_id: None,
         };
         assert!(matches!(
             s.apply_intent(&intent),
@@ -1833,6 +1891,7 @@ mod tests {
             user_address: addr(1),
             l2_recipient: addr(3),
             amount: 100,
+            asset_id: None,
         })
         .unwrap();
         assert_eq!(s.bridge_escrow_balance(), 100);
@@ -1841,6 +1900,7 @@ mod tests {
             user_address: addr(2),
             l2_recipient: addr(4),
             amount: 50,
+            asset_id: None,
         })
         .unwrap();
         assert_eq!(s.bridge_escrow_balance(), 150);
@@ -1850,6 +1910,7 @@ mod tests {
             recipient: addr(5),
             amount: 70,
             merkle_path: vec![0xab; 32],
+            asset_id: None,
         })
         .unwrap();
         assert_eq!(s.bridge_escrow_balance(), 80);
@@ -1860,6 +1921,7 @@ mod tests {
             recipient: addr(6),
             amount: 80,
             merkle_path: vec![0xab; 32],
+            asset_id: None,
         })
         .unwrap();
         assert_eq!(s.bridge_escrow_balance(), 0);
@@ -2637,6 +2699,214 @@ mod tests {
         assert_eq!(s.balance(&reserved::treasury_address()), 19_500);
         // Submitter accumulates: 5_000 + 4_750 = 9_750.
         assert_eq!(s.balance(&addr(10)), 9_750);
+    }
+
+    // ===== Asset-aware bridge (Track I I.5 enforcement) =====
+
+    /// Helper: register a USDC-shaped Active asset under
+    /// chain_id 1, contract = 0xaa*20.
+    fn register_active_usdc(s: &mut InMemorySubstrate) -> [u8; 32] {
+        use crate::asset_registry::asset_id;
+        s.apply_intent(&Intent::AddBridgeAsset {
+            source_chain: 1,
+            source_contract: vec![0xaa; 20],
+            decimals: 6,
+            name: b"USD Coin".to_vec(),
+            symbol: b"USDC".to_vec(),
+        })
+        .unwrap();
+        asset_id(1, &[0xaa; 20])
+    }
+
+    /// L1Lock with a registered + Active asset_id succeeds.
+    /// Native-GSX balance accounting still applies (phase 1
+    /// scope — per-asset balances ship later).
+    #[test]
+    fn l1_lock_with_active_asset_succeeds() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 1_000)]);
+        let id = register_active_usdc(&mut s);
+        s.apply_intent(&Intent::L1Lock {
+            user_address: addr(1),
+            l2_recipient: addr(2),
+            amount: 250,
+            asset_id: Some(id),
+        })
+        .unwrap();
+        assert_eq!(s.balance(&addr(1)), 750);
+        assert_eq!(s.bridge_escrow_balance(), 250);
+    }
+
+    /// L1Lock with an unknown asset_id rejects with
+    /// `BridgeAssetNotFound` — registry gate fires before
+    /// any balance mutation.
+    #[test]
+    fn l1_lock_unknown_asset_rejected() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 1_000)]);
+        let before = s.state_root();
+        let err = s.apply_intent(&Intent::L1Lock {
+            user_address: addr(1),
+            l2_recipient: addr(2),
+            amount: 250,
+            asset_id: Some([0xde; 32]),
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::BridgeAssetNotFound { .. })
+        ));
+        assert_eq!(s.balance(&addr(1)), 1_000);
+        assert_eq!(s.bridge_escrow_balance(), 0);
+        assert_eq!(s.state_root(), before, "rejection must roll back state");
+    }
+
+    /// L1Lock with a Paused asset rejects with
+    /// `BridgeAssetNotActive`.
+    #[test]
+    fn l1_lock_paused_asset_rejected() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 1_000)]);
+        let id = register_active_usdc(&mut s);
+        s.apply_intent(&Intent::PauseBridgeAsset { asset_id: id })
+            .unwrap();
+
+        let err = s.apply_intent(&Intent::L1Lock {
+            user_address: addr(1),
+            l2_recipient: addr(2),
+            amount: 250,
+            asset_id: Some(id),
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::BridgeAssetNotActive { .. })
+        ));
+        assert_eq!(s.balance(&addr(1)), 1_000);
+        assert_eq!(s.bridge_escrow_balance(), 0);
+    }
+
+    /// L1Lock with a Removed asset rejects too. Once removed,
+    /// no further bridge ops accepted even though the record
+    /// stays in the registry for audit.
+    #[test]
+    fn l1_lock_removed_asset_rejected() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 1_000)]);
+        let id = register_active_usdc(&mut s);
+        s.apply_intent(&Intent::RemoveBridgeAsset { asset_id: id })
+            .unwrap();
+
+        let err = s.apply_intent(&Intent::L1Lock {
+            user_address: addr(1),
+            l2_recipient: addr(2),
+            amount: 250,
+            asset_id: Some(id),
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::BridgeAssetNotActive { .. })
+        ));
+    }
+
+    /// L2BurnProven mirrors the L1Lock gates: unknown asset
+    /// rejects with `BridgeAssetNotFound`.
+    #[test]
+    fn l2_burn_proven_unknown_asset_rejected() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 1_000)]);
+        // Pre-fund escrow so the gate is the asset check,
+        // not insufficient escrow.
+        s.apply_intent(&Intent::L1Lock {
+            user_address: addr(1),
+            l2_recipient: addr(2),
+            amount: 500,
+            asset_id: None,
+        })
+        .unwrap();
+
+        let err = s.apply_intent(&Intent::L2BurnProven {
+            batch_id: 7,
+            recipient: addr(3),
+            amount: 100,
+            merkle_path: vec![0xab; 32],
+            asset_id: Some([0xde; 32]),
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::BridgeAssetNotFound { .. })
+        ));
+        // Escrow unchanged.
+        assert_eq!(s.bridge_escrow_balance(), 500);
+    }
+
+    /// L2BurnProven with Paused asset rejects.
+    #[test]
+    fn l2_burn_proven_paused_asset_rejected() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 1_000)]);
+        let id = register_active_usdc(&mut s);
+        // Fund escrow via Active-asset L1Lock, then pause the
+        // asset before the withdrawal.
+        s.apply_intent(&Intent::L1Lock {
+            user_address: addr(1),
+            l2_recipient: addr(2),
+            amount: 250,
+            asset_id: Some(id),
+        })
+        .unwrap();
+        s.apply_intent(&Intent::PauseBridgeAsset { asset_id: id })
+            .unwrap();
+
+        let err = s.apply_intent(&Intent::L2BurnProven {
+            batch_id: 7,
+            recipient: addr(3),
+            amount: 100,
+            merkle_path: vec![0xab; 32],
+            asset_id: Some(id),
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::BridgeAssetNotActive { .. })
+        ));
+    }
+
+    /// Round-trip with an Active asset: L1Lock followed by
+    /// L2BurnProven both pass through the gate cleanly.
+    #[test]
+    fn bridge_round_trip_with_active_asset() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 1_000)]);
+        let id = register_active_usdc(&mut s);
+        s.apply_intent(&Intent::L1Lock {
+            user_address: addr(1),
+            l2_recipient: addr(2),
+            amount: 400,
+            asset_id: Some(id),
+        })
+        .unwrap();
+        assert_eq!(s.bridge_escrow_balance(), 400);
+
+        s.apply_intent(&Intent::L2BurnProven {
+            batch_id: 1,
+            recipient: addr(3),
+            amount: 400,
+            merkle_path: vec![0xab; 32],
+            asset_id: Some(id),
+        })
+        .unwrap();
+        assert_eq!(s.bridge_escrow_balance(), 0);
+        assert_eq!(s.balance(&addr(3)), 400);
+    }
+
+    /// Pre-existing native-GSX path (asset_id = None) still
+    /// works without the registry — backwards-compat for
+    /// callers that don't yet know about asset-aware bridging.
+    #[test]
+    fn l1_lock_native_gsx_path_unaffected() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 1_000)]);
+        // No assets registered.
+        assert_eq!(s.bridge_asset_count(), 0);
+        s.apply_intent(&Intent::L1Lock {
+            user_address: addr(1),
+            l2_recipient: addr(2),
+            amount: 250,
+            asset_id: None,
+        })
+        .unwrap();
+        assert_eq!(s.balance(&addr(1)), 750);
+        assert_eq!(s.bridge_escrow_balance(), 250);
     }
 
     // ===== MarkForceIncludeHonored (G3.4 follow-up) =====
