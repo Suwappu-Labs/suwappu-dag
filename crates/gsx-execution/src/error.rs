@@ -227,4 +227,22 @@ pub enum ExecutionError {
         /// The asset's current (non-Active) status.
         status: crate::asset_registry::AssetStatus,
     },
+
+    /// `Intent::L2BurnProven` referenced a
+    /// `(l2_chain_id_hash, batch_id)` that has no committed
+    /// state root in the L2 registry. The withdrawal cannot
+    /// be authorized — either the batch hasn't been committed
+    /// yet via `CommitL2StateRoot`, or the caller passed the
+    /// wrong chain_id_hash. Defensive gate against draining
+    /// the bridge escrow on unproven batches.
+    #[error(
+        "L2 batch (chain 0x{enc_chain}, id {batch_id}) is not committed",
+        enc_chain = hex::encode(l2_chain_id_hash),
+    )]
+    L2BatchNotCommitted {
+        /// L2 chain identifier hash from the burn Intent.
+        l2_chain_id_hash: [u8; 32],
+        /// Batch id from the burn Intent.
+        batch_id: u64,
+    },
 }

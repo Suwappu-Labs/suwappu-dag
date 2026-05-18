@@ -202,9 +202,18 @@ pub enum Intent {
         asset_id: Option<[u8; 32]>,
     },
     /// L2→L1 withdrawal. Only valid AFTER a `CommitL2StateRoot` for
-    /// `batch_id` has been accepted. Verifies the user's burn
-    /// against the proven L2 state root via the Merkle proof. The
-    /// L1 escrow then releases `amount` to `recipient`.
+    /// `(l2_chain_id_hash, batch_id)` has been accepted. Verifies
+    /// the user's burn against the proven L2 state root via the
+    /// Merkle proof. The L1 escrow then releases `amount` to
+    /// `recipient`.
+    ///
+    /// Batch-commit gate: the substrate validates the named
+    /// `(l2_chain_id_hash, batch_id)` exists in the L2 registry
+    /// — i.e. a `CommitL2StateRoot` has landed for this batch
+    /// — before allowing the escrow drain. Without this gate
+    /// any caller with knowledge of an unproven `batch_id`
+    /// plus valid `merkle_path` bytes could drain the bridge
+    /// escrow.
     L2BurnProven {
         /// L2 batch id whose committed state root proves the burn.
         batch_id: u64,
@@ -219,6 +228,14 @@ pub enum Intent {
         /// `Some(asset_id)` = registered + Active asset.
         #[serde(default)]
         asset_id: Option<[u8; 32]>,
+        /// L2 chain identifier hash — `SHA3-256("gsx-l2-chain-"
+        /// || chain_id)` per IQ-006. Combined with `batch_id`
+        /// to look up the committed L2 state root in the
+        /// registry. `[0u8; 32]` matches the v1 single-L2
+        /// "default chain" for pre-`l2_chain_id_hash`
+        /// callers (wire-compat with the prior Intent shape).
+        #[serde(default)]
+        l2_chain_id_hash: [u8; 32],
     },
     /// L1-quorum-enforced force-inclusion. The L2 sequencer is
     /// mandated to include `tx` in an L2 batch by
@@ -684,6 +701,34 @@ impl InMemorySubstrate {
         self.credit_unchecked(reserved::safety_bond_address(), amount)
     }
 
+    /// Pin an L2 state-root record in the registry for
+    /// `(l2_chain_id_hash, batch_id)`. Test/setup helper —
+    /// production validators commit via
+    /// `Intent::CommitL2StateRoot` (which requires a pinned
+    /// vk_hash + valid proof). This helper bypasses that
+    /// dispatch path for tests that exercise downstream
+    /// consumers (like the L2BurnProven batch-commit gate).
+    pub fn pin_l2_state_root_for_test(&mut self, l2_chain_id_hash: [u8; 32], batch_id: u64) {
+        use crate::l2_state::{encode, L2BatchKey, L2StateRootRecord};
+        let registry_addr = reserved::l2_registry_address();
+        let existing_bytes = self.read_bytes(&registry_addr).unwrap_or_default();
+        let mut registry = crate::l2_state::decode(&existing_bytes).unwrap_or_default();
+        registry.state_roots.insert(
+            L2BatchKey {
+                l2_chain_id_hash,
+                batch_id,
+            },
+            L2StateRootRecord {
+                state_root: [0xab; 32],
+                committed_at_l1_height: 0,
+                vk_hash: [0xcd; 32],
+                da_commitment: [0xef; 32],
+            },
+        );
+        let new_bytes = encode(&registry);
+        self.write_bytes_unchecked(registry_addr, new_bytes);
+    }
+
     /// Pin the L2 aggregation + range VK pair. Convenience
     /// wrapper around `Intent::SetL2VerifyingKey` — production
     /// callers should go through the Intent; tests can use this
@@ -1021,19 +1066,29 @@ impl Substrate for InMemorySubstrate {
                 self.credit_unchecked(reserved::bridge_escrow_address(), amount)?;
                 Ok(())
             }
-            // L2BurnProven: drain escrow into recipient. The
-            // merkle_path validation (proving the L2 burn against
-            // the committed L2 state root) is a stub until G2.2
-            // phase 2 stores `(chain_id, batch_id) -> L2StateRoot`.
-            // Until then, the substrate enforces only the
-            // accounting invariant; off-chain validators check
-            // the merkle_path's byte-shape via gsx-l2-bridge.
+            // L2BurnProven: drain escrow into recipient.
+            //
+            // Batch-commit gate (Track G G3.2 hardening): the
+            // substrate validates the named (l2_chain_id_hash,
+            // batch_id) exists in the L2 registry before
+            // allowing the escrow drain. Without this gate a
+            // caller with knowledge of an unproven batch_id +
+            // valid merkle_path bytes could drain the bridge
+            // escrow.
+            //
+            // The merkle_path itself is still a byte-shape
+            // stub (full Merkle inclusion proof verification
+            // requires a tree implementation; lands in G2.2
+            // phase 3). Off-chain validators check
+            // merkle_path's byte-shape via gsx-l2-bridge in
+            // the meantime.
             Intent::L2BurnProven {
-                batch_id: _,
+                batch_id,
                 recipient,
                 amount,
                 merkle_path: _,
                 asset_id,
+                l2_chain_id_hash,
             } => {
                 let amount = *amount;
                 let recipient = *recipient;
@@ -1047,6 +1102,19 @@ impl Substrate for InMemorySubstrate {
                 // L1Lock.
                 if let Some(id) = asset_id {
                     self.assert_bridge_asset_active(id)?;
+                }
+                // Batch-commit gate. The L2 registry stores
+                // state roots keyed by (l2_chain_id_hash,
+                // batch_id) per IQ-006.
+                let key = crate::l2_state::L2BatchKey {
+                    l2_chain_id_hash: *l2_chain_id_hash,
+                    batch_id: *batch_id,
+                };
+                if self.l2_state_root_record(&key).is_none() {
+                    return Err(ExecutionError::L2BatchNotCommitted {
+                        l2_chain_id_hash: *l2_chain_id_hash,
+                        batch_id: *batch_id,
+                    });
                 }
                 self.debit_unchecked(reserved::bridge_escrow_address(), amount)?;
                 self.credit_unchecked(recipient, amount)?;
@@ -2094,12 +2162,14 @@ mod tests {
         })
         .unwrap();
         assert_eq!(s.bridge_escrow_balance(), 25);
+        s.pin_l2_state_root_for_test([0u8; 32], 7);
         s.apply_intent(&Intent::L2BurnProven {
             batch_id: 7,
             recipient: addr(1),
             amount: 25,
             merkle_path: vec![0xab; 256],
             asset_id: None,
+            l2_chain_id_hash: [0u8; 32],
         })
         .unwrap();
         assert_eq!(s.bridge_escrow_balance(), 0);
@@ -2110,6 +2180,7 @@ mod tests {
     #[test]
     fn l2_burn_proven_insufficient_escrow_rejected() {
         let mut s = InMemorySubstrate::from_balances([(addr(1), 100)]);
+        s.pin_l2_state_root_for_test([0u8; 32], 7);
         // Escrow has zero balance.
         let intent = Intent::L2BurnProven {
             batch_id: 7,
@@ -2117,6 +2188,7 @@ mod tests {
             amount: 25,
             merkle_path: vec![0xab; 256],
             asset_id: None,
+            l2_chain_id_hash: [0u8; 32],
         };
         assert!(matches!(
             s.apply_intent(&intent),
@@ -2136,6 +2208,7 @@ mod tests {
             asset_id: None,
         })
         .unwrap();
+        s.pin_l2_state_root_for_test([0u8; 32], 7);
         // Then attempt to withdraw to a reserved address.
         let intent = Intent::L2BurnProven {
             batch_id: 7,
@@ -2143,6 +2216,7 @@ mod tests {
             amount: 25,
             merkle_path: vec![0xab; 256],
             asset_id: None,
+            l2_chain_id_hash: [0u8; 32],
         };
         assert!(matches!(
             s.apply_intent(&intent),
@@ -2173,6 +2247,8 @@ mod tests {
         })
         .unwrap();
         assert_eq!(s.bridge_escrow_balance(), 150);
+        s.pin_l2_state_root_for_test([0u8; 32], 1);
+        s.pin_l2_state_root_for_test([0u8; 32], 2);
         // Withdraw 70.
         s.apply_intent(&Intent::L2BurnProven {
             batch_id: 1,
@@ -2180,6 +2256,7 @@ mod tests {
             amount: 70,
             merkle_path: vec![0xab; 32],
             asset_id: None,
+            l2_chain_id_hash: [0u8; 32],
         })
         .unwrap();
         assert_eq!(s.bridge_escrow_balance(), 80);
@@ -2191,6 +2268,7 @@ mod tests {
             amount: 80,
             merkle_path: vec![0xab; 32],
             asset_id: None,
+            l2_chain_id_hash: [0u8; 32],
         })
         .unwrap();
         assert_eq!(s.bridge_escrow_balance(), 0);
@@ -3093,6 +3171,7 @@ mod tests {
             amount: 100,
             merkle_path: vec![0xab; 32],
             asset_id: Some([0xde; 32]),
+            l2_chain_id_hash: [0u8; 32],
         });
         assert!(matches!(
             err,
@@ -3125,6 +3204,7 @@ mod tests {
             amount: 100,
             merkle_path: vec![0xab; 32],
             asset_id: Some(id),
+            l2_chain_id_hash: [0u8; 32],
         });
         assert!(matches!(
             err,
@@ -3146,6 +3226,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(s.bridge_escrow_balance(), 400);
+        s.pin_l2_state_root_for_test([0u8; 32], 1);
 
         s.apply_intent(&Intent::L2BurnProven {
             batch_id: 1,
@@ -3153,6 +3234,7 @@ mod tests {
             amount: 400,
             merkle_path: vec![0xab; 32],
             asset_id: Some(id),
+            l2_chain_id_hash: [0u8; 32],
         })
         .unwrap();
         assert_eq!(s.bridge_escrow_balance(), 0);
@@ -3683,6 +3765,179 @@ mod tests {
         .unwrap();
         let after = s.state_root();
         assert_ne!(before, after);
+    }
+
+    // ===== L2BurnProven batch-commit gate (G3.2 hardening) =====
+
+    /// Burn against an uncommitted (chain, batch) rejects
+    /// with `L2BatchNotCommitted`. The bridge escrow is
+    /// drained ONLY when the L2 has actually proven the
+    /// batch via `CommitL2StateRoot` — closes the security
+    /// gap of accepting any merkle_path bytes.
+    #[test]
+    fn l2_burn_proven_uncommitted_batch_rejected() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 1_000)]);
+        // Fund the escrow.
+        s.apply_intent(&Intent::L1Lock {
+            user_address: addr(1),
+            l2_recipient: addr(2),
+            amount: 500,
+            asset_id: None,
+        })
+        .unwrap();
+        // No batch commit — burn must reject.
+        let err = s.apply_intent(&Intent::L2BurnProven {
+            batch_id: 99,
+            recipient: addr(3),
+            amount: 100,
+            merkle_path: vec![0xab; 32],
+            asset_id: None,
+            l2_chain_id_hash: [0u8; 32],
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::L2BatchNotCommitted { .. })
+        ));
+        // Escrow unchanged, recipient still empty.
+        assert_eq!(s.bridge_escrow_balance(), 500);
+        assert_eq!(s.balance(&addr(3)), 0);
+    }
+
+    /// Burn against a committed batch succeeds (gate passes).
+    #[test]
+    fn l2_burn_proven_committed_batch_succeeds() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 1_000)]);
+        s.apply_intent(&Intent::L1Lock {
+            user_address: addr(1),
+            l2_recipient: addr(2),
+            amount: 500,
+            asset_id: None,
+        })
+        .unwrap();
+        s.pin_l2_state_root_for_test([0u8; 32], 42);
+
+        s.apply_intent(&Intent::L2BurnProven {
+            batch_id: 42,
+            recipient: addr(3),
+            amount: 100,
+            merkle_path: vec![0xab; 32],
+            asset_id: None,
+            l2_chain_id_hash: [0u8; 32],
+        })
+        .unwrap();
+
+        assert_eq!(s.bridge_escrow_balance(), 400);
+        assert_eq!(s.balance(&addr(3)), 100);
+    }
+
+    /// Burn with the wrong chain_id_hash rejects — even if
+    /// the batch_id IS committed under a different chain.
+    /// Multi-L2 isolation defense.
+    #[test]
+    fn l2_burn_proven_wrong_chain_hash_rejected() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 1_000)]);
+        s.apply_intent(&Intent::L1Lock {
+            user_address: addr(1),
+            l2_recipient: addr(2),
+            amount: 500,
+            asset_id: None,
+        })
+        .unwrap();
+        // Commit batch 42 under chain hash A.
+        let chain_a = [0xaa; 32];
+        let chain_b = [0xbb; 32];
+        s.pin_l2_state_root_for_test(chain_a, 42);
+
+        // Burn citing chain B — same batch_id, different
+        // chain hash. Must reject.
+        let err = s.apply_intent(&Intent::L2BurnProven {
+            batch_id: 42,
+            recipient: addr(3),
+            amount: 100,
+            merkle_path: vec![0xab; 32],
+            asset_id: None,
+            l2_chain_id_hash: chain_b,
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::L2BatchNotCommitted { .. })
+        ));
+
+        // Burning the correct chain still works.
+        s.apply_intent(&Intent::L2BurnProven {
+            batch_id: 42,
+            recipient: addr(3),
+            amount: 100,
+            merkle_path: vec![0xab; 32],
+            asset_id: None,
+            l2_chain_id_hash: chain_a,
+        })
+        .unwrap();
+        assert_eq!(s.balance(&addr(3)), 100);
+    }
+
+    /// Empty registry + uncommitted batch: rejection happens
+    /// before any balance check; escrow + recipient untouched
+    /// even if escrow has zero balance.
+    #[test]
+    fn l2_burn_proven_uncommitted_rejects_before_balance_check() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 1_000)]);
+        let before = s.state_root();
+        // Zero escrow, uncommitted batch.
+        let err = s.apply_intent(&Intent::L2BurnProven {
+            batch_id: 1,
+            recipient: addr(3),
+            amount: 100,
+            merkle_path: vec![],
+            asset_id: None,
+            l2_chain_id_hash: [0u8; 32],
+        });
+        // Specifically L2BatchNotCommitted, NOT
+        // InsufficientBalance — gate fires first.
+        assert!(matches!(
+            err,
+            Err(ExecutionError::L2BatchNotCommitted { .. })
+        ));
+        assert_eq!(s.state_root(), before);
+    }
+
+    /// Zero-amount burn is a no-op + skips the gate
+    /// (matches Transfer / L1Lock zero-amount semantics).
+    #[test]
+    fn l2_burn_proven_zero_amount_skips_gate() {
+        let mut s = InMemorySubstrate::new();
+        let before = s.state_root();
+        s.apply_intent(&Intent::L2BurnProven {
+            batch_id: 999,
+            recipient: addr(1),
+            amount: 0,
+            merkle_path: vec![],
+            asset_id: None,
+            l2_chain_id_hash: [0u8; 32],
+        })
+        .unwrap();
+        assert_eq!(s.state_root(), before);
+    }
+
+    /// pin_l2_state_root_for_test helper writes a real
+    /// record that's readable via the public read API.
+    #[test]
+    fn pin_l2_state_root_for_test_round_trips() {
+        let mut s = InMemorySubstrate::new();
+        assert_eq!(s.l2_commit_count(), 0);
+        s.pin_l2_state_root_for_test([0xab; 32], 7);
+        assert_eq!(s.l2_commit_count(), 1);
+        let key = crate::l2_state::L2BatchKey {
+            l2_chain_id_hash: [0xab; 32],
+            batch_id: 7,
+        };
+        assert!(s.l2_state_root_record(&key).is_some());
+        // Unrelated key returns None.
+        let other = crate::l2_state::L2BatchKey {
+            l2_chain_id_hash: [0xcd; 32],
+            batch_id: 7,
+        };
+        assert!(s.l2_state_root_record(&other).is_none());
     }
 
     // ===== DepositSequencerBond / DepositSafetyBond =====
