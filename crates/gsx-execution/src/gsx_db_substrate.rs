@@ -201,6 +201,8 @@ impl Substrate for GsxDbSubstrate {
             | Intent::EjectSequencer { .. }
             | Intent::DepositSequencerBond { .. }
             | Intent::DepositSafetyBond { .. }
+            | Intent::DepositAuthorityStake { .. }
+            | Intent::DepositValidatorStake { .. }
             | Intent::ClaimInsurance { .. }
             | Intent::DisburseTreasury { .. }
             | Intent::PostL2DA { .. } => Ok(()),
