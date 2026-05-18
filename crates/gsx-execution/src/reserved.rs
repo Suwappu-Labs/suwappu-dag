@@ -86,6 +86,13 @@ pub const ASSET_REGISTRY_DOMAIN: &[u8] = b"gsx-asset-registry-v1";
 /// fallback window.
 pub const EJECTION_REGISTRY_DOMAIN: &[u8] = b"gsx-ejection-registry-v1";
 
+/// Domain tag for the L2 burn-nullifier registry account.
+/// Stores the set of claimed `burn_id`s — one per
+/// successful `Intent::L2BurnProven` — to prevent
+/// double-spending a single L2 burn against the bridge
+/// escrow (Track G G3.2 hardening).
+pub const BURN_NULLIFIER_REGISTRY_DOMAIN: &[u8] = b"gsx-burn-nullifier-registry-v1";
+
 /// Compute the reserved address corresponding to `domain` —
 /// `BLAKE3(domain)[..20]`. Used by the three exposed helpers below.
 /// Inlined per call site (BLAKE3 is sub-microsecond).
@@ -159,6 +166,15 @@ pub fn ejection_registry_address() -> Address {
     derive(EJECTION_REGISTRY_DOMAIN)
 }
 
+/// Reserved address for the L2 burn-nullifier registry.
+/// Stores the set of claimed `burn_id`s — one per
+/// successful `Intent::L2BurnProven` — to prevent
+/// double-spending a single L2 burn against the bridge
+/// escrow (Track G G3.2 hardening).
+pub fn burn_nullifier_registry_address() -> Address {
+    derive(BURN_NULLIFIER_REGISTRY_DOMAIN)
+}
+
 /// Returns true if `addr` is a reserved protocol-owned registry
 /// account. Both `Substrate` impls reject `Intent::Transfer` into
 /// or out of a reserved address.
@@ -172,6 +188,7 @@ pub fn is_reserved(addr: &Address) -> bool {
         || addr == &safety_bond_address()
         || addr == &asset_registry_address()
         || addr == &ejection_registry_address()
+        || addr == &burn_nullifier_registry_address()
 }
 
 #[cfg(test)]
@@ -179,7 +196,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn eight_reserved_addresses_are_distinct() {
+    fn ten_reserved_addresses_are_distinct() {
         let all = [
             l2_registry_address(),
             insurance_pool_address(),
@@ -190,6 +207,7 @@ mod tests {
             safety_bond_address(),
             asset_registry_address(),
             ejection_registry_address(),
+            burn_nullifier_registry_address(),
         ];
         for (i, a) in all.iter().enumerate() {
             for (j, b) in all.iter().enumerate() {
@@ -214,10 +232,14 @@ mod tests {
         assert_eq!(safety_bond_address(), safety_bond_address());
         assert_eq!(asset_registry_address(), asset_registry_address());
         assert_eq!(ejection_registry_address(), ejection_registry_address());
+        assert_eq!(
+            burn_nullifier_registry_address(),
+            burn_nullifier_registry_address()
+        );
     }
 
     #[test]
-    fn is_reserved_matches_all_eight() {
+    fn is_reserved_matches_all_ten() {
         assert!(is_reserved(&l2_registry_address()));
         assert!(is_reserved(&insurance_pool_address()));
         assert!(is_reserved(&treasury_address()));
@@ -227,6 +249,7 @@ mod tests {
         assert!(is_reserved(&safety_bond_address()));
         assert!(is_reserved(&asset_registry_address()));
         assert!(is_reserved(&ejection_registry_address()));
+        assert!(is_reserved(&burn_nullifier_registry_address()));
     }
 
     #[test]

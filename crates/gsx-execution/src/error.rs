@@ -245,4 +245,18 @@ pub enum ExecutionError {
         /// Batch id from the burn Intent.
         batch_id: u64,
     },
+
+    /// `Intent::L2BurnProven` was submitted with a
+    /// `burn_id` already in the burn-nullifier set.
+    /// Defends against replaying the same burn against
+    /// the bridge escrow (Track G G3.2 hardening).
+    #[error(
+        "L2 burn 0x{enc_id} already claimed",
+        enc_id = hex::encode(burn_id),
+    )]
+    L2BurnAlreadyClaimed {
+        /// The `burn_id` that was already in the
+        /// nullifier set.
+        burn_id: [u8; 32],
+    },
 }
