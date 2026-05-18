@@ -278,6 +278,47 @@ pub enum Intent {
         /// `obligation_id`).
         obligation_id: [u8; 32],
     },
+    /// Permissionless sequencer ejection after a Slashed
+    /// obligation has aged past the 10,000-L1-block fallback
+    /// window. Track G strategic plan:
+    ///
+    /// > "after `deadline_l1_height + 10,000 blocks` (≈ 83 min),
+    /// > any address can post a `SequencerEjection` proof and
+    /// > become the next sequencer for one slot."
+    ///
+    /// The substrate effect:
+    /// - Verify obligation is `Slashed` (the slashing path
+    ///   must have already fired; ejection is post-slash).
+    /// - Verify the ejector address is not reserved.
+    /// - Reject if an ejection record already exists for
+    ///   this obligation (replay defense).
+    /// - Insert the ejection record at
+    ///   `ejection_registry_address`.
+    /// - Pay the snitch bounty from treasury to `ejector`,
+    ///   same shape + cap as the `MissedForceInclude`
+    ///   bounty (10% of liveness-bond slash, capped 1M GSX),
+    ///   computed from the obligation's reference slash
+    ///   amount — best-effort, capped by current treasury
+    ///   balance.
+    ///
+    /// The 10,000-block delay is gated daemon-side (the
+    /// substrate has no view into L1 block height); only
+    /// authority-quorum-ratified EjectSequencer Intents
+    /// reach `apply_intent`.
+    ///
+    /// Substrate-level effect is the deterministic ejection
+    /// record. The daemon consults this registry to rotate
+    /// the sequencer for the next slot (separate concern;
+    /// not in scope here).
+    EjectSequencer {
+        /// Obligation that justifies the ejection (must be
+        /// Slashed in the force-include registry).
+        obligation_id: [u8; 32],
+        /// Address that's posting the ejection +
+        /// (daemon-level) becomes the next sequencer slot's
+        /// owner. Receives the snitch bounty.
+        ejector: Address,
+    },
     /// Post a per-batch DA blob to L1 calldata. The sequencer
     /// emits this alongside `CommitL2StateRoot` so the L2 state
     /// transitions are reproducible from L1-anchored data. The
@@ -645,6 +686,29 @@ impl InMemorySubstrate {
     /// Count of registered bridge assets (regardless of status).
     pub fn bridge_asset_count(&self) -> usize {
         self.asset_registry().assets.len()
+    }
+
+    /// Look up the ejection record for a given obligation_id.
+    /// Returns `None` if no ejection has been recorded, or
+    /// if the ejection-registry bytes are corrupt.
+    pub fn sequencer_ejection(
+        &self,
+        obligation_id: &[u8; 32],
+    ) -> Option<crate::eject_registry::EjectionRecord> {
+        let bytes = self.read_bytes(&reserved::ejection_registry_address())?;
+        let map = crate::eject_registry::decode(&bytes).ok()?;
+        map.get(obligation_id).cloned()
+    }
+
+    /// Count of recorded sequencer ejections (one per
+    /// Slashed-and-fallen-out-the-window obligation).
+    pub fn sequencer_ejection_count(&self) -> usize {
+        let bytes = self
+            .read_bytes(&reserved::ejection_registry_address())
+            .unwrap_or_default();
+        crate::eject_registry::decode(&bytes)
+            .map(|m| m.len())
+            .unwrap_or(0)
     }
 
     /// Validate a bridge asset is registered + Active.
@@ -1134,6 +1198,81 @@ impl Substrate for InMemorySubstrate {
 
                 let new_bytes = encode_map(&map);
                 self.write_bytes_unchecked(registry_addr, new_bytes);
+                Ok(())
+            }
+            // Track G G3.4 permissionless-fallback: ejection
+            // of the sequencer after a Slashed obligation has
+            // aged past the daemon-gated 10k-block window.
+            // Substrate enforces (a) obligation Slashed,
+            // (b) ejector not reserved, (c) no prior ejection
+            // for this obligation; then records the ejection
+            // and pays the snitch bounty from treasury.
+            Intent::EjectSequencer {
+                obligation_id,
+                ejector,
+            } => {
+                use crate::{
+                    eject_registry::{decode, encode, EjectionRecord},
+                    force_include::{decode_map, ObligationStatus},
+                };
+
+                if reserved::is_reserved(ejector) {
+                    return Err(ExecutionError::ReservedAddressTransferDenied { addr: *ejector });
+                }
+
+                // Verify the obligation is Slashed.
+                let fi_addr = reserved::force_include_registry_address();
+                let fi_bytes = self.read_bytes(&fi_addr).unwrap_or_default();
+                let fi_map = decode_map(&fi_bytes)?;
+                let ob = fi_map
+                    .get(obligation_id)
+                    .ok_or(ExecutionError::ForceIncludeNotFound {
+                        obligation_id: *obligation_id,
+                    })?;
+                if ob.status != ObligationStatus::Slashed {
+                    return Err(ExecutionError::ForceIncludeNotSlashed {
+                        obligation_id: *obligation_id,
+                        status: ob.status,
+                    });
+                }
+
+                // Load existing ejection map; reject replay.
+                let ej_addr = reserved::ejection_registry_address();
+                let ej_bytes = self.read_bytes(&ej_addr).unwrap_or_default();
+                let mut ej_map = decode(&ej_bytes)?;
+                if ej_map.contains_key(obligation_id) {
+                    return Err(ExecutionError::SequencerEjectionAlreadyRecorded {
+                        obligation_id: *obligation_id,
+                    });
+                }
+                ej_map.insert(*obligation_id, EjectionRecord { ejector: *ejector });
+                let new_bytes = encode(&ej_map);
+                self.write_bytes_unchecked(ej_addr, new_bytes);
+
+                // Bounty payout from treasury. The reference
+                // amount uses the current bond balance × the
+                // medium-tier liveness slash rate — same shape
+                // as the MissedForceInclude path. Best-effort:
+                // capped by current treasury balance; empty
+                // treasury → no bounty, never a rejected
+                // ejection (the ejection record is the
+                // load-bearing state effect).
+                let bond_balance = self.balance(&reserved::sequencer_bond_address());
+                let reference_slash = liveness_slash_amount(bond_balance);
+                let bounty = snitch_bounty_amount(reference_slash);
+                if bounty > 0 {
+                    let treasury_addr = reserved::treasury_address();
+                    let treasury_balance = self.balance(&treasury_addr);
+                    let paid = if bounty < treasury_balance {
+                        bounty
+                    } else {
+                        treasury_balance
+                    };
+                    if paid > 0 {
+                        self.debit_unchecked(treasury_addr, paid)?;
+                        self.credit_unchecked(*ejector, paid)?;
+                    }
+                }
                 Ok(())
             }
             // PostL2DA → G3.3 (#102) DA blob anchoring (no
@@ -3073,6 +3212,220 @@ mod tests {
 
         s.apply_intent(&Intent::MarkForceIncludeHonored { obligation_id: id })
             .unwrap();
+        let after = s.state_root();
+        assert_ne!(before, after);
+    }
+
+    // ===== EjectSequencer (G3.4 permissionless fallback) =====
+
+    /// Helper: register + slash an obligation, returning
+    /// the obligation_id. Common setup for ejection tests.
+    fn slashed_obligation(s: &mut InMemorySubstrate, seed: u8, fund: Balance) -> [u8; 32] {
+        use crate::force_include::obligation_id;
+        s.fund_sequencer_bond(fund).unwrap();
+        let tx = vec![seed; 32];
+        s.apply_intent(&Intent::L2ForceInclude {
+            tx: tx.clone(),
+            deadline_l1_height: 100,
+            submitter: addr(seed),
+            l2_nonce: 1,
+        })
+        .unwrap();
+        let id = obligation_id(&tx, 100, &addr(seed), 1);
+        s.apply_intent(&Intent::SlashSequencer {
+            reason: SlashReason::MissedForceInclude,
+            intent_hash: id,
+        })
+        .unwrap();
+        id
+    }
+
+    /// Happy path: slashed obligation can be ejected, the
+    /// ejection record lands, bounty paid to ejector.
+    #[test]
+    fn eject_sequencer_happy_path() {
+        let mut s = InMemorySubstrate::new();
+        let id = slashed_obligation(&mut s, 7, 1_000_000);
+        // After slash: treasury 10k (15k gross - 5k snitch
+        // bounty to addr(7)). addr(7) holds the snitch
+        // bounty already.
+        assert_eq!(s.balance(&reserved::treasury_address()), 10_000);
+        assert_eq!(s.balance(&addr(7)), 5_000);
+        // Sanity: no ejection yet.
+        assert!(s.sequencer_ejection(&id).is_none());
+
+        // Permissionless ejector is a different address.
+        s.apply_intent(&Intent::EjectSequencer {
+            obligation_id: id,
+            ejector: addr(20),
+        })
+        .unwrap();
+
+        // Ejection record exists.
+        let rec = s.sequencer_ejection(&id).unwrap();
+        assert_eq!(rec.ejector, addr(20));
+        assert_eq!(s.sequencer_ejection_count(), 1);
+
+        // Bounty: reference_slash = 5% × 950k = 47_500
+        // (post-MissedForceInclude bond); bounty = 10% =
+        // 4_750. Treasury was 10k → 5_250 after bounty.
+        assert_eq!(s.balance(&addr(20)), 4_750);
+        assert_eq!(s.balance(&reserved::treasury_address()), 5_250);
+    }
+
+    /// Eject before slash → rejected (obligation Pending).
+    #[test]
+    fn eject_sequencer_pending_obligation_rejected() {
+        use crate::force_include::obligation_id;
+        let mut s = InMemorySubstrate::new();
+        let tx = b"pending".to_vec();
+        s.apply_intent(&Intent::L2ForceInclude {
+            tx: tx.clone(),
+            deadline_l1_height: 100,
+            submitter: addr(5),
+            l2_nonce: 1,
+        })
+        .unwrap();
+        let id = obligation_id(&tx, 100, &addr(5), 1);
+        // No slash.
+        let err = s.apply_intent(&Intent::EjectSequencer {
+            obligation_id: id,
+            ejector: addr(20),
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::ForceIncludeNotSlashed { .. })
+        ));
+    }
+
+    /// Eject on Honored obligation rejects.
+    #[test]
+    fn eject_sequencer_honored_obligation_rejected() {
+        use crate::force_include::obligation_id;
+        let mut s = InMemorySubstrate::new();
+        let tx = b"honored".to_vec();
+        s.apply_intent(&Intent::L2ForceInclude {
+            tx: tx.clone(),
+            deadline_l1_height: 100,
+            submitter: addr(5),
+            l2_nonce: 1,
+        })
+        .unwrap();
+        let id = obligation_id(&tx, 100, &addr(5), 1);
+        s.apply_intent(&Intent::MarkForceIncludeHonored { obligation_id: id })
+            .unwrap();
+
+        let err = s.apply_intent(&Intent::EjectSequencer {
+            obligation_id: id,
+            ejector: addr(20),
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::ForceIncludeNotSlashed { .. })
+        ));
+    }
+
+    /// Unknown obligation rejects with ForceIncludeNotFound.
+    #[test]
+    fn eject_sequencer_unknown_obligation_rejected() {
+        let mut s = InMemorySubstrate::new();
+        let err = s.apply_intent(&Intent::EjectSequencer {
+            obligation_id: [0xde; 32],
+            ejector: addr(20),
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::ForceIncludeNotFound { .. })
+        ));
+    }
+
+    /// Reserved-address ejector rejects via the standard
+    /// reserved-address gate.
+    #[test]
+    fn eject_sequencer_reserved_ejector_rejected() {
+        let mut s = InMemorySubstrate::new();
+        let id = slashed_obligation(&mut s, 7, 1_000_000);
+        let err = s.apply_intent(&Intent::EjectSequencer {
+            obligation_id: id,
+            ejector: reserved::treasury_address(),
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::ReservedAddressTransferDenied { .. })
+        ));
+    }
+
+    /// Double-eject same obligation rejects (replay defense).
+    #[test]
+    fn eject_sequencer_double_eject_rejected() {
+        let mut s = InMemorySubstrate::new();
+        let id = slashed_obligation(&mut s, 7, 1_000_000);
+        s.apply_intent(&Intent::EjectSequencer {
+            obligation_id: id,
+            ejector: addr(20),
+        })
+        .unwrap();
+        let err = s.apply_intent(&Intent::EjectSequencer {
+            obligation_id: id,
+            ejector: addr(21),
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::SequencerEjectionAlreadyRecorded { .. })
+        ));
+        // First ejector keeps the record + bounty.
+        let rec = s.sequencer_ejection(&id).unwrap();
+        assert_eq!(rec.ejector, addr(20));
+    }
+
+    /// Empty-treasury ejection: record lands, no bounty paid
+    /// (best-effort).
+    #[test]
+    fn eject_sequencer_empty_treasury_still_records() {
+        use crate::force_include::obligation_id;
+        let mut s = InMemorySubstrate::new();
+        // Register obligation, no bond, slash is no-op
+        // (slash_amount = 0 since bond = 0). Status flips to
+        // Slashed; treasury stays at 0.
+        let tx = b"poor-treasury".to_vec();
+        s.apply_intent(&Intent::L2ForceInclude {
+            tx: tx.clone(),
+            deadline_l1_height: 100,
+            submitter: addr(5),
+            l2_nonce: 1,
+        })
+        .unwrap();
+        let id = obligation_id(&tx, 100, &addr(5), 1);
+        s.apply_intent(&Intent::SlashSequencer {
+            reason: SlashReason::MissedForceInclude,
+            intent_hash: id,
+        })
+        .unwrap();
+        assert_eq!(s.balance(&reserved::treasury_address()), 0);
+
+        s.apply_intent(&Intent::EjectSequencer {
+            obligation_id: id,
+            ejector: addr(20),
+        })
+        .unwrap();
+
+        // Record lands.
+        assert!(s.sequencer_ejection(&id).is_some());
+        // Ejector got no bounty (treasury empty, slash was 0).
+        assert_eq!(s.balance(&addr(20)), 0);
+    }
+
+    /// Ejection shifts state_root.
+    #[test]
+    fn eject_sequencer_shifts_state_root() {
+        let mut s = InMemorySubstrate::new();
+        let id = slashed_obligation(&mut s, 7, 1_000_000);
+        let before = s.state_root();
+        s.apply_intent(&Intent::EjectSequencer {
+            obligation_id: id,
+            ejector: addr(20),
+        })
+        .unwrap();
         let after = s.state_root();
         assert_ne!(before, after);
     }

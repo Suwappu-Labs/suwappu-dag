@@ -185,6 +185,34 @@ pub enum ExecutionError {
         max: usize,
     },
 
+    /// `Intent::EjectSequencer` referenced an obligation
+    /// that's not in `ObligationStatus::Slashed`. The
+    /// ejection prerequisite is a prior slashing — Pending
+    /// / Honored / Ejected (already) obligations cannot
+    /// be ejected.
+    #[error(
+        "force-include obligation 0x{enc_id} is not slashed (current status: {status:?})",
+        enc_id = hex::encode(obligation_id),
+    )]
+    ForceIncludeNotSlashed {
+        /// The obligation_id pointed at.
+        obligation_id: [u8; 32],
+        /// The obligation's current (non-Slashed) status.
+        status: crate::force_include::ObligationStatus,
+    },
+
+    /// `Intent::EjectSequencer` already has a record for
+    /// this obligation_id. Replay defense: an ejection is
+    /// a one-shot event per obligation.
+    #[error(
+        "sequencer ejection already recorded for obligation 0x{enc_id}",
+        enc_id = hex::encode(obligation_id),
+    )]
+    SequencerEjectionAlreadyRecorded {
+        /// The obligation_id that was already ejected.
+        obligation_id: [u8; 32],
+    },
+
     /// `Intent::L1Lock` or `Intent::L2BurnProven` referenced
     /// an asset that exists in the registry but is not in
     /// `AssetStatus::Active` state (i.e., it's Paused or

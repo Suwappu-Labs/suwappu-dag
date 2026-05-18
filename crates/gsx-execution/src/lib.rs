@@ -31,6 +31,7 @@
 pub mod asset_registry;
 pub mod block;
 pub mod checkpoint;
+pub mod eject_registry;
 pub mod error;
 pub mod force_include;
 pub mod gsx_db_substrate;
