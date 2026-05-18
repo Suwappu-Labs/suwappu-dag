@@ -1211,6 +1211,7 @@ impl Substrate for InMemorySubstrate {
                         mldsa_public_key: mldsa_public_key.clone(),
                         bls_public_key: bls_public_key.clone(),
                         stake_gsx: *stake_gsx,
+                        deposited_stake: 0,
                         status: AuthorityStatus::Active,
                     },
                 );
@@ -1330,6 +1331,7 @@ impl Substrate for InMemorySubstrate {
                         mldsa_public_key: mldsa_public_key.clone(),
                         bls_public_key: bls_public_key.clone(),
                         stake_gsx: *stake_gsx,
+                        deposited_stake: 0,
                         status: ValidatorStatus::Active,
                     },
                 );
@@ -2062,7 +2064,12 @@ impl Substrate for InMemorySubstrate {
                         status: rec.status,
                     });
                 }
-                rec.deposited_stake = rec.deposited_stake.checked_add(amount).ok_or(
+                let delta =
+                    u64::try_from(amount).map_err(|_| ExecutionError::DepositedStakeOverflow {
+                        ring: "authority",
+                        slot_id: *authority_id,
+                    })?;
+                rec.deposited_stake = rec.deposited_stake.checked_add(delta).ok_or(
                     ExecutionError::DepositedStakeOverflow {
                         ring: "authority",
                         slot_id: *authority_id,
@@ -2102,7 +2109,12 @@ impl Substrate for InMemorySubstrate {
                         status: rec.status,
                     });
                 }
-                rec.deposited_stake = rec.deposited_stake.checked_add(amount).ok_or(
+                let delta =
+                    u64::try_from(amount).map_err(|_| ExecutionError::DepositedStakeOverflow {
+                        ring: "validator",
+                        slot_id: *validator_id,
+                    })?;
+                rec.deposited_stake = rec.deposited_stake.checked_add(delta).ok_or(
                     ExecutionError::DepositedStakeOverflow {
                         ring: "validator",
                         slot_id: *validator_id,
