@@ -60,10 +60,18 @@ pub const BRIDGE_ESCROW_DOMAIN: &[u8] = b"gsx-bridge-escrow-v1";
 /// the substrate's bytes_state surface (Track G G3.4, #103).
 pub const FORCE_INCLUDE_REGISTRY_DOMAIN: &[u8] = b"gsx-force-include-registry-v1";
 
-/// Domain tag for the foundation-operated sequencer's bond
-/// account. Holds the liveness + safety bonds; drains on
-/// `Intent::SlashSequencer`.
+/// Domain tag for the sequencer's liveness bond. 3,000,000
+/// GSX per Track G "Sequencer bonding"; drains 5% per
+/// missed-force-include slash. Refundable.
 pub const SEQUENCER_BOND_DOMAIN: &[u8] = b"gsx-sequencer-bond-v1";
+
+/// Domain tag for the sequencer's safety bond. 15,000,000
+/// GSX per Track G "Sequencer bonding"; 100% forfeit on
+/// `SlashReason::Equivocation` or `SlashReason::InvalidBatch`.
+/// Separate from the liveness bond so the partial-drain
+/// model for missed-force-include can't accidentally drain
+/// equivocation collateral.
+pub const SAFETY_BOND_DOMAIN: &[u8] = b"gsx-safety-bond-v1";
 
 /// Domain tag for the bridge-asset registry account.
 /// Stores `asset_id → AssetRecord` records via the substrate's
@@ -122,11 +130,18 @@ pub fn force_include_registry_address() -> Address {
     derive(FORCE_INCLUDE_REGISTRY_DOMAIN)
 }
 
-/// Reserved address for the sequencer's liveness + safety bond.
+/// Reserved address for the sequencer's liveness bond.
 /// Track G G3.4: per-slash drain via
 /// `Intent::SlashSequencer { reason: MissedForceInclude, ... }`.
 pub fn sequencer_bond_address() -> Address {
     derive(SEQUENCER_BOND_DOMAIN)
+}
+
+/// Reserved address for the sequencer's safety bond.
+/// Track G G3.4: 100% forfeit on
+/// `Intent::SlashSequencer { reason: Equivocation | InvalidBatch, ... }`.
+pub fn safety_bond_address() -> Address {
+    derive(SAFETY_BOND_DOMAIN)
 }
 
 /// Reserved address for the bridge-asset registry (Track I
@@ -154,6 +169,7 @@ pub fn is_reserved(addr: &Address) -> bool {
         || addr == &bridge_escrow_address()
         || addr == &force_include_registry_address()
         || addr == &sequencer_bond_address()
+        || addr == &safety_bond_address()
         || addr == &asset_registry_address()
         || addr == &ejection_registry_address()
 }
@@ -171,6 +187,7 @@ mod tests {
             bridge_escrow_address(),
             force_include_registry_address(),
             sequencer_bond_address(),
+            safety_bond_address(),
             asset_registry_address(),
             ejection_registry_address(),
         ];
@@ -194,6 +211,7 @@ mod tests {
             force_include_registry_address()
         );
         assert_eq!(sequencer_bond_address(), sequencer_bond_address());
+        assert_eq!(safety_bond_address(), safety_bond_address());
         assert_eq!(asset_registry_address(), asset_registry_address());
         assert_eq!(ejection_registry_address(), ejection_registry_address());
     }
@@ -206,6 +224,7 @@ mod tests {
         assert!(is_reserved(&bridge_escrow_address()));
         assert!(is_reserved(&force_include_registry_address()));
         assert!(is_reserved(&sequencer_bond_address()));
+        assert!(is_reserved(&safety_bond_address()));
         assert!(is_reserved(&asset_registry_address()));
         assert!(is_reserved(&ejection_registry_address()));
     }

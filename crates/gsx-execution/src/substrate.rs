@@ -620,17 +620,29 @@ impl InMemorySubstrate {
         self.balance(&reserved::bridge_escrow_address())
     }
 
-    /// Read the sequencer's bond balance.
+    /// Read the sequencer's liveness bond balance.
     pub fn sequencer_bond_balance(&self) -> Balance {
         self.balance(&reserved::sequencer_bond_address())
     }
 
-    /// Pre-fund the sequencer's bond. Test/setup helper —
-    /// production wires bond posting via a future
+    /// Read the sequencer's safety bond balance. Drains 100%
+    /// on Equivocation / InvalidBatch slash.
+    pub fn safety_bond_balance(&self) -> Balance {
+        self.balance(&reserved::safety_bond_address())
+    }
+
+    /// Pre-fund the sequencer's liveness bond. Test/setup
+    /// helper — production wires bond posting via a future
     /// `Intent::DepositSequencerBond` (tracked separately).
     /// Bypasses the reserved-address Transfer gate.
     pub fn fund_sequencer_bond(&mut self, amount: Balance) -> Result<(), ExecutionError> {
         self.credit_unchecked(reserved::sequencer_bond_address(), amount)
+    }
+
+    /// Pre-fund the sequencer's safety bond. Test/setup
+    /// helper; production routes through a future Intent.
+    pub fn fund_safety_bond(&mut self, amount: Balance) -> Result<(), ExecutionError> {
+        self.credit_unchecked(reserved::safety_bond_address(), amount)
     }
 
     /// Pin the L2 aggregation + range VK pair. Convenience
@@ -1166,12 +1178,60 @@ impl Substrate for InMemorySubstrate {
                 }
                 Ok(())
             }
-            // Other SlashSequencer variants are not yet wired
-            // (Equivocation, InvalidBatch, Downtime) — they
-            // route through dedicated daemon adjudication paths.
-            // Stub no-op at the substrate level until each
-            // adjudication path lands.
-            Intent::SlashSequencer { .. } => Ok(()),
+            // Track G G3.4: Equivocation / InvalidBatch
+            // slashes. Per the strategic plan Track G
+            // "Sequencer bonding":
+            //
+            // > "Safety bond: 15,000,000 GSX. Matches Tier A
+            // >  Authority Super Node self-stake exactly.
+            // >  **100% forfeit** on equivocation (signing
+            // >  two conflicting L2 batches) or invalid batch
+            // >  (proof verifies but STM contains a consensus
+            // >  rule violation that surfaces later)."
+            //
+            // Substrate effect: drain 100% of the safety bond
+            // (separate reserved address from the liveness
+            // bond) + waterfall the funds 70% insurance / 30%
+            // treasury (Tokenomics §8.3 — no direct
+            // counterparty for protocol-level offenses).
+            //
+            // No snitch bounty on the substrate side: these
+            // offenses are protocol-detected (consensus sees
+            // the conflicting signatures, or a later batch's
+            // proof surfaces the rule violation). If
+            // off-chain bounties are needed, they can be paid
+            // via a separate `DistributeSlashedFunds` Intent
+            // referencing this slash's `intent_hash`.
+            //
+            // The daemon's authority-quorum gates this Intent
+            // (the equivocation proof / invalid-batch witness
+            // must be verified before the SlashSequencer
+            // reaches `apply_intent`).
+            Intent::SlashSequencer {
+                reason: reason @ (SlashReason::Equivocation | SlashReason::InvalidBatch),
+                intent_hash: _,
+            } => {
+                let _ = reason;
+                let bond_addr = reserved::safety_bond_address();
+                let bond_balance = self.balance(&bond_addr);
+                if bond_balance == 0 {
+                    return Ok(());
+                }
+                self.debit_unchecked(bond_addr, bond_balance)?;
+                let insurance_share = bond_balance * 70 / 100;
+                let treasury_share = bond_balance - insurance_share;
+                self.credit_unchecked(reserved::insurance_pool_address(), insurance_share)?;
+                self.credit_unchecked(reserved::treasury_address(), treasury_share)?;
+                Ok(())
+            }
+            // Downtime variant: dedicated daemon adjudication
+            // path (the validator-program daemon detects
+            // missed liveness windows). Stub no-op at the
+            // substrate level until that wiring lands.
+            Intent::SlashSequencer {
+                reason: SlashReason::Downtime,
+                ..
+            } => Ok(()),
             // Track G G3.4 follow-up: sequencer-claimed
             // obligation-honored marker. Daemon-authority-
             // quorum gates the claim; substrate only enforces
@@ -3216,6 +3276,147 @@ mod tests {
         assert_ne!(before, after);
     }
 
+    // ===== Equivocation / InvalidBatch safety bond slash =====
+
+    /// Equivocation slash drains 100% of safety bond and
+    /// applies 70/30 insurance/treasury waterfall. Liveness
+    /// bond untouched.
+    #[test]
+    fn slash_sequencer_equivocation_drains_safety_bond_100pct() {
+        let mut s = InMemorySubstrate::new();
+        s.fund_sequencer_bond(1_000_000).unwrap();
+        s.fund_safety_bond(15_000_000).unwrap();
+        let proof_hash = [0x77; 32];
+
+        s.apply_intent(&Intent::SlashSequencer {
+            reason: SlashReason::Equivocation,
+            intent_hash: proof_hash,
+        })
+        .unwrap();
+
+        // Safety bond drained to zero.
+        assert_eq!(s.safety_bond_balance(), 0);
+        // Liveness bond untouched.
+        assert_eq!(s.sequencer_bond_balance(), 1_000_000);
+        // 70% to insurance = 10_500_000; 30% to treasury = 4_500_000.
+        assert_eq!(s.balance(&reserved::insurance_pool_address()), 10_500_000);
+        assert_eq!(s.balance(&reserved::treasury_address()), 4_500_000);
+    }
+
+    /// InvalidBatch slash mirrors Equivocation: 100% safety
+    /// bond + same waterfall.
+    #[test]
+    fn slash_sequencer_invalid_batch_drains_safety_bond_100pct() {
+        let mut s = InMemorySubstrate::new();
+        s.fund_safety_bond(10_000_000).unwrap();
+        let batch_hash = [0x88; 32];
+
+        s.apply_intent(&Intent::SlashSequencer {
+            reason: SlashReason::InvalidBatch,
+            intent_hash: batch_hash,
+        })
+        .unwrap();
+
+        assert_eq!(s.safety_bond_balance(), 0);
+        assert_eq!(s.balance(&reserved::insurance_pool_address()), 7_000_000);
+        assert_eq!(s.balance(&reserved::treasury_address()), 3_000_000);
+    }
+
+    /// Empty safety bond → slash is a no-op at substrate level.
+    #[test]
+    fn slash_sequencer_equivocation_empty_bond_is_noop() {
+        let mut s = InMemorySubstrate::new();
+        let before = s.state_root();
+        s.apply_intent(&Intent::SlashSequencer {
+            reason: SlashReason::Equivocation,
+            intent_hash: [0; 32],
+        })
+        .unwrap();
+        assert_eq!(s.safety_bond_balance(), 0);
+        assert_eq!(s.balance(&reserved::insurance_pool_address()), 0);
+        assert_eq!(s.balance(&reserved::treasury_address()), 0);
+        assert_eq!(s.state_root(), before);
+    }
+
+    /// Double-equivocation: second slash sees empty bond → no-op.
+    #[test]
+    fn slash_sequencer_equivocation_idempotent_after_drain() {
+        let mut s = InMemorySubstrate::new();
+        s.fund_safety_bond(10_000_000).unwrap();
+
+        s.apply_intent(&Intent::SlashSequencer {
+            reason: SlashReason::Equivocation,
+            intent_hash: [0x77; 32],
+        })
+        .unwrap();
+        assert_eq!(s.safety_bond_balance(), 0);
+        let insurance_after_first = s.balance(&reserved::insurance_pool_address());
+        let treasury_after_first = s.balance(&reserved::treasury_address());
+
+        s.apply_intent(&Intent::SlashSequencer {
+            reason: SlashReason::Equivocation,
+            intent_hash: [0x77; 32],
+        })
+        .unwrap();
+        assert_eq!(s.safety_bond_balance(), 0);
+        assert_eq!(
+            s.balance(&reserved::insurance_pool_address()),
+            insurance_after_first
+        );
+        assert_eq!(
+            s.balance(&reserved::treasury_address()),
+            treasury_after_first
+        );
+    }
+
+    /// Equivocation slash leaves force-include registry untouched.
+    #[test]
+    fn slash_sequencer_equivocation_independent_of_force_include() {
+        use crate::force_include::obligation_id;
+        let mut s = InMemorySubstrate::new();
+        s.fund_safety_bond(10_000_000).unwrap();
+        let tx = b"unrelated".to_vec();
+        s.apply_intent(&Intent::L2ForceInclude {
+            tx: tx.clone(),
+            deadline_l1_height: 100,
+            submitter: addr(5),
+            l2_nonce: 1,
+        })
+        .unwrap();
+        let id = obligation_id(&tx, 100, &addr(5), 1);
+
+        s.apply_intent(&Intent::SlashSequencer {
+            reason: SlashReason::Equivocation,
+            intent_hash: [0x77; 32],
+        })
+        .unwrap();
+
+        assert_eq!(s.safety_bond_balance(), 0);
+        assert_eq!(s.force_include_count(), 1);
+        assert_eq!(
+            s.force_include_obligation(&id).unwrap().status,
+            crate::force_include::ObligationStatus::Pending,
+        );
+    }
+
+    /// Downtime slash is a substrate no-op (validator-program
+    /// daemon adjudication path lands separately).
+    #[test]
+    fn slash_sequencer_downtime_is_noop() {
+        let mut s = InMemorySubstrate::new();
+        s.fund_safety_bond(10_000_000).unwrap();
+        s.fund_sequencer_bond(1_000_000).unwrap();
+        let before = s.state_root();
+        s.apply_intent(&Intent::SlashSequencer {
+            reason: SlashReason::Downtime,
+            intent_hash: [0; 32],
+        })
+        .unwrap();
+        assert_eq!(s.safety_bond_balance(), 10_000_000);
+        assert_eq!(s.sequencer_bond_balance(), 1_000_000);
+        assert_eq!(s.state_root(), before);
+    }
+
     // ===== EjectSequencer (G3.4 permissionless fallback) =====
 
     /// Helper: register + slash an obligation, returning
@@ -3246,29 +3447,22 @@ mod tests {
     fn eject_sequencer_happy_path() {
         let mut s = InMemorySubstrate::new();
         let id = slashed_obligation(&mut s, 7, 1_000_000);
-        // After slash: treasury 10k (15k gross - 5k snitch
-        // bounty to addr(7)). addr(7) holds the snitch
-        // bounty already.
         assert_eq!(s.balance(&reserved::treasury_address()), 10_000);
         assert_eq!(s.balance(&addr(7)), 5_000);
-        // Sanity: no ejection yet.
         assert!(s.sequencer_ejection(&id).is_none());
 
-        // Permissionless ejector is a different address.
         s.apply_intent(&Intent::EjectSequencer {
             obligation_id: id,
             ejector: addr(20),
         })
         .unwrap();
 
-        // Ejection record exists.
         let rec = s.sequencer_ejection(&id).unwrap();
         assert_eq!(rec.ejector, addr(20));
         assert_eq!(s.sequencer_ejection_count(), 1);
 
-        // Bounty: reference_slash = 5% × 950k = 47_500
-        // (post-MissedForceInclude bond); bounty = 10% =
-        // 4_750. Treasury was 10k → 5_250 after bounty.
+        // Bounty: reference_slash = 5% × 950k = 47_500;
+        // bounty = 10% = 4_750. Treasury was 10k → 5_250.
         assert_eq!(s.balance(&addr(20)), 4_750);
         assert_eq!(s.balance(&reserved::treasury_address()), 5_250);
     }
@@ -3287,7 +3481,6 @@ mod tests {
         })
         .unwrap();
         let id = obligation_id(&tx, 100, &addr(5), 1);
-        // No slash.
         let err = s.apply_intent(&Intent::EjectSequencer {
             obligation_id: id,
             ejector: addr(20),
@@ -3339,8 +3532,7 @@ mod tests {
         ));
     }
 
-    /// Reserved-address ejector rejects via the standard
-    /// reserved-address gate.
+    /// Reserved-address ejector rejects via the reserved gate.
     #[test]
     fn eject_sequencer_reserved_ejector_rejected() {
         let mut s = InMemorySubstrate::new();
@@ -3355,7 +3547,7 @@ mod tests {
         ));
     }
 
-    /// Double-eject same obligation rejects (replay defense).
+    /// Double-eject rejects (replay defense).
     #[test]
     fn eject_sequencer_double_eject_rejected() {
         let mut s = InMemorySubstrate::new();
@@ -3373,20 +3565,15 @@ mod tests {
             err,
             Err(ExecutionError::SequencerEjectionAlreadyRecorded { .. })
         ));
-        // First ejector keeps the record + bounty.
         let rec = s.sequencer_ejection(&id).unwrap();
         assert_eq!(rec.ejector, addr(20));
     }
 
-    /// Empty-treasury ejection: record lands, no bounty paid
-    /// (best-effort).
+    /// Empty-treasury ejection: record lands, no bounty.
     #[test]
     fn eject_sequencer_empty_treasury_still_records() {
         use crate::force_include::obligation_id;
         let mut s = InMemorySubstrate::new();
-        // Register obligation, no bond, slash is no-op
-        // (slash_amount = 0 since bond = 0). Status flips to
-        // Slashed; treasury stays at 0.
         let tx = b"poor-treasury".to_vec();
         s.apply_intent(&Intent::L2ForceInclude {
             tx: tx.clone(),
@@ -3409,9 +3596,7 @@ mod tests {
         })
         .unwrap();
 
-        // Record lands.
         assert!(s.sequencer_ejection(&id).is_some());
-        // Ejector got no bounty (treasury empty, slash was 0).
         assert_eq!(s.balance(&addr(20)), 0);
     }
 
