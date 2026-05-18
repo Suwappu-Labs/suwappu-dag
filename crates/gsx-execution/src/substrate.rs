@@ -188,6 +188,46 @@ pub enum Intent {
         /// Amount delegated.
         amount: Balance,
     },
+    /// Begin unbonding `amount` of the (validator_id, from)
+    /// delegation. Moves the requested amount from the active
+    /// delegation registry into the unbonding registry, keyed
+    /// by the current block height. The funds stay in the
+    /// validator stake pool — they remain slashable during
+    /// the `EXIT_COOLDOWN_BLOCKS` cool-off — but no longer
+    /// count as an active delegation for reward purposes.
+    ///
+    /// Gating:
+    /// - `from` must not be reserved.
+    /// - `amount` must be ≤ the active delegation for
+    ///   `(validator_id, from)`.
+    /// - Zero is a no-op.
+    /// - The validator slot does NOT need to be Active —
+    ///   delegators can exit independently of validator
+    ///   lifecycle.
+    UndelegateBegin {
+        /// Delegator initiating the unbond.
+        from: Address,
+        /// Validator slot being undelegated from.
+        validator_id: u32,
+        /// Amount entering the unbonding queue.
+        amount: Balance,
+    },
+    /// Claim every (validator_id, from, height) unbonding
+    /// entry whose `height + EXIT_COOLDOWN_BLOCKS ≤
+    /// current_block_height`. Debits the validator stake
+    /// pool by the sum of matured amounts and credits `from`.
+    /// Removes the claimed entries from the unbonding
+    /// registry.
+    ///
+    /// Successful call with no matured entries is a no-op
+    /// (returns `Ok(())` with no state change). Allows
+    /// callers to poll without partial-progress side effects.
+    UndelegateClaim {
+        /// Delegator claiming matured unbondings.
+        from: Address,
+        /// Validator slot being claimed from.
+        validator_id: u32,
+    },
     /// Daemon-emitted: mint a per-epoch inflation tranche,
     /// crediting the three protocol-owned destination pools
     /// (Authority rewards, Validator rewards, treasury).
@@ -1471,6 +1511,38 @@ impl InMemorySubstrate {
             .sum()
     }
 
+    /// Pending unbonding amount for the
+    /// `(validator_id, delegator, unbonding_height)` triple.
+    /// Returns 0 for unknown triples or corrupt bytes.
+    pub fn unbonding(&self, validator_id: u32, delegator: Address, unbonding_height: u64) -> u64 {
+        let bytes = self
+            .read_bytes(&reserved::validator_unbonding_registry_address())
+            .unwrap_or_default();
+        crate::unbonding_registry::decode(&bytes)
+            .map(|m| {
+                m.get(&(validator_id, delegator, unbonding_height))
+                    .copied()
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0)
+    }
+
+    /// Total pending unbonding amount for `(validator_id,
+    /// delegator)` across all heights. Useful in tests.
+    pub fn total_unbonding_for(&self, validator_id: u32, delegator: Address) -> u64 {
+        let bytes = self
+            .read_bytes(&reserved::validator_unbonding_registry_address())
+            .unwrap_or_default();
+        let map = match crate::unbonding_registry::decode(&bytes) {
+            Ok(m) => m,
+            Err(_) => return 0,
+        };
+        map.iter()
+            .filter(|((vid, d, _), _)| *vid == validator_id && *d == delegator)
+            .map(|(_, amount)| *amount)
+            .sum()
+    }
+
     /// Last epoch for which `Intent::DistributeRewards` ran
     /// against `ring`. Returns `0` if no payout has been
     /// recorded for that ring (the bootstrap state).
@@ -1785,6 +1857,124 @@ impl Substrate for InMemorySubstrate {
                         })?;
                 self.transfer_internal(from, reserved::validator_stake_pool_address(), amount)?;
                 self.write_bytes_unchecked(reg_addr, delegation_registry::encode(&reg));
+                Ok(())
+            }
+            // Delegator-initiated unbond. Moves `amount` from
+            // the active delegation registry into the
+            // unbonding registry keyed at the current block
+            // height. Funds stay in the validator stake pool
+            // (still slashable during the cooldown window).
+            Intent::UndelegateBegin {
+                from,
+                validator_id,
+                amount,
+            } => {
+                use crate::{delegation_registry, unbonding_registry};
+                let from = *from;
+                let amount = *amount;
+                if amount == 0 {
+                    return Ok(());
+                }
+                if reserved::is_reserved(&from) {
+                    return Err(ExecutionError::ReservedAddressTransferDenied { addr: from });
+                }
+                let delta =
+                    u64::try_from(amount).map_err(|_| ExecutionError::DepositedStakeOverflow {
+                        ring: "delegation",
+                        slot_id: *validator_id,
+                    })?;
+                let height = self.current_block_height();
+                // Decode delegation registry; require an
+                // existing (validator_id, from) entry of at
+                // least `delta`.
+                let del_addr = reserved::validator_delegation_registry_address();
+                let del_bytes = self.read_bytes(&del_addr).unwrap_or_default();
+                let mut del_map = delegation_registry::decode(&del_bytes)?;
+                let key = (*validator_id, from);
+                let current = del_map.get(&key).copied().unwrap_or(0);
+                if current < delta {
+                    return Err(ExecutionError::UndelegationExceedsDelegation {
+                        slot_id: *validator_id,
+                        want: amount,
+                        have: current as Balance,
+                    });
+                }
+                let new_active = current - delta;
+                if new_active == 0 {
+                    del_map.remove(&key);
+                } else {
+                    del_map.insert(key, new_active);
+                }
+                // Add (or extend) the unbonding entry for
+                // this height.
+                let unb_addr = reserved::validator_unbonding_registry_address();
+                let unb_bytes = self.read_bytes(&unb_addr).unwrap_or_default();
+                let mut unb_map = unbonding_registry::decode(&unb_bytes)?;
+                let unb_key = (*validator_id, from, height);
+                let prior = unb_map.get(&unb_key).copied().unwrap_or(0);
+                let new_unb =
+                    prior
+                        .checked_add(delta)
+                        .ok_or(ExecutionError::DepositedStakeOverflow {
+                            ring: "unbonding",
+                            slot_id: *validator_id,
+                        })?;
+                unb_map.insert(unb_key, new_unb);
+                // No balance mutation — funds stay in the
+                // pool. Only the two registry records change.
+                self.write_bytes_unchecked(del_addr, delegation_registry::encode(&del_map));
+                self.write_bytes_unchecked(unb_addr, unbonding_registry::encode(&unb_map));
+                Ok(())
+            }
+            // Drain every matured (validator_id, from, height)
+            // unbonding entry whose
+            // `height + EXIT_COOLDOWN_BLOCKS ≤ current_height`
+            // into `from`. No-op if there are no matured
+            // entries.
+            Intent::UndelegateClaim { from, validator_id } => {
+                use crate::unbonding_registry;
+                let from = *from;
+                if reserved::is_reserved(&from) {
+                    return Err(ExecutionError::ReservedAddressTransferDenied { addr: from });
+                }
+                let height = self.current_block_height();
+                let unb_addr = reserved::validator_unbonding_registry_address();
+                let unb_bytes = self.read_bytes(&unb_addr).unwrap_or_default();
+                let mut unb_map = unbonding_registry::decode(&unb_bytes)?;
+                let mut total_payout: Balance = 0;
+                let mut keys_to_drop: Vec<(u32, Address, u64)> = Vec::new();
+                for (key, amount) in unb_map.iter() {
+                    let (vid, delegator, unb_height) = *key;
+                    if vid != *validator_id || delegator != from {
+                        continue;
+                    }
+                    let required = unb_height.saturating_add(EXIT_COOLDOWN_BLOCKS);
+                    if height < required {
+                        continue;
+                    }
+                    total_payout = total_payout.checked_add(*amount as Balance).ok_or(
+                        ExecutionError::DepositedStakeOverflow {
+                            ring: "unbonding",
+                            slot_id: *validator_id,
+                        },
+                    )?;
+                    keys_to_drop.push(*key);
+                }
+                if total_payout == 0 {
+                    return Ok(());
+                }
+                // Atomic pool → from transfer; pre-flights
+                // both pool sufficiency and recipient
+                // overflow.
+                self.transfer_internal(
+                    reserved::validator_stake_pool_address(),
+                    from,
+                    total_payout,
+                )?;
+                for key in keys_to_drop {
+                    unb_map.remove(&key);
+                }
+                self.write_bytes_unchecked(unb_addr, unbonding_registry::encode(&unb_map));
                 Ok(())
             }
             // Phase G governance — Authority Ring registry
@@ -8596,6 +8786,381 @@ mod tests {
         let s = InMemorySubstrate::new();
         assert_eq!(s.delegation(0, addr(1)), 0);
         assert_eq!(s.total_delegated_to_validator(0), 0);
+    }
+
+    // ===== Undelegate (Begin + Claim) =====
+
+    /// Set up a substrate with one validator and an active
+    /// delegation of `amount` from `addr(1)`.
+    fn with_delegation(amount: u128) -> InMemorySubstrate {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 10_000_000)]);
+        admit_validator(&mut s, 0);
+        s.apply_intent(&Intent::Delegate {
+            from: addr(1),
+            validator_id: 0,
+            amount,
+        })
+        .unwrap();
+        s
+    }
+
+    #[test]
+    fn undelegate_begin_happy_path_moves_to_unbonding() {
+        let mut s = with_delegation(4_000_000);
+        let pool_before = s.balance(&reserved::validator_stake_pool_address());
+        let from_before = s.balance(&addr(1));
+
+        s.set_current_block_height(100);
+        s.apply_intent(&Intent::UndelegateBegin {
+            from: addr(1),
+            validator_id: 0,
+            amount: 1_500_000,
+        })
+        .unwrap();
+
+        // Funds stay in the pool — only registry shape moves.
+        assert_eq!(
+            s.balance(&reserved::validator_stake_pool_address()),
+            pool_before
+        );
+        assert_eq!(s.balance(&addr(1)), from_before);
+        // Active delegation shrinks; unbonding entry appears.
+        assert_eq!(s.delegation(0, addr(1)), 2_500_000);
+        assert_eq!(s.unbonding(0, addr(1), 100), 1_500_000);
+        assert_eq!(s.total_unbonding_for(0, addr(1)), 1_500_000);
+    }
+
+    #[test]
+    fn undelegate_begin_fully_drains_delegation_entry() {
+        let mut s = with_delegation(2_000_000);
+        s.set_current_block_height(50);
+        s.apply_intent(&Intent::UndelegateBegin {
+            from: addr(1),
+            validator_id: 0,
+            amount: 2_000_000,
+        })
+        .unwrap();
+        // Empty active delegation is removed (delegation()
+        // returns 0); total still accounts for it via the
+        // unbonding registry.
+        assert_eq!(s.delegation(0, addr(1)), 0);
+        assert_eq!(s.unbonding(0, addr(1), 50), 2_000_000);
+    }
+
+    #[test]
+    fn undelegate_begin_two_at_same_height_accumulate() {
+        let mut s = with_delegation(5_000_000);
+        s.set_current_block_height(75);
+        for amt in [1_000_000u128, 500_000] {
+            s.apply_intent(&Intent::UndelegateBegin {
+                from: addr(1),
+                validator_id: 0,
+                amount: amt,
+            })
+            .unwrap();
+        }
+        assert_eq!(s.unbonding(0, addr(1), 75), 1_500_000);
+        assert_eq!(s.delegation(0, addr(1)), 3_500_000);
+    }
+
+    #[test]
+    fn undelegate_begin_at_different_heights_kept_separately() {
+        let mut s = with_delegation(5_000_000);
+        s.set_current_block_height(100);
+        s.apply_intent(&Intent::UndelegateBegin {
+            from: addr(1),
+            validator_id: 0,
+            amount: 1_000_000,
+        })
+        .unwrap();
+        s.set_current_block_height(200);
+        s.apply_intent(&Intent::UndelegateBegin {
+            from: addr(1),
+            validator_id: 0,
+            amount: 2_000_000,
+        })
+        .unwrap();
+        assert_eq!(s.unbonding(0, addr(1), 100), 1_000_000);
+        assert_eq!(s.unbonding(0, addr(1), 200), 2_000_000);
+        assert_eq!(s.total_unbonding_for(0, addr(1)), 3_000_000);
+    }
+
+    #[test]
+    fn undelegate_begin_exceeding_delegation_rejected() {
+        let mut s = with_delegation(1_000_000);
+        let before = s.state_root();
+        let err = s.apply_intent(&Intent::UndelegateBegin {
+            from: addr(1),
+            validator_id: 0,
+            amount: 2_000_000,
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::UndelegationExceedsDelegation {
+                slot_id: 0,
+                want: 2_000_000,
+                have: 1_000_000,
+            })
+        ));
+        assert_eq!(s.state_root(), before);
+    }
+
+    #[test]
+    fn undelegate_begin_with_no_active_delegation_rejected() {
+        let mut s = InMemorySubstrate::new();
+        admit_validator(&mut s, 0);
+        let err = s.apply_intent(&Intent::UndelegateBegin {
+            from: addr(1),
+            validator_id: 0,
+            amount: 100,
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::UndelegationExceedsDelegation {
+                slot_id: 0,
+                want: 100,
+                have: 0,
+            })
+        ));
+    }
+
+    #[test]
+    fn undelegate_begin_zero_is_noop() {
+        let mut s = with_delegation(1_000_000);
+        let before = s.state_root();
+        s.apply_intent(&Intent::UndelegateBegin {
+            from: addr(1),
+            validator_id: 0,
+            amount: 0,
+        })
+        .unwrap();
+        assert_eq!(s.state_root(), before);
+    }
+
+    #[test]
+    fn undelegate_begin_reserved_from_rejected() {
+        let mut s = with_delegation(1_000_000);
+        let err = s.apply_intent(&Intent::UndelegateBegin {
+            from: reserved::treasury_address(),
+            validator_id: 0,
+            amount: 100,
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::ReservedAddressTransferDenied { .. })
+        ));
+    }
+
+    #[test]
+    fn undelegate_begin_per_delegator_isolated() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 5_000_000), (addr(2), 5_000_000)]);
+        admit_validator(&mut s, 0);
+        s.apply_intent(&Intent::Delegate {
+            from: addr(1),
+            validator_id: 0,
+            amount: 4_000_000,
+        })
+        .unwrap();
+        s.apply_intent(&Intent::Delegate {
+            from: addr(2),
+            validator_id: 0,
+            amount: 3_000_000,
+        })
+        .unwrap();
+        s.set_current_block_height(10);
+        s.apply_intent(&Intent::UndelegateBegin {
+            from: addr(1),
+            validator_id: 0,
+            amount: 1_000_000,
+        })
+        .unwrap();
+        // addr(2)'s active delegation is untouched.
+        assert_eq!(s.delegation(0, addr(1)), 3_000_000);
+        assert_eq!(s.delegation(0, addr(2)), 3_000_000);
+        assert_eq!(s.unbonding(0, addr(1), 10), 1_000_000);
+        assert_eq!(s.unbonding(0, addr(2), 10), 0);
+    }
+
+    #[test]
+    fn undelegate_claim_before_cooldown_is_noop() {
+        let mut s = with_delegation(2_000_000);
+        s.set_current_block_height(100);
+        s.apply_intent(&Intent::UndelegateBegin {
+            from: addr(1),
+            validator_id: 0,
+            amount: 1_000_000,
+        })
+        .unwrap();
+        let snapshot = s.state_root();
+        // Still inside the cool-off — no maturation.
+        s.set_current_block_height(100 + EXIT_COOLDOWN_BLOCKS - 1);
+        s.apply_intent(&Intent::UndelegateClaim {
+            from: addr(1),
+            validator_id: 0,
+        })
+        .unwrap();
+        assert_eq!(s.state_root(), snapshot);
+    }
+
+    #[test]
+    fn undelegate_claim_after_cooldown_credits_delegator() {
+        let mut s = with_delegation(2_000_000);
+        let from_before = s.balance(&addr(1));
+        s.set_current_block_height(100);
+        s.apply_intent(&Intent::UndelegateBegin {
+            from: addr(1),
+            validator_id: 0,
+            amount: 750_000,
+        })
+        .unwrap();
+        s.set_current_block_height(100 + EXIT_COOLDOWN_BLOCKS);
+        s.apply_intent(&Intent::UndelegateClaim {
+            from: addr(1),
+            validator_id: 0,
+        })
+        .unwrap();
+        assert_eq!(s.balance(&addr(1)), from_before + 750_000);
+        assert_eq!(s.unbonding(0, addr(1), 100), 0);
+        // Active delegation stays where UndelegateBegin left it.
+        assert_eq!(s.delegation(0, addr(1)), 1_250_000);
+    }
+
+    #[test]
+    fn undelegate_claim_drains_only_matured_entries() {
+        let mut s = with_delegation(5_000_000);
+        // First unbond at h=100 will be matured.
+        s.set_current_block_height(100);
+        s.apply_intent(&Intent::UndelegateBegin {
+            from: addr(1),
+            validator_id: 0,
+            amount: 1_000_000,
+        })
+        .unwrap();
+        // Second unbond at h=500 will NOT be matured at claim time.
+        s.set_current_block_height(500);
+        s.apply_intent(&Intent::UndelegateBegin {
+            from: addr(1),
+            validator_id: 0,
+            amount: 2_000_000,
+        })
+        .unwrap();
+        // Cooldown elapsed for h=100 but not h=500.
+        let from_before = s.balance(&addr(1));
+        s.set_current_block_height(100 + EXIT_COOLDOWN_BLOCKS);
+        s.apply_intent(&Intent::UndelegateClaim {
+            from: addr(1),
+            validator_id: 0,
+        })
+        .unwrap();
+        assert_eq!(s.balance(&addr(1)), from_before + 1_000_000);
+        assert_eq!(s.unbonding(0, addr(1), 100), 0);
+        assert_eq!(s.unbonding(0, addr(1), 500), 2_000_000);
+    }
+
+    #[test]
+    fn undelegate_claim_with_no_entries_is_noop() {
+        let mut s = with_delegation(1_000_000);
+        let before = s.state_root();
+        s.set_current_block_height(EXIT_COOLDOWN_BLOCKS + 1);
+        s.apply_intent(&Intent::UndelegateClaim {
+            from: addr(1),
+            validator_id: 0,
+        })
+        .unwrap();
+        assert_eq!(s.state_root(), before);
+    }
+
+    #[test]
+    fn undelegate_claim_only_drains_for_matching_pair() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 5_000_000), (addr(2), 5_000_000)]);
+        admit_validator(&mut s, 0);
+        admit_validator(&mut s, 1);
+        s.apply_intent(&Intent::Delegate {
+            from: addr(1),
+            validator_id: 0,
+            amount: 3_000_000,
+        })
+        .unwrap();
+        s.apply_intent(&Intent::Delegate {
+            from: addr(2),
+            validator_id: 0,
+            amount: 3_000_000,
+        })
+        .unwrap();
+        s.apply_intent(&Intent::Delegate {
+            from: addr(1),
+            validator_id: 1,
+            amount: 2_000_000,
+        })
+        .unwrap();
+        s.set_current_block_height(10);
+        for (from, vid, amt) in [
+            (addr(1), 0u32, 500_000u128),
+            (addr(2), 0, 500_000),
+            (addr(1), 1, 1_000_000),
+        ] {
+            s.apply_intent(&Intent::UndelegateBegin {
+                from,
+                validator_id: vid,
+                amount: amt,
+            })
+            .unwrap();
+        }
+        s.set_current_block_height(10 + EXIT_COOLDOWN_BLOCKS);
+        let from1_before = s.balance(&addr(1));
+        s.apply_intent(&Intent::UndelegateClaim {
+            from: addr(1),
+            validator_id: 0,
+        })
+        .unwrap();
+        // Only addr(1)'s validator-0 entry drains.
+        assert_eq!(s.balance(&addr(1)), from1_before + 500_000);
+        assert_eq!(s.unbonding(0, addr(1), 10), 0);
+        assert_eq!(s.unbonding(0, addr(2), 10), 500_000);
+        assert_eq!(s.unbonding(1, addr(1), 10), 1_000_000);
+    }
+
+    #[test]
+    fn undelegate_claim_reserved_from_rejected() {
+        let mut s = InMemorySubstrate::new();
+        admit_validator(&mut s, 0);
+        let err = s.apply_intent(&Intent::UndelegateClaim {
+            from: reserved::treasury_address(),
+            validator_id: 0,
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::ReservedAddressTransferDenied { .. })
+        ));
+    }
+
+    #[test]
+    fn undelegate_begin_then_claim_round_trips_supply() {
+        // End-to-end: delegate → undelegate-begin → wait →
+        // claim returns the same nominal amount to the
+        // delegator. Validator pool ends at zero (validator
+        // still admitted but no active stake).
+        let mut s = with_delegation(2_000_000);
+        s.set_current_block_height(1);
+        s.apply_intent(&Intent::UndelegateBegin {
+            from: addr(1),
+            validator_id: 0,
+            amount: 2_000_000,
+        })
+        .unwrap();
+        s.set_current_block_height(1 + EXIT_COOLDOWN_BLOCKS);
+        s.apply_intent(&Intent::UndelegateClaim {
+            from: addr(1),
+            validator_id: 0,
+        })
+        .unwrap();
+        // Note: with_delegation seeds addr(1) at 10M, delegates
+        // 2M → balance 8M after Delegate. Claim returns 2M →
+        // 10M.
+        assert_eq!(s.balance(&addr(1)), 10_000_000);
+        assert_eq!(s.balance(&reserved::validator_stake_pool_address()), 0);
+        assert_eq!(s.total_unbonding_for(0, addr(1)), 0);
+        assert_eq!(s.delegation(0, addr(1)), 0);
     }
 
     // ===== Atomicity hardening =====

@@ -455,4 +455,22 @@ pub enum ExecutionError {
         /// for this ring.
         last_distributed_epoch: u64,
     },
+
+    /// `Intent::UndelegateBegin { validator_id, amount, .. }`
+    /// requested an unbond larger than the active
+    /// `(validator_id, delegator)` entry in the delegation
+    /// registry. Unbonds cannot exceed the active delegation
+    /// from the same caller against the same validator.
+    #[error(
+        "undelegation exceeds active delegation on validator slot {slot_id}: want {want}, have {have}"
+    )]
+    UndelegationExceedsDelegation {
+        /// Validator slot the caller is undelegating from.
+        slot_id: u32,
+        /// Amount the Intent requested to unbond.
+        want: Balance,
+        /// Current active delegation for the
+        /// `(validator_id, delegator)` pair.
+        have: Balance,
+    },
 }
