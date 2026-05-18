@@ -30,6 +30,21 @@ pub type Balance = u128;
 /// the cap is hit).
 pub const LIVENESS_SLASH_BPS: u128 = 500;
 
+/// Number of L1 blocks an Authority / Validator slot must
+/// wait between `ExitAuthority` / `ExitValidator` and the
+/// first allowed `WithdrawAuthorityStake` /
+/// `WithdrawValidatorStake`. Bounds the window in which an
+/// equivocation proof produced before-or-during the operator's
+/// graceful exit can still ground a slashing event — i.e.,
+/// makes the operator's exit "unwithdrawable" until the
+/// slashing surface has had a chance to catch up.
+///
+/// Per the strategic plan §6.1, this is set in the
+/// "weeks-of-blocks" range. At ~500 ms reliable-broadcast
+/// budget per round (paper §3.4) that's ≈172_800 rounds/day.
+/// Set to ≈14 days of rounds (≈2_419_200) by default.
+pub const EXIT_COOLDOWN_BLOCKS: u64 = 2_419_200;
+
 /// Compute the medium-tier liveness slash amount given the
 /// current bond balance. 5% of current bond. Returns 0 if the
 /// bond is empty.
@@ -699,6 +714,27 @@ pub trait Substrate {
     /// guaranteed identical to before the call (atomicity).
     fn apply_intent(&mut self, intent: &Intent) -> Result<(), ExecutionError>;
 
+    /// Ambient Mysticeti round at which intents are being
+    /// applied. Used by lifecycle gates that need a height
+    /// (e.g., the exit-cooldown gate on
+    /// `WithdrawAuthorityStake` / `WithdrawValidatorStake`).
+    ///
+    /// Default impl returns `0` — adapters that don't carry
+    /// block context inherit the safe behavior of "height
+    /// never advances", which conservatively blocks
+    /// cooldown-gated Intents. Implementations should override
+    /// to return the round of the block currently being
+    /// executed.
+    fn current_block_height(&self) -> u64 {
+        0
+    }
+
+    /// Set the ambient block height. Called by
+    /// [`execute_block`] before iterating the block's intents.
+    /// Default impl is a no-op for adapters that don't carry
+    /// block context.
+    fn set_current_block_height(&mut self, _height: u64) {}
+
     /// Compute the canonical state root.
     ///
     /// Encoding (V2 — extended for bytes-state in this PR):
@@ -735,6 +771,14 @@ pub trait Substrate {
 pub struct InMemorySubstrate {
     balances: BTreeMap<Address, Balance>,
     bytes_state: BTreeMap<Address, Vec<u8>>,
+    /// Ambient round at which the current block's intents are
+    /// being applied. Set by [`execute_block`] before applying
+    /// the intents of a [`Block`]. Persistent on the substrate
+    /// (so off-block reads can answer "what was the last
+    /// observed height?") but excluded from `state_root` —
+    /// block context is execution-environment data, not
+    /// commit-state, matching the EVM/Solana convention.
+    current_block_height: u64,
 }
 
 impl InMemorySubstrate {
@@ -1154,6 +1198,14 @@ impl Substrate for InMemorySubstrate {
         self.bytes_state.get(addr).cloned()
     }
 
+    fn current_block_height(&self) -> u64 {
+        self.current_block_height
+    }
+
+    fn set_current_block_height(&mut self, height: u64) {
+        self.current_block_height = height;
+    }
+
     fn apply_intent(&mut self, intent: &Intent) -> Result<(), ExecutionError> {
         match intent {
             Intent::Transfer { from, to, amount } => {
@@ -1248,6 +1300,7 @@ impl Substrate for InMemorySubstrate {
                         bls_public_key: bls_public_key.clone(),
                         stake_gsx: *stake_gsx,
                         deposited_stake: 0,
+                        exit_block_height: 0,
                         status: AuthorityStatus::Active,
                     },
                 );
@@ -1257,6 +1310,7 @@ impl Substrate for InMemorySubstrate {
             }
             Intent::ExitAuthority { authority_id } => {
                 use crate::authority_registry::{decode, encode, AuthorityStatus};
+                let height = self.current_block_height();
                 let registry_addr = reserved::authority_registry_address();
                 let existing_bytes = self.read_bytes(&registry_addr).unwrap_or_default();
                 let mut map = decode(&existing_bytes)?;
@@ -1272,6 +1326,11 @@ impl Substrate for InMemorySubstrate {
                     });
                 }
                 rec.status = AuthorityStatus::Exiting;
+                // Anchor the cooldown clock at the current block.
+                // WithdrawAuthorityStake will require
+                // current_block_height >= exit_block_height +
+                // EXIT_COOLDOWN_BLOCKS before releasing capital.
+                rec.exit_block_height = height;
                 let new_bytes = encode(&map);
                 self.write_bytes_unchecked(registry_addr, new_bytes);
                 Ok(())
@@ -1368,6 +1427,7 @@ impl Substrate for InMemorySubstrate {
                         bls_public_key: bls_public_key.clone(),
                         stake_gsx: *stake_gsx,
                         deposited_stake: 0,
+                        exit_block_height: 0,
                         status: ValidatorStatus::Active,
                     },
                 );
@@ -1377,6 +1437,7 @@ impl Substrate for InMemorySubstrate {
             }
             Intent::ExitValidator { validator_id } => {
                 use crate::validator_registry::{decode, encode, ValidatorStatus};
+                let height = self.current_block_height();
                 let registry_addr = reserved::validator_registry_address();
                 let existing_bytes = self.read_bytes(&registry_addr).unwrap_or_default();
                 let mut map = decode(&existing_bytes)?;
@@ -1392,6 +1453,7 @@ impl Substrate for InMemorySubstrate {
                     });
                 }
                 rec.status = ValidatorStatus::Exiting;
+                rec.exit_block_height = height;
                 let new_bytes = encode(&map);
                 self.write_bytes_unchecked(registry_addr, new_bytes);
                 Ok(())
@@ -2173,6 +2235,7 @@ impl Substrate for InMemorySubstrate {
                 use crate::authority_registry::{decode, encode, AuthorityStatus};
                 let to = *to;
                 let amount = *amount;
+                let height = self.current_block_height();
                 if amount == 0 {
                     return Ok(());
                 }
@@ -2199,6 +2262,16 @@ impl Substrate for InMemorySubstrate {
                         status,
                     });
                 }
+                let required_block_height =
+                    rec.exit_block_height.saturating_add(EXIT_COOLDOWN_BLOCKS);
+                if height < required_block_height {
+                    return Err(ExecutionError::ExitCooldownNotElapsed {
+                        ring: "authority",
+                        slot_id: *authority_id,
+                        required_block_height,
+                        current_block_height: height,
+                    });
+                }
                 let have = rec.deposited_stake as Balance;
                 if amount > have {
                     return Err(ExecutionError::WithdrawalExceedsDeposit {
@@ -2208,6 +2281,8 @@ impl Substrate for InMemorySubstrate {
                         have,
                     });
                 }
+                // amount ≤ have ≤ u64::MAX, so the narrowing
+                // cast is safe.
                 rec.deposited_stake -= amount as u64;
                 self.debit_unchecked(reserved::authority_stake_pool_address(), amount)?;
                 self.credit_unchecked(to, amount)?;
@@ -2223,6 +2298,7 @@ impl Substrate for InMemorySubstrate {
                 use crate::validator_registry::{decode, encode, ValidatorStatus};
                 let to = *to;
                 let amount = *amount;
+                let height = self.current_block_height();
                 if amount == 0 {
                     return Ok(());
                 }
@@ -2247,6 +2323,16 @@ impl Substrate for InMemorySubstrate {
                         ring: "validator",
                         slot_id: *validator_id,
                         status,
+                    });
+                }
+                let required_block_height =
+                    rec.exit_block_height.saturating_add(EXIT_COOLDOWN_BLOCKS);
+                if height < required_block_height {
+                    return Err(ExecutionError::ExitCooldownNotElapsed {
+                        ring: "validator",
+                        slot_id: *validator_id,
+                        required_block_height,
+                        current_block_height: height,
                     });
                 }
                 let have = rec.deposited_stake as Balance;
@@ -6905,6 +6991,10 @@ mod tests {
         .unwrap();
         s.apply_intent(&Intent::ExitAuthority { authority_id: 0 })
             .unwrap();
+        // Advance past the cooldown so the existing withdraw
+        // tests exercise the non-cooldown logic — dedicated
+        // cooldown tests below set a height inside the window.
+        s.set_current_block_height(EXIT_COOLDOWN_BLOCKS + 1);
     }
 
     fn admit_and_exit_validator(s: &mut InMemorySubstrate, src: Address, amount: Balance) {
@@ -6923,6 +7013,7 @@ mod tests {
         .unwrap();
         s.apply_intent(&Intent::ExitValidator { validator_id: 0 })
             .unwrap();
+        s.set_current_block_height(EXIT_COOLDOWN_BLOCKS + 1);
     }
 
     #[test]
@@ -7194,5 +7285,150 @@ mod tests {
             4_000_000
         );
         assert_eq!(s.validator_deposited_stake(0), 4_000_000);
+    }
+
+    // ===== EXIT_COOLDOWN_BLOCKS gate =====
+
+    /// `ExitAuthority` stamps `exit_block_height` to the
+    /// substrate's current ambient height. Later inspection
+    /// via `authority_record(...)` returns that height.
+    #[test]
+    fn exit_authority_anchors_exit_block_height() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 1_000_000)]);
+        s.set_current_block_height(42);
+        s.apply_intent(&Intent::AdmitAuthority {
+            authority_id: 0,
+            stake_gsx: 1,
+            mldsa_public_key: vec![0xaa; 1952],
+            bls_public_key: vec![0xbb; 48],
+        })
+        .unwrap();
+        s.apply_intent(&Intent::ExitAuthority { authority_id: 0 })
+            .unwrap();
+        assert_eq!(s.authority_record(0).unwrap().exit_block_height, 42);
+    }
+
+    /// `Withdraw` inside the cooldown window rejects with
+    /// `ExitCooldownNotElapsed`. Atomicity: state unchanged.
+    #[test]
+    fn withdraw_authority_inside_cooldown_rejected_atomically() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 10_000_000)]);
+        // Exit at height 100.
+        s.set_current_block_height(100);
+        s.apply_intent(&Intent::AdmitAuthority {
+            authority_id: 0,
+            stake_gsx: 1,
+            mldsa_public_key: vec![0xaa; 1952],
+            bls_public_key: vec![0xbb; 48],
+        })
+        .unwrap();
+        s.apply_intent(&Intent::DepositAuthorityStake {
+            from: addr(1),
+            authority_id: 0,
+            amount: 5_000_000,
+        })
+        .unwrap();
+        s.apply_intent(&Intent::ExitAuthority { authority_id: 0 })
+            .unwrap();
+        // Withdraw at height 100 + cooldown - 1 (still inside window).
+        s.set_current_block_height(100 + EXIT_COOLDOWN_BLOCKS - 1);
+        let before = s.state_root();
+        let err = s.apply_intent(&Intent::WithdrawAuthorityStake {
+            to: addr(2),
+            authority_id: 0,
+            amount: 1_000_000,
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::ExitCooldownNotElapsed {
+                ring: "authority",
+                slot_id: 0,
+                ..
+            })
+        ));
+        assert_eq!(s.state_root(), before);
+    }
+
+    /// `Withdraw` at exactly `exit_block_height +
+    /// EXIT_COOLDOWN_BLOCKS` succeeds (inclusive lower bound).
+    #[test]
+    fn withdraw_authority_at_cooldown_boundary_succeeds() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 10_000_000)]);
+        s.set_current_block_height(7);
+        s.apply_intent(&Intent::AdmitAuthority {
+            authority_id: 0,
+            stake_gsx: 1,
+            mldsa_public_key: vec![0xaa; 1952],
+            bls_public_key: vec![0xbb; 48],
+        })
+        .unwrap();
+        s.apply_intent(&Intent::DepositAuthorityStake {
+            from: addr(1),
+            authority_id: 0,
+            amount: 5_000_000,
+        })
+        .unwrap();
+        s.apply_intent(&Intent::ExitAuthority { authority_id: 0 })
+            .unwrap();
+        // Withdraw at exact required height: exit (7) + cooldown.
+        s.set_current_block_height(7 + EXIT_COOLDOWN_BLOCKS);
+        s.apply_intent(&Intent::WithdrawAuthorityStake {
+            to: addr(2),
+            authority_id: 0,
+            amount: 5_000_000,
+        })
+        .unwrap();
+        assert_eq!(s.authority_deposited_stake(0), 0);
+        assert_eq!(s.balance(&addr(2)), 5_000_000);
+    }
+
+    /// Validator-ring mirror.
+    #[test]
+    fn withdraw_validator_inside_cooldown_rejected() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 5_000_000)]);
+        s.set_current_block_height(100);
+        s.apply_intent(&Intent::AdmitValidator {
+            validator_id: 0,
+            stake_gsx: 1,
+            mldsa_public_key: vec![0xaa; 1952],
+            bls_public_key: vec![0xbb; 48],
+        })
+        .unwrap();
+        s.apply_intent(&Intent::DepositValidatorStake {
+            from: addr(1),
+            validator_id: 0,
+            amount: 1_000_000,
+        })
+        .unwrap();
+        s.apply_intent(&Intent::ExitValidator { validator_id: 0 })
+            .unwrap();
+        s.set_current_block_height(100 + EXIT_COOLDOWN_BLOCKS / 2);
+        let err = s.apply_intent(&Intent::WithdrawValidatorStake {
+            to: addr(2),
+            validator_id: 0,
+            amount: 100,
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::ExitCooldownNotElapsed {
+                ring: "validator",
+                slot_id: 0,
+                ..
+            })
+        ));
+    }
+
+    /// `execute_block` plumbs `block.round` through to
+    /// the substrate so apply_intent reads the correct height.
+    #[test]
+    fn execute_block_propagates_round_to_substrate() {
+        use crate::block::{execute_block, Block};
+        let mut s = InMemorySubstrate::new();
+        let block = Block {
+            round: 12345,
+            intents: vec![],
+        };
+        let _ = execute_block(&mut s, &block);
+        assert_eq!(s.current_block_height(), 12345);
     }
 }

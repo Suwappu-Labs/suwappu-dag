@@ -55,6 +55,13 @@ pub fn execute_block<S: Substrate>(substrate: &mut S, block: &Block) -> Executio
     let mut first_error = None;
     let mut skipped = 0;
 
+    // Plumb the current round through to the substrate so
+    // intent arms that need a height (e.g., the exit-cooldown
+    // gate on Withdraw*) can read it via
+    // `current_block_height`. Adapters that don't override the
+    // trait default ignore this.
+    substrate.set_current_block_height(block.round);
+
     for (idx, intent) in block.intents.iter().enumerate() {
         if first_error.is_some() {
             skipped += 1;
