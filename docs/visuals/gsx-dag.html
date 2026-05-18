@@ -24,10 +24,22 @@
     .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
     .chip { border: 1px solid #334155; background: rgba(2,6,23,0.34); color: #cbd5e1; border-radius: 999px; padding: 6px 10px; font-size: 0.72rem; }
     .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; margin-top: 16px; }
-    .kpi { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; margin-bottom: 8px; font-size: 0.74rem; }
-    .track { height: 14px; border-radius: 999px; background: rgba(30,41,59,0.82); border: 1px solid #334155; overflow: hidden; }
-    .fill { height: 100%; border-radius: 999px; }
-    .meta { color: #94a3b8; font-size: 0.72rem; line-height: 1.65; margin-top: 8px; }
+    .meta { color: #94a3b8; font-size: 0.72rem; line-height: 1.65; margin-top: 10px; }
+    .stat { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: baseline; padding: 6px 0; border-bottom: 1px dashed #1e293b; font-size: 0.76rem; }
+    .stat:last-child { border-bottom: none; }
+    .stat .k { color: #94a3b8; }
+    .stat .v { color: #f8fafc; font-weight: 600; font-variant-numeric: tabular-nums; }
+    .stat .v.cyan { color: #22d3ee; }
+    .stat .v.emerald { color: #34d399; }
+    .stat .v.violet { color: #a78bfa; }
+    .stat .v.amber { color: #fbbf24; }
+    .stat .v.rose { color: #fb7185; }
+    .legend { display: flex; align-items: center; gap: 6px; font-size: 0.7rem; color: #94a3b8; margin-top: 8px; }
+    .legend .sw { width: 10px; height: 10px; border-radius: 3px; }
+    .code-snippet { font-size: 0.72rem; color: #cbd5e1; background: rgba(2,6,23,0.5); border: 1px solid #1e293b; border-radius: 8px; padding: 8px 10px; line-height: 1.55; white-space: pre-wrap; margin-top: 8px; }
+    .code-snippet .c { color: #64748b; }
+    .code-snippet .k { color: #fb7185; }
+    .code-snippet .s { color: #34d399; }
     .footer { text-align: center; color: #64748b; font-size: 0.74rem; margin-top: 18px; }
   </style>
 </head>
@@ -104,12 +116,44 @@
       </div>
     </div>
 
-    <div class="section-title"><span class="dot" style="width:8px;height:8px;background:#22d3ee"></span><h2>Charts</h2></div>
+    <div class="section-title"><span class="dot" style="width:8px;height:8px;background:#22d3ee"></span><h2>Invariants &amp; surface</h2></div>
     <div class="cards">
-      <div class="card"><h3 style="margin:0 0 10px;font-size:0.84rem">Architecture counts</h3><div class="kpi"><div>Layers</div><div>4</div></div><div class="track"><div class="fill" style="width:100%;background:linear-gradient(90deg,#22d3ee,#06b6d4)"></div></div><div class="kpi"><div>Core crates</div><div>3</div></div><div class="track"><div class="fill" style="width:75%;background:linear-gradient(90deg,#34d399,#10b981)"></div></div><div class="kpi"><div>LTP phases</div><div>3</div></div><div class="track"><div class="fill" style="width:75%;background:linear-gradient(90deg,#a78bfa,#8b5cf6)"></div></div><div class="meta">This is the clean presentation-style count view for the chain stack.</div></div><div class="card"><h3 style="margin:0 0 10px;font-size:0.84rem">Security geometry</h3><div class="kpi"><div>Authority ring</div><div>30–50</div></div><div class="track"><div class="fill" style="width:18%;background:linear-gradient(90deg,#fb7185,#f43f5e)"></div></div><div class="kpi"><div>Validator ring</div><div>100–500</div></div><div class="track"><div class="fill" style="width:44%;background:linear-gradient(90deg,#22d3ee,#06b6d4)"></div></div><div class="kpi"><div>Corridor quorum</div><div>7/9</div></div><div class="track"><div class="fill" style="width:78%;background:linear-gradient(90deg,#fbbf24,#f59e0b)"></div></div><div class="meta">The AND-gate only closes if both rings are compromised.</div></div><div class="card"><h3 style="margin:0 0 10px;font-size:0.84rem">Chain commitments</h3><div class="kpi"><div>Joint state</div><div>linearized</div></div><div class="track"><div class="fill" style="width:67%;background:linear-gradient(90deg,#34d399,#10b981)"></div></div><div class="kpi"><div>LTP attestation</div><div>~1.6 kB</div></div><div class="track"><div class="fill" style="width:83%;background:linear-gradient(90deg,#a78bfa,#8b5cf6)"></div></div><div class="kpi"><div>Anchor input</div><div>~96 B</div></div><div class="track"><div class="fill" style="width:6%;background:linear-gradient(90deg,#22d3ee,#06b6d4)"></div></div><div class="meta">The chain commits to the same deterministic state each block.</div></div>
+      <div class="card">
+        <h3 style="margin:0 0 10px;font-size:0.84rem;color:#fb7185">Joint-quorum AND-gate</h3>
+        <div class="stat"><span class="k">Authority Ring</span><span class="v rose">30–50 institutions</span></div>
+        <div class="stat"><span class="k">Validator Ring</span><span class="v cyan">100–500 stake-weighted</span></div>
+        <div class="stat"><span class="k">Safety violation requires</span><span class="v amber">corruption of BOTH</span></div>
+        <div class="stat"><span class="k">Quorum formula</span><span class="v">n − ⌊(n−1)/3⌋</span></div>
+        <div class="legend"><span class="sw" style="background:#fb7185"></span> Authority<span class="sw" style="background:#22d3ee;margin-left:6px"></span> Validator</div>
+        <div class="meta">Paper Theorem 2 / Invariant 1 (CLAUDE.md). Property test <code style="color:#22d3ee">proptest_joint_quorum</code> × 10k cases.</div>
+      </div>
+      <div class="card">
+        <h3 style="margin:0 0 10px;font-size:0.84rem;color:#34d399">Mysticeti-C commit cadence</h3>
+        <div class="stat"><span class="k">Direct decide</span><span class="v emerald">quorum supporters at R+1</span></div>
+        <div class="stat"><span class="k">Indirect decide</span><span class="v cyan">walk causal_history from R+2 anchor</span></div>
+        <div class="stat"><span class="k">Orphan window (IQ-004)</span><span class="v amber">parent-set frozen at R+1</span></div>
+        <div class="stat"><span class="k">Fast path (single-owner)</span><span class="v violet">K=4 owner-binding cert</span></div>
+        <div class="meta">See <a href="commit-rule.html" style="color:#22d3ee">commit-rule</a> + <a href="fast-path-and-slashing.html" style="color:#22d3ee">fast-path</a> deep dives.</div>
+      </div>
+      <div class="card">
+        <h3 style="margin:0 0 10px;font-size:0.84rem;color:#a78bfa">Per-block commitment surface</h3>
+        <div class="stat"><span class="k">Linearized cert order</span><span class="v">deterministic</span></div>
+        <div class="stat"><span class="k">Joint state root</span><span class="v emerald">gsx-db tree hash</span></div>
+        <div class="stat"><span class="k">LTP attestation</span><span class="v violet">≈1,600 B constant</span></div>
+        <div class="stat"><span class="k">Parent-linked block hash</span><span class="v">32 B SHA3-256</span></div>
+        <div class="meta">Invariant 3: LTP commitment is constant-size regardless of payload (Paper §10.2).</div>
+      </div>
     </div>
 
-    <div class="chips"><span class="chip">Mysticeti-C</span><span class="chip">dual-ring validator set</span><span class="chip">dual VM</span><span class="chip">LTP integration</span><span class="chip">post-quantum signing</span></div>
+    <div class="section-title"><span class="dot" style="width:8px;height:8px;background:#fbbf24"></span><h2>Sprint state</h2></div>
+    <div class="panel" style="padding:14px 16px;font-size:0.75rem;color:#cbd5e1;line-height:1.7">
+      DAG-S1 → DAG-S20 closed (each gated on a 10k-case proptest). Sprint matrix in
+      <a href="../../CLAUDE.md" style="color:#22d3ee">CLAUDE.md</a>.
+      Active surfaces: substrate state lifecycle (stake / inflation / distribute),
+      governance epoch boundary (Phase G2), testnet rollout.
+    </div>
+
+    <div class="chips" style="margin-top:14px"><span class="chip">Mysticeti-C</span><span class="chip">joint quorum AND-gate</span><span class="chip">dual VM</span><span class="chip">ML-DSA-65</span><span class="chip">ML-KEM-768</span><span class="chip">20/20 sprints</span></div>
     <div class="footer">See also: gsx-db substrate page and LTP lifecycle page.</div>
   </div>
 </body>

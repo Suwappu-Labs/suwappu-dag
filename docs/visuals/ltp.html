@@ -24,10 +24,21 @@
     .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
     .chip { border: 1px solid #334155; background: rgba(2,6,23,0.34); color: #cbd5e1; border-radius: 999px; padding: 6px 10px; font-size: 0.72rem; }
     .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; margin-top: 16px; }
-    .kpi { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; margin-bottom: 8px; font-size: 0.74rem; }
-    .track { height: 14px; border-radius: 999px; background: rgba(30,41,59,0.82); border: 1px solid #334155; overflow: hidden; }
-    .fill { height: 100%; border-radius: 999px; }
-    .meta { color: #94a3b8; font-size: 0.72rem; line-height: 1.65; margin-top: 8px; }
+    .meta { color: #94a3b8; font-size: 0.72rem; line-height: 1.65; margin-top: 10px; }
+    .stat { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: baseline; padding: 6px 0; border-bottom: 1px dashed #1e293b; font-size: 0.76rem; }
+    .stat:last-child { border-bottom: none; }
+    .stat .k { color: #94a3b8; }
+    .stat .v { color: #f8fafc; font-weight: 600; font-variant-numeric: tabular-nums; }
+    .stat .v.cyan { color: #22d3ee; }
+    .stat .v.emerald { color: #34d399; }
+    .stat .v.violet { color: #a78bfa; }
+    .stat .v.amber { color: #fbbf24; }
+    .stat .v.rose { color: #fb7185; }
+    .bytes { display: grid; grid-template-columns: 18ch 1fr 8ch; gap: 8px; align-items: center; padding: 5px 0; font-size: 0.72rem; }
+    .bytes .lbl { color: #cbd5e1; }
+    .bytes .num { color: #f8fafc; font-weight: 600; text-align: right; font-variant-numeric: tabular-nums; }
+    .bytes .bar { height: 8px; border-radius: 4px; background: rgba(30,41,59,0.6); border: 1px solid #334155; overflow: hidden; }
+    .bytes .bar > span { display: block; height: 100%; border-radius: 4px; }
     .footer { text-align: center; color: #64748b; font-size: 0.74rem; margin-top: 18px; }
   </style>
 </head>
@@ -105,12 +116,47 @@
       </div>
     </div>
 
-    <div class="section-title"><span class="dot" style="width:8px;height:8px;background:#fbbf24"></span><h2>Charts</h2></div>
+    <div class="section-title"><span class="dot" style="width:8px;height:8px;background:#fbbf24"></span><h2>Constant-size commitment (Paper §10.2)</h2></div>
     <div class="cards">
-      <div class="card"><h3 style="margin:0 0 10px;font-size:0.84rem">Phase model</h3><div class="kpi"><div>Commit</div><div>1</div></div><div class="track"><div class="fill" style="width:100%;background:linear-gradient(90deg,#fbbf24,#f59e0b)"></div></div><div class="kpi"><div>Lattice</div><div>2</div></div><div class="track"><div class="fill" style="width:100%;background:linear-gradient(90deg,#22d3ee,#06b6d4)"></div></div><div class="kpi"><div>Materialize</div><div>3</div></div><div class="track"><div class="fill" style="width:100%;background:linear-gradient(90deg,#a78bfa,#8b5cf6)"></div></div><div class="meta">Three distinct phases, each with a different security job.</div></div><div class="card"><h3 style="margin:0 0 10px;font-size:0.84rem">Security layers</h3><div class="kpi"><div>RS threshold</div><div>1</div></div><div class="track"><div class="fill" style="width:100%;background:linear-gradient(90deg,#34d399,#10b981)"></div></div><div class="kpi"><div>AEAD</div><div>2</div></div><div class="track"><div class="fill" style="width:100%;background:linear-gradient(90deg,#22d3ee,#06b6d4)"></div></div><div class="kpi"><div>Envelope</div><div>~1.3 kB</div></div><div class="track"><div class="fill" style="width:83%;background:linear-gradient(90deg,#fbbf24,#f59e0b)"></div></div><div class="meta">The layers are orthogonal rather than redundant.</div></div><div class="card"><h3 style="margin:0 0 10px;font-size:0.84rem">Settlement anchors</h3><div class="kpi"><div>Payload root</div><div>32 B</div></div><div class="track"><div class="fill" style="width:2%;background:linear-gradient(90deg,#34d399,#10b981)"></div></div><div class="kpi"><div>Anchor input</div><div>~96 B</div></div><div class="track"><div class="fill" style="width:6%;background:linear-gradient(90deg,#22d3ee,#06b6d4)"></div></div><div class="kpi"><div>LTP commitment</div><div>~1.6 kB</div></div><div class="track"><div class="fill" style="width:100%;background:linear-gradient(90deg,#a78bfa,#8b5cf6)"></div></div><div class="meta">Constant-size commitment surface for downstream chains.</div></div>
+      <div class="card">
+        <h3 style="margin:0 0 10px;font-size:0.84rem;color:#a78bfa">≈1,600 B envelope breakdown</h3>
+        <div class="bytes">
+          <span class="lbl">ML-KEM-768 CT</span>
+          <span class="bar"><span style="width:98%;background:linear-gradient(90deg,#a78bfa,#8b5cf6)"></span></span>
+          <span class="num">1,568 B</span>
+        </div>
+        <div class="bytes">
+          <span class="lbl">BLS12-381 agg sig</span>
+          <span class="bar"><span style="width:6%;background:linear-gradient(90deg,#22d3ee,#06b6d4)"></span></span>
+          <span class="num">96 B</span>
+        </div>
+        <div class="bytes">
+          <span class="lbl">SHA3-256 root</span>
+          <span class="bar"><span style="width:2%;background:linear-gradient(90deg,#34d399,#10b981)"></span></span>
+          <span class="num">32 B</span>
+        </div>
+        <div class="meta">Bars are byte-proportional to the 1,600 B total. Payload size is unbounded; commitment size is constant — Invariant 3.</div>
+      </div>
+      <div class="card">
+        <h3 style="margin:0 0 10px;font-size:0.84rem;color:#22d3ee">PQ-conservative crypto surface</h3>
+        <div class="stat"><span class="k">Long-lived sig</span><span class="v cyan">ML-DSA-65 (FIPS 204)</span></div>
+        <div class="stat"><span class="k">KEM envelope</span><span class="v violet">ML-KEM-768 (FIPS 203)</span></div>
+        <div class="stat"><span class="k">Aggregate sig</span><span class="v amber">BLS12-381 (classical exception)</span></div>
+        <div class="stat"><span class="k">Hash</span><span class="v emerald">SHA3-256</span></div>
+        <div class="stat"><span class="k">7-of-9 super-node quorum</span><span class="v">attestation gate</span></div>
+        <div class="meta">All long-lived confidentiality/integrity surfaces are NIST PQ-standardized. BLS12-381 retained only as a documented migration target.</div>
+      </div>
+      <div class="card">
+        <h3 style="margin:0 0 10px;font-size:0.84rem;color:#34d399">Lifecycle phase roles</h3>
+        <div class="stat"><span class="k">Phase 1 — Commit</span><span class="v amber">RS encode, distribute shards</span></div>
+        <div class="stat"><span class="k">Phase 2 — Lattice</span><span class="v cyan">constant-bandwidth envelope</span></div>
+        <div class="stat"><span class="k">Phase 3 — Materialize</span><span class="v violet">fetch k shards, AEAD decrypt</span></div>
+        <div class="stat"><span class="k">DA SLA gate</span><span class="v emerald">DAG-S16 proptest × 10k</span></div>
+        <div class="meta">Sender may stop after Commit; payload reconstructs at the receiver's edge, not in transit.</div>
+      </div>
     </div>
 
-    <div class="chips"><span class="chip">commit</span><span class="chip">lattice</span><span class="chip">materialize</span><span class="chip">ML-KEM-768</span><span class="chip">7-of-9 quorum</span></div>
+    <div class="chips" style="margin-top:14px"><span class="chip">commit / lattice / materialize</span><span class="chip">ML-KEM-768</span><span class="chip">ML-DSA-65</span><span class="chip">7-of-9 super-node</span><span class="chip">~1,600 B constant</span><span class="chip">DAG-S15 / S16 closed</span></div>
     <div class="footer">See also: gsx-dag architecture page and gsx-db substrate page.</div>
   </div>
 </body>
