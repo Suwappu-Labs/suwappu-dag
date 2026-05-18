@@ -198,6 +198,7 @@ impl Substrate for GsxDbSubstrate {
             | Intent::EjectSequencer { .. }
             | Intent::DepositSequencerBond { .. }
             | Intent::DepositSafetyBond { .. }
+            | Intent::ClaimInsurance { .. }
             | Intent::DisburseTreasury { .. }
             | Intent::PostL2DA { .. } => Ok(()),
             // C.8 (#131): slashing-distribution waterfall.

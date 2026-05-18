@@ -400,28 +400,45 @@ pub enum Intent {
     /// deterministic state effect: debit treasury, credit
     /// recipient, audit trail via `purpose_tag`.
     ///
-    /// - `recipient` MUST NOT be a reserved address —
-    ///   treasury→insurance, treasury→bridge_escrow, etc.
-    ///   would silently shift funds between protocol-owned
-    ///   accounts. Use dedicated Intents for those flows.
-    /// - `amount == 0` is a no-op (matches Transfer
-    ///   semantics).
+    /// - `recipient` MUST NOT be a reserved address.
+    /// - `amount == 0` is a no-op.
     /// - Insufficient treasury balance surfaces
-    ///   `InsufficientBalance` (same shape as Transfer).
-    /// - `purpose_tag` is opaque to the substrate
-    ///   (BLAKE3(proposal_doc) or similar). Recorded only
-    ///   in the consensus log via the Intent itself; no
-    ///   on-chain purpose registry yet.
+    ///   `InsufficientBalance`.
+    /// - `purpose_tag` is opaque to the substrate.
     DisburseTreasury {
         /// Recipient of the disbursement.
         recipient: Address,
         /// Amount being disbursed.
         amount: Balance,
         /// Audit-trail tag — typically BLAKE3 of the
-        /// authorizing proposal document. Opaque to the
-        /// substrate; consensus log preserves it for
-        /// off-chain audit.
+        /// authorizing proposal document.
         purpose_tag: [u8; 32],
+    },
+    /// Governance-gated payout from the insurance pool.
+    /// Track C / Tokenomics §8.3 step 2: slashed funds
+    /// flow into the insurance pool to backstop affected
+    /// counterparties for future incidents (counterparties
+    /// from the same slash event are reimbursed directly
+    /// via `DistributeSlashedFunds`; this Intent is for
+    /// claims that surface POST-slash).
+    ///
+    /// The daemon's authority-quorum-vote layer gates
+    /// claim validation (claim_reference must be ratified
+    /// before the Intent reaches `apply_intent`). The
+    /// substrate enforces the deterministic state effect:
+    /// debit insurance pool, credit claimant.
+    ///
+    /// Same shape as `DisburseTreasury`: reserved-recipient
+    /// rejects, zero amount is no-op, insufficient balance
+    /// surfaces `InsufficientBalance`.
+    ClaimInsurance {
+        /// Recipient of the claim payout.
+        claimant: Address,
+        /// Amount being paid out.
+        amount: Balance,
+        /// Audit-trail tag linking to the authorizing
+        /// claim doc + originating slash event.
+        claim_reference: [u8; 32],
     },
     /// Post a per-batch DA blob to L1 calldata. The sequencer
     /// emits this alongside `CommitL2StateRoot` so the L2 state
@@ -1651,12 +1668,6 @@ impl Substrate for InMemorySubstrate {
                 Ok(())
             }
             // Track C: governance-gated treasury disbursement.
-            // The daemon's authority-quorum-vote layer
-            // already gated this Intent (only quorum-
-            // ratified disbursements reach apply_intent).
-            // Substrate effect: debit treasury, credit
-            // recipient. purpose_tag is recorded only via
-            // the consensus log; substrate doesn't track it.
             Intent::DisburseTreasury {
                 recipient,
                 amount,
@@ -1672,6 +1683,25 @@ impl Substrate for InMemorySubstrate {
                 }
                 self.debit_unchecked(reserved::treasury_address(), amount)?;
                 self.credit_unchecked(recipient, amount)?;
+                Ok(())
+            }
+            // Track C / Tokenomics §8.3 step 2: governance-
+            // gated insurance-pool payout.
+            Intent::ClaimInsurance {
+                claimant,
+                amount,
+                claim_reference: _,
+            } => {
+                let claimant = *claimant;
+                let amount = *amount;
+                if amount == 0 {
+                    return Ok(());
+                }
+                if reserved::is_reserved(&claimant) {
+                    return Err(ExecutionError::ReservedAddressTransferDenied { addr: claimant });
+                }
+                self.debit_unchecked(reserved::insurance_pool_address(), amount)?;
+                self.credit_unchecked(claimant, amount)?;
                 Ok(())
             }
             // PostL2DA → G3.3 (#102) DA blob anchoring (no
@@ -4574,13 +4604,9 @@ mod tests {
 
     // ===== Treasury disbursement (Track C / §3.2) =====
 
-    /// Happy path: governance-gated disbursement debits
-    /// treasury and credits recipient.
     #[test]
     fn disburse_treasury_credits_recipient() {
         let mut s = InMemorySubstrate::new();
-        // Seed treasury with funds (this would normally come
-        // from slashing waterfalls or genesis allocation).
         s.credit_unchecked(reserved::treasury_address(), 10_000_000)
             .unwrap();
         s.apply_intent(&Intent::DisburseTreasury {
@@ -4593,8 +4619,6 @@ mod tests {
         assert_eq!(s.balance(&reserved::treasury_address()), 8_500_000);
     }
 
-    /// Insufficient treasury balance surfaces
-    /// `InsufficientBalance` (same shape as Transfer).
     #[test]
     fn disburse_treasury_insufficient_balance_rejected() {
         let mut s = InMemorySubstrate::new();
@@ -4610,16 +4634,11 @@ mod tests {
             err,
             Err(ExecutionError::InsufficientBalance { .. })
         ));
-        // Treasury unchanged, recipient empty, state-root
-        // preserved.
         assert_eq!(s.balance(&reserved::treasury_address()), 100);
         assert_eq!(s.balance(&addr(1)), 0);
         assert_eq!(s.state_root(), before);
     }
 
-    /// Reserved-address recipient rejects: prevents
-    /// treasury→insurance / treasury→bridge_escrow
-    /// silent fund shifts via this Intent.
     #[test]
     fn disburse_treasury_reserved_recipient_rejected() {
         let mut s = InMemorySubstrate::new();
@@ -4637,8 +4656,6 @@ mod tests {
         assert_eq!(s.balance(&reserved::treasury_address()), 1_000_000);
     }
 
-    /// Zero-amount disbursement is a no-op (matches
-    /// Transfer / DepositBond semantics).
     #[test]
     fn disburse_treasury_zero_amount_is_noop() {
         let mut s = InMemorySubstrate::new();
@@ -4654,7 +4671,6 @@ mod tests {
         assert_eq!(s.state_root(), before);
     }
 
-    /// Multiple disbursements accumulate at the recipient.
     #[test]
     fn disburse_treasury_multiple_to_same_recipient_accumulates() {
         let mut s = InMemorySubstrate::new();
@@ -4672,16 +4688,11 @@ mod tests {
         assert_eq!(s.balance(&reserved::treasury_address()), 9_500_000);
     }
 
-    /// purpose_tag is opaque — different tags don't dedup
-    /// or alter the balance effect (no purpose-tag registry
-    /// in v1).
     #[test]
     fn disburse_treasury_purpose_tag_is_opaque() {
         let mut s = InMemorySubstrate::new();
         s.credit_unchecked(reserved::treasury_address(), 1_000_000)
             .unwrap();
-        // Same amount + recipient, different tags — both
-        // succeed.
         s.apply_intent(&Intent::DisburseTreasury {
             recipient: addr(1),
             amount: 100_000,
@@ -4697,9 +4708,6 @@ mod tests {
         assert_eq!(s.balance(&addr(1)), 200_000);
     }
 
-    /// Treasury accumulates from slash waterfall + can
-    /// disburse from the accumulated pool. Integration
-    /// across SlashSequencer + DisburseTreasury.
     #[test]
     fn disburse_treasury_integrates_with_slashing() {
         use crate::force_include::obligation_id;
@@ -4709,7 +4717,7 @@ mod tests {
         s.apply_intent(&Intent::L2ForceInclude {
             tx: tx.clone(),
             deadline_l1_height: 100,
-            submitter: addr(9), // arbitrary, no impact on treasury post-bounty
+            submitter: addr(9),
             l2_nonce: 1,
         })
         .unwrap();
@@ -4719,11 +4727,7 @@ mod tests {
             intent_hash: id,
         })
         .unwrap();
-        // Treasury after slash: 30% of 50k slash = 15k gross,
-        // minus 5k snitch bounty to addr(9) = 10k net.
         assert_eq!(s.balance(&reserved::treasury_address()), 10_000);
-
-        // Foundation grant of 8k from treasury.
         s.apply_intent(&Intent::DisburseTreasury {
             recipient: addr(20),
             amount: 8_000,
@@ -4734,9 +4738,6 @@ mod tests {
         assert_eq!(s.balance(&reserved::treasury_address()), 2_000);
     }
 
-    /// State root drifts on a real disbursement (proves
-    /// the balance write reaches the canonical state-root
-    /// recipe).
     #[test]
     fn disburse_treasury_shifts_state_root() {
         let mut s = InMemorySubstrate::new();
@@ -4747,6 +4748,140 @@ mod tests {
             recipient: addr(1),
             amount: 100,
             purpose_tag: [0; 32],
+        })
+        .unwrap();
+        assert_ne!(s.state_root(), before);
+    }
+
+    // ===== ClaimInsurance (Track C / §8.3 step 2) =====
+
+    #[test]
+    fn claim_insurance_credits_claimant() {
+        let mut s = InMemorySubstrate::new();
+        s.credit_unchecked(reserved::insurance_pool_address(), 5_000_000)
+            .unwrap();
+        s.apply_intent(&Intent::ClaimInsurance {
+            claimant: addr(1),
+            amount: 1_000_000,
+            claim_reference: [0xc1; 32],
+        })
+        .unwrap();
+        assert_eq!(s.balance(&addr(1)), 1_000_000);
+        assert_eq!(s.balance(&reserved::insurance_pool_address()), 4_000_000);
+    }
+
+    #[test]
+    fn claim_insurance_insufficient_balance_rejected() {
+        let mut s = InMemorySubstrate::new();
+        s.credit_unchecked(reserved::insurance_pool_address(), 100)
+            .unwrap();
+        let before = s.state_root();
+        let err = s.apply_intent(&Intent::ClaimInsurance {
+            claimant: addr(1),
+            amount: 500,
+            claim_reference: [0; 32],
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::InsufficientBalance { .. })
+        ));
+        assert_eq!(s.balance(&reserved::insurance_pool_address()), 100);
+        assert_eq!(s.balance(&addr(1)), 0);
+        assert_eq!(s.state_root(), before);
+    }
+
+    #[test]
+    fn claim_insurance_reserved_claimant_rejected() {
+        let mut s = InMemorySubstrate::new();
+        s.credit_unchecked(reserved::insurance_pool_address(), 1_000_000)
+            .unwrap();
+        let err = s.apply_intent(&Intent::ClaimInsurance {
+            claimant: reserved::treasury_address(),
+            amount: 100_000,
+            claim_reference: [0; 32],
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::ReservedAddressTransferDenied { .. })
+        ));
+        assert_eq!(s.balance(&reserved::insurance_pool_address()), 1_000_000);
+    }
+
+    #[test]
+    fn claim_insurance_zero_amount_is_noop() {
+        let mut s = InMemorySubstrate::new();
+        s.credit_unchecked(reserved::insurance_pool_address(), 1_000)
+            .unwrap();
+        let before = s.state_root();
+        s.apply_intent(&Intent::ClaimInsurance {
+            claimant: addr(1),
+            amount: 0,
+            claim_reference: [0; 32],
+        })
+        .unwrap();
+        assert_eq!(s.state_root(), before);
+    }
+
+    #[test]
+    fn claim_insurance_claim_reference_is_opaque() {
+        let mut s = InMemorySubstrate::new();
+        s.credit_unchecked(reserved::insurance_pool_address(), 1_000_000)
+            .unwrap();
+        s.apply_intent(&Intent::ClaimInsurance {
+            claimant: addr(1),
+            amount: 100_000,
+            claim_reference: [0xaa; 32],
+        })
+        .unwrap();
+        s.apply_intent(&Intent::ClaimInsurance {
+            claimant: addr(1),
+            amount: 100_000,
+            claim_reference: [0xbb; 32],
+        })
+        .unwrap();
+        assert_eq!(s.balance(&addr(1)), 200_000);
+    }
+
+    #[test]
+    fn claim_insurance_integrates_with_slashing() {
+        use crate::force_include::obligation_id;
+        let mut s = InMemorySubstrate::new();
+        s.fund_sequencer_bond(1_000_000).unwrap();
+        let tx = b"slashed-for-insurance".to_vec();
+        s.apply_intent(&Intent::L2ForceInclude {
+            tx: tx.clone(),
+            deadline_l1_height: 100,
+            submitter: addr(9),
+            l2_nonce: 1,
+        })
+        .unwrap();
+        let id = obligation_id(&tx, 100, &addr(9), 1);
+        s.apply_intent(&Intent::SlashSequencer {
+            reason: SlashReason::MissedForceInclude,
+            intent_hash: id,
+        })
+        .unwrap();
+        assert_eq!(s.balance(&reserved::insurance_pool_address()), 35_000);
+        s.apply_intent(&Intent::ClaimInsurance {
+            claimant: addr(20),
+            amount: 20_000,
+            claim_reference: [0xcc; 32],
+        })
+        .unwrap();
+        assert_eq!(s.balance(&addr(20)), 20_000);
+        assert_eq!(s.balance(&reserved::insurance_pool_address()), 15_000);
+    }
+
+    #[test]
+    fn claim_insurance_shifts_state_root() {
+        let mut s = InMemorySubstrate::new();
+        s.credit_unchecked(reserved::insurance_pool_address(), 1_000_000)
+            .unwrap();
+        let before = s.state_root();
+        s.apply_intent(&Intent::ClaimInsurance {
+            claimant: addr(1),
+            amount: 100,
+            claim_reference: [0; 32],
         })
         .unwrap();
         assert_ne!(s.state_root(), before);
