@@ -136,6 +136,36 @@ pub enum Intent {
         /// post-credit balance fits in `u128`).
         allocations: Vec<(Address, Balance)>,
     },
+    /// Daemon-emitted: mint a per-epoch inflation tranche,
+    /// crediting the three protocol-owned destination pools
+    /// (Authority rewards, Validator rewards, treasury).
+    ///
+    /// Per Tokenomics §3 the protocol mints ~5% annual
+    /// inflation; the consensus layer schedules MintInflation
+    /// at epoch boundaries with the per-tranche split. The
+    /// substrate executes the credits and bumps the
+    /// "last minted epoch" counter so a replayed Intent at
+    /// the same or earlier epoch rejects.
+    ///
+    /// Replay defense: the substrate keeps the last minted
+    /// `epoch` in a bytes_state record at
+    /// `inflation_registry_address`. Subsequent
+    /// `MintInflation { epoch, .. }` Intents must carry a
+    /// strictly-greater epoch number; otherwise
+    /// `ExecutionError::InflationEpochAlreadyMinted` fires.
+    MintInflation {
+        /// Epoch number the daemon is minting for. Must be
+        /// strictly greater than the last recorded epoch.
+        epoch: u64,
+        /// GSX credited to `authority_rewards_pool_address`.
+        authority_share: Balance,
+        /// GSX credited to `validator_rewards_pool_address`.
+        validator_share: Balance,
+        /// GSX credited to `treasury_address` (foundation
+        /// stream — keeps the treasury topped up alongside
+        /// the slashing-waterfall inflows).
+        treasury_share: Balance,
+    },
     /// Admit a new Authority Ring member, applied at the next epoch
     /// boundary. Stake gates whether the candidate makes the active
     /// set (selection logic lands in S25.3); pubkey material is the
@@ -1181,6 +1211,21 @@ impl InMemorySubstrate {
             .unwrap_or(0)
     }
 
+    /// Last epoch for which `Intent::MintInflation` was
+    /// applied. Returns `0` if no inflation has been minted
+    /// yet (the substrate's bootstrap state) or if the
+    /// registry bytes are corrupt.
+    pub fn last_minted_inflation_epoch(&self) -> u64 {
+        let bytes = self
+            .read_bytes(&reserved::inflation_registry_address())
+            .unwrap_or_default();
+        if bytes.len() == 8 {
+            u64::from_be_bytes(bytes.as_slice().try_into().unwrap())
+        } else {
+            0
+        }
+    }
+
     /// Validate a bridge asset is registered + Active.
     /// Returns `Err(BridgeAssetNotFound)` if no record exists,
     /// `Err(BridgeAssetNotActive)` if status is Paused or
@@ -1302,6 +1347,60 @@ impl Substrate for InMemorySubstrate {
                     }
                     self.credit_unchecked(*addr, *amount)?;
                 }
+                Ok(())
+            }
+            // Per-epoch inflation tranche. Replay-defended by
+            // the last minted epoch stored at
+            // inflation_registry_address (bytes_state: 8 BE
+            // bytes). Credits the three protocol-owned pools
+            // unconditionally; zero-share entries skip their
+            // credit.
+            Intent::MintInflation {
+                epoch,
+                authority_share,
+                validator_share,
+                treasury_share,
+            } => {
+                let epoch = *epoch;
+                let registry_addr = reserved::inflation_registry_address();
+                let existing = self.read_bytes(&registry_addr).unwrap_or_default();
+                let last_epoch = if existing.is_empty() {
+                    0u64
+                } else if existing.len() == 8 {
+                    u64::from_be_bytes(existing.as_slice().try_into().unwrap())
+                } else {
+                    return Err(ExecutionError::CorruptStateRecord {
+                        addr: registry_addr,
+                        reason: "inflation registry size mismatch",
+                    });
+                };
+                // First-ever mint must satisfy epoch > 0
+                // (epoch 0 is reserved for the "never minted"
+                // sentinel — the chain starts at last_epoch=0,
+                // so MintInflation { epoch: 0 } would not be
+                // strictly greater).
+                if epoch <= last_epoch {
+                    return Err(ExecutionError::InflationEpochAlreadyMinted {
+                        attempted_epoch: epoch,
+                        last_minted_epoch: last_epoch,
+                    });
+                }
+                if *authority_share > 0 {
+                    self.credit_unchecked(
+                        reserved::authority_rewards_pool_address(),
+                        *authority_share,
+                    )?;
+                }
+                if *validator_share > 0 {
+                    self.credit_unchecked(
+                        reserved::validator_rewards_pool_address(),
+                        *validator_share,
+                    )?;
+                }
+                if *treasury_share > 0 {
+                    self.credit_unchecked(reserved::treasury_address(), *treasury_share)?;
+                }
+                self.write_bytes_unchecked(registry_addr, epoch.to_be_bytes().to_vec());
                 Ok(())
             }
             // Phase G governance — Authority Ring registry
@@ -7594,5 +7693,167 @@ mod tests {
         })
         .unwrap();
         assert_eq!(s1.state_root(), s2.state_root());
+    }
+
+    // ===== MintInflation =====
+
+    /// Happy path: first inflation mint at epoch 1 credits
+    /// the three pools and stamps the last-minted counter.
+    #[test]
+    fn mint_inflation_credits_three_pools() {
+        let mut s = InMemorySubstrate::new();
+        s.apply_intent(&Intent::MintInflation {
+            epoch: 1,
+            authority_share: 10_000,
+            validator_share: 20_000,
+            treasury_share: 5_000,
+        })
+        .unwrap();
+        assert_eq!(
+            s.balance(&reserved::authority_rewards_pool_address()),
+            10_000
+        );
+        assert_eq!(
+            s.balance(&reserved::validator_rewards_pool_address()),
+            20_000
+        );
+        assert_eq!(s.balance(&reserved::treasury_address()), 5_000);
+        assert_eq!(s.last_minted_inflation_epoch(), 1);
+    }
+
+    /// Replayed Intent with same epoch rejects atomically.
+    #[test]
+    fn mint_inflation_replay_same_epoch_rejected() {
+        let mut s = InMemorySubstrate::new();
+        s.apply_intent(&Intent::MintInflation {
+            epoch: 5,
+            authority_share: 1_000,
+            validator_share: 1_000,
+            treasury_share: 1_000,
+        })
+        .unwrap();
+        let before = s.state_root();
+        let err = s.apply_intent(&Intent::MintInflation {
+            epoch: 5,
+            authority_share: 1_000,
+            validator_share: 1_000,
+            treasury_share: 1_000,
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::InflationEpochAlreadyMinted {
+                attempted_epoch: 5,
+                last_minted_epoch: 5,
+            })
+        ));
+        assert_eq!(s.state_root(), before);
+    }
+
+    /// Earlier epoch (backwards) rejects.
+    #[test]
+    fn mint_inflation_earlier_epoch_rejected() {
+        let mut s = InMemorySubstrate::new();
+        s.apply_intent(&Intent::MintInflation {
+            epoch: 10,
+            authority_share: 1,
+            validator_share: 1,
+            treasury_share: 1,
+        })
+        .unwrap();
+        let err = s.apply_intent(&Intent::MintInflation {
+            epoch: 9,
+            authority_share: 1,
+            validator_share: 1,
+            treasury_share: 1,
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::InflationEpochAlreadyMinted {
+                attempted_epoch: 9,
+                last_minted_epoch: 10,
+            })
+        ));
+    }
+
+    /// Strictly-greater epoch succeeds and updates the counter.
+    #[test]
+    fn mint_inflation_sequential_epochs_accumulate() {
+        let mut s = InMemorySubstrate::new();
+        for e in 1..=3 {
+            s.apply_intent(&Intent::MintInflation {
+                epoch: e,
+                authority_share: 100,
+                validator_share: 200,
+                treasury_share: 50,
+            })
+            .unwrap();
+        }
+        assert_eq!(s.balance(&reserved::authority_rewards_pool_address()), 300);
+        assert_eq!(s.balance(&reserved::validator_rewards_pool_address()), 600);
+        assert_eq!(s.balance(&reserved::treasury_address()), 150);
+        assert_eq!(s.last_minted_inflation_epoch(), 3);
+    }
+
+    /// Epoch 0 rejected — sentinel value, "never minted".
+    #[test]
+    fn mint_inflation_epoch_zero_rejected() {
+        let mut s = InMemorySubstrate::new();
+        let err = s.apply_intent(&Intent::MintInflation {
+            epoch: 0,
+            authority_share: 1,
+            validator_share: 1,
+            treasury_share: 1,
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::InflationEpochAlreadyMinted {
+                attempted_epoch: 0,
+                last_minted_epoch: 0,
+            })
+        ));
+    }
+
+    /// Sparse epochs (1 → 100) succeed — no contiguity gate.
+    #[test]
+    fn mint_inflation_sparse_epochs_succeed() {
+        let mut s = InMemorySubstrate::new();
+        s.apply_intent(&Intent::MintInflation {
+            epoch: 1,
+            authority_share: 10,
+            validator_share: 10,
+            treasury_share: 10,
+        })
+        .unwrap();
+        s.apply_intent(&Intent::MintInflation {
+            epoch: 100,
+            authority_share: 20,
+            validator_share: 20,
+            treasury_share: 20,
+        })
+        .unwrap();
+        assert_eq!(s.last_minted_inflation_epoch(), 100);
+    }
+
+    /// Zero shares are skipped; the epoch counter still bumps.
+    #[test]
+    fn mint_inflation_zero_shares_skip_credits_but_bump_counter() {
+        let mut s = InMemorySubstrate::new();
+        let before_treasury = s.balance(&reserved::treasury_address());
+        s.apply_intent(&Intent::MintInflation {
+            epoch: 7,
+            authority_share: 0,
+            validator_share: 0,
+            treasury_share: 0,
+        })
+        .unwrap();
+        assert_eq!(s.balance(&reserved::treasury_address()), before_treasury);
+        assert_eq!(s.last_minted_inflation_epoch(), 7);
+    }
+
+    /// `last_minted_inflation_epoch()` returns 0 on a fresh substrate.
+    #[test]
+    fn last_minted_inflation_epoch_initially_zero() {
+        let s = InMemorySubstrate::new();
+        assert_eq!(s.last_minted_inflation_epoch(), 0);
     }
 }

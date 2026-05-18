@@ -124,6 +124,20 @@ pub const AUTHORITY_STAKE_POOL_DOMAIN: &[u8] = b"gsx-authority-stake-pool-v1";
 /// of `authority_stake_pool` for the Tier B Validator set.
 pub const VALIDATOR_STAKE_POOL_DOMAIN: &[u8] = b"gsx-validator-stake-pool-v1";
 
+/// Domain tag for the Authority Ring rewards pool. Receives
+/// freshly-minted GSX from `Intent::MintInflation`; drained
+/// by per-epoch reward distribution.
+pub const AUTHORITY_REWARDS_POOL_DOMAIN: &[u8] = b"gsx-authority-rewards-pool-v1";
+
+/// Domain tag for the Validator Ring rewards pool. Mirror
+/// of `authority_rewards_pool` for Tier B.
+pub const VALIDATOR_REWARDS_POOL_DOMAIN: &[u8] = b"gsx-validator-rewards-pool-v1";
+
+/// Domain tag for the inflation registry. Stores the last
+/// minted epoch number (`u64::BE`) so `Intent::MintInflation`
+/// can replay-defend its own emission.
+pub const INFLATION_REGISTRY_DOMAIN: &[u8] = b"gsx-inflation-registry-v1";
+
 /// Compute the reserved address corresponding to `domain` —
 /// `BLAKE3(domain)[..20]`. Used by the three exposed helpers below.
 /// Inlined per call site (BLAKE3 is sub-microsecond).
@@ -244,6 +258,26 @@ pub fn validator_stake_pool_address() -> Address {
     derive(VALIDATOR_STAKE_POOL_DOMAIN)
 }
 
+/// Reserved address for the Authority Ring rewards pool.
+/// Credited by `Intent::MintInflation`; drained by per-epoch
+/// reward distribution (follow-up PR).
+pub fn authority_rewards_pool_address() -> Address {
+    derive(AUTHORITY_REWARDS_POOL_DOMAIN)
+}
+
+/// Reserved address for the Validator Ring rewards pool.
+/// Mirror of `authority_rewards_pool_address` for Tier B.
+pub fn validator_rewards_pool_address() -> Address {
+    derive(VALIDATOR_REWARDS_POOL_DOMAIN)
+}
+
+/// Reserved address for the inflation registry. Bytes_state
+/// holds the last minted epoch (`u64::BE`) for replay defense
+/// on `Intent::MintInflation`.
+pub fn inflation_registry_address() -> Address {
+    derive(INFLATION_REGISTRY_DOMAIN)
+}
+
 /// Returns true if `addr` is a reserved protocol-owned registry
 /// account. Both `Substrate` impls reject `Intent::Transfer` into
 /// or out of a reserved address.
@@ -263,6 +297,9 @@ pub fn is_reserved(addr: &Address) -> bool {
         || addr == &validator_registry_address()
         || addr == &authority_stake_pool_address()
         || addr == &validator_stake_pool_address()
+        || addr == &authority_rewards_pool_address()
+        || addr == &validator_rewards_pool_address()
+        || addr == &inflation_registry_address()
 }
 
 #[cfg(test)]
@@ -270,7 +307,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fifteen_reserved_addresses_are_distinct() {
+    fn eighteen_reserved_addresses_are_distinct() {
         let all = [
             l2_registry_address(),
             insurance_pool_address(),
@@ -287,6 +324,9 @@ mod tests {
             validator_registry_address(),
             authority_stake_pool_address(),
             validator_stake_pool_address(),
+            authority_rewards_pool_address(),
+            validator_rewards_pool_address(),
+            inflation_registry_address(),
         ];
         for (i, a) in all.iter().enumerate() {
             for (j, b) in all.iter().enumerate() {

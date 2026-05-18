@@ -424,4 +424,18 @@ pub enum ExecutionError {
         /// The ambient block height at the rejected attempt.
         current_block_height: u64,
     },
+
+    /// `Intent::MintInflation { epoch, .. }` carried an
+    /// epoch number ≤ the last minted epoch on record.
+    /// Replay defense — the substrate keeps the last
+    /// minted epoch at `inflation_registry_address`.
+    #[error(
+        "inflation already minted for epoch {last_minted_epoch} (attempted: {attempted_epoch})"
+    )]
+    InflationEpochAlreadyMinted {
+        /// The epoch the Intent carried.
+        attempted_epoch: u64,
+        /// The last epoch already recorded as minted.
+        last_minted_epoch: u64,
+    },
 }
