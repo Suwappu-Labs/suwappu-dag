@@ -1156,6 +1156,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "gsx-l2-sequencer-daemon"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "gsx-l2-sequencer",
+ "gsx-l2-stm",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "gsx-l2-stm"
 version = "0.1.0"
 dependencies = [

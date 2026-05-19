@@ -21,6 +21,7 @@ members = [
     "crates/gsx-l2-bridge",
     "crates/gsx-l2-sequencer",
     "crates/gsx-l2-stm",
+    "crates/gsx-l2-sequencer-daemon",
     "clients/rust-sdk",
 ]
 # B4: keep the cargo-fuzz workspace out of the main one — cargo-fuzz
@@ -67,6 +68,7 @@ gsx-l2-confidential = { path = "crates/gsx-l2-confidential" }
 gsx-l2-bridge = { path = "crates/gsx-l2-bridge" }
 gsx-l2-sequencer = { path = "crates/gsx-l2-sequencer" }
 gsx-l2-stm = { path = "crates/gsx-l2-stm" }
+gsx-l2-sequencer-daemon = { path = "crates/gsx-l2-sequencer-daemon" }
 gsx-client = { path = "clients/rust-sdk" }
 
 # Post-quantum primitives (FIPS 203 / 204)
