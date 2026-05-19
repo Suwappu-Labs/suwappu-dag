@@ -7,25 +7,22 @@
 //! Verify time target: **2–5 ms single-core** once the real
 //! `sp1-verifier` backend lands.
 //!
-//! ## Phase split
+//! ## Phase status
 //!
-//! This PR (G2.2 phase 1) lands the **dispatch surface + format
-//! gates** — proof byte size + public-input length + vk_hash
-//! non-zero. The cryptographic Groth16 BN254 pairing check is
-//! deferred to a follow-up PR (G2.2 phase 2) that adds the
-//! `sp1-verifier` workspace dep + the production cargo-deny
-//! review of the BN254 dep tree.
+//! G2.2 phase 1 (format gates) AND phase 2 (real Groth16 BN254
+//! pairing check via `sp1-verifier`) are both live. The dispatch
+//! function `verify_l2_batch` runs the four checks below in order:
 //!
-//! Wiring it now lets us:
-//! - Land the `gsx-l2-verifier-precompile` crate + its tests
-//! - Exercise the `Intent::CommitL2StateRoot` end-to-end through
-//!   both `Substrate` impls without dragging in BN254 transitive
-//!   deps
-//! - Surface obvious format bugs (wrong proof size, missing
-//!   public inputs) before the cryptographic check runs
+//! 1. Proof byte width (260 B, Succinct's wrapped Groth16 format)
+//! 2. Public-input byte width (240 B, fixed-offset layout below)
+//! 3. `vk_hash` non-zero (sentinel for "no VK pinned" rejection)
+//! 4. **`sp1_verifier::Groth16Verifier::verify`** — the actual
+//!    BN254 pairing check. Application VK hash is the caller's
+//!    `vk_hash` arg; SP1's verifier-circuit VK is the constant
+//!    `sp1_verifier::GROTH16_VK_BYTES`.
 //!
-//! Once `sp1-verifier` lands, only `verify_groth16_bn254` below
-//! changes — the public API + callers + tests stay stable.
+//! Verify time on a single core is dominated by the pairing
+//! check (~2–5 ms); the format gates are O(1) byte comparisons.
 //!
 //! ## Why a separate crate (not a module in gsx-execution)
 //!
@@ -129,8 +126,11 @@ pub enum VerifyError {
 /// 3. `vk_hash` is not all-zeros (an all-zeros hash means the
 ///    chain-state `aggregation_vk_hash` has never been set via
 ///    `Intent::SetL2VerifyingKey`, so no proof can validate).
-/// 4. (G2.2 phase 2) The Groth16 BN254 pairing check via
-///    `sp1-verifier::Groth16Verifier::verify_proof`.
+/// 4. The Groth16 BN254 pairing check via
+///    [`sp1_verifier::Groth16Verifier::verify`]. Application VK
+///    hash comes from the caller (`vk_hash`); the SP1 verifier
+///    circuit's VK is the bundled
+///    [`sp1_verifier::GROTH16_VK_BYTES`] constant.
 ///
 /// The substrate-side `Intent::CommitL2StateRoot` arm calls
 /// this; on `Ok(())` it credits the L2 registry account
@@ -165,11 +165,20 @@ pub fn verify_l2_batch(
         return Err(VerifyError::UnpinnedVerifyingKey);
     }
 
-    // G2.2 phase 2: invoke sp1-verifier::Groth16Verifier::verify_proof
-    // here. Until then, format gates above are the only checks —
-    // the substrate-side arm treats `Ok(())` as "the dispatch
-    // path works", NOT as "this proof is cryptographically
-    // valid". Phase 2 closes that gap.
+    // Groth16 BN254 pairing check. sp1-verifier expects the
+    // application VK hash as a 0x-prefixed hex string (its API
+    // mirrors the on-chain ABI); we keep it as a `[u8; 32]` in
+    // our public surface because that's what every other hash on
+    // the substrate uses, and convert here at the boundary.
+    let vk_hash_hex = format!("0x{}", hex::encode(vk_hash));
+    sp1_verifier::Groth16Verifier::verify(
+        proof,
+        public_inputs,
+        &vk_hash_hex,
+        &sp1_verifier::GROTH16_VK_BYTES,
+    )
+    .map_err(|_| VerifyError::Groth16Failed)?;
+
     Ok(())
 }
 
@@ -186,9 +195,22 @@ mod tests {
     }
 
     #[test]
-    fn verify_accepts_correctly_shaped_inputs() {
+    fn verify_rejects_zero_proof_at_pairing_check() {
+        // Correctly-shaped inputs (proof = 260 B zeros, public_inputs
+        // = 240 B zeros, vk_hash = nonzero) clear the format gates but
+        // MUST fail at the Groth16 BN254 pairing check — the all-zero
+        // byte string is not a valid Groth16 proof for any non-trivial
+        // statement.
+        //
+        // This replaces an earlier positive test that asserted Ok(())
+        // for zero-byte inputs, valid only when the pairing check was
+        // stubbed out. Real positive coverage needs an SP1 fixture
+        // (deferred until the gsx-l2-stm circuit produces one).
         let (proof, pi, vk) = valid_inputs();
-        assert!(verify_l2_batch(&proof, &pi, &vk).is_ok());
+        assert!(matches!(
+            verify_l2_batch(&proof, &pi, &vk),
+            Err(VerifyError::Groth16Failed)
+        ));
     }
 
     #[test]
