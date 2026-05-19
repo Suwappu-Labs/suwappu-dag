@@ -105,7 +105,7 @@ hex = "0.4"
 clap = { version = "4", features = ["derive"] }
 
 # Async / runtime
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "fs", "io-util", "net"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "fs", "io-util", "net", "signal"] }
 futures = "0.3"
 
 # Errors / logging

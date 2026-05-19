@@ -5,11 +5,18 @@
 //! The batch-builder + force-include watcher + JSON-RPC server
 //! tasks land in follow-up commits (Phase 2.2-b/c/d).
 
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use gsx_l2_sequencer_daemon::SequencerConfig;
+use gsx_l2_sequencer_daemon::{
+    batch_builder_task, l1_client::mock::MockL1Client, BatchBuilderTaskConfig, SequencerConfig,
+    SequencerState,
+};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -46,25 +53,50 @@ fn main() -> Result<()> {
 }
 
 async fn run(cfg: SequencerConfig) -> Result<()> {
+    let l2_chain_id_hash = BatchBuilderTaskConfig::derive_l2_chain_id_hash(&cfg.l2_chain_id);
     info!(
         l1_rpc_url = %cfg.l1_rpc_url,
         l2_chain_id = %cfg.l2_chain_id,
+        l2_chain_id_hash = ?l2_chain_id_hash,
         rpc_bind_addr = %cfg.rpc_bind_addr,
         batch_interval_ms = cfg.batch_interval_ms,
-        "gsx-l2-sequencer-daemon: scaffold up, awaiting follow-up Phase 2.2 tasks"
+        "gsx-l2-sequencer-daemon: starting"
     );
 
-    // Phase 2.2-b/c/d will spawn the real tasks here. For now,
-    // park so deployment harnesses can validate the binary
-    // boots + holds the port (once 2.2-d adds RPC server).
-    futures_park().await;
-    Ok(())
-}
+    let state = Arc::new(Mutex::new(SequencerState::new()));
 
-/// Park indefinitely. Cleaner than `loop { sleep(forever) }`
-/// because it doesn't burn a Tokio timer slot.
-async fn futures_park() {
-    // `std::future::pending` resolves never. The runtime keeps
-    // running other tasks; this one just never wakes.
-    std::future::pending::<()>().await
+    // Phase 2.2-c will replace the mock with the real
+    // gsx-client-backed L1Client. The mock keeps the binary
+    // bootable + the batch-builder loop testable end-to-end
+    // until then.
+    let l1: Arc<MockL1Client> = Arc::new(MockL1Client::new());
+    info!("l1 client: mock (real gsx-client wiring lands in Phase 2.2-c)");
+
+    let builder_cfg = BatchBuilderTaskConfig {
+        interval: Duration::from_millis(cfg.batch_interval_ms),
+        l2_chain_id_hash,
+        range_vk_commitment: [0u8; 32],
+    };
+
+    // Ctrl-C triggers the shutdown future. Tasks observe it
+    // via the oneshot and exit cleanly.
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let shutdown = Box::pin(async move {
+        let _ = shutdown_rx.await;
+    });
+
+    let builder_handle = tokio::spawn(batch_builder_task::run_loop(
+        state.clone(),
+        builder_cfg,
+        l1.clone(),
+        shutdown,
+    ));
+
+    tokio::signal::ctrl_c()
+        .await
+        .context("installing ctrl-c handler")?;
+    info!("ctrl-c received, shutting down");
+    let _ = shutdown_tx.send(());
+    builder_handle.await.context("batch builder task join")?;
+    Ok(())
 }

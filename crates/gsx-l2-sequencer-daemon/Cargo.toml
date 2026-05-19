@@ -35,6 +35,10 @@ tracing-subscriber.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 
+# Async traits for the L1Client surface + mock intent_hash.
+async-trait = "0.1"
+blake3.workspace = true
+
 [dev-dependencies]
 # Round-trip tests for SequencerConfig (de)serialization.
 serde_json.workspace = true

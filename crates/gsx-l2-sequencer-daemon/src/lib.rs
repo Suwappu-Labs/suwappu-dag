@@ -31,6 +31,10 @@
 //! Splitting this way lets each follow-up land in a focused
 //! PR that exercises one I/O surface.
 
+pub mod batch_builder_task;
 pub mod config;
+pub mod l1_client;
 
+pub use batch_builder_task::{BatchBuilderTaskConfig, SequencerState};
 pub use config::{ConfigError, SequencerConfig};
+pub use l1_client::{L1Client, L1ClientError};

@@ -1160,6 +1160,8 @@ name = "gsx-l2-sequencer-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "blake3",
  "clap",
  "gsx-l2-sequencer",
  "gsx-l2-stm",
