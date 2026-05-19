@@ -1150,6 +1150,7 @@ dependencies = [
  "blake3",
  "gsx-l2-verifier-precompile",
  "hex",
+ "proptest",
  "serde",
  "thiserror 1.0.69",
 ]

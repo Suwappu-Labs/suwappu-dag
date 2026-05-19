@@ -36,6 +36,8 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod force_include;
+
 use std::collections::VecDeque;
 
 use blake3::Hasher;
