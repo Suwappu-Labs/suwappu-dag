@@ -24,10 +24,21 @@
     .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
     .chip { border: 1px solid #334155; background: rgba(2,6,23,0.34); color: #cbd5e1; border-radius: 999px; padding: 6px 10px; font-size: 0.72rem; }
     .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; margin-top: 16px; }
-    .kpi { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; margin-bottom: 8px; font-size: 0.74rem; }
-    .track { height: 14px; border-radius: 999px; background: rgba(30,41,59,0.82); border: 1px solid #334155; overflow: hidden; }
-    .fill { height: 100%; border-radius: 999px; }
-    .meta { color: #94a3b8; font-size: 0.72rem; line-height: 1.65; margin-top: 8px; }
+    .meta { color: #94a3b8; font-size: 0.72rem; line-height: 1.65; margin-top: 10px; }
+    .stat { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: baseline; padding: 6px 0; border-bottom: 1px dashed #1e293b; font-size: 0.76rem; }
+    .stat:last-child { border-bottom: none; }
+    .stat .k { color: #94a3b8; }
+    .stat .v { color: #f8fafc; font-weight: 600; font-variant-numeric: tabular-nums; }
+    .stat .v.cyan { color: #22d3ee; }
+    .stat .v.emerald { color: #34d399; }
+    .stat .v.violet { color: #a78bfa; }
+    .stat .v.amber { color: #fbbf24; }
+    .stat .v.rose { color: #fb7185; }
+    .arrow { display: inline-block; padding: 0 6px; color: #64748b; }
+    .swap { display: grid; grid-template-columns: 1fr auto 1fr; gap: 6px; align-items: center; padding: 6px 0; border-bottom: 1px dashed #1e293b; font-size: 0.74rem; }
+    .swap:last-child { border-bottom: none; }
+    .swap .from { color: #94a3b8; }
+    .swap .to { color: #34d399; font-weight: 600; text-align: right; }
     .footer { text-align: center; color: #64748b; font-size: 0.74rem; margin-top: 18px; }
   </style>
 </head>
@@ -92,12 +103,47 @@
       </div>
     </div>
 
-    <div class="section-title"><span class="dot" style="width:8px;height:8px;background:#a78bfa"></span><h2>Charts</h2></div>
+    <div class="section-title"><span class="dot" style="width:8px;height:8px;background:#a78bfa"></span><h2>Substrate invariants</h2></div>
     <div class="cards">
-      <div class="card"><h3 style="margin:0 0 10px;font-size:0.84rem">Boundary layout</h3><div class="kpi"><div>Lane</div><div>untrusted</div></div><div class="track"><div class="fill" style="width:100%;background:linear-gradient(90deg,#94a3b8,#64748b)"></div></div><div class="kpi"><div>Bridge</div><div>sealed</div></div><div class="track"><div class="fill" style="width:75%;background:linear-gradient(90deg,#34d399,#10b981)"></div></div><div class="kpi"><div>State</div><div>canonical</div></div><div class="track"><div class="fill" style="width:100%;background:linear-gradient(90deg,#a78bfa,#8b5cf6)"></div></div><div class="meta">The bridge is the only place where mutation can be authorized.</div></div><div class="card"><h3 style="margin:0 0 10px;font-size:0.84rem">Parity guarantees</h3><div class="kpi"><div>EVM balanceOf</div><div>projector</div></div><div class="track"><div class="fill" style="width:92%;background:linear-gradient(90deg,#22d3ee,#06b6d4)"></div></div><div class="kpi"><div>Move value</div><div>projector</div></div><div class="track"><div class="fill" style="width:92%;background:linear-gradient(90deg,#22d3ee,#06b6d4)"></div></div><div class="kpi"><div>Tree root</div><div>deterministic</div></div><div class="track"><div class="fill" style="width:100%;background:linear-gradient(90deg,#fbbf24,#f59e0b)"></div></div><div class="meta">The two projections must stay equal for the same address.</div></div><div class="card"><h3 style="margin:0 0 10px;font-size:0.84rem">Swap points</h3><div class="kpi"><div>Storage backend</div><div>trait</div></div><div class="track"><div class="fill" style="width:75%;background:linear-gradient(90deg,#34d399,#10b981)"></div></div><div class="kpi"><div>Execution VM</div><div>adapter</div></div><div class="track"><div class="fill" style="width:83%;background:linear-gradient(90deg,#a78bfa,#8b5cf6)"></div></div><div class="kpi"><div>Anchor auth</div><div>surface</div></div><div class="track"><div class="fill" style="width:67%;background:linear-gradient(90deg,#fb7185,#f43f5e)"></div></div><div class="meta">These are mechanical replacement points rather than rewrites.</div></div>
+      <div class="card">
+        <h3 style="margin:0 0 10px;font-size:0.84rem;color:#34d399">Lane separation (Inv. 1)</h3>
+        <div class="stat"><span class="k">gsxdb-lane</span><span class="v rose">untrusted, no PBM write</span></div>
+        <div class="stat"><span class="k">gsxdb-bridge</span><span class="v emerald">single sealed mutator</span></div>
+        <div class="stat"><span class="k">gsxdb-state</span><span class="v violet">canonical BalanceSlot map</span></div>
+        <div class="stat"><span class="k">Property test</span><span class="v cyan">lane_cannot_import_state × 10k</span></div>
+        <div class="meta">Bridge::submit is the only path that authorizes mutation. Lane stages intents but cannot reach into canonical state.</div>
+      </div>
+      <div class="card">
+        <h3 style="margin:0 0 10px;font-size:0.84rem;color:#22d3ee">Dual-VM projection equality (Inv. 2)</h3>
+        <div class="stat"><span class="k">EVM</span><span class="v cyan">balanceOf(addr)</span></div>
+        <div class="stat"><span class="k">Move</span><span class="v cyan">Coin::value(addr)</span></div>
+        <div class="stat"><span class="k">Read-only</span><span class="v">projectors, no writes</span></div>
+        <div class="stat"><span class="k">Equality holds</span><span class="v emerald">bit-for-bit, every block</span></div>
+        <div class="meta">Property test <code style="color:#22d3ee">dual_projection_equality_holds</code> in gsx-db enforces equality at 10k cases.</div>
+      </div>
+      <div class="card">
+        <h3 style="margin:0 0 10px;font-size:0.84rem;color:#fbbf24">Swappable trait surfaces</h3>
+        <div class="swap"><span class="from">redb</span><span class="arrow">→</span><span class="to">RocksDB</span></div>
+        <div class="swap"><span class="from">MockEvm</span><span class="arrow">→</span><span class="to">revm</span></div>
+        <div class="swap"><span class="from">MockMove</span><span class="arrow">→</span><span class="to">Aptos Move VM</span></div>
+        <div class="swap"><span class="from">BLAKE3 tree</span><span class="arrow">→</span><span class="to">Verkle / IPA</span></div>
+        <div class="swap"><span class="from">MAC anchor</span><span class="arrow">→</span><span class="to">LTP registry</span></div>
+        <div class="meta">Trait boundaries are isolated; the chain stays deterministic across swap points.</div>
+      </div>
     </div>
 
-    <div class="chips"><span class="chip">lane separation</span><span class="chip">BridgeToken</span><span class="chip">BalanceSlot</span><span class="chip">replay</span><span class="chip">parity</span></div>
+    <div class="section-title"><span class="dot" style="width:8px;height:8px;background:#fb7185"></span><h2>Mutation lifecycle</h2></div>
+    <div class="panel" style="padding:14px 16px;font-size:0.75rem;color:#cbd5e1;line-height:1.7">
+      <strong style="color:#f8fafc">Intent</strong> <span class="arrow">→</span>
+      <strong style="color:#22d3ee">validate</strong> <span class="arrow">→</span>
+      <strong style="color:#34d399">mint BridgeToken</strong> <span class="arrow">→</span>
+      <strong style="color:#a78bfa">apply to PBM</strong> <span class="arrow">→</span>
+      <strong style="color:#fbbf24">update tree root</strong> <span class="arrow">→</span>
+      <strong style="color:#fb7185">emit AnchorDispatcher output</strong>
+      <div style="color:#94a3b8;margin-top:8px">Replay (Inv. 7) reproduces every step from the committed-block stream — same root, same anchor, bit-for-bit.</div>
+    </div>
+
+    <div class="chips" style="margin-top:14px"><span class="chip">lane separation</span><span class="chip">BridgeToken seal</span><span class="chip">BalanceSlot</span><span class="chip">replay equivalence</span><span class="chip">EVM ↔ Move parity</span></div>
     <div class="footer">See also: gsx-dag architecture page and the LTP lifecycle page.</div>
   </div>
 </body>

@@ -37,18 +37,18 @@
     <div class="panel">
       <pre class="mermaid">
 flowchart LR
-    Author[Validator authors cert] --> Shred[RaptorQ encode<br/>n shreds any k reconstruct]
-    Shred --> Path{SCION path<br/>available?}
-    Path -->|yes| SCION[Path-authenticated<br/>SCION transport]
-    Path -->|no| Gateway[SCION-IP-Gateway<br/>fallback shim]
-    SCION --> Wire[Wire cluster mesh]
+    Author["Validator authors cert"] --> Shred["RaptorQ encode<br/>n shreds, any k reconstruct"]
+    Shred --> Path{"SCION path<br/>available?"}
+    Path -->|"yes"| SCION["Path-authenticated<br/>SCION transport"]
+    Path -->|"no"| Gateway["SCION-IP-Gateway<br/>fallback shim"]
+    SCION --> Wire[("Wire — cluster mesh")]
     Gateway --> Wire
-    Wire --> Recv[Receiving validator<br/>collects ge k shreds]
-    Recv --> Reco[RaptorQ reconstruct]
-    Reco --> Ingest[ingest_cert<br/>insert into DAG]
-    Ingest -->|UnknownParent| Orphan[orphan-pull buffer<br/>fetch missing parents]
-    Ingest -->|OK| Vote[cast Vote<br/>broadcast]
-    Orphan -. per-orphan backoff<br/>500ms 1s 2s 4s 5s cap<br/>DAG-S32 .- Wire
+    Wire --> Recv["Receiving validator<br/>collects ≥ k shreds"]
+    Recv --> Reco["RaptorQ reconstruct"]
+    Reco --> Ingest["ingest_cert<br/>insert into DAG"]
+    Ingest -->|"UnknownParent"| Orphan["orphan-pull buffer<br/>fetch missing parents"]
+    Ingest -->|"OK"| Vote["cast Vote<br/>broadcast"]
+    Orphan -.->|"per-orphan backoff<br/>500ms → 1s → 2s → 4s → 5s cap<br/>DAG-S32"| Wire
       </pre>
     </div>
 

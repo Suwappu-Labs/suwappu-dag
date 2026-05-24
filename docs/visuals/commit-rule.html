@@ -37,25 +37,25 @@
     <div class="panel">
       <pre class="mermaid">
 flowchart TB
-    R[Round R<br/>leader cert authored<br/>by leader R n]
-    R1[Round R+1<br/>peer authors propose<br/>parent set = local DAG R-certs]
-    Q{Distinct authors at R+1<br/>citing leader_hash as parent<br/>greater-equal quorum_threshold n?}
-    Direct[LeaderStatus::Direct<br/>commit + drain block]
-    Anchor[Search anchor at R-prime ge R+2<br/>directly decided]
-    InHist{leader cert in<br/>causal_history anchor?}
-    Skip[LeaderStatus::Skip<br/>permanently dropped<br/>one-shot intent lost]
-    Late[Late-arriving leader cert<br/>via orphan-pull]
-    IQ4[IQ-004 fix candidates:<br/>A late-arrival re-decide<br/>B wait-for-leader timer<br/>C author-buffered duplicates]
+    R["Round R<br/>leader cert authored<br/>by leader(R, n)"]
+    R1["Round R+1<br/>peer authors propose<br/>parent set = local DAG R-certs"]
+    Q{"Distinct authors at R+1<br/>citing leader_hash as parent<br/>≥ quorum_threshold(n)?"}
+    Direct["LeaderStatus::Direct<br/>commit + drain block"]
+    Anchor["Search anchor at R' ≥ R+2<br/>directly decided"]
+    InHist{"leader cert in<br/>causal_history(anchor)?"}
+    Skip["LeaderStatus::Skip<br/>permanently dropped<br/>one-shot intent lost"]
+    Late["Late-arriving leader cert<br/>via orphan-pull"]
+    IQ4["IQ-004 fix candidates:<br/>A) late-arrival re-decide<br/>B) wait-for-leader timer<br/>C) author-buffered duplicates"]
 
     R --> R1
     R1 --> Q
-    Q -->|yes| Direct
-    Q -->|no| Anchor
+    Q -->|"yes"| Direct
+    Q -->|"no"| Anchor
     Anchor --> InHist
-    InHist -->|yes| Direct
-    InHist -->|no| Skip
-    Late -. arrives AFTER R+1<br/>parent-set frozen .- Q
-    Skip -. mitigated by .- IQ4
+    InHist -->|"yes"| Direct
+    InHist -->|"no"| Skip
+    Late -.->|"arrives AFTER R+1<br/>parent-set frozen"| Q
+    Skip -.->|"mitigated by"| IQ4
       </pre>
     </div>
 
