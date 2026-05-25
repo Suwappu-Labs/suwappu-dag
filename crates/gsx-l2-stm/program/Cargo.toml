@@ -19,6 +19,15 @@ publish = false
 # The resulting `gsx-l2-stm-program.elf` is what the prover
 # daemon (Phase 2.1, #104) loads into `sp1_sdk::ProverClient`.
 
+# Declare this crate as its own workspace root. Without this
+# empty `[workspace]` table, `cargo prove build` walks upward,
+# finds the repo-root `Cargo.toml`'s `[workspace]` declaration,
+# discovers this path is in `exclude = [...]` rather than
+# `members = [...]`, and aborts with:
+#   current package believes it's in a workspace when it's not
+# (Codex #229 P1, surfaced 2026-05-25 against commit 2397874.)
+[workspace]
+
 [dependencies]
 # SP1 guest runtime. `default-features = false` strips the
 # host-side dependencies; we need only the guest I/O primitives.
