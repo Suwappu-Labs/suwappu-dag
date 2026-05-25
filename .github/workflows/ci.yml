@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Manual trigger from the Actions tab or `gh workflow run ci.yml --ref <branch>`.
+  # Useful when GitHub's auto-dispatch on a `pull_request: synchronize` event
+  # silently no-ops (we hit this during the 2026-05-24 → 2026-05-25 Actions
+  # billing recovery window — PR #222 stopped receiving CI on push).
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
