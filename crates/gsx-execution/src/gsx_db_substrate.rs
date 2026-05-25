@@ -212,6 +212,22 @@ impl Substrate for GsxDbSubstrate {
             | Intent::ClaimInsurance { .. }
             | Intent::DisburseTreasury { .. }
             | Intent::PostL2DA { .. } => Ok(()),
+            // PostL2DAv2 → G3.3 (#102) DA-anchor registry write
+            // (BLAKE3 of the blob keyed by `(l2_chain_id_hash,
+            // batch_id)`). `InMemorySubstrate` writes the registry
+            // entry + enforces replay rejection. `GsxDbSubstrate`
+            // stubs as Ok until gsx-db v0.2.0 ships a `bytes_state`-
+            // style surface — same pattern as `DistributeSlashedFunds`
+            // below and the asset-whitelist Intents (#166).
+            //
+            // This stub is a deliberate state-root divergence vs
+            // `InMemorySubstrate` for any block that includes a
+            // PostL2DAv2 Intent. Both substrates produce identical
+            // roots on PostL2DAv2-free blocks today; PostL2DAv2-
+            // bearing blocks will diverge until gsx-db v0.2.0 lands.
+            // The InMemorySubstrate side is the canonical
+            // semantics; tests exercise the registry there.
+            Intent::PostL2DAv2 { .. } => Ok(()),
             // C.8 (#131): slashing-distribution waterfall.
             // gsx-db v0.1.0's `Bridge::submit` only exposes the
             // capability-gated Transfer path — no `credit_unchecked`

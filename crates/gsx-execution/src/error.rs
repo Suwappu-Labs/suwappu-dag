@@ -455,4 +455,21 @@ pub enum ExecutionError {
         /// for this ring.
         last_distributed_epoch: u64,
     },
+
+    /// `Intent::PostL2DAv2 { l2_chain_id_hash, batch_id, .. }`
+    /// attempted to anchor a DA blob for a `(chain, batch)` pair
+    /// that the DA-anchor registry already has on record. Once
+    /// anchored the blob hash is immutable per
+    /// `da_anchor_registry`'s replay invariant; off-chain auditors
+    /// rely on a single canonical commitment per batch.
+    #[error(
+        "DA anchor already recorded for (chain {l2_chain_id_hash}, batch {batch_id})",
+        l2_chain_id_hash = hex::encode(l2_chain_id_hash),
+    )]
+    DaAnchorAlreadyRecorded {
+        /// Chain hash from the rejected PostL2DAv2 Intent.
+        l2_chain_id_hash: [u8; 32],
+        /// Batch id from the rejected PostL2DAv2 Intent.
+        batch_id: u64,
+    },
 }
