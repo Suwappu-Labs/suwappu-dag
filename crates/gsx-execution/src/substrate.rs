@@ -688,35 +688,6 @@ pub enum Intent {
         /// commitments + nullifiers + encrypted memos.
         da_blob: Vec<u8>,
     },
-    /// Versioned successor to `PostL2DA` (G3.3 hardening — closes the
-    /// substrate-no-op gap that #208 originally surfaced).
-    ///
-    /// Writes `BLAKE3("gsx-da-blob-v1" || da_blob)` to the DA-anchor
-    /// registry keyed by `(l2_chain_id_hash, batch_id)`. Off-chain
-    /// auditors can now link L1 calldata to the `da_commitment` in
-    /// the matching `L2StateRootRecord`:
-    /// L1 bytes → BLAKE3 → registry value → `da_commitment`.
-    ///
-    /// Re-anchoring the same `(chain, batch)` rejects with
-    /// `DaAnchorAlreadyRecorded`. The hash is immutable once set.
-    ///
-    /// `PostL2DA` (no L2 chain id, no anchoring) stays unchanged
-    /// alongside this variant per IQ-007's versioned-variant pattern:
-    /// pre-cutover wire-format remains intact, and new callers
-    /// adopt v2 incrementally. After cutover, `PostL2DA` is
-    /// deprecation-eligible.
-    PostL2DAv2 {
-        /// Monotonic per-L2-chain batch identifier; matches
-        /// `CommitL2StateRoot::batch_id`.
-        batch_id: u64,
-        /// Opaque DA blob bytes.
-        da_blob: Vec<u8>,
-        /// 32-byte chain identifier (matches the
-        /// `L2_CHAIN_ID_HASH_OFFSET` field in the verifier's
-        /// public-input layout). Lets multiple L2 chains coexist on
-        /// the same gsx-dag substrate.
-        l2_chain_id_hash: [u8; 32],
-    },
     /// Distribute slashed funds per the Tokenomics §8.3 waterfall:
     ///
     /// 1. Reimburse `counterparties` (each `(addr, share)` pair).
@@ -791,6 +762,42 @@ pub enum Intent {
     RemoveBridgeAsset {
         /// Asset identifier.
         asset_id: [u8; 32],
+    },
+    /// Versioned successor to `PostL2DA` (G3.3 hardening — closes the
+    /// substrate-no-op gap that #208 originally surfaced). Seated at
+    /// the **end** of the enum so its bincode discriminant doesn't
+    /// shift any pre-existing variant. The repo's bincode decode
+    /// helper (`crates/gsx-node/src/codec.rs`) silently ignores
+    /// trailing bytes; combining that with a mid-enum insert risked
+    /// silent re-interpretation of pre-upgrade payloads, so this
+    /// variant lands here despite IQ-007 (#225 / #238) ratifying
+    /// pre-mainnet variant-insert churn in general.
+    ///
+    /// Writes `BLAKE3(da_blob)` to the DA-anchor registry keyed by
+    /// `(l2_chain_id_hash, batch_id)`. The hash matches the
+    /// sequencer's `da_commitment` formula at
+    /// `crates/gsx-l2-sequencer/src/lib.rs`, so off-chain auditors
+    /// can cross-check: L1 calldata bytes → BLAKE3 → registry value
+    /// → `da_commitment` in the matching `L2StateRootRecord`.
+    ///
+    /// Re-anchoring the same `(chain, batch)` rejects with
+    /// `DaAnchorAlreadyRecorded`. The hash is immutable once set.
+    ///
+    /// `PostL2DA` (no L2 chain id, no anchoring) stays unchanged
+    /// alongside this variant as a no-op for wire-stable backwards
+    /// compatibility. After IQ-007's mainnet cutover `PostL2DA` is
+    /// deprecation-eligible.
+    PostL2DAv2 {
+        /// Monotonic per-L2-chain batch identifier; matches
+        /// `CommitL2StateRoot::batch_id`.
+        batch_id: u64,
+        /// Opaque DA blob bytes.
+        da_blob: Vec<u8>,
+        /// 32-byte chain identifier (matches the
+        /// `L2_CHAIN_ID_HASH_OFFSET` field in the verifier's
+        /// public-input layout). Lets multiple L2 chains coexist on
+        /// the same gsx-dag substrate.
+        l2_chain_id_hash: [u8; 32],
     },
 }
 
@@ -2954,9 +2961,9 @@ impl Substrate for InMemorySubstrate {
             // `PostL2DAv2` for new traffic.
             Intent::PostL2DA { .. } => Ok(()),
             // PostL2DAv2 → G3.3 (#102) DA blob anchoring WITH
-            // substrate-side record. Writes
-            //   BLAKE3("gsx-da-blob-v1" || da_blob)
-            // to the DA-anchor registry keyed by
+            // substrate-side record. Writes plain `BLAKE3(da_blob)`
+            // (matching the sequencer's `da_commitment` formula
+            // by construction) to the DA-anchor registry keyed by
             // (l2_chain_id_hash, batch_id). Rejects re-anchoring
             // for the same (chain, batch) — off-chain auditors
             // rely on a single canonical commitment per batch.
@@ -4132,8 +4139,7 @@ mod tests {
     }
 
     /// Empty DA blob is a valid anchor — registry still records the
-    /// blob hash (`BLAKE3("gsx-da-blob-v1" || "")`), and replay still
-    /// rejects.
+    /// blob hash (`BLAKE3(b"")`), and replay still rejects.
     #[test]
     fn post_l2_da_v2_empty_blob_still_anchors() {
         let mut s = InMemorySubstrate::from_balances([(addr(1), 100)]);

@@ -472,4 +472,22 @@ pub enum ExecutionError {
         /// Batch id from the rejected PostL2DAv2 Intent.
         batch_id: u64,
     },
+
+    /// The Intent is recognized but the active `Substrate`
+    /// implementation does not yet support it. Returned (rather
+    /// than stubbed as `Ok(())`) when stubbing would silently
+    /// diverge state-machine semantics between backends — better
+    /// to fail loud than to let two substrates accept the same
+    /// block and disagree on the resulting state root.
+    ///
+    /// Currently used by `GsxDbSubstrate` for
+    /// `Intent::PostL2DAv2`, gated on the v0.2.0 `bytes_state`
+    /// surface in `gsx-db`.
+    #[error("intent {intent} not implemented on substrate backend {backend}")]
+    NotImplementedOnBackend {
+        /// Backend identifier ("gsx_db_substrate", etc.).
+        backend: &'static str,
+        /// Intent variant name.
+        intent: &'static str,
+    },
 }

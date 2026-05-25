@@ -16,11 +16,13 @@
 //! Inconsistency between the actual DA blob bytes anchored
 //! to L1 calldata and the `da_commitment` value claimed in a
 //! later `CommitL2StateRoot` proof. The substrate now keeps
-//! the BLAKE3 of each anchored blob keyed by
+//! `BLAKE3(da_blob)` (matching the sequencer's
+//! `da_commitment` formula by construction) keyed by
 //! `(l2_chain_id_hash, batch_id)`. Off-chain auditors can
 //! cross-check: blob bytes from L1 calldata → BLAKE3 →
-//! must equal the registry's value → must equal the
-//! `da_commitment` in the matching L2StateRootRecord.
+//! registry value → `da_commitment` in the matching
+//! `L2StateRootRecord`. All three hashes are the same 32
+//! bytes by construction.
 //!
 //! ## Replay defense
 //!
@@ -129,15 +131,24 @@ pub fn decode(bytes: &[u8]) -> Result<BTreeMap<L2BatchKey, [u8; 32]>, ExecutionE
     Ok(map)
 }
 
-/// Compute the canonical anchor hash of a DA blob —
-/// `BLAKE3("gsx-da-blob-v1" || da_blob)`. Domain-tagged so
-/// the registry hash is distinct from any other BLAKE3
-/// digest the substrate computes.
+/// Compute the canonical anchor hash of a DA blob — plain
+/// `BLAKE3(da_blob)`. Matches the sequencer's `da_commitment`
+/// recipe (`crates/gsx-l2-sequencer/src/lib.rs`'s
+/// `BatchHeader.da_commitment` field) by construction, so
+/// off-chain auditors can directly compare the registry value
+/// to the `da_commitment` in the matching `L2StateRootRecord`:
+/// L1 calldata bytes → BLAKE3 → registry value (this fn) →
+/// `da_commitment` claimed in the proof. All four are the
+/// same 32 bytes.
+///
+/// An earlier draft used a domain-tagged form
+/// (`BLAKE3("gsx-da-blob-v1" || da_blob)`), which is better
+/// hash hygiene in isolation but does NOT match the producer's
+/// emitted commitment — Codex flagged that mismatch as a
+/// load-bearing-invariant violation since the registry's
+/// stated purpose IS the cross-check against `da_commitment`.
 pub fn da_blob_hash(da_blob: &[u8]) -> [u8; 32] {
-    let mut h = blake3::Hasher::new();
-    h.update(b"gsx-da-blob-v1");
-    h.update(da_blob);
-    *h.finalize().as_bytes()
+    *blake3::hash(da_blob).as_bytes()
 }
 
 #[cfg(test)]
@@ -193,17 +204,15 @@ mod tests {
         assert_ne!(da_blob_hash(b""), da_blob_hash(b"\x00"));
     }
 
-    /// The domain tag is load-bearing: any change here is a
-    /// state-incompatible upgrade.
+    /// The anchor hash MUST equal plain `BLAKE3(da_blob)` —
+    /// any divergence from the sequencer's `da_commitment`
+    /// formula breaks the load-bearing cross-check invariant
+    /// off-chain auditors rely on.
     #[test]
-    fn da_blob_hash_uses_domain_tag() {
-        let raw = {
-            let mut h = blake3::Hasher::new();
-            h.update(b"hello");
-            *h.finalize().as_bytes()
-        };
-        let tagged = da_blob_hash(b"hello");
-        assert_ne!(raw, tagged);
+    fn da_blob_hash_matches_plain_blake3() {
+        let plain = *blake3::hash(b"hello").as_bytes();
+        let anchored = da_blob_hash(b"hello");
+        assert_eq!(anchored, plain);
     }
 
     #[test]

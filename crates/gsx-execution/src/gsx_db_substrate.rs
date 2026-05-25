@@ -216,18 +216,25 @@ impl Substrate for GsxDbSubstrate {
             // (BLAKE3 of the blob keyed by `(l2_chain_id_hash,
             // batch_id)`). `InMemorySubstrate` writes the registry
             // entry + enforces replay rejection. `GsxDbSubstrate`
-            // stubs as Ok until gsx-db v0.2.0 ships a `bytes_state`-
-            // style surface — same pattern as `DistributeSlashedFunds`
-            // below and the asset-whitelist Intents (#166).
+            // cannot mirror the write yet — it depends on
+            // gsx-db v0.2.0's `bytes_state` surface.
             //
-            // This stub is a deliberate state-root divergence vs
-            // `InMemorySubstrate` for any block that includes a
-            // PostL2DAv2 Intent. Both substrates produce identical
-            // roots on PostL2DAv2-free blocks today; PostL2DAv2-
-            // bearing blocks will diverge until gsx-db v0.2.0 lands.
-            // The InMemorySubstrate side is the canonical
-            // semantics; tests exercise the registry there.
-            Intent::PostL2DAv2 { .. } => Ok(()),
+            // **Reject** the Intent here (rather than stub as Ok)
+            // so the backends never silently diverge on state
+            // root: accepting the Intent on this backend while
+            // InMemorySubstrate writes the registry would produce
+            // different roots for the same block. Codex flagged
+            // the silent-divergence pattern as a P1; failing loud
+            // lifts it to a runtime contract.
+            //
+            // `DistributeSlashedFunds` (#131) and the bridge-asset
+            // Intents (#166) below still stub as `Ok` — they
+            // pre-date this hardening and converting them is its
+            // own work item.
+            Intent::PostL2DAv2 { .. } => Err(ExecutionError::NotImplementedOnBackend {
+                backend: "gsx_db_substrate",
+                intent: "PostL2DAv2",
+            }),
             // C.8 (#131): slashing-distribution waterfall.
             // gsx-db v0.1.0's `Bridge::submit` only exposes the
             // capability-gated Transfer path — no `credit_unchecked`
@@ -327,5 +334,46 @@ mod tests {
         });
         // Amount = 0 is a no-op in both substrates.
         assert!(err.is_ok());
+    }
+
+    /// `Intent::PostL2DAv2` must fail loud on `GsxDbSubstrate` — the
+    /// gsx-db backend can't yet write the DA-anchor registry
+    /// (depends on `bytes_state` in gsx-db v0.2.0), so accepting the
+    /// Intent here would silently diverge the state root vs
+    /// `InMemorySubstrate` which DOES write. Returning
+    /// `NotImplementedOnBackend` lifts the divergence to a runtime
+    /// contract.
+    #[test]
+    fn post_l2_da_v2_rejected_on_gsx_db() {
+        let mut s = GsxDbSubstrate::new();
+        let err = s
+            .apply_intent(&Intent::PostL2DAv2 {
+                batch_id: 7,
+                da_blob: vec![0xcd; 64],
+                l2_chain_id_hash: [0xa1; 32],
+            })
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ExecutionError::NotImplementedOnBackend {
+                backend: "gsx_db_substrate",
+                intent: "PostL2DAv2",
+            }
+        ));
+    }
+
+    /// The legacy `Intent::PostL2DA` (no L2 chain id, no anchoring)
+    /// still stubs as `Ok(())` on `GsxDbSubstrate` — backwards-
+    /// compatible no-op. Asserts the rejection in the new
+    /// `PostL2DAv2` arm did NOT regress the original variant's
+    /// stub posture.
+    #[test]
+    fn post_l2_da_v1_still_stubbed_on_gsx_db() {
+        let mut s = GsxDbSubstrate::new();
+        let ok = s.apply_intent(&Intent::PostL2DA {
+            batch_id: 7,
+            da_blob: vec![0xcd; 64],
+        });
+        assert!(ok.is_ok());
     }
 }
