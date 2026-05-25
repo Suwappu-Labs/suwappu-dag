@@ -39,6 +39,20 @@ pub enum ConfigError {
         /// Name of the empty field.
         field: &'static str,
     },
+
+    /// A numeric field was set to a value that would crash the
+    /// daemon at startup (e.g. `batch_interval_ms = 0` panics
+    /// `tokio::time::interval`). Caught at load time so a bad
+    /// config doesn't take the service down deterministically.
+    #[error("config field `{field}` must be {constraint}, got {value}")]
+    InvalidNumericField {
+        /// Name of the invalid field.
+        field: &'static str,
+        /// Constraint description (e.g. `"non-zero"`).
+        constraint: &'static str,
+        /// The offending value.
+        value: u64,
+    },
 }
 
 /// Sequencer daemon configuration. Loaded once at startup;
@@ -124,8 +138,10 @@ impl SequencerConfig {
     }
 
     /// Field-level validation. Catches empty strings on fields
-    /// where empty is never meaningful — RPC URLs, chain ids,
-    /// bind addresses, key paths.
+    /// where empty is never meaningful (RPC URLs, chain ids,
+    /// bind addresses, key paths) and numeric values that would
+    /// crash the daemon at startup (`batch_interval_ms = 0`
+    /// panics `tokio::time::interval` — Codex #229 P1 #4).
     fn validate(&self) -> Result<(), ConfigError> {
         for (name, value) in [
             ("l1_rpc_url", &self.l1_rpc_url),
@@ -136,6 +152,20 @@ impl SequencerConfig {
             if value.is_empty() {
                 return Err(ConfigError::EmptyRequiredField { field: name });
             }
+        }
+        if self.batch_interval_ms == 0 {
+            return Err(ConfigError::InvalidNumericField {
+                field: "batch_interval_ms",
+                constraint: "non-zero (tokio::time::interval panics on Duration::ZERO)",
+                value: self.batch_interval_ms,
+            });
+        }
+        if self.force_include_interval_l1_blocks == 0 {
+            return Err(ConfigError::InvalidNumericField {
+                field: "force_include_interval_l1_blocks",
+                constraint: "non-zero",
+                value: self.force_include_interval_l1_blocks,
+            });
         }
         Ok(())
     }
@@ -210,5 +240,65 @@ signer_key_path = "/k"
         let err = SequencerConfig::load_from_path("/tmp/gsx-l2-seq-config-does-not-exist.toml")
             .unwrap_err();
         assert!(matches!(err, ConfigError::Io { .. }));
+    }
+
+    /// Regression for #229 P1 #4: `batch_interval_ms = 0` would feed
+    /// `Duration::ZERO` to `tokio::time::interval` and panic at startup.
+    /// Validation now rejects it at load time with a clear error.
+    #[test]
+    fn rejects_zero_batch_interval_ms() {
+        let bad = r#"
+l1_rpc_url = "x"
+l2_chain_id = "y"
+rpc_bind_addr = "0.0.0.0:1"
+signer_key_path = "/k"
+batch_interval_ms = 0
+"#;
+        let cfg: SequencerConfig = toml::from_str(bad).unwrap();
+        assert!(matches!(
+            cfg.validate(),
+            Err(ConfigError::InvalidNumericField {
+                field: "batch_interval_ms",
+                value: 0,
+                ..
+            })
+        ));
+    }
+
+    /// Companion: zero `force_include_interval_l1_blocks` would create a
+    /// degenerate watcher; reject it for consistency with the batch ticker.
+    #[test]
+    fn rejects_zero_force_include_interval() {
+        let bad = r#"
+l1_rpc_url = "x"
+l2_chain_id = "y"
+rpc_bind_addr = "0.0.0.0:1"
+signer_key_path = "/k"
+force_include_interval_l1_blocks = 0
+"#;
+        let cfg: SequencerConfig = toml::from_str(bad).unwrap();
+        assert!(matches!(
+            cfg.validate(),
+            Err(ConfigError::InvalidNumericField {
+                field: "force_include_interval_l1_blocks",
+                value: 0,
+                ..
+            })
+        ));
+    }
+
+    /// Positive case: a sensible nonzero `batch_interval_ms` passes.
+    #[test]
+    fn accepts_nonzero_intervals() {
+        let good = r#"
+l1_rpc_url = "x"
+l2_chain_id = "y"
+rpc_bind_addr = "0.0.0.0:1"
+signer_key_path = "/k"
+batch_interval_ms = 250
+force_include_interval_l1_blocks = 1
+"#;
+        let cfg: SequencerConfig = toml::from_str(good).unwrap();
+        cfg.validate().unwrap();
     }
 }
