@@ -90,7 +90,18 @@ pub fn decode(bytes: &[u8]) -> Result<UnbondingMap, ExecutionError> {
         });
     }
     let count = u32::from_be_bytes(bytes[4..8].try_into().unwrap()) as usize;
-    let expected_len = ENCODED_HEADER_BYTES + count * ENTRY_BYTES;
+    // `count` is bounded by u32::MAX. On 64-bit targets `count * ENTRY_BYTES`
+    // fits in usize, but the SP1 guest builds for riscv32 (32-bit usize) where
+    // a crafted `count` near u32::MAX would wrap and pass the length check,
+    // then panic in the loop's slice indexing. Reject on overflow before any
+    // further validation.
+    let expected_len = count
+        .checked_mul(ENTRY_BYTES)
+        .and_then(|payload| payload.checked_add(ENCODED_HEADER_BYTES))
+        .ok_or(ExecutionError::CorruptStateRecord {
+            addr: reserved::validator_unbonding_registry_address(),
+            reason: "unbonding registry count overflows usize",
+        })?;
     if bytes.len() != expected_len {
         return Err(ExecutionError::CorruptStateRecord {
             addr: reserved::validator_unbonding_registry_address(),
@@ -199,6 +210,23 @@ mod tests {
     fn decode_rejects_trailing_bytes() {
         let mut bytes = encode(&UnbondingMap::new());
         bytes.push(0xff);
+        assert!(matches!(
+            decode(&bytes),
+            Err(ExecutionError::CorruptStateRecord { .. })
+        ));
+    }
+
+    /// Regression: a crafted header with `count = u32::MAX` and an empty
+    /// body must reject cleanly (CorruptStateRecord) and never panic. On
+    /// 32-bit targets the previous `count * ENTRY_BYTES` arithmetic would
+    /// wrap; on 64-bit it falls through to the length-mismatch branch.
+    /// Either path now produces the same `CorruptStateRecord` outcome.
+    #[test]
+    fn decode_rejects_huge_count_without_panic() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&UNBONDING_REGISTRY_VERSION.to_be_bytes());
+        bytes.extend_from_slice(&u32::MAX.to_be_bytes());
+        // body intentionally empty (bytes.len() == 8 == header only)
         assert!(matches!(
             decode(&bytes),
             Err(ExecutionError::CorruptStateRecord { .. })
