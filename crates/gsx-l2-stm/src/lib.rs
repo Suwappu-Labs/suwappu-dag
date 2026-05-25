@@ -186,10 +186,14 @@ impl BatchTransaction {
 /// `BatchTransaction` stream the sequencer encoded.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BatchInput {
-    /// L2 state root BEFORE this batch applies. The STM is
-    /// faithful to this — it does NOT re-derive `prev_l2_state_root`
-    /// from any ambient state; the caller is responsible for
-    /// passing the committed value from the previous batch.
+    /// L2 state root BEFORE this batch applies. MUST equal
+    /// `compute_state_root(&ledger)` — `execute_batch` verifies this
+    /// at function entry and rejects with `PreStateRootMismatch`
+    /// on disagreement. The check is load-bearing for ZK soundness:
+    /// `to_public_inputs` commits this value, so without the check
+    /// a malicious prover could pair an arbitrary ledger witness
+    /// with a claimed `prev_l2_state_root` and produce a "valid"
+    /// transition over an unanchored pre-state.
     pub prev_l2_state_root: Hash32,
     /// Per-batch monotonic id within the L2 chain.
     pub batch_id: u64,
@@ -288,14 +292,30 @@ pub enum StmError {
         /// Tx amount.
         need: Balance,
     },
-    /// Transfer arithmetic overflowed (recipient balance + amount
-    /// > u128::MAX). Should be unreachable under realistic
-    /// supply caps; surfaced rather than silently saturated so
-    /// the proof rejects on impossible inputs.
+    /// Transfer arithmetic overflowed (recipient balance plus
+    /// amount exceeds `u128::MAX`). Should be unreachable under
+    /// realistic supply caps; surfaced rather than silently
+    /// saturated so the proof rejects on impossible inputs.
     #[error("balance overflow crediting recipient 0x{to}", to = hex::encode(to))]
     CreditOverflow {
         /// Recipient that would have overflowed.
         to: Address,
+    },
+    /// `BatchInput.prev_l2_state_root` did not match
+    /// `compute_state_root(&input.ledger)`. Without this check the
+    /// SP1 guest would happily commit a caller-provided claimed
+    /// root while running over an unanchored ledger witness — a
+    /// classic soundness break for ZK rollups.
+    #[error(
+        "prev_l2_state_root mismatch: ledger hashes to 0x{actual}, claimed 0x{claimed}",
+        actual = hex::encode(actual),
+        claimed = hex::encode(claimed),
+    )]
+    PreStateRootMismatch {
+        /// What `compute_state_root(&input.ledger)` produced.
+        actual: Hash32,
+        /// What `BatchInput.prev_l2_state_root` declared.
+        claimed: Hash32,
     },
 }
 
@@ -303,6 +323,19 @@ pub enum StmError {
 /// root + outputs. **Native reference**; the SP1 guest will call
 /// this exact function from inside `main`.
 pub fn execute_batch(input: &BatchInput) -> Result<BatchOutput, StmError> {
+    // 0. Pre-state-root soundness check. `to_public_inputs` commits
+    //    the caller-provided `prev_l2_state_root` verbatim, so if the
+    //    ledger witness doesn't actually hash to that root, a
+    //    malicious prover could prove a transition over an unanchored
+    //    pre-state. Reject before doing any work.
+    let actual_prev_root = compute_state_root(&input.ledger);
+    if actual_prev_root != input.prev_l2_state_root {
+        return Err(StmError::PreStateRootMismatch {
+            actual: actual_prev_root,
+            claimed: input.prev_l2_state_root,
+        });
+    }
+
     // 1. Decode the DA blob.
     let txs = decode_da_blob(&input.da_blob, input.batch_id)?;
 
@@ -557,7 +590,7 @@ mod tests {
         let blob = encode_da_blob(1, &txs);
 
         let input = BatchInput {
-            prev_l2_state_root: [0u8; 32],
+            prev_l2_state_root: compute_state_root(&ledger),
             batch_id: 1,
             da_blob: blob,
             prev_l1_state_root: [0u8; 32],
@@ -592,7 +625,7 @@ mod tests {
             nonce: 99, // wrong
         }];
         let input = BatchInput {
-            prev_l2_state_root: [0u8; 32],
+            prev_l2_state_root: compute_state_root(&ledger),
             batch_id: 1,
             da_blob: encode_da_blob(1, &txs),
             prev_l1_state_root: [0u8; 32],
@@ -629,7 +662,7 @@ mod tests {
             nonce: 0,
         }];
         let input = BatchInput {
-            prev_l2_state_root: [0u8; 32],
+            prev_l2_state_root: compute_state_root(&ledger),
             batch_id: 1,
             da_blob: encode_da_blob(1, &txs),
             prev_l1_state_root: [0u8; 32],
@@ -646,6 +679,36 @@ mod tests {
                 need: 100,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn execute_rejects_pre_state_root_mismatch() {
+        let mut ledger = BTreeMap::new();
+        ledger.insert(
+            addr(1),
+            Account {
+                balance: 1_000,
+                nonce: 0,
+            },
+        );
+        let actual = compute_state_root(&ledger);
+        let claimed = [0xAAu8; 32]; // attacker-picked
+        let input = BatchInput {
+            prev_l2_state_root: claimed,
+            batch_id: 1,
+            da_blob: encode_da_blob(1, &[]),
+            prev_l1_state_root: [0u8; 32],
+            l2_chain_id_hash: [0u8; 32],
+            l1_anchor_height: 0,
+            range_vk_commitment: [0u8; 32],
+            ledger,
+        };
+        let err = execute_batch(&input).unwrap_err();
+        assert!(matches!(
+            err,
+            StmError::PreStateRootMismatch { actual: a, claimed: c }
+                if a == actual && c == claimed
         ));
     }
 

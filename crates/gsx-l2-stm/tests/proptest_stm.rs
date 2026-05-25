@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 use gsx_l2_stm::{
     compute_state_root, encode_da_blob, execute_batch, to_public_inputs, Account, Address,
-    BatchInput, BatchTransaction,
+    BatchInput, BatchTransaction, StmError,
 };
 use gsx_l2_verifier_precompile::{public_inputs as pi_offsets, L2_PUBLIC_INPUTS_BYTES};
 use proptest::prelude::*;
@@ -100,7 +100,7 @@ fn apply_until_done(
     }
 
     let input = BatchInput {
-        prev_l2_state_root: [0u8; 32],
+        prev_l2_state_root: compute_state_root(&initial_ledger),
         batch_id: 1,
         da_blob: encode_da_blob(1, &applied),
         prev_l1_state_root: [0u8; 32],
@@ -274,5 +274,55 @@ proptest! {
             &pi[pi_offsets::CONFIDENTIAL_ROOT_OFFSET..pi_offsets::CONFIDENTIAL_ROOT_OFFSET + 32],
             conf_root
         );
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
+
+    /// **Pre-state-root soundness gate**: any `BatchInput` whose
+    /// `prev_l2_state_root` does NOT equal
+    /// `compute_state_root(&input.ledger)` is rejected with
+    /// `PreStateRootMismatch` BEFORE any tx is applied.
+    ///
+    /// This is the load-bearing soundness check for the SP1 guest:
+    /// `to_public_inputs` commits the caller-provided
+    /// `prev_l2_state_root` verbatim, so without this gate a
+    /// malicious prover could pair an arbitrary ledger witness with
+    /// a claimed root and produce a "valid" proof for an unanchored
+    /// pre-state.
+    #[test]
+    fn pre_state_root_mismatch_is_rejected(
+        ledger in ledger_strategy(),
+        bogus_root in prop::array::uniform32(0u8..=255u8),
+        txs in prop::collection::vec(tx_strategy(), 0..=8),
+    ) {
+        let actual_root = compute_state_root(&ledger);
+        // Skip cases where the random bytes happen to collide with
+        // the real root — astronomically rare for a 256-bit hash
+        // but proptest can still trip it under shrinking.
+        prop_assume!(bogus_root != actual_root);
+
+        let input = BatchInput {
+            prev_l2_state_root: bogus_root,
+            batch_id: 1,
+            da_blob: encode_da_blob(1, &txs),
+            prev_l1_state_root: [0u8; 32],
+            l2_chain_id_hash: [0u8; 32],
+            l1_anchor_height: 0,
+            range_vk_commitment: [0u8; 32],
+            ledger,
+        };
+        match execute_batch(&input) {
+            Err(StmError::PreStateRootMismatch { actual, claimed }) => {
+                prop_assert_eq!(actual, actual_root);
+                prop_assert_eq!(claimed, bogus_root);
+            }
+            other => prop_assert!(
+                false,
+                "expected PreStateRootMismatch, got {:?}",
+                other
+            ),
+        }
     }
 }
