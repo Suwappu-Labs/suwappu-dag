@@ -1109,10 +1109,11 @@ impl InMemorySubstrate {
         Ok(())
     }
 
-    /// Atomic drain-and-credit-many: drains `from` by the sum of all
-    /// `credits` amounts and credits each destination, with full
-    /// pre-flight (source sufficiency + per-destination overflow) before
-    /// any mutation. Used by `DistributeRewards`.
+    /// Atomic drain-and-credit-many. Drains `from` by the
+    /// sum of all `credits` amounts and credits each
+    /// destination, with full pre-flight (source sufficiency
+    /// plus per-destination overflow) before any mutation.
+    /// Used by `DistributeRewards`.
     ///
     /// Reserved-address recipients are NOT checked here — callers are
     /// responsible for the reserved-address invariant.

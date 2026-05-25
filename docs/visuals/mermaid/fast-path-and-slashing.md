@@ -6,18 +6,18 @@ Paper §6.4. Sprint exit gates: DAG-S8 (lane), DAG-S9 (slashing).
 
 ```mermaid
 flowchart LR
-    Client[Client submits<br/>single-owner intent] --> Lane[Fast-path lane<br/>K-of-N owner-binding cert]
-    Lane -->|K=4 confirmations| Ack[Client receives ack<br/>1-RTT commit confirmation]
-    Lane --> Cross{K-binding cross-check<br/>vs main_lane_index<br/>(populated by try_commit)}
-    Cross -->|consistent| Final[Fast-path cert<br/>safe to spend]
-    Cross -->|conflict<br/>in K-window| Equiv[EquivocationProof<br/>two fast-path certs<br/>same owner, same nonce]
-    Equiv --> Slash[100% bonded stake<br/>+ Authority Ring expulsion]
-    subgraph MainLane[Main-lane fallback]
-      MLane[Same intent flows<br/>through Mysticeti-C DAG]
-      MLane --> Commit[Block commit<br/>main_lane_index updated]
+    Client["Client submits<br/>single-owner intent"] --> Lane["Fast-path lane<br/>K-of-N owner-binding cert"]
+    Lane -->|"K=4 confirmations"| Ack["Client receives ack<br/>1-RTT commit confirmation"]
+    Lane --> Cross{"K-binding cross-check<br/>vs main_lane_index"}
+    Cross -->|"consistent"| Final["Fast-path cert<br/>safe to spend"]
+    Cross -->|"conflict in K-window"| Equiv["EquivocationProof<br/>two fast-path certs<br/>same owner, same nonce"]
+    Equiv --> Slash["100% bonded stake<br/>+ Authority Ring expulsion"]
+    subgraph MainLane ["Main-lane fallback"]
+      MLane["Same intent flows<br/>through Mysticeti-C DAG"]
+      MLane --> Commit["Block commit<br/>main_lane_index updated"]
     end
-    Cross -.- MLane
-    Slash -. paper §6.4<br/>Invariant 5 .- Inv[100% slashing<br/>+ expulsion]
+    Cross -.-> MLane
+    Slash -.->|"paper §6.4 / Invariant 5"| Inv["100% slashing<br/>+ expulsion"]
 ```
 
 ## Notes

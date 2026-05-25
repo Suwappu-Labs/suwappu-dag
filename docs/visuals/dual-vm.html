@@ -37,19 +37,19 @@
     <div class="panel">
       <pre class="mermaid">
 flowchart LR
-    Intent[Intent inbound<br/>via consensus commit] --> Exec[gsx-execution<br/>execute_block]
-    Exec --> Bridge[gsxdb-bridge<br/>Bridge submit]
-    Bridge --> PBM[Polymorphic Balance Map<br/>BalanceSlot canonical state]
-    PBM --> Tree[State tree root<br/>plus proofs]
-    PBM --> Anchor[AnchorDispatcher<br/>MAC or registry]
-    PBM --> Replay[Replay or recovery<br/>same result post-restart]
-    Lane[gsxdb-lane<br/>untrusted ingest] -. cannot import<br/>into PBM .- PBM
-    subgraph Projectors[Read-only projectors]
-      EVM[EVM projector<br/>balanceOf]
-      Move[Move projector<br/>Coin value]
+    Intent["Intent inbound<br/>via consensus commit"] --> Exec["gsx-execution<br/>execute_block"]
+    Exec --> Bridge["gsxdb-bridge<br/>Bridge::submit"]
+    Bridge --> PBM["Polymorphic Balance Map<br/>BalanceSlot canonical state"]
+    PBM --> Tree["State tree root<br/>+ proofs"]
+    PBM --> Anchor["AnchorDispatcher<br/>MAC / registry"]
+    PBM --> Replay["Replay / recovery<br/>same result post-restart"]
+    Lane["gsxdb-lane<br/>untrusted ingest"] -.->|"cannot import<br/>into PBM"| PBM
+    subgraph Projectors ["Read-only projectors"]
+      EVM["EVM projector<br/>balanceOf"]
+      Move["Move projector<br/>Coin::value"]
     end
     Projectors --> PBM
-    EVM <-.->|projection equality<br/>bit-for-bit| Move
+    EVM <-.->|"projection equality<br/>bit-for-bit"| Move
       </pre>
     </div>
 

@@ -106,6 +106,6 @@ resource "aws_route53_record" "faucet" {
 # Output the NS records so an operator can paste them into the apex
 # zone for delegation.
 output "devnet_nameservers" {
-  description = "Authoritative nameservers for the devnet subdomain. Publish these as NS records under the apex zone for ${var.devnet_subdomain}.${var.apex_domain}."
+  description = "Authoritative nameservers for the devnet subdomain. Publish these as NS records under the apex zone for the devnet_subdomain (variable) of the apex_domain (variable)."
   value       = aws_route53_zone.devnet.name_servers
 }

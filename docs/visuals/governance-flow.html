@@ -37,21 +37,21 @@
     <div class="panel">
       <pre class="mermaid">
 flowchart LR
-    Op[Authority operator<br/>signs intent with ML-DSA-65<br/>see issue 28] --> Wire[Client wire verify_signed_intent<br/>rejects unsigned or forged before mpsc]
-    Wire --> Intent[Intent: AdmitAuthority<br/>ExitAuthority or EjectAuthority]
-    Intent --> Block[Lands in proposed block]
-    Block --> Commit[Block committed via decide_slot<br/>see commit-rule visual]
-    Commit --> Queue[pending_governance push intent<br/>at try_commit NOT applied yet]
-    Queue --> Boundary{Epoch boundary<br/>at cert_round?}
-    Boundary -->|no| Wait[Wait next round]
+    Op["Authority operator<br/>signs intent with ML-DSA-65<br/>(#28)"] --> Wire["Client wire verify_signed_intent<br/>rejects unsigned/forged before mpsc"]
+    Wire --> Intent["Intent: AdmitAuthority /<br/>ExitAuthority / EjectAuthority"]
+    Intent --> Block["Lands in proposed block"]
+    Block --> Commit["Block committed via decide_slot<br/>(see commit-rule visual)"]
+    Commit --> Queue["pending_governance.push(intent)<br/>at try_commit — NOT applied yet"]
+    Queue --> Boundary{"Epoch boundary<br/>at cert_round?"}
+    Boundary -->|"no"| Wait["Wait next round"]
     Wait --> Queue
-    Boundary -->|yes issue 18| Drain[Drain queue]
-    Drain --> Apply[apply_governance_intent for each]
-    Apply -->|AdmitAuthority| AdmReg[registries grow to n+1<br/>pending_stake parks stake<br/>n_authorities UNCHANGED]
-    Apply -->|Exit or Eject| RemReg[registries shrink<br/>n_authorities equals registry len]
-    AdmReg --> NewCert{New authority first cert<br/>ingests via ingest_cert?}
-    NewCert -->|yes issue 32| Activate[pending_stake remove to stake_table<br/>n_authorities plus 1<br/>NOW the new voter is active]
-    NewCert -->|no still pending| AdmReg
+    Boundary -->|"yes (#18)"| Drain["Drain queue"]
+    Drain --> Apply["apply_governance_intent for each"]
+    Apply -->|"AdmitAuthority"| AdmReg["registries grow to n+1<br/>pending_stake parks stake<br/>n_authorities UNCHANGED"]
+    Apply -->|"Exit / Eject"| RemReg["registries shrink<br/>n_authorities = registry.len"]
+    AdmReg --> NewCert{"New authority's first cert<br/>ingests via ingest_cert?"}
+    NewCert -->|"yes (#32)"| Activate["pending_stake.remove → stake_table<br/>n_authorities += 1<br/>NOW the new voter is active"]
+    NewCert -->|"no, still pending"| AdmReg
       </pre>
     </div>
 
