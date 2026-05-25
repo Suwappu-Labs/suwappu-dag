@@ -175,20 +175,34 @@ impl TxMempool {
     /// idempotent-friendly).
     pub fn submit(&mut self, bytes: Vec<u8>) -> Result<[u8; 32], SequencerError> {
         let tx = PendingTx::new(bytes)?;
+        // Dedup BEFORE the byte-cap check. A retry of a tx already in
+        // the queue does not consume new capacity, so returning
+        // `MempoolFull` on a near-saturated pool would break the
+        // documented idempotent-resubmit behavior and cause at-least-once
+        // clients to misinterpret an accepted tx as rejected.
+        // (Codex #229 P1 #5.)
+        if self.queue.iter().any(|t| t.hash == tx.hash) {
+            return Ok(tx.hash);
+        }
         if self.bytes_total.saturating_add(tx.bytes.len()) > MAX_MEMPOOL_BYTES {
             return Err(SequencerError::MempoolFull {
                 max: MAX_MEMPOOL_BYTES,
                 current: self.bytes_total,
             });
         }
-        // Dedup against the existing queue.
-        if self.queue.iter().any(|t| t.hash == tx.hash) {
-            return Ok(tx.hash);
-        }
         self.bytes_total += tx.bytes.len();
         let hash = tx.hash;
         self.queue.push_back(tx);
         Ok(hash)
+    }
+
+    /// Test-only helper that simulates a mempool with
+    /// `bytes_total` accounted bytes already in the queue,
+    /// without allocating actual tx payloads. Used by the
+    /// near-saturation regression tests (#229 P1 #5).
+    #[cfg(test)]
+    pub(crate) fn force_bytes_total_for_test(&mut self, bytes_total: usize) {
+        self.bytes_total = bytes_total;
     }
 
     /// Drain up to `max` transactions for batch construction.
@@ -468,6 +482,36 @@ mod tests {
         let h2 = m.submit(b"tx1".to_vec()).unwrap();
         assert_eq!(h1, h2);
         assert_eq!(m.len(), 1, "duplicate should not grow queue");
+    }
+
+    /// Regression for #229 P1 #5: a re-submit of a tx already in the
+    /// queue must return the existing hash, not `MempoolFull`, even when
+    /// `bytes_total` is at the cap. Under the buggy ordering the
+    /// byte-cap check ran first and rejected the retry. Under the fix
+    /// the dedup check runs first and the call stays idempotent.
+    #[test]
+    fn mempool_resubmit_when_at_capacity_is_idempotent() {
+        let mut m = TxMempool::new();
+        let h_first = m.submit(b"already-queued".to_vec()).unwrap();
+        // Saturate accounted bytes without actually allocating a 256 MiB
+        // tail; the byte-cap path doesn't inspect the queue contents.
+        m.force_bytes_total_for_test(MAX_MEMPOOL_BYTES);
+        let h_retry = m
+            .submit(b"already-queued".to_vec())
+            .expect("resubmit at capacity must dedup, not return MempoolFull");
+        assert_eq!(h_first, h_retry);
+        assert_eq!(m.len(), 1, "retry must not grow the queue");
+    }
+
+    /// Companion to the above: a *new* tx at capacity is still rejected.
+    /// The fix narrows the byte-cap to non-duplicate submissions; it
+    /// must not weaken backpressure for genuine new traffic.
+    #[test]
+    fn mempool_new_tx_when_at_capacity_still_rejects() {
+        let mut m = TxMempool::new();
+        m.force_bytes_total_for_test(MAX_MEMPOOL_BYTES);
+        let err = m.submit(b"genuine-new-tx".to_vec()).unwrap_err();
+        assert!(matches!(err, SequencerError::MempoolFull { .. }));
     }
 
     #[test]
