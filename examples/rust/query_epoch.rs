@@ -3,13 +3,17 @@
 //! Run:
 //!     cd examples/rust && cargo run --bin query_epoch
 //!
-//! Pre-req: a devnet up at `http://127.0.0.1:9092`. See ../../DEVNET.md.
+//! Set `GSX_RPC_URL` to point at a non-local endpoint (e.g. the
+//! public devnet): `GSX_RPC_URL=https://rpc.devnet.gsx.globalsettlement.com`.
+//! Defaults to `http://127.0.0.1:9092`. See ../../DEVNET.md for the
+//! local devnet flow.
 
 use anyhow::Result;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let client = gsx_client::Client::new("http://127.0.0.1:9092");
+    let rpc_url = std::env::var("GSX_RPC_URL").unwrap_or_else(|_| "http://127.0.0.1:9092".into());
+    let client = gsx_client::Client::new(&rpc_url);
     let epoch = client.get_epoch().await?;
     println!(
         "current epoch         : {}\n\

@@ -24,8 +24,11 @@ use gsx_execution::Intent;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let network_id = "gsx-devnet-local";
-    let rpc_url = "http://127.0.0.1:9092";
+    // network_id MUST match the genesis manifest of the target chain
+    // (e.g. `gsx-devnet-local` for the docker devnet, the public devnet's
+    // own id for the public endpoint). Override via GSX_NETWORK_ID.
+    let network_id = std::env::var("GSX_NETWORK_ID").unwrap_or_else(|_| "gsx-devnet-local".into());
+    let rpc_url = std::env::var("GSX_RPC_URL").unwrap_or_else(|_| "http://127.0.0.1:9092".into());
 
     // 1. Build the intent. A Transfer is the simplest variant —
     //    moves `amount` from `from` to `to`. Addresses are 20 bytes
@@ -75,26 +78,17 @@ async fn main() -> Result<()> {
 
     // 6. Submit via the Rust SDK's raw submit path. Expect
     //    `UnknownSigner` (see header) on a fresh devnet.
-    let client = gsx_client::Client::new(rpc_url);
+    let client = gsx_client::Client::new(&rpc_url);
     match client
-        .submit_intent_raw(
-            intent_bincode,
-            signature.as_bytes().to_vec(),
-            signer_pubkey_hash,
-        )
+        .submit_intent_raw(&intent_bincode, signature.as_bytes(), signer_pubkey_hash)
         .await
     {
         Ok(intent_hash) => {
-            println!(
-                "✅ submitted; intent hash: 0x{}",
-                hex::encode(intent_hash)
-            );
+            println!("✅ submitted; intent hash: 0x{}", hex::encode(intent_hash));
         }
         Err(e) => {
             println!("❌ submission rejected: {}", e);
-            println!(
-                "   (this is expected on a fresh devnet — see this file's header)"
-            );
+            println!("   (this is expected on a fresh devnet — see this file's header)");
         }
     }
     Ok(())

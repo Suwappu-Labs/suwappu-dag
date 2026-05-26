@@ -1,8 +1,17 @@
+```text
+╔═══════════════════════════════════════════════════════╗
+║                                                       ║
+║   gsx-dag · post-quantum settlement chain             ║
+║   joint-quorum BFT  ·  Mysticeti-C  ·  PQ crypto      ║
+║                                                       ║
+╚═══════════════════════════════════════════════════════╝
+```
+
 <div align="center">
 
 # gsx-dag
 
-The **post-quantum settlement chain**. Joint-quorum BFT safety on a
+The post-quantum settlement chain — joint-quorum BFT safety on a
 Mysticeti-C certificate-DAG, constant-size cross-chain attestation,
 and an execution substrate built to settle regulated assets.
 
@@ -65,11 +74,10 @@ Byzantine corruption.
 
 ## Quickstart
 
-Two paths — start with the public devnet unless you're changing the
-validator itself. Full operator + developer details in
-[`DEVNET.md`](./DEVNET.md).
+Start with the public devnet unless you're changing the validator
+itself. Full operator + developer details in [`DEVNET.md`](./DEVNET.md).
 
-### 1. Use the public devnet (recommended)
+### Public devnet endpoints
 
 | Endpoint | URL |
 |---|---|
@@ -79,44 +87,107 @@ validator itself. Full operator + developer details in
 | Explorer | `https://explorer.devnet.gsx.globalsettlement.com` |
 | Status | `https://status.devnet.gsx.globalsettlement.com` |
 
+### Talk to it in 60 seconds
+
+Three commands using the Rust SDK examples in
+[`examples/rust/`](./examples/rust) — runnable straight from a fresh
+clone against the public devnet:
+
 ```bash
-# Drip 100 GSX to a fresh address (max 5 drips/hour per IP).
+git clone https://github.com/GlobalSettlementNetwork/gsx-dag.git
+cd gsx-dag/examples/rust
+export GSX_RPC_URL=https://rpc.devnet.gsx.globalsettlement.com
+
+cargo run --bin query_epoch
+cargo run --bin query_balance -- 0x0101010101010101010101010101010101010101
+cargo run --bin subscribe_events
+```
+
+The same three calls in TypeScript via
+[`clients/ts-sdk/`](./clients/ts-sdk):
+
+```ts
+import { Client } from "@globalsettlement/gsx-client";
+
+const client = new Client({
+  rpcUrl: "https://rpc.devnet.gsx.globalsettlement.com",
+});
+
+console.log(await client.getEpoch());
+console.log(await client.getBalance("0x0101010101010101010101010101010101010101"));
+
+const sub = client.subscribeEvents();
+for await (const event of sub) console.log(event);
+```
+
+### Get tokens from the faucet
+
+```bash
+# 100 GSX per drip, max 5 drips/hour per IP.
 ADDR="0x$(openssl rand -hex 20)"
 curl -X POST -H 'Content-Type: application/json' \
   -d "{\"address\":\"$ADDR\"}" \
   https://faucet.devnet.gsx.globalsettlement.com/faucet
-
-# Read epoch via JSON-RPC.
-curl -sX POST https://rpc.devnet.gsx.globalsettlement.com \
-  -H 'content-type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"gsx_getEpoch","params":null}'
 ```
 
-### 2. Run a local 4-node devnet (Docker)
+### Submit a signed Intent (educational)
+
+The chain accepts intents signed by **seated authorities only** —
+permissionless user transactions land via the L2 sequencer (Track G,
+in flight on `gsx-l2-sequencer` + `gsx-l2-bridge`). Today, the public
+devnet's faucet service is the only path for an unseated address to
+land a Transfer on L1.
+
+The construct-sign-submit pipeline is worth knowing anyway —
+[`examples/rust/submit_transfer.rs`](./examples/rust/submit_transfer.rs)
+has the full flow with the on-chain digest recipe. The headline:
+
+```rust
+use gsx_execution::Intent;
+
+let intent = Intent::Transfer { from, to, amount };
+let intent_bincode = bincode::serialize(&intent)?;
+
+// Signing digest: blake3(b"GSX_INTENT_V1" || network_id || intent_bincode).
+// Both submitter and validator MUST compute the digest the same way —
+// any divergence rejects the signature.
+let mut hasher = blake3::Hasher::new();
+hasher.update(b"GSX_INTENT_V1");
+hasher.update(network_id.as_bytes());
+hasher.update(&intent_bincode);
+let digest = *hasher.finalize().as_bytes();
+
+let (pubkey, sk) = gsx_crypto::mldsa::keypair();
+let signature = gsx_crypto::mldsa::sign(&digest, &sk)?;
+let pubkey_hash: [u8; 32] = *blake3::hash(pubkey.as_bytes()).as_bytes();
+
+let client = gsx_client::Client::new(&rpc_url);
+client.submit_intent_raw(&intent_bincode, signature.as_bytes(), pubkey_hash).await?;
+// → UnknownSigner unless `pubkey_hash` is in the AuthorityRegistry.
+```
+
+ML-DSA-65 signatures are 3,309 B fixed-width. The example prints the
+constructed bytes and gracefully reports the expected `UnknownSigner`
+rejection against a stock devnet.
+
+### Run a local 4-node devnet (Docker)
 
 ```bash
-git clone https://github.com/GlobalSettlementNetwork/gsx-dag.git
-cd gsx-dag
 ./scripts/devnet-local.sh up
 ```
 
-The script generates per-validator keys + genesis under `target/devnet/`
-and brings up 4 containers on a private network. JSON-RPC for `v0` is
-exposed on `127.0.0.1:9092`. Tear down with `./scripts/devnet-local.sh down`.
+Generates per-validator keys + genesis under `target/devnet/` and
+brings up 4 containers on a private network. JSON-RPC for `v0` is
+exposed on `127.0.0.1:9092` — the same Rust + TS commands above work
+unmodified once `GSX_RPC_URL` is unset (or set to the local URL). Tear
+down with `./scripts/devnet-local.sh down`.
 
-```bash
-curl -sX POST http://127.0.0.1:9092 -H 'content-type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"gsx_getEpoch","params":null}'
-```
+### SDKs and reference
 
-The full RPC surface is documented in
-[`crates/gsx-rpc/`](./crates/gsx-rpc).
-
-### SDKs
-
-- Rust: [`clients/rust-sdk/`](./clients/rust-sdk)
-- TypeScript: [`clients/ts-sdk/`](./clients/ts-sdk)
-- End-to-end example: `cargo run -p gsx-client --example submit_transfer`
+- Rust SDK: [`clients/rust-sdk/`](./clients/rust-sdk)
+- TypeScript SDK: [`clients/ts-sdk/`](./clients/ts-sdk)
+- Rust examples: [`examples/rust/`](./examples/rust)
+- Full RPC surface: [`crates/gsx-rpc/`](./crates/gsx-rpc)
 
 ---
 
