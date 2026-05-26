@@ -986,6 +986,16 @@ pub struct InMemorySubstrate {
     /// block context is execution-environment data, not
     /// commit-state, matching the EVM/Solana convention.
     current_block_height: u64,
+    /// Test-only: when set, `Intent::CommitL2StateRoot` skips
+    /// the Groth16 verifier and treats the proof as accepted.
+    /// Existing substrate happy-path tests pre-date the real
+    /// verifier wire-up (PR #224 commit 8e8c62f) and use
+    /// placeholder byte arrays for `proof_bytes` / `public_inputs`
+    /// that no longer pass verification. Tests that need to
+    /// exercise post-verifier state-machine semantics enable
+    /// this; verifier-format-gate tests do not. See issue #232.
+    #[cfg(test)]
+    test_bypass_l2_verifier: bool,
 }
 
 impl InMemorySubstrate {
@@ -1006,6 +1016,17 @@ impl InMemorySubstrate {
             }
         }
         s
+    }
+
+    /// Test-only: bypass the Groth16 L2 verifier for
+    /// `Intent::CommitL2StateRoot`. Use in substrate state-machine
+    /// tests whose placeholder `proof_bytes` aren't real proofs.
+    /// Verifier-format-gate tests (e.g. `commit_rejects_short_proof`)
+    /// MUST NOT enable this — they exist to assert the verifier
+    /// fires. See issue #232.
+    #[cfg(test)]
+    pub(crate) fn bypass_l2_verifier_for_test(&mut self) {
+        self.test_bypass_l2_verifier = true;
     }
 
     /// Total supply across all addresses (sum of balances).
@@ -2279,11 +2300,22 @@ impl Substrate for InMemorySubstrate {
                 use crate::l2_state::{decode, encode, L2BatchKey, L2StateRootRecord};
 
                 // Verifier format gate (proof = 260 B,
-                // public_inputs = 240 B, vk_hash != all-zeros).
-                gsx_l2_verifier_precompile::verify_l2_batch(proof_bytes, public_inputs, vk_hash)
+                // public_inputs = 240 B, vk_hash != all-zeros) +
+                // real Groth16 BN254 pairing check (since 8e8c62f).
+                #[cfg(test)]
+                let skip_verifier = self.test_bypass_l2_verifier;
+                #[cfg(not(test))]
+                let skip_verifier = false;
+                if !skip_verifier {
+                    gsx_l2_verifier_precompile::verify_l2_batch(
+                        proof_bytes,
+                        public_inputs,
+                        vk_hash,
+                    )
                     .map_err(|e| ExecutionError::L2VerifierRejected {
                         reason: e.to_string(),
                     })?;
+                }
 
                 let registry_addr = reserved::l2_registry_address();
                 let existing_bytes = self.read_bytes(&registry_addr).unwrap_or_default();
@@ -3439,6 +3471,7 @@ mod tests {
     #[test]
     fn commit_l2_state_root_increments_counter() {
         let mut s = InMemorySubstrate::from_balances([(addr(1), 100)]);
+        s.bypass_l2_verifier_for_test(); // #232 — placeholder proof bytes
         s.pin_l2_verifying_key_for_chain([0xef; 32], [0x42; 32], [0x43; 32])
             .unwrap();
         let before_count = s.l2_commit_count();
@@ -3513,7 +3546,8 @@ mod tests {
     #[test]
     fn commits_are_monotonic() {
         let mut s = InMemorySubstrate::new();
-        // public_inputs are all 0xef so chain_id_hash @ offset 176 = [0xef; 32]
+        s.bypass_l2_verifier_for_test(); // #232 — placeholder proof bytes
+                                         // public_inputs are all 0xef so chain_id_hash @ offset 176 = [0xef; 32]
         s.pin_l2_verifying_key_for_chain([0xef; 32], [0x42; 32], [0x43; 32])
             .unwrap();
         for batch_id in 0..5 {
@@ -3555,7 +3589,8 @@ mod tests {
             .copy_from_slice(&[0xc1; 32]);
 
         let mut s = InMemorySubstrate::new();
-        // public_inputs sets chain_id_hash = [0xc1; 32]
+        s.bypass_l2_verifier_for_test(); // #232 — placeholder proof bytes
+                                         // public_inputs sets chain_id_hash = [0xc1; 32]
         s.pin_l2_verifying_key_for_chain([0xc1; 32], [0x42; 32], [0x43; 32])
             .unwrap();
         s.apply_intent(&Intent::CommitL2StateRoot {
@@ -3590,6 +3625,7 @@ mod tests {
         use crate::l2_state::L2BatchKey;
 
         let mut s = InMemorySubstrate::new();
+        s.bypass_l2_verifier_for_test(); // #232 — placeholder proof bytes
         s.pin_l2_verifying_key_for_chain([0xc1; 32], [0x42; 32], [0x43; 32])
             .unwrap();
         let mut prior_root = s.state_root();
@@ -3642,7 +3678,8 @@ mod tests {
         use crate::l2_state::L2BatchKey;
 
         let mut s = InMemorySubstrate::new();
-        // Pin BOTH chains' VKs.
+        s.bypass_l2_verifier_for_test(); // #232 — placeholder proof bytes
+                                         // Pin BOTH chains' VKs.
         s.pin_l2_verifying_key_for_chain([0xa1; 32], [0x42; 32], [0x43; 32])
             .unwrap();
         s.pin_l2_verifying_key_for_chain([0xb1; 32], [0x42; 32], [0x43; 32])
@@ -3759,7 +3796,8 @@ mod tests {
     fn set_l2_verifying_key_rotation_changes_required_vk_hash() {
         use gsx_l2_verifier_precompile::public_inputs as pi;
         let mut s = InMemorySubstrate::new();
-        // Pin under the [0xc1; 32] chain to match public_inputs.
+        s.bypass_l2_verifier_for_test(); // #232 — placeholder proof bytes
+                                         // Pin under the [0xc1; 32] chain to match public_inputs.
         s.pin_l2_verifying_key_for_chain([0xc1; 32], [0x01; 32], [0x02; 32])
             .unwrap();
         let mut public_inputs = vec![0u8; 240];
@@ -3803,6 +3841,9 @@ mod tests {
     #[test]
     fn commit_before_vk_pin_rejected() {
         let mut s = InMemorySubstrate::new();
+        // #232 — bypass the Groth16 verifier so the request flows through
+        // to the vk-pin check, which is what this test exercises.
+        s.bypass_l2_verifier_for_test();
         let err = s.apply_intent(&Intent::CommitL2StateRoot {
             batch_id: 0,
             new_state_root: [0xab; 32],
@@ -6675,6 +6716,9 @@ mod tests {
     fn commit_l2_state_root_rejects_chain_mismatch() {
         use gsx_l2_verifier_precompile::public_inputs as pi;
         let mut s = InMemorySubstrate::new();
+        // #232 — bypass the Groth16 verifier so the request flows through
+        // to the per-chain vk-pin check, which is what this test exercises.
+        s.bypass_l2_verifier_for_test();
         // Chain A's VK = [0x11; 32]; chain B's VK = [0x99; 32].
         s.pin_l2_verifying_key_for_chain([0xa1; 32], [0x11; 32], [0x12; 32])
             .unwrap();

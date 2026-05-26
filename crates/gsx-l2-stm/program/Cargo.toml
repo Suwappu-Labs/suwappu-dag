@@ -1,0 +1,50 @@
+[package]
+name = "gsx-l2-stm-program"
+version = "0.1.0"
+edition = "2021"
+description = "SP1 guest program for the GSX L2 state-transition function. Built via `cargo prove build` and packaged as a RISC-V ELF that the prover daemon executes to produce Groth16 BN254 proofs. The substrate-side verifier (`gsx-l2-verifier-precompile`) is the consumer of those proofs."
+license = "Apache-2.0"
+publish = false
+
+# This crate is intentionally OUTSIDE the gsx-dag workspace
+# (`Cargo.toml` excludes `crates/gsx-l2-stm/program`). The
+# guest targets `riscv32im-succinct-zkvm-elf`; pulling it into
+# the workspace would force every host build through the
+# zkVM toolchain.
+#
+# Build with:
+#   cd crates/gsx-l2-stm/program
+#   cargo prove build --output-directory ../elf
+#
+# The resulting `gsx-l2-stm-program.elf` is what the prover
+# daemon (Phase 2.1, #104) loads into `sp1_sdk::ProverClient`.
+
+# Declare this crate as its own workspace root. Without this
+# empty `[workspace]` table, `cargo prove build` walks upward,
+# finds the repo-root `Cargo.toml`'s `[workspace]` declaration,
+# discovers this path is in `exclude = [...]` rather than
+# `members = [...]`, and aborts with:
+#   current package believes it's in a workspace when it's not
+# (Codex #229 P1, surfaced 2026-05-25 against commit 2397874.)
+[workspace]
+
+[dependencies]
+# SP1 guest runtime. `default-features = false` strips the
+# host-side dependencies; we need only the guest I/O primitives.
+sp1-zkvm = { version = "4", default-features = false }
+
+# The native STM lib. Path dep so the guest links the same
+# `execute_batch` + `to_public_inputs` the host (sequencer,
+# prover, force-include daemon, native equivalence harness)
+# uses. This is the load-bearing property of the design:
+# the guest and the host execute literally the same Rust.
+gsx-l2-stm = { path = ".." }
+
+[profile.release]
+# SP1 guest convention. `panic = "abort"` is required by the
+# zkVM (no unwinding); `lto = true` shrinks the ELF; `codegen-units = 1`
+# improves cycle-count locality.
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

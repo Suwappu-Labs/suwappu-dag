@@ -1,0 +1,44 @@
+[package]
+name = "gsx-l2-sequencer-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+description = "GSX L2 sequencer daemon binary (Track G G4.2 phase 2, #105). Wraps the pure-logic gsx-l2-sequencer crate (TxMempool, BatchBuilder, force_include::evaluate) and the gsx-l2-stm STM with a Tokio runtime + JSON-RPC service + L1 substrate client. Phase 1 scaffold: config + tracing + runtime skeleton only; the batch-builder + force-include + RPC tasks land in follow-up commits."
+
+[lib]
+name = "gsx_l2_sequencer_daemon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "gsx-l2-sequencer-daemon"
+path = "src/main.rs"
+
+[dependencies]
+# Pure-logic dependencies. The daemon's job is to orchestrate
+# these crates against a Tokio runtime + L1 RPC + JSON-RPC
+# clients; the heavy lifting lives in the libs.
+gsx-l2-sequencer.workspace = true
+gsx-l2-stm.workspace = true
+
+# Runtime + CLI + config + logging. Same shape as
+# gsx-validator-program's daemon stack.
+tokio.workspace = true
+clap.workspace = true
+serde.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+
+# Async traits for the L1Client surface + mock intent_hash.
+async-trait = "0.1"
+blake3.workspace = true
+
+[dev-dependencies]
+# Round-trip tests for SequencerConfig (de)serialization.
+serde_json.workspace = true
