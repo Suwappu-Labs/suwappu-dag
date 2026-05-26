@@ -763,6 +763,42 @@ pub enum Intent {
         /// Asset identifier.
         asset_id: [u8; 32],
     },
+    /// Versioned successor to `PostL2DA` (G3.3 hardening — closes the
+    /// substrate-no-op gap that #208 originally surfaced). Seated at
+    /// the **end** of the enum so its bincode discriminant doesn't
+    /// shift any pre-existing variant. The repo's bincode decode
+    /// helper (`crates/gsx-node/src/codec.rs`) silently ignores
+    /// trailing bytes; combining that with a mid-enum insert risked
+    /// silent re-interpretation of pre-upgrade payloads, so this
+    /// variant lands here despite IQ-007 (#225 / #238) ratifying
+    /// pre-mainnet variant-insert churn in general.
+    ///
+    /// Writes `BLAKE3(da_blob)` to the DA-anchor registry keyed by
+    /// `(l2_chain_id_hash, batch_id)`. The hash matches the
+    /// sequencer's `da_commitment` formula at
+    /// `crates/gsx-l2-sequencer/src/lib.rs`, so off-chain auditors
+    /// can cross-check: L1 calldata bytes → BLAKE3 → registry value
+    /// → `da_commitment` in the matching `L2StateRootRecord`.
+    ///
+    /// Re-anchoring the same `(chain, batch)` rejects with
+    /// `DaAnchorAlreadyRecorded`. The hash is immutable once set.
+    ///
+    /// `PostL2DA` (no L2 chain id, no anchoring) stays unchanged
+    /// alongside this variant as a no-op for wire-stable backwards
+    /// compatibility. After IQ-007's mainnet cutover `PostL2DA` is
+    /// deprecation-eligible.
+    PostL2DAv2 {
+        /// Monotonic per-L2-chain batch identifier; matches
+        /// `CommitL2StateRoot::batch_id`.
+        batch_id: u64,
+        /// Opaque DA blob bytes.
+        da_blob: Vec<u8>,
+        /// 32-byte chain identifier (matches the
+        /// `L2_CHAIN_ID_HASH_OFFSET` field in the verifier's
+        /// public-input layout). Lets multiple L2 chains coexist on
+        /// the same gsx-dag substrate.
+        l2_chain_id_hash: [u8; 32],
+    },
 }
 
 /// Classification of a sequencer slashing event. Drives the
@@ -2921,7 +2957,40 @@ impl Substrate for InMemorySubstrate {
             // PostL2DA → G3.3 (#102) DA blob anchoring (no
             // substrate state effect; the blob lives in L1
             // calldata which is consensus-level state).
+            // Deprecation-eligible after IQ-007 cutover; use
+            // `PostL2DAv2` for new traffic.
             Intent::PostL2DA { .. } => Ok(()),
+            // PostL2DAv2 → G3.3 (#102) DA blob anchoring WITH
+            // substrate-side record. Writes plain `BLAKE3(da_blob)`
+            // (matching the sequencer's `da_commitment` formula
+            // by construction) to the DA-anchor registry keyed by
+            // (l2_chain_id_hash, batch_id). Rejects re-anchoring
+            // for the same (chain, batch) — off-chain auditors
+            // rely on a single canonical commitment per batch.
+            Intent::PostL2DAv2 {
+                batch_id,
+                da_blob,
+                l2_chain_id_hash,
+            } => {
+                use crate::da_anchor_registry::{da_blob_hash, decode, encode};
+                use crate::l2_state::L2BatchKey;
+                let registry_addr = reserved::da_anchor_registry_address();
+                let existing_bytes = self.read_bytes(&registry_addr).unwrap_or_default();
+                let mut registry = decode(&existing_bytes)?;
+                let key = L2BatchKey {
+                    l2_chain_id_hash: *l2_chain_id_hash,
+                    batch_id: *batch_id,
+                };
+                if registry.contains_key(&key) {
+                    return Err(ExecutionError::DaAnchorAlreadyRecorded {
+                        l2_chain_id_hash: *l2_chain_id_hash,
+                        batch_id: *batch_id,
+                    });
+                }
+                registry.insert(key, da_blob_hash(da_blob));
+                self.bytes_state.insert(registry_addr, encode(&registry));
+                Ok(())
+            }
             // C.8 (#131): slashing-distribution waterfall.
             // Tokenomics §8.3 ordering: counterparties → insurance
             // pool → treasury. Credits go directly to balance
@@ -3970,6 +4039,127 @@ mod tests {
         };
         assert!(s.apply_intent(&intent).is_ok());
         assert_eq!(s.state_root(), before);
+    }
+
+    // ---- PostL2DAv2 (G3.3) ----
+
+    /// PostL2DAv2 writes the BLAKE3-domain-tagged blob hash to the
+    /// DA-anchor registry keyed by `(l2_chain_id_hash, batch_id)`.
+    #[test]
+    fn post_l2_da_v2_records_blob_hash() {
+        use crate::da_anchor_registry::{da_blob_hash, decode};
+        use crate::l2_state::L2BatchKey;
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 100)]);
+        let da_blob = vec![0xcd; 1024];
+        let l2_chain_id_hash = [0xa1; 32];
+        let intent = Intent::PostL2DAv2 {
+            batch_id: 7,
+            da_blob: da_blob.clone(),
+            l2_chain_id_hash,
+        };
+        s.apply_intent(&intent).unwrap();
+
+        let registry_bytes = s
+            .read_bytes(&reserved::da_anchor_registry_address())
+            .expect("registry must exist after PostL2DAv2");
+        let registry = decode(&registry_bytes).unwrap();
+        let key = L2BatchKey {
+            l2_chain_id_hash,
+            batch_id: 7,
+        };
+        assert_eq!(registry.get(&key), Some(&da_blob_hash(&da_blob)));
+    }
+
+    /// Re-anchoring the same `(chain, batch)` rejects with
+    /// `DaAnchorAlreadyRecorded`. Once anchored the blob hash is
+    /// immutable — off-chain auditors rely on a single canonical
+    /// commitment per batch.
+    #[test]
+    fn post_l2_da_v2_replay_rejected() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 100)]);
+        let intent = Intent::PostL2DAv2 {
+            batch_id: 7,
+            da_blob: vec![0xcd; 1024],
+            l2_chain_id_hash: [0xa1; 32],
+        };
+        s.apply_intent(&intent).unwrap();
+        let err = s
+            .apply_intent(&Intent::PostL2DAv2 {
+                batch_id: 7,
+                da_blob: vec![0xee; 2048], // different bytes, same key
+                l2_chain_id_hash: [0xa1; 32],
+            })
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ExecutionError::DaAnchorAlreadyRecorded { batch_id: 7, .. }
+        ));
+    }
+
+    /// Different `(chain, batch)` pairs coexist independently.
+    #[test]
+    fn post_l2_da_v2_multi_batch_independent() {
+        use crate::da_anchor_registry::decode;
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 100)]);
+        for batch_id in 0..3u64 {
+            s.apply_intent(&Intent::PostL2DAv2 {
+                batch_id,
+                da_blob: vec![batch_id as u8; 64],
+                l2_chain_id_hash: [0xa1; 32],
+            })
+            .unwrap();
+        }
+        let registry = decode(
+            &s.read_bytes(&reserved::da_anchor_registry_address())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(registry.len(), 3);
+    }
+
+    /// Different `l2_chain_id_hash` values give independent batch
+    /// id namespaces. Lets multiple L2 chains coexist on the
+    /// gsx-dag substrate without batch-id collisions.
+    #[test]
+    fn post_l2_da_v2_multi_chain_namespacing() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 100)]);
+        // Same batch_id, different chain — should both succeed.
+        s.apply_intent(&Intent::PostL2DAv2 {
+            batch_id: 0,
+            da_blob: vec![0x01; 64],
+            l2_chain_id_hash: [0xa1; 32],
+        })
+        .unwrap();
+        s.apply_intent(&Intent::PostL2DAv2 {
+            batch_id: 0,
+            da_blob: vec![0x02; 64],
+            l2_chain_id_hash: [0xb1; 32],
+        })
+        .unwrap();
+    }
+
+    /// Empty DA blob is a valid anchor — registry still records the
+    /// blob hash (`BLAKE3(b"")`), and replay still rejects.
+    #[test]
+    fn post_l2_da_v2_empty_blob_still_anchors() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 100)]);
+        s.apply_intent(&Intent::PostL2DAv2 {
+            batch_id: 7,
+            da_blob: vec![],
+            l2_chain_id_hash: [0xa1; 32],
+        })
+        .unwrap();
+        let err = s
+            .apply_intent(&Intent::PostL2DAv2 {
+                batch_id: 7,
+                da_blob: vec![],
+                l2_chain_id_hash: [0xa1; 32],
+            })
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ExecutionError::DaAnchorAlreadyRecorded { .. }
+        ));
     }
 
     /// SlashReason variants are distinct + serializable.

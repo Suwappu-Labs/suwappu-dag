@@ -455,4 +455,39 @@ pub enum ExecutionError {
         /// for this ring.
         last_distributed_epoch: u64,
     },
+
+    /// `Intent::PostL2DAv2 { l2_chain_id_hash, batch_id, .. }`
+    /// attempted to anchor a DA blob for a `(chain, batch)` pair
+    /// that the DA-anchor registry already has on record. Once
+    /// anchored the blob hash is immutable per
+    /// `da_anchor_registry`'s replay invariant; off-chain auditors
+    /// rely on a single canonical commitment per batch.
+    #[error(
+        "DA anchor already recorded for (chain {l2_chain_id_hash}, batch {batch_id})",
+        l2_chain_id_hash = hex::encode(l2_chain_id_hash),
+    )]
+    DaAnchorAlreadyRecorded {
+        /// Chain hash from the rejected PostL2DAv2 Intent.
+        l2_chain_id_hash: [u8; 32],
+        /// Batch id from the rejected PostL2DAv2 Intent.
+        batch_id: u64,
+    },
+
+    /// The Intent is recognized but the active `Substrate`
+    /// implementation does not yet support it. Returned (rather
+    /// than stubbed as `Ok(())`) when stubbing would silently
+    /// diverge state-machine semantics between backends — better
+    /// to fail loud than to let two substrates accept the same
+    /// block and disagree on the resulting state root.
+    ///
+    /// Currently used by `GsxDbSubstrate` for
+    /// `Intent::PostL2DAv2`, gated on the v0.2.0 `bytes_state`
+    /// surface in `gsx-db`.
+    #[error("intent {intent} not implemented on substrate backend {backend}")]
+    NotImplementedOnBackend {
+        /// Backend identifier ("gsx_db_substrate", etc.).
+        backend: &'static str,
+        /// Intent variant name.
+        intent: &'static str,
+    },
 }
