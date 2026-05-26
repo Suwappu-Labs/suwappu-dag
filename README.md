@@ -107,17 +107,20 @@ The same three calls in TypeScript via
 [`clients/ts-sdk/`](./clients/ts-sdk):
 
 ```ts
-import { Client } from "@globalsettlement/gsx-client";
+import { Client } from "@gsx/client";
 
-const client = new Client({
-  rpcUrl: "https://rpc.devnet.gsx.globalsettlement.com",
-});
+const client = new Client("https://rpc.devnet.gsx.globalsettlement.com");
 
 console.log(await client.getEpoch());
 console.log(await client.getBalance("0x0101010101010101010101010101010101010101"));
 
-const sub = client.subscribeEvents();
-for await (const event of sub) console.log(event);
+// subscribeEvents is callback-driven; Node 20/21 callers should also pass
+// `WebSocket: (await import("ws")).WebSocket` in the options bag.
+const sub = client.subscribeEvents({
+  onEvent: (event) => console.log(event),
+  onError: (err) => console.warn("ws:", err),
+});
+// ...later: sub.close();
 ```
 
 ### Get tokens from the faucet
