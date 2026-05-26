@@ -32,9 +32,7 @@ use gsx_consensus::{
     joint::{StakeTable, Vote},
     validator_quorum_met, AuthorityId, ConsensusError, LeaderStatus,
 };
-#[cfg(test)]
-use gsx_execution::Substrate;
-use gsx_execution::{execute_block, Block, InMemorySubstrate, Intent};
+use gsx_execution::{execute_block, Block, InMemorySubstrate, Intent, Substrate};
 use gsx_fastpath::{
     binding::{is_main_lane_consistent, MainLaneTx, FAST_PATH_CONFIRMATION_K},
     cert::{FastPathCert, FastPathTx, OwnedObjectId},
@@ -95,7 +93,11 @@ pub(crate) struct State {
 /// grouped under one `Mutex<StateInner>` because access frequency
 /// doesn't warrant individual locks.
 pub(crate) struct StateInner {
-    pub(crate) substrate: InMemorySubstrate,
+    /// Execution backend, held as a trait object so the concrete
+    /// substrate (in-memory today; gsx-db once its seeding/credit
+    /// surface lands) is a construction-time choice, not a type baked
+    /// into every consumer.
+    pub(crate) substrate: Box<dyn Substrate + Send + Sync>,
     pub(crate) last_authored_round: Option<u64>,
     /// Highest round observed across own + peer certs. Used by the
     /// synchronizer (S21.3) to detect catch-up gaps.
@@ -296,7 +298,7 @@ impl State {
             authority_registry: tokio::sync::RwLock::new(authority_registry),
             validator_registry: tokio::sync::RwLock::new(validator_registry),
             inner: tokio::sync::Mutex::new(StateInner {
-                substrate: InMemorySubstrate::new(),
+                substrate: Box::new(InMemorySubstrate::new()),
                 last_authored_round: None,
                 max_observed_round: 0,
                 n_authorities: n,
