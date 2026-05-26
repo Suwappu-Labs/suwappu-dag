@@ -154,6 +154,15 @@ pub const VALIDATOR_DELEGATION_REGISTRY_DOMAIN: &[u8] = b"gsx-validator-delegati
 /// records for `Intent::UndelegateBegin` pending cooldown.
 pub const VALIDATOR_UNBONDING_REGISTRY_DOMAIN: &[u8] = b"gsx-validator-unbonding-registry-v1";
 
+/// Domain tag for the DA-anchor registry (Track G G3.3). Stores
+/// `BLAKE3("gsx-da-blob-v1" || da_blob)` keyed by
+/// `(l2_chain_id_hash, batch_id)` so off-chain auditors can
+/// link L1 calldata to the `da_commitment` in the matching
+/// `L2StateRootRecord`. Written by `Intent::PostL2DAv2`
+/// (versioned alongside the unchanged `Intent::PostL2DA` per
+/// IQ-007).
+pub const DA_ANCHOR_REGISTRY_DOMAIN: &[u8] = b"gsx-da-anchor-registry-v1";
+
 /// Compute the reserved address corresponding to `domain` —
 /// `BLAKE3(domain)[..20]`. Used by the three exposed helpers below.
 /// Inlined per call site (BLAKE3 is sub-microsecond).
@@ -318,6 +327,12 @@ pub fn validator_unbonding_registry_address() -> Address {
     derive(VALIDATOR_UNBONDING_REGISTRY_DOMAIN)
 }
 
+/// Reserved address for the DA-anchor registry account
+/// (Track G G3.3). Written by `Intent::PostL2DAv2`.
+pub fn da_anchor_registry_address() -> Address {
+    derive(DA_ANCHOR_REGISTRY_DOMAIN)
+}
+
 /// Returns true if `addr` is a reserved protocol-owned registry
 /// account. Both `Substrate` impls reject `Intent::Transfer` into
 /// or out of a reserved address.
@@ -343,6 +358,7 @@ pub fn is_reserved(addr: &Address) -> bool {
         || addr == &rewards_distribution_registry_address()
         || addr == &validator_delegation_registry_address()
         || addr == &validator_unbonding_registry_address()
+        || addr == &da_anchor_registry_address()
 }
 
 #[cfg(test)]
@@ -350,7 +366,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn twentyone_reserved_addresses_are_distinct() {
+    fn twenty_two_reserved_addresses_are_distinct() {
         let all = [
             l2_registry_address(),
             insurance_pool_address(),
@@ -373,6 +389,7 @@ mod tests {
             rewards_distribution_registry_address(),
             validator_delegation_registry_address(),
             validator_unbonding_registry_address(),
+            da_anchor_registry_address(),
         ];
         for (i, a) in all.iter().enumerate() {
             for (j, b) in all.iter().enumerate() {
