@@ -960,6 +960,38 @@ pub trait Substrate {
     fn state_root(&self) -> [u8; 32];
 }
 
+/// Blanket adapter so a boxed trait object is itself a [`Substrate`].
+///
+/// The node holds its execution backend as `Box<dyn Substrate>` so the
+/// concrete substrate (in-memory vs gsx-db) can be selected at runtime.
+/// This impl lets that box flow through [`execute_block`] and the trait
+/// read methods unchanged — no call site needs to know it's boxed.
+impl<S: Substrate + ?Sized> Substrate for Box<S> {
+    fn balance(&self, addr: &Address) -> Balance {
+        (**self).balance(addr)
+    }
+
+    fn read_bytes(&self, addr: &Address) -> Option<Vec<u8>> {
+        (**self).read_bytes(addr)
+    }
+
+    fn apply_intent(&mut self, intent: &Intent) -> Result<(), ExecutionError> {
+        (**self).apply_intent(intent)
+    }
+
+    fn current_block_height(&self) -> u64 {
+        (**self).current_block_height()
+    }
+
+    fn set_current_block_height(&mut self, height: u64) {
+        (**self).set_current_block_height(height)
+    }
+
+    fn state_root(&self) -> [u8; 32] {
+        (**self).state_root()
+    }
+}
+
 /// Phase-1 in-memory substrate adapter.
 ///
 /// Two parallel state maps:
