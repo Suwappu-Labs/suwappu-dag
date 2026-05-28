@@ -138,19 +138,17 @@ proptest! {
 proptest! {
     #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
 
-    /// **Honor-wins-tie**: if an obligation is both Pending and
-    /// past its deadline AND its tx_hash is in the committed
-    /// set, evaluate MUST emit `MarkHonored`, never
-    /// `SlashMissedForceInclude`.
+    /// **Honor only inside the deadline window**: if an obligation
+    /// is Pending, its tx_hash is in the committed set, AND the
+    /// daemon evaluates at or before `deadline_l1_height`, evaluate
+    /// MUST emit `MarkHonored` (never `SlashMissedForceInclude`).
     ///
-    /// Mirror of `force_include_lifecycle_is_one_way` in
-    /// `crates/gsx-execution/tests/proptest_l2.rs`, but on the
-    /// daemon side: the daemon must give the sequencer the
-    /// benefit of the doubt when both transitions are eligible.
-    /// The substrate would reject the slash anyway, but
-    /// emitting honor is the bond-preserving move.
+    /// The symmetric "late-inclusion gets slashed" half is covered
+    /// by [`late_inclusion_after_deadline_does_not_honor`] below
+    /// — together they pin the Codex P1
+    /// `force_include.rs:206` semantics in both directions.
     #[test]
-    fn pending_with_committed_tx_never_slashes(
+    fn on_time_committed_tx_emits_honor_not_slash(
         obligations in obligation_map_strategy(),
         committed in committed_tx_strategy(),
         current_l1_height in 0u64..=2_000_000,
@@ -168,13 +166,74 @@ proptest! {
         for (id, ob) in &obligations {
             if ob.status == ObligationStatus::Pending
                 && committed.contains(&ob.tx_hash)
+                && current_l1_height <= ob.deadline_l1_height
             {
                 let has_slash = actions.iter().any(|a| {
                     matches!(a, DaemonAction::SlashMissedForceInclude { obligation_id } if obligation_id == id)
                 });
+                let has_honor = actions.iter().any(|a| {
+                    matches!(a, DaemonAction::MarkHonored { obligation_id } if obligation_id == id)
+                });
                 prop_assert!(
                     !has_slash,
-                    "obligation {:?} was committed but also slashed",
+                    "obligation {:?} was committed within deadline but also slashed",
+                    id
+                );
+                prop_assert!(
+                    has_honor,
+                    "obligation {:?} was committed within deadline but not honored",
+                    id
+                );
+            }
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
+
+    /// **Late-inclusion-slash (Codex P1, force_include.rs:206)**:
+    /// if an obligation is Pending, its tx_hash is committed, AND
+    /// the daemon evaluates after `deadline_l1_height`, evaluate
+    /// MUST emit `SlashMissedForceInclude` — never `MarkHonored`.
+    /// The old "any inclusion honors" behaviour let a sequencer
+    /// dodge slashing by including censored txs after the
+    /// deadline; this property fences that off.
+    #[test]
+    fn late_inclusion_after_deadline_does_not_honor(
+        obligations in obligation_map_strategy(),
+        committed in committed_tx_strategy(),
+        current_l1_height in 0u64..=2_000_000,
+        ejected in ejected_set_strategy(),
+        ejector_seed in any::<u8>(),
+    ) {
+        let actions = evaluate(EvaluateInput {
+            obligations: &obligations,
+            committed_batch_tx_hashes: &committed,
+            current_l1_height,
+            ejected_obligations: &ejected,
+            ejector: [ejector_seed; 20],
+        });
+
+        for (id, ob) in &obligations {
+            if ob.status == ObligationStatus::Pending
+                && committed.contains(&ob.tx_hash)
+                && current_l1_height > ob.deadline_l1_height
+            {
+                let has_honor = actions.iter().any(|a| {
+                    matches!(a, DaemonAction::MarkHonored { obligation_id } if obligation_id == id)
+                });
+                let has_slash = actions.iter().any(|a| {
+                    matches!(a, DaemonAction::SlashMissedForceInclude { obligation_id } if obligation_id == id)
+                });
+                prop_assert!(
+                    !has_honor,
+                    "obligation {:?} was committed past deadline but honored",
+                    id
+                );
+                prop_assert!(
+                    has_slash,
+                    "obligation {:?} was committed past deadline but not slashed",
                     id
                 );
             }
@@ -243,19 +302,24 @@ proptest! {
                 prop_assert!(current_l1_height >= eject_at);
             }
 
-            // SlashMissedForceInclude requires Pending +
-            // current > deadline + not committed (the
-            // honor-wins-tie property is its inverse).
+            // SlashMissedForceInclude requires Pending + current
+            // > deadline. The tx_hash may or may not be in the
+            // committed set — a late inclusion (committed after
+            // the deadline) still slashes per Codex P1
+            // `force_include.rs:206`.
             if let DaemonAction::SlashMissedForceInclude { .. } = action {
                 prop_assert_eq!(ob.status, ObligationStatus::Pending);
                 prop_assert!(current_l1_height > ob.deadline_l1_height);
-                prop_assert!(!committed.contains(&ob.tx_hash));
             }
 
-            // MarkHonored requires Pending + tx_hash committed.
+            // MarkHonored requires Pending + tx_hash committed +
+            // current_l1_height inside the deadline window.
+            // (Late-inclusion-honor is exactly the Codex P1 case
+            // closed by deadline-gated honor.)
             if let DaemonAction::MarkHonored { .. } = action {
                 prop_assert_eq!(ob.status, ObligationStatus::Pending);
                 prop_assert!(committed.contains(&ob.tx_hash));
+                prop_assert!(current_l1_height <= ob.deadline_l1_height);
             }
         }
     }
