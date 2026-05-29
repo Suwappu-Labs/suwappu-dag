@@ -4,19 +4,29 @@
 //!
 //! `gsx_l2_sequencer::force_include::evaluate` decides, per L1
 //! tick, whether each `Pending` force-include obligation should
-//! be **honored** (its tx was committed on time) or **slashed**
-//! (the deadline passed un-honored). Pass 1 emits `MarkHonored`
-//! for every Pending obligation whose `tx_hash` is in the
-//! `committed_batch_tx_hashes` set the daemon supplies.
+//! be **honored** (its tx was committed at a height ≤ the
+//! deadline) or **slashed** (the deadline passed with no on-time
+//! commit). Pass 1 emits `MarkHonored` for every Pending
+//! obligation whose `tx_hash` appears in the
+//! `committed_batch_tx_hashes` map the daemon supplies at a
+//! recorded commit height ≤ the obligation's deadline.
 //!
-//! That set was historically the daemon's **in-memory** record
+//! That map was historically the daemon's **in-memory** record
 //! of "tx hashes committed since this process last booted." A
 //! restart or outage wiped it. After the wipe, an obligation
 //! whose tx was *already committed on time* no longer appears in
-//! the set, so pass 1 skips it — and once `current_l1_height`
+//! the map, so pass 1 skips it — and once `current_l1_height`
 //! crosses its deadline, pass 2 emits `SlashMissedForceInclude`
 //! against an obligation the sequencer **already honored**. That
 //! is a false slashing decision driven purely by lost RAM.
+//!
+//! Honor is decided by the recorded **commit height**, not by the
+//! daemon's evaluation-time `current_l1_height` — so an on-time
+//! commit replayed from this store after a late restart is still
+//! honored (the #268 + #280 reconciliation, see
+//! `force_include::evaluate`). That is exactly why each entry
+//! stores the L1 height the tx was committed at, not merely the
+//! hash.
 //!
 //! This module gives the daemon a **crash-safe, on-disk**
 //! record of committed tx hashes (each tagged with the L1 height
@@ -262,10 +272,14 @@ impl CommittedHistory {
         }
     }
 
-    /// The set of committed tx hashes, ready to hand to
-    /// `EvaluateInput::committed_batch_tx_hashes`.
-    pub fn tx_hashes(&self) -> std::collections::BTreeSet<TxHash> {
-        self.entries.keys().copied().collect()
+    /// The committed tx_hash → L1-commit-height map, ready to hand
+    /// to `EvaluateInput::committed_batch_tx_hashes`. The evaluator
+    /// decides honor by `commit_height <= deadline`, so it needs
+    /// the recorded heights, not just the key set. Borrowed
+    /// directly — no clone — so the caller can pass `&map` straight
+    /// into `EvaluateInput`.
+    pub fn commit_heights(&self) -> &BTreeMap<TxHash, u64> {
+        &self.entries
     }
 
     /// Whether `tx_hash` is recorded as committed.
@@ -572,13 +586,19 @@ mod tests {
         let _ = fs::remove_file(&p);
     }
 
-    /// The core #256 regression, verified *through the evaluator*.
+    /// The core #256 / #287 regression, verified *through the
+    /// evaluator* under commit-height honor semantics.
     ///
-    /// Scenario: the sequencer commits a force-include tx on time,
-    /// then the daemon restarts (state dropped + reloaded from
-    /// disk). With the durable history, a later tick — now past
-    /// the obligation's deadline — must still emit `MarkHonored`
-    /// and must NOT emit `SlashMissedForceInclude`.
+    /// Scenario: the sequencer commits a force-include tx ON TIME
+    /// (recorded commit height 900 ≤ deadline 1000), then the
+    /// daemon restarts (state dropped + reloaded from disk). With
+    /// the durable history, a later tick — now far PAST the
+    /// obligation's deadline (current 1500) — must still emit
+    /// `MarkHonored` and must NOT emit `SlashMissedForceInclude`,
+    /// because honor keys off the recorded commit height (900 ≤
+    /// 1000), not the evaluation-time `current_l1_height`. This is
+    /// the canonical regression for the eval-time → commit-height
+    /// fix (#268 over-slash removed, #280 reconciled).
     #[test]
     fn restart_preserves_honor_and_prevents_false_slash() {
         let p = scratch_path("restart");
@@ -599,8 +619,9 @@ mod tests {
         // --- Restart: original in-memory state is gone; reload. ---
         let history = CommittedHistory::load(&p).unwrap();
 
-        // A later tick, now PAST the deadline (height 1500). Without
-        // durable history this is exactly when the false slash fires.
+        // A later tick, now PAST the deadline (height 1500). Under
+        // eval-time honor (#268) this is exactly when the false
+        // slash fired; under commit-height honor it must not.
         let mut obligations = BTreeMap::new();
         obligations.insert(
             obligation_id,
@@ -610,7 +631,9 @@ mod tests {
                 status: ObligationStatus::Pending,
             },
         );
-        let committed: BTreeSet<TxHash> = history.tx_hashes();
+        // Feed the recorded tx_hash → commit-height map straight
+        // into the evaluator. The map carries height 900 for `tx`.
+        let committed: BTreeMap<TxHash, u64> = history.commit_heights().clone();
         let ejected: BTreeSet<[u8; 32]> = BTreeSet::new();
 
         let actions = evaluate(EvaluateInput {
@@ -623,13 +646,13 @@ mod tests {
 
         assert!(
             actions.contains(&DaemonAction::MarkHonored { obligation_id }),
-            "reloaded history must still honor the on-time commit"
+            "reloaded history must still honor the on-time commit (900 <= 1000)"
         );
         assert!(
             !actions
                 .iter()
                 .any(|a| matches!(a, DaemonAction::SlashMissedForceInclude { .. })),
-            "durable history must prevent the post-restart false slash"
+            "commit-height honor must prevent the post-restart false slash"
         );
 
         let _ = fs::remove_file(&p);
@@ -652,7 +675,7 @@ mod tests {
                 status: ObligationStatus::Pending,
             },
         );
-        let committed: BTreeSet<TxHash> = BTreeSet::new(); // lost on restart
+        let committed: BTreeMap<TxHash, u64> = BTreeMap::new(); // lost on restart
         let ejected: BTreeSet<[u8; 32]> = BTreeSet::new();
 
         let actions = evaluate(EvaluateInput {

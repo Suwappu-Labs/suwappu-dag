@@ -250,8 +250,50 @@ pub async fn run_one_tick<C: L1Client>(
     );
 
     // Record the built batch into shared state so tests + the
-    // (future) prover task can observe it.
-    state.lock().expect("sequencer state poisoned").last_built = Some(batch.clone());
+    // (future) prover task can observe it. In the SAME critical
+    // section, record each tx's commit-height evidence into the
+    // durable committed-history so a later force-include tick (or
+    // a post-restart replay) honors these txs by commit height
+    // rather than false-slashing them. See `record_commit` below.
+    let persist_result = {
+        let mut s = state.lock().expect("sequencer state poisoned");
+        s.last_built = Some(batch.clone());
+
+        // ── Phase-2.2-c TODO ──────────────────────────────────
+        // This records commit-height evidence at the BATCH BUILD
+        // point, keyed by `l1_anchor_height`. That is the nearest
+        // existing hook: the daemon does NOT yet submit
+        // `Intent::PostL2DA` / `Intent::CommitL2StateRoot` (needs
+        // the SP1 prover, #104, + the real L1 client, Phase
+        // 2.2-c). When that commit-submission path lands, MOVE
+        // this `record_commit` to fire on the *confirmed L1
+        // commit* and use the L1 height the commit landed at
+        // (which may differ from `l1_anchor_height`). Until then,
+        // anchoring on `l1_anchor_height` is the best available
+        // commit-height proxy and keeps the honor evidence
+        // populated end-to-end for the force-include watcher to
+        // consume. Tracking: #287 (commit-height honor) + #256
+        // (durable history) + Phase-2.2-c wiring.
+        //
+        // `tx.hash` is `BLAKE3(tx_bytes)`, matching the
+        // force-include `tx_hash` convention
+        // (`gsx_execution::force_include::tx_hash`), so the
+        // recorded key lines up with the obligation's `tx_hash`.
+        for tx in &batch.txs {
+            s.committed_history.record_commit(tx.hash, l1_anchor_height);
+        }
+        // Persist while holding the lock so a concurrent RPC push
+        // cannot interleave a half-written state. `persist` is a
+        // no-op for the default in-memory store (the daemon swaps
+        // in a disk-backed store at startup), so existing tests
+        // pay nothing here. Errors are surfaced after dropping the
+        // lock so the fsync failure does not abort the (already
+        // built) batch.
+        s.committed_history.persist()
+    };
+    if let Err(e) = persist_result {
+        warn!(error = %e, "batch builder: committed-history persist failed; honor evidence not durable this tick");
+    }
 
     Ok(Some(batch))
 }
@@ -590,6 +632,36 @@ mod tests {
         let next_batch = run_one_tick(&state, &cfg(), &l1).await.unwrap();
         assert!(next_batch.is_none());
         assert_eq!(state.lock().unwrap().next_batch_id, 1);
+    }
+
+    /// Step-3 wiring (#287 / Phase-2.2-c hook): building a batch
+    /// must record each tx's commit-height evidence into the
+    /// committed-history, keyed by the batch's `l1_anchor_height`.
+    /// This is the honor evidence a later force-include tick (or a
+    /// post-restart replay) reads to honor-by-commit-height instead
+    /// of false-slashing. Uses the default in-memory store, so
+    /// `persist` is a no-op — we assert on the in-memory entries.
+    #[tokio::test]
+    async fn build_records_commit_height_for_each_tx() {
+        let state = Arc::new(Mutex::new(SequencerState::new()));
+        let (h1, h2) = {
+            let mut s = state.lock().unwrap();
+            let h1 = s.mempool.submit(vec![1, 2, 3, 4]).unwrap();
+            let h2 = s.mempool.submit(vec![5, 6, 7, 8]).unwrap();
+            (h1, h2)
+        };
+        let l1 = MockL1Client::new();
+        l1.set_l1_height(777);
+
+        let batch = run_one_tick(&state, &cfg(), &l1).await.unwrap().unwrap();
+        assert_eq!(batch.header.l1_anchor_height, 777);
+
+        let s = state.lock().unwrap();
+        let recorded = s.committed_history.commit_heights();
+        // Both txs recorded at the batch's l1_anchor_height.
+        assert_eq!(recorded.get(&h1), Some(&777));
+        assert_eq!(recorded.get(&h2), Some(&777));
+        assert_eq!(recorded.len(), 2);
     }
 
     #[tokio::test]

@@ -3,6 +3,14 @@
 //!
 //! Default 256 cases under CI; sprint close runs
 //! `PROPTEST_CASES=10000 cargo test --release -p gsx-l2-sequencer`.
+//!
+//! ## Commit-height honor semantics
+//!
+//! Honor is decided by the L1 height at which a tx was *committed*
+//! (`commit_height <= deadline_l1_height`), NOT by the daemon's
+//! `current_l1_height` at evaluation time. `current_l1_height`
+//! gates slash / eject *timing* only. These properties pin that
+//! reconciliation (#268 + #280, see `force_include::evaluate`).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -43,9 +51,19 @@ fn obligation_map_strategy() -> impl Strategy<Value = BTreeMap<ObligationId, Obl
     })
 }
 
-fn committed_tx_strategy() -> impl Strategy<Value = BTreeSet<TxHash>> {
-    prop::collection::vec(any::<u8>(), 0..=16)
-        .prop_map(|seeds| seeds.into_iter().map(|s| [s; 32]).collect())
+/// Committed tx hashes → their recorded L1 commit height. The
+/// commit height is drawn over a range that straddles the
+/// obligation deadline range (0..=1_000_000) so both the on-time
+/// (`commit_height <= deadline`) and late (`commit_height >
+/// deadline`) cases are exercised.
+fn committed_tx_strategy() -> impl Strategy<Value = BTreeMap<TxHash, u64>> {
+    prop::collection::vec((any::<u8>(), 0u64..=2_000_000), 0..=16).prop_map(|entries| {
+        let mut map = BTreeMap::new();
+        for (seed, height) in entries {
+            map.insert([seed; 32], height);
+        }
+        map
+    })
 }
 
 fn ejected_set_strategy() -> impl Strategy<Value = BTreeSet<ObligationId>> {
@@ -138,17 +156,19 @@ proptest! {
 proptest! {
     #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
 
-    /// **Honor only inside the deadline window**: if an obligation
-    /// is Pending, its tx_hash is in the committed set, AND the
-    /// daemon evaluates at or before `deadline_l1_height`, evaluate
-    /// MUST emit `MarkHonored` (never `SlashMissedForceInclude`).
+    /// **Honor by commit height**: if an obligation is Pending and
+    /// its tx_hash is recorded committed at a height ≤ its
+    /// `deadline_l1_height`, evaluate MUST emit `MarkHonored`
+    /// (never `SlashMissedForceInclude`) — REGARDLESS of
+    /// `current_l1_height`. An on-time commit observed late is
+    /// still honored.
     ///
-    /// The symmetric "late-inclusion gets slashed" half is covered
-    /// by [`late_inclusion_after_deadline_does_not_honor`] below
-    /// — together they pin the Codex P1
-    /// `force_include.rs:206` semantics in both directions.
+    /// The symmetric "late commit gets slashed" half is covered by
+    /// [`late_commit_after_deadline_does_not_honor`] below — together
+    /// they pin the commit-height honor semantics (#268 + #280) in
+    /// both directions.
     #[test]
-    fn on_time_committed_tx_emits_honor_not_slash(
+    fn on_time_commit_emits_honor_not_slash(
         obligations in obligation_map_strategy(),
         committed in committed_tx_strategy(),
         current_l1_height in 0u64..=2_000_000,
@@ -164,10 +184,10 @@ proptest! {
         });
 
         for (id, ob) in &obligations {
-            if ob.status == ObligationStatus::Pending
-                && committed.contains(&ob.tx_hash)
-                && current_l1_height <= ob.deadline_l1_height
-            {
+            let on_time_commit = committed
+                .get(&ob.tx_hash)
+                .is_some_and(|&h| h <= ob.deadline_l1_height);
+            if ob.status == ObligationStatus::Pending && on_time_commit {
                 let has_slash = actions.iter().any(|a| {
                     matches!(a, DaemonAction::SlashMissedForceInclude { obligation_id } if obligation_id == id)
                 });
@@ -176,12 +196,12 @@ proptest! {
                 });
                 prop_assert!(
                     !has_slash,
-                    "obligation {:?} was committed within deadline but also slashed",
+                    "obligation {:?} was committed on time but also slashed",
                     id
                 );
                 prop_assert!(
                     has_honor,
-                    "obligation {:?} was committed within deadline but not honored",
+                    "obligation {:?} was committed on time but not honored",
                     id
                 );
             }
@@ -192,15 +212,19 @@ proptest! {
 proptest! {
     #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
 
-    /// **Late-inclusion-slash (Codex P1, force_include.rs:206)**:
-    /// if an obligation is Pending, its tx_hash is committed, AND
-    /// the daemon evaluates after `deadline_l1_height`, evaluate
-    /// MUST emit `SlashMissedForceInclude` — never `MarkHonored`.
-    /// The old "any inclusion honors" behaviour let a sequencer
-    /// dodge slashing by including censored txs after the
-    /// deadline; this property fences that off.
+    /// **Late-commit-slash (commit-height honor)**: if an obligation
+    /// is Pending, its tx_hash is recorded committed at a height
+    /// PAST its deadline (`commit_height > deadline`), AND the
+    /// daemon evaluates after `deadline_l1_height`, evaluate MUST
+    /// emit `SlashMissedForceInclude` — never `MarkHonored`.
+    ///
+    /// A sequencer that genuinely commits a censored tx after the
+    /// deadline cannot dodge slashing: the recorded commit height
+    /// itself proves it was late. (This is distinct from an on-time
+    /// commit observed late, which IS honored — exactly the #268
+    /// over-slash removed here.)
     #[test]
-    fn late_inclusion_after_deadline_does_not_honor(
+    fn late_commit_after_deadline_does_not_honor(
         obligations in obligation_map_strategy(),
         committed in committed_tx_strategy(),
         current_l1_height in 0u64..=2_000_000,
@@ -216,8 +240,13 @@ proptest! {
         });
 
         for (id, ob) in &obligations {
+            // tx recorded committed, but at a height past the
+            // deadline (a genuinely late inclusion).
+            let late_commit = committed
+                .get(&ob.tx_hash)
+                .is_some_and(|&h| h > ob.deadline_l1_height);
             if ob.status == ObligationStatus::Pending
-                && committed.contains(&ob.tx_hash)
+                && late_commit
                 && current_l1_height > ob.deadline_l1_height
             {
                 let has_honor = actions.iter().any(|a| {
@@ -254,7 +283,8 @@ proptest! {
     /// Together these prove the no-redundant-RPC property:
     /// the daemon never asks the substrate to re-apply a
     /// transition that's already been applied or isn't yet
-    /// eligible.
+    /// eligible. The honor / slash arms are additionally checked
+    /// against the commit-height rule.
     #[test]
     fn never_acts_on_terminal_or_ineligible_states(
         obligations in obligation_map_strategy(),
@@ -302,24 +332,34 @@ proptest! {
                 prop_assert!(current_l1_height >= eject_at);
             }
 
-            // SlashMissedForceInclude requires Pending + current
-            // > deadline. The tx_hash may or may not be in the
-            // committed set — a late inclusion (committed after
-            // the deadline) still slashes per Codex P1
-            // `force_include.rs:206`.
+            // SlashMissedForceInclude requires Pending + current >
+            // deadline + NO on-time commit (no recorded commit at
+            // height ≤ deadline). A late commit (height > deadline)
+            // still slashes; an on-time commit never does.
             if let DaemonAction::SlashMissedForceInclude { .. } = action {
                 prop_assert_eq!(ob.status, ObligationStatus::Pending);
                 prop_assert!(current_l1_height > ob.deadline_l1_height);
+                let on_time_commit = committed
+                    .get(&ob.tx_hash)
+                    .is_some_and(|&h| h <= ob.deadline_l1_height);
+                prop_assert!(
+                    !on_time_commit,
+                    "slashed an obligation that had an on-time commit"
+                );
             }
 
-            // MarkHonored requires Pending + tx_hash committed +
-            // current_l1_height inside the deadline window.
-            // (Late-inclusion-honor is exactly the Codex P1 case
-            // closed by deadline-gated honor.)
+            // MarkHonored requires Pending + a recorded commit at
+            // height ≤ deadline. Independent of current_l1_height
+            // (an on-time commit observed late is still honored).
             if let DaemonAction::MarkHonored { .. } = action {
                 prop_assert_eq!(ob.status, ObligationStatus::Pending);
-                prop_assert!(committed.contains(&ob.tx_hash));
-                prop_assert!(current_l1_height <= ob.deadline_l1_height);
+                let on_time_commit = committed
+                    .get(&ob.tx_hash)
+                    .is_some_and(|&h| h <= ob.deadline_l1_height);
+                prop_assert!(
+                    on_time_commit,
+                    "honored an obligation without an on-time commit"
+                );
             }
         }
     }
