@@ -85,6 +85,9 @@ sha3 = "0.10"
 blake3 = "1.5"
 hkdf = "0.12"
 
+# Constant-time operations (C6 hardening — side-channel resistance)
+subtle = "2.6"
+
 # Erasure coding (RFC 6330) — gsx-transport block shred/reconstruct
 raptorq = "2.0"
 
@@ -104,6 +107,10 @@ hex = "0.4"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
+
+# HTTP client (used by gsx-l2-sequencer-daemon's RpcL1Client to
+# call the L1 node's JSON-RPC endpoint).
+reqwest = { version = "0.11", features = ["json"] }
 
 # Async / runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "fs", "io-util", "net", "signal"] }

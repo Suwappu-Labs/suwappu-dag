@@ -1043,6 +1043,7 @@ dependencies = [
  "rand_chacha 0.3.1",
  "serde",
  "sha3",
+ "subtle",
  "thiserror 1.0.69",
 ]
 
@@ -1184,6 +1185,8 @@ dependencies = [
  "clap",
  "gsx-l2-sequencer",
  "gsx-l2-stm",
+ "hex",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -1348,6 +1351,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
+ "subtle",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -3620,6 +3624,7 @@ dependencies = [
  "http-body 1.0.1",
  "http-body-util",
  "pin-project-lite",
+ "tokio",
  "tower-layer",
  "tower-service",
  "tracing",

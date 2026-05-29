@@ -10,6 +10,7 @@ use pqcrypto_mldsa::mldsa65;
 use pqcrypto_traits::sign::{
     DetachedSignature as _, PublicKey as _, SecretKey as _, SignedMessage as _,
 };
+use subtle::ConstantTimeEq;
 
 use crate::error::CryptoError;
 
@@ -18,12 +19,32 @@ use crate::error::CryptoError;
 pub struct PublicKey(Vec<u8>);
 
 /// ML-DSA-65 secret key, byte-serialized.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `PartialEq` uses constant-time comparison via `subtle::ConstantTimeEq`
+/// to prevent timing side-channels (C6 hardening).
+#[derive(Debug, Clone)]
 pub struct SecretKey(Vec<u8>);
 
+impl PartialEq for SecretKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.ct_eq(&other.0).into()
+    }
+}
+impl Eq for SecretKey {}
+
 /// ML-DSA-65 detached signature, byte-serialized.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `PartialEq` uses constant-time comparison to prevent timing
+/// side-channels on signature values (C6 hardening).
+#[derive(Debug, Clone)]
 pub struct Signature(Vec<u8>);
+
+impl PartialEq for Signature {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.ct_eq(&other.0).into()
+    }
+}
+impl Eq for Signature {}
 
 impl PublicKey {
     /// Borrow the public-key bytes.

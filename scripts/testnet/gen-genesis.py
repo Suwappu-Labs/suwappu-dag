@@ -163,17 +163,20 @@ def main() -> int:
         f.write(f'label = "{FAUCET_LABEL}"\n')
         f.write(f'mldsa_public_key_hex = "{faucet_pk_hex}"\n')
         f.write(f'bls_public_key_hex = "{faucet_bls_pk_hex}"\n')
-        f.write(f"validator_stake_gsx = 1\n")
-        f.write(f"authority_stake_gsx = 1\n\n")
+        # Faucet stake must clear AUTHORITY_STAKE_THRESHOLD_GSX (100,000)
+        # so registry.admit() succeeds. Without this, the faucet's
+        # pubkey never enters the AuthorityRegistry and every signed
+        # drip intent is rejected with UnknownSigner.
+        f.write(f"validator_stake_gsx = {args.authority_stake_gsx}\n")
+        f.write(f"authority_stake_gsx = {args.authority_stake_gsx}\n\n")
 
-    import hashlib as _h
-    faucet_addr_20 = _h.blake2b(faucet_pk, digest_size=32).digest()[:20]
+    import blake3 as _b3  # pip install blake3
+    faucet_addr_20 = _b3.blake3(faucet_pk).digest()[:20]
     faucet_addr_hex = "0x" + faucet_addr_20.hex()
 
-    prebalances = args.out_dir / "prebalances.toml"
-    with prebalances.open("w") as f:
-        f.write("# Testnet pre-balances applied at genesis.\n\n")
-        f.write("[[balances]]\n")
+    with genesis.open("a") as f:
+        f.write("# Pre-genesis balances applied before round 0.\n")
+        f.write("[[prebalances]]\n")
         f.write(f'address = "{faucet_addr_hex}"\n')
         f.write(f"balance_gsx = {args.faucet_initial_balance_gsx}\n")
         f.write(f'role = "faucet"\n\n')
@@ -184,7 +187,6 @@ def main() -> int:
     print(f"  validators[{FAUCET_AUTHORITY_ID}] = {FAUCET_LABEL} (pk={faucet_pk_hex[:16]}...)", file=sys.stderr)
     print(f"  faucet address = {faucet_addr_hex}", file=sys.stderr)
     print(f"  faucet initial balance = {args.faucet_initial_balance_gsx:,} GSX", file=sys.stderr)
-    print(f"wrote {prebalances}", file=sys.stderr)
     print(
         "NOTE: validator keys are placeholders (matches devnet/perf); "
         "only the faucet ML-DSA key is real. Do NOT reuse this output "

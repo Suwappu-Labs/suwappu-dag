@@ -81,7 +81,7 @@ mod tests {
                     object: obj,
                     owner: OwnerAddress([0; 32]),
                     nonce: 0,
-                    lineage: CertHash([0; 32]),
+                    lineage: CertHash::from([0; 32]),
                     lineage_round: 10,
                     payload_digest: [0xA; 32],
                 },
@@ -91,7 +91,7 @@ mod tests {
                 round: 12,
                 object: obj,
                 payload_digest: [0xB; 32],
-                lineage: CertHash([0; 32]),
+                lineage: CertHash::from([0; 32]),
             },
         }
     }

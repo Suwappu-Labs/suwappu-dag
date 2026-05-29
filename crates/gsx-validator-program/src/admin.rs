@@ -23,6 +23,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
+use subtle::ConstantTimeEq;
 use tracing::warn;
 
 /// Shared state passed into each admin handler.
@@ -35,6 +36,8 @@ pub struct AdminState {
     pub admin_token: String,
 }
 
+/// C10 hardening: constant-time bearer token comparison to prevent
+/// timing side-channel recovery of the admin token.
 fn check_auth(
     headers: &HeaderMap,
     expected: &str,
@@ -43,7 +46,14 @@ fn check_auth(
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if auth.strip_prefix("Bearer ") != Some(expected) {
+    let token = auth.strip_prefix("Bearer ").unwrap_or("");
+    // Constant-time content comparison via `subtle::ConstantTimeEq`.
+    // Note: `ct_eq` returns 0 immediately for different-length slices
+    // (the length itself is NOT compared in constant time). This leaks
+    // token length but not content — acceptable because the admin token
+    // length is not secret (it's a fixed-length hex string).
+    let matches: bool = token.as_bytes().ct_eq(expected.as_bytes()).into();
+    if !matches || token.is_empty() {
         return Err((
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({ "error": "missing or wrong bearer token" })),

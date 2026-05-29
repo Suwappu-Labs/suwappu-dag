@@ -20,7 +20,10 @@ pub mod wire;
 pub use config::{ConfigError, GenesisManifest, GenesisValidator, NodeConfig, Peer};
 pub use daemon::Daemon;
 pub use events::{Event, EventLog, Lane};
-pub use validator::{run_genesis_flow_with_keys, seed_registry, NodeError, Validator};
+pub use validator::{
+    run_genesis_flow_with_keys, seed_registry, sign_cert, sign_vote, verify_cert_signature,
+    verify_vote_signature, NodeError, Validator,
+};
 pub use wire::{
     BlockPayload, PeerId, Wire, WireConfig, WireError, WireEvent, WireMessage, WireSplit,
     MAX_FRAME_BYTES,

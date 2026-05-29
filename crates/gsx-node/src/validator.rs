@@ -22,15 +22,19 @@
 //! cases in its own sprint; S20 confirms they compose without seams.
 
 use gsx_authority::{AuthorityMember, AuthorityRegistry, AUTHORITY_STAKE_THRESHOLD_GSX};
-use gsx_consensus::{cert_at, commit_leader, AuthorityId, CertHash, Certificate, DagStore, Round};
+use gsx_consensus::{
+    cert_at, commit_leader, AuthorityId, CertHash, Certificate, DagStore, Round, ValidatorId, Vote,
+};
 use gsx_crypto::mldsa;
 use gsx_execution::{
     execute_block, ratify_checkpoint, sign_checkpoint, Block, Checkpoint, CheckpointSignature,
     Checkpointer, CoSignedCheckpoint, ExecutionReport, InMemorySubstrate, Intent, Substrate,
 };
+use gsx_validator::ValidatorRegistry;
 
 /// Errors emitted by the node-integration layer.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum NodeError {
     /// The genesis flow could not seat the validator into the Authority
     /// registry.
@@ -44,13 +48,31 @@ pub enum NodeError {
     /// Checkpoint ratification failed.
     #[error("checkpoint ratification failed: {0}")]
     Checkpoint(#[from] gsx_execution::CheckpointError),
+
+    /// Certificate signature verification failed or malformed.
+    #[error("certificate signature invalid for authority {0}")]
+    CertSignature(AuthorityId),
+
+    /// Certificate authored by an authority not in the registry.
+    #[error("unknown authority {0}")]
+    UnknownAuthority(AuthorityId),
+
+    /// Vote signature verification failed or malformed.
+    #[error("vote signature invalid for validator {0}")]
+    VoteSignature(ValidatorId),
+
+    /// Vote cast by a validator not in the registry.
+    #[error("unknown validator {0}")]
+    UnknownValidator(ValidatorId),
 }
 
 /// One Authority Ring member, fully wired.
 pub struct Validator {
     /// Authority Ring identifier of this validator.
     pub id: AuthorityId,
-    /// ML-DSA-65 keypair (public key derived for the registry).
+    /// ML-DSA-65 public key, cached at construction for registry seating.
+    pub mldsa_pk: mldsa::PublicKey,
+    /// ML-DSA-65 secret key for signing certificates and checkpoints.
     pub mldsa_sk: mldsa::SecretKey,
     /// Local view of the certificate DAG.
     pub dag: DagStore,
@@ -64,9 +86,10 @@ impl Validator {
     /// Construct a fresh validator with the given id and an empty
     /// substrate / DAG / checkpointer at the supplied cadence.
     pub fn new(id: AuthorityId, checkpoint_cadence: u32) -> Self {
-        let (_pk, sk) = mldsa::keypair();
+        let (pk, sk) = mldsa::keypair();
         Self {
             id,
+            mldsa_pk: pk,
             mldsa_sk: sk,
             dag: DagStore::new(),
             substrate: InMemorySubstrate::new(),
@@ -77,41 +100,43 @@ impl Validator {
     /// Borrow the ML-DSA-65 public key bytes for this validator. Used
     /// when seating into an `AuthorityRegistry`.
     pub fn public_key_bytes(&self) -> Vec<u8> {
-        // Derive PK by signing-key conversion — pqcrypto exposes only
-        // keypair() so phase-1 caches the bytes via a re-encode through
-        // a fresh sign-and-discard path. Simpler: rebuild via a stable
-        // accessor on the SecretKey... but the gsx-crypto API hides it.
-        // Workaround: store PK at construction; refactor later.
-        // For now, deserialize-encode is unnecessary because phase-1
-        // store the PK explicitly. We return an empty vec sentinel; the
-        // test driver builds and tracks PKs separately.
-        Vec::new()
+        self.mldsa_pk.as_bytes().to_vec()
     }
 
-    /// Produce a genesis certificate (round 0, no parents).
-    pub fn produce_genesis(&mut self, payload_digest: [u8; 32]) -> Certificate {
-        Certificate::genesis(self.id, payload_digest)
+    /// Produce a signed genesis certificate (round 0, no parents).
+    pub fn produce_genesis(&mut self, payload_digest: [u8; 32], network_id: &str) -> Certificate {
+        let mut cert = Certificate::genesis(self.id, payload_digest);
+        let sig = mldsa::sign(cert.hash(network_id).as_bytes(), &self.mldsa_sk)
+            .expect("signing with own key cannot fail");
+        cert.signature = sig.as_bytes().to_vec();
+        cert
     }
 
-    /// Author a round-`round` certificate referencing every parent in
-    /// `parents`.
+    /// Author and sign a round-`round` certificate referencing every
+    /// parent in `parents`.
     pub fn author_round(
         &mut self,
         round: Round,
         parents: Vec<CertHash>,
         payload_digest: [u8; 32],
+        network_id: &str,
     ) -> Certificate {
-        Certificate {
+        let mut cert = Certificate {
             author: self.id,
             round,
             parents,
             payload_digest,
-        }
+            signature: vec![],
+        };
+        let sig = mldsa::sign(cert.hash(network_id).as_bytes(), &self.mldsa_sk)
+            .expect("signing with own key cannot fail");
+        cert.signature = sig.as_bytes().to_vec();
+        cert
     }
 
     /// Insert a certificate (own or peer) into the local DAG.
-    pub fn observe(&mut self, cert: Certificate) -> Result<CertHash, NodeError> {
-        Ok(self.dag.insert(cert)?)
+    pub fn observe(&mut self, cert: Certificate, network_id: &str) -> Result<CertHash, NodeError> {
+        Ok(self.dag.insert(cert, network_id)?)
     }
 
     /// Look up the cert hash this validator authored at `round`, if any.
@@ -140,105 +165,67 @@ impl Validator {
     }
 }
 
-/// Untyped variant of [`run_genesis_flow_with_keys`] kept for API
-/// symmetry. The integration tests use the typed variant since it
-/// produces a checkpoint that ratifies against the supplied registry's
-/// real ML-DSA-65 public keys.
-#[allow(dead_code)]
-fn run_genesis_flow(
-    n: u32,
+/// Sign a vote in place using the provided ML-DSA-65 secret key.
+/// Sets `vote.signature` to the detached signature over
+/// `vote_digest(network_id, vote.validator, &vote.candidate)`.
+pub fn sign_vote(vote: &mut Vote, sk: &mldsa::SecretKey, network_id: &str) {
+    let digest = gsx_consensus::vote_digest(network_id, vote.validator, &vote.candidate);
+    let sig = mldsa::sign(&digest, sk).expect("ML-DSA-65 signing cannot fail");
+    vote.signature = sig.as_bytes().to_vec();
+}
+
+/// Verify that a vote's ML-DSA-65 signature is valid against the
+/// voter's public key in the Validator Registry.
+///
+/// Returns `Ok(())` if the signature is valid. Returns an error if the
+/// voter is not in the registry, the key bytes are malformed, the
+/// signature bytes are malformed, or the signature does not verify.
+pub fn verify_vote_signature(
+    vote: &Vote,
+    registry: &ValidatorRegistry,
+    network_id: &str,
+) -> Result<(), NodeError> {
+    let member = registry
+        .get(vote.validator)
+        .ok_or(NodeError::UnknownValidator(vote.validator))?;
+    let pk = mldsa::PublicKey::from_bytes(&member.public_key_bytes)
+        .map_err(|_| NodeError::VoteSignature(vote.validator))?;
+    let sig = mldsa::Signature::from_bytes(&vote.signature)
+        .map_err(|_| NodeError::VoteSignature(vote.validator))?;
+    let digest = gsx_consensus::vote_digest(network_id, vote.validator, &vote.candidate);
+    mldsa::verify(&digest, &sig, &pk).map_err(|_| NodeError::VoteSignature(vote.validator))?;
+    Ok(())
+}
+
+/// Sign a certificate in place using the provided ML-DSA-65 secret key.
+/// Sets `cert.signature` to the detached signature over `cert.hash(network_id)`.
+pub fn sign_cert(cert: &mut Certificate, sk: &mldsa::SecretKey, network_id: &str) {
+    let sig =
+        mldsa::sign(cert.hash(network_id).as_bytes(), sk).expect("ML-DSA-65 signing cannot fail");
+    cert.signature = sig.as_bytes().to_vec();
+}
+
+/// Verify that a certificate's ML-DSA-65 signature is valid against the
+/// author's public key in the Authority Registry.
+///
+/// Returns `Ok(())` if the signature is valid. Returns an error if the
+/// author is not in the registry, the key bytes are malformed, the
+/// signature bytes are malformed, or the signature does not verify.
+pub fn verify_cert_signature(
+    cert: &Certificate,
     registry: &AuthorityRegistry,
-    payload_seed: u8,
-) -> Result<Option<(CertHash, [u8; 32], CoSignedCheckpoint)>, NodeError> {
-    let mut validators: Vec<Validator> = (0..n).map(|i| Validator::new(i, 1)).collect();
-
-    // Round 0: every validator authors a genesis cert.
-    let mut round_0_hashes: Vec<CertHash> = Vec::with_capacity(n as usize);
-    for v in &mut validators {
-        let mut payload = [0u8; 32];
-        payload[0] = v.id as u8;
-        payload[1] = payload_seed;
-        let cert = v.produce_genesis(payload);
-        round_0_hashes.push(cert.hash());
-    }
-    // Every validator observes every round-0 cert. Reconstruct one cert
-    // per author per validator to stay consistent.
-    for v in &mut validators {
-        for author in 0..n {
-            let mut payload = [0u8; 32];
-            payload[0] = author as u8;
-            payload[1] = payload_seed;
-            let cert = Certificate::genesis(author, payload);
-            v.observe(cert)?;
-        }
-    }
-
-    // Round 1: every validator authors a round-1 cert referencing all
-    // round-0 certs. We compute the cert content first, then gossip in
-    // a separate pass to keep the borrow checker happy.
-    for v in &mut validators {
-        let payload = [0xAB; 32];
-        let cert = v.author_round(1, round_0_hashes.clone(), payload);
-        v.observe(cert)?;
-    }
-    // Gossip round-1: every non-authoring validator observes every cert.
-    for author in 0..n {
-        let mut payload = [0xAB; 32];
-        payload[0] = author as u8;
-        let cert = Certificate {
-            author,
-            round: 1,
-            parents: round_0_hashes.clone(),
-            payload_digest: payload,
-        };
-        for v in &mut validators {
-            if v.id == author {
-                continue;
-            }
-            // Insert may fail with duplicate if the validator already
-            // authored under the same payload; that's fine — proceed.
-            let _ = v.observe(cert.clone());
-        }
-    }
-
-    // Check if the round-0 leader commits under Mysticeti-C at round 1.
-    let leader = commit_leader(&validators[0].dag, 0, n);
-
-    // Execute the same (empty) block on every validator's substrate.
-    let block = Block {
-        round: 0,
-        intents: Vec::<Intent>::new(),
-    };
-    let mut state_root_canonical = None;
-    for v in &mut validators {
-        let (_report, root) = v.execute(&block);
-        if let Some(r) = state_root_canonical {
-            if r != root {
-                // Cross-validator divergence — bail out as a programming
-                // error.
-                return Ok(None);
-            }
-        } else {
-            state_root_canonical = Some(root);
-        }
-    }
-    let state_root = state_root_canonical.expect("at least one validator executed");
-
-    // Build a checkpoint and co-sign with every validator (we expect to
-    // exceed quorum_threshold).
-    let ck = Checkpoint {
-        height: 0,
-        round: 0,
-        state_root,
-        prev_checkpoint: [0u8; 32],
-    };
-    let mut sigs = Vec::with_capacity(n as usize);
-    for v in &mut validators {
-        sigs.push(sign_checkpoint(v.id, &v.mldsa_sk, &ck).expect("sign"));
-    }
-
-    let cosigned = ratify_checkpoint(ck, sigs, registry)?;
-    Ok(leader.map(|h| (h, state_root, cosigned)))
+    network_id: &str,
+) -> Result<(), NodeError> {
+    let member = registry
+        .get(cert.author)
+        .ok_or(NodeError::UnknownAuthority(cert.author))?;
+    let pk = mldsa::PublicKey::from_bytes(&member.public_key_bytes)
+        .map_err(|_| NodeError::CertSignature(cert.author))?;
+    let sig = mldsa::Signature::from_bytes(&cert.signature)
+        .map_err(|_| NodeError::CertSignature(cert.author))?;
+    mldsa::verify(cert.hash(network_id).as_bytes(), &sig, &pk)
+        .map_err(|_| NodeError::CertSignature(cert.author))?;
+    Ok(())
 }
 
 /// Build an `AuthorityRegistry` seating `n` validators and return the
@@ -267,6 +254,7 @@ pub fn run_genesis_flow_with_keys(
     registry: &AuthorityRegistry,
     sks: &[mldsa::SecretKey],
     payload_seed: u8,
+    network_id: &str,
 ) -> Result<Option<(CertHash, [u8; 32], CoSignedCheckpoint)>, NodeError> {
     assert_eq!(sks.len() as u32, n);
     let mut dags: Vec<DagStore> = (0..n).map(|_| DagStore::new()).collect();
@@ -278,10 +266,11 @@ pub fn run_genesis_flow_with_keys(
         let mut payload = [0u8; 32];
         payload[0] = i as u8;
         payload[1] = payload_seed;
-        let cert = Certificate::genesis(i, payload);
-        round_0_hashes.push(cert.hash());
+        let mut cert = Certificate::genesis(i, payload);
+        sign_cert(&mut cert, &sks[i as usize], network_id);
+        round_0_hashes.push(cert.hash(network_id));
         for dag in &mut dags {
-            dag.insert(cert.clone())?;
+            dag.insert(cert.clone(), network_id)?;
         }
     }
 
@@ -289,14 +278,16 @@ pub fn run_genesis_flow_with_keys(
     for i in 0..n {
         let mut payload = [0xAB; 32];
         payload[0] = i as u8;
-        let cert = Certificate {
+        let mut cert = Certificate {
             author: i,
             round: 1,
             parents: round_0_hashes.clone(),
             payload_digest: payload,
+            signature: vec![],
         };
+        sign_cert(&mut cert, &sks[i as usize], network_id);
         for dag in &mut dags {
-            dag.insert(cert.clone())?;
+            dag.insert(cert.clone(), network_id)?;
         }
     }
 
@@ -339,11 +330,13 @@ pub fn run_genesis_flow_with_keys(
 mod tests {
     use super::*;
 
+    const NET: &str = "test";
+
     #[test]
     fn genesis_flow_runs_end_to_end() {
         let n = 4u32;
         let (registry, sks) = seed_registry(n);
-        let (leader, root, cosigned) = run_genesis_flow_with_keys(n, &registry, &sks, 0xAB)
+        let (leader, root, cosigned) = run_genesis_flow_with_keys(n, &registry, &sks, 0xAB, NET)
             .unwrap()
             .unwrap();
         // The leader is the cert authored by authority 0 at round 0
@@ -351,7 +344,7 @@ mod tests {
         let mut payload = [0u8; 32];
         payload[0] = 0;
         payload[1] = 0xAB;
-        let expected_leader = Certificate::genesis(0, payload).hash();
+        let expected_leader = Certificate::genesis(0, payload).hash(NET);
         assert_eq!(leader, expected_leader);
         // Every validator's substrate is empty → identical state root.
         assert_eq!(root, InMemorySubstrate::new().state_root());

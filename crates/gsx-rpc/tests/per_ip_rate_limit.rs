@@ -60,8 +60,18 @@ impl StateView for MockState {
         _intent_bincode: Vec<u8>,
         _signature: Vec<u8>,
         _signer_pubkey_hash: [u8; 32],
+        _signer_pubkey: Option<Vec<u8>>,
     ) -> Result<[u8; 32], SubmitIntentError> {
         Ok([0u8; 32])
+    }
+    async fn l1_state_root(&self) -> [u8; 32] {
+        [0u8; 32]
+    }
+    async fn l2_state_root(&self, _l2_chain_id_hash: [u8; 32]) -> [u8; 32] {
+        [0u8; 32]
+    }
+    async fn force_include_registry_bytes(&self) -> Vec<u8> {
+        Vec::new()
     }
     fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<gsx_rpc::context::EventView> {
         // Unused in this test; return a fresh broadcast pair.

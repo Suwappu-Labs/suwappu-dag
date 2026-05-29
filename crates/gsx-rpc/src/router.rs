@@ -8,7 +8,7 @@
 //! InvalidRequest error in the body (per spec — HTTP status stays
 //! 200, transport errors are encoded in the response envelope).
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use axum::{
     extract::State,
@@ -56,6 +56,13 @@ pub const DEFAULT_PER_IP_CAPACITY: u64 = 60;
 /// CPU budgets.
 pub const DEFAULT_PER_IP_REFILL_PER_SEC: u64 = 10;
 
+/// B2.2 hardening: default per-request wall-clock timeout in
+/// milliseconds. Requests that do not produce a response within this
+/// window are cancelled and the caller receives HTTP 408. 30 seconds
+/// is generous for any read method; `gsx_submitIntent` is bounded by
+/// the ML-DSA verify step (~2 ms) and the mempool enqueue (~us).
+pub const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 30_000;
+
 /// Hardening limits applied to the gsx-rpc HTTP router. The defaults
 /// match `DEFAULT_MAX_CONCURRENT_REQUESTS` and `DEFAULT_MAX_REQUEST_BODY_BYTES`;
 /// callers can override at startup if the deployment topology
@@ -73,6 +80,10 @@ pub struct RouterLimits {
     /// B2.1: per-IP token-bucket refill rate (steady-state ceiling
     /// in requests/sec).
     pub per_ip_refill_per_sec: u64,
+    /// B2.2: per-request wall-clock timeout in milliseconds.
+    /// Requests exceeding this are cancelled; the caller receives
+    /// HTTP 408 (tower's `TimeoutLayer` default).
+    pub request_timeout_ms: u64,
 }
 
 impl Default for RouterLimits {
@@ -82,6 +93,7 @@ impl Default for RouterLimits {
             max_request_body_bytes: DEFAULT_MAX_REQUEST_BODY_BYTES,
             per_ip_capacity: DEFAULT_PER_IP_CAPACITY,
             per_ip_refill_per_sec: DEFAULT_PER_IP_REFILL_PER_SEC,
+            request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
         }
     }
 }
@@ -95,6 +107,10 @@ pub fn router<S: StateView>(ctx: Arc<RpcContext<S>>) -> Router {
 /// Build the axum router with explicit hardening limits.
 ///
 /// Middleware order (outermost → innermost):
+///   0. `TimeoutLayer` (tower) — cancels any request that doesn't
+///      produce a response within `request_timeout_ms`. The caller
+///      receives HTTP 408. Outermost so it bounds total wall time
+///      regardless of where the request stalls.
 ///   1. `RequestBodyLimitLayer` (tower-http) — rejects an HTTP request
 ///      whose declared `Content-Length` or streamed body exceeds the
 ///      cap before axum's `Json` extractor allocates.
@@ -133,6 +149,16 @@ pub fn router_with_limits<S: StateView>(ctx: Arc<RpcContext<S>>, limits: RouterL
         .layer(tower_http::limit::RequestBodyLimitLayer::new(
             limits.max_request_body_bytes,
         ))
+        .layer(tower_http::timeout::TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            Duration::from_millis(limits.request_timeout_ms),
+        ))
+        .layer(
+            tower_http::cors::CorsLayer::new()
+                .allow_origin(tower_http::cors::Any)
+                .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
+                .allow_headers([axum::http::header::CONTENT_TYPE]),
+        )
         .with_state(ctx)
 }
 
@@ -184,6 +210,9 @@ async fn dispatch<S: StateView>(
         "gsx_getBlock" => methods::get_block(state, params).await,
         "gsx_getTransaction" => methods::get_transaction(state, params).await,
         "gsx_submitIntent" => methods::submit_intent(state, params).await,
+        "gsx_getL1StateRoot" => methods::get_l1_state_root(state, params).await,
+        "gsx_getL2StateRoot" => methods::get_l2_state_root(state, params).await,
+        "gsx_getForceIncludeRegistry" => methods::get_force_include_registry(state, params).await,
         unknown => Err(RpcError::MethodNotFound(unknown.into())),
     }
 }

@@ -40,6 +40,7 @@ fn vmem(id: u32, stake: Stake) -> ValidatorMember {
     ValidatorMember {
         id,
         stake_gsx: stake,
+        public_key_bytes: vec![id as u8; 32],
     }
 }
 

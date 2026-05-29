@@ -40,6 +40,9 @@ thiserror.workspace = true
 async-trait = "0.1"
 blake3.workspace = true
 
-# serde_json is a runtime dependency above (committed-history
-# checkpoint serialization, #256); it also backs the config
-# round-trip tests.
+# RpcL1Client: JSON-RPC calls against the L1 node. serde_json is already
+# declared as a runtime dependency above (committed-history checkpoint
+# serialization, #256; it also backs the config round-trip tests), so it
+# is not re-declared here.
+reqwest.workspace = true
+hex.workspace = true

@@ -91,6 +91,15 @@ resource "aws_route_table_association" "public" {
 #   message layer; the per-IP rate limit in gsx-rpc keeps abuse bounded.
 # - Metrics port (9093) intentionally NOT in this list — only the local
 #   CloudWatch agent reads it.
+#
+# SECURITY NOTE (audit M-RPC-1): exposing 9092 to 0.0.0.0/0 is the
+# devnet posture. Defence-in-depth layers at the application level:
+#   1. tower::timeout::TimeoutLayer (B2.2) — 30 s per-request wall-clock cap
+#   2. tower::limit::ConcurrencyLimitLayer (B2) — 64 concurrent requests
+#   3. tower_http::limit::RequestBodyLimitLayer (B2) — 1 MiB body cap
+#   4. per_ip::PerIpRateLimiter (B2.1) — 60-burst / 10 req/s token bucket
+# For production, replace this rule with the ALB SG (alb.tf) and bind
+# rpc_listen to 127.0.0.1 so only the ALB can reach the validator.
 resource "aws_security_group" "this" {
   name        = "gsx-devnet-${var.region_label}-sg"
   description = "GSX devnet - validator ingress"

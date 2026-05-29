@@ -37,9 +37,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{debug, info, warn};
 
-/// Domain separation tag for ML-DSA-65 signing of intents.
-/// MUST match `gsx_node::client::INTENT_DOMAIN_TAG` byte-for-byte.
-pub const INTENT_DOMAIN_TAG: &[u8] = b"GSX_INTENT_V1";
+/// Re-export the canonical domain tag from `gsx-execution`.
+pub use gsx_execution::INTENT_DOMAIN_TAG;
 
 /// Devnet faucet errors. The HTTP layer maps each variant to a status
 /// code in `main.rs`.
@@ -69,37 +68,25 @@ pub enum FaucetError {
     Rpc(#[from] gsx_client::Error),
 }
 
-/// Construct the canonical intent-signing digest. MUST match
-/// `gsx_node::client::intent_signing_digest`.
-///
-/// `digest = blake3( INTENT_DOMAIN_TAG || network_id_bytes ||
-///                   bincode(intent) )`.
+/// Compute the canonical intent-signing digest. Serializes the intent
+/// via bincode legacy and delegates to [`gsx_execution::intent_signing_digest`].
 pub fn intent_signing_digest(network_id: &str, intent: &Intent) -> Result<[u8; 32], FaucetError> {
     let intent_bytes = bincode::serde::encode_to_vec(intent, bincode::config::legacy())
         .map_err(|e| FaucetError::Encode(e.to_string()))?;
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(INTENT_DOMAIN_TAG);
-    hasher.update(network_id.as_bytes());
-    hasher.update(&intent_bytes);
-    Ok(*hasher.finalize().as_bytes())
+    Ok(gsx_execution::intent_signing_digest(
+        network_id,
+        &intent_bytes,
+    ))
 }
 
-/// Derive a 20-byte address from an ML-DSA-65 public key. MUST match
-/// the recipe used by the devnet genesis script
-/// (`scripts/devnet/gen-genesis.py`): `blake2b-32(pk)[:20]`.
+/// Derive a 20-byte address from an ML-DSA-65 public key.
+///
+/// `address = blake3(pk_bytes)[:20]`
+///
+/// Genesis scripts (`scripts/devnet/gen-genesis.py`, etc.) MUST use
+/// the same BLAKE3 recipe. Callers can also pass `--faucet-address`
+/// directly to bypass derivation.
 pub fn address_from_pubkey(pk: &PublicKey) -> [u8; 20] {
-    // Use blake3 truncated — matches the gen-genesis.py recipe
-    // (the script uses blake2b for compat with Python stdlib hashlib;
-    // both produce a hash of the same key; the address derivation
-    // is whatever genesis declared). For devnet we mirror the
-    // genesis script byte-for-byte; for the address itself the
-    // genesis MUST declare blake2b too. This helper exists so the
-    // faucet binary's address matches what the genesis manifest
-    // pre-balanced.
-    //
-    // NOTE: this helper is a CONVENIENCE — callers can pass the
-    // faucet's address directly via --faucet-address if they
-    // prefer not to rely on the recipe.
     let mut hasher = blake3::Hasher::new();
     hasher.update(pk.as_bytes());
     let h = hasher.finalize();
@@ -129,12 +116,12 @@ pub struct Faucet {
     drip_amount: u128,
     buckets: Mutex<HashMap<IpAddr, LeakyBucket>>,
     capacity: u64,
-    refill_per_sec: u64,
+    refill_per_hour: u64,
 }
 
 impl Faucet {
     /// Construct a faucet bound to a particular RPC URL + signing key.
-    /// `capacity` and `refill_per_sec` are the per-IP token-bucket
+    /// `capacity` and `refill_per_hour` are the per-IP token-bucket
     /// knobs (same algorithm as the RPC layer's per-IP limiter).
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -145,7 +132,7 @@ impl Faucet {
         network_id: String,
         drip_amount: u128,
         capacity: u64,
-        refill_per_sec: u64,
+        refill_per_hour: u64,
     ) -> Self {
         let signer_pubkey_hash = *blake3::hash(public_key.as_bytes()).as_bytes();
         Self {
@@ -158,7 +145,7 @@ impl Faucet {
             drip_amount,
             buckets: Mutex::new(HashMap::new()),
             capacity,
-            refill_per_sec,
+            refill_per_hour,
         }
     }
 
@@ -168,9 +155,9 @@ impl Faucet {
         let now_ms = now_ms();
         {
             let mut buckets = self.buckets.lock().expect("faucet bucket map poisoned");
-            let bucket = buckets
-                .entry(peer_ip)
-                .or_insert_with(|| LeakyBucket::new(self.capacity, self.refill_per_sec, now_ms));
+            let bucket = buckets.entry(peer_ip).or_insert_with(|| {
+                LeakyBucket::from_per_hour(self.capacity, self.refill_per_hour, now_ms)
+            });
             if let Err(retry_after_ms) = bucket.take_one(now_ms) {
                 debug!(?peer_ip, retry_after_ms, "faucet: rate limited");
                 return Err(FaucetError::RateLimited(retry_after_ms));
@@ -198,24 +185,30 @@ impl Faucet {
             return Err(FaucetError::Empty);
         }
 
-        // 3. Build + sign the Transfer.
+        // 3. Build + sign the Transfer. Serialize once — the same bytes
+        //    feed both the signing digest and submit_intent_raw.
         let intent = Intent::Transfer {
             from: self.faucet_address,
             to: address,
             amount: self.drip_amount,
         };
-        let digest = intent_signing_digest(&self.network_id, &intent)?;
-        let signature = mldsa::sign(&digest, &self.secret_key)
-            .map_err(|e| FaucetError::Sign(format!("{e:?}")))?;
         let intent_bytes = bincode::serde::encode_to_vec(&intent, bincode::config::legacy())
             .map_err(|e| FaucetError::Encode(e.to_string()))?;
+        let digest = gsx_execution::intent_signing_digest(&self.network_id, &intent_bytes);
+        let signature = mldsa::sign(&digest, &self.secret_key)
+            .map_err(|e| FaucetError::Sign(format!("{e:?}")))?;
 
         // 4. Submit. The validator's `verify_signed_intent` gate
         //    re-derives `signer_pubkey_hash` from genesis and accepts
         //    if the ML-DSA signature checks against it.
         let tx_hash = self
             .client
-            .submit_intent_raw(&intent_bytes, signature.as_bytes(), self.signer_pubkey_hash)
+            .submit_intent_raw(
+                &intent_bytes,
+                signature.as_bytes(),
+                self.signer_pubkey_hash,
+                None,
+            )
             .await
             .map_err(FaucetError::Rpc)?;
 

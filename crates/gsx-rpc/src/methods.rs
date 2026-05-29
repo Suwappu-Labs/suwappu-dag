@@ -209,6 +209,12 @@ struct SubmitIntentParams {
     signature: String,
     /// `blake3(public_key_bytes)`, 32 bytes hex.
     signer_pubkey_hash: String,
+    /// ML-DSA-65 public key bytes, hex-encoded. Required for open
+    /// signers (callers not in the Authority or Validator Ring).
+    /// Ring members may omit — their pubkey is resolved from the
+    /// registry via `signer_pubkey_hash`.
+    #[serde(default)]
+    signer_pubkey: Option<String>,
 }
 
 /// `gsx_submitIntent` — params `{intent: hex, signature: hex,
@@ -223,16 +229,20 @@ pub async fn submit_intent<S: StateView>(state: &S, params: &Value) -> Result<Va
         match params {
             Value::Object(_) => serde_json::from_value(params.clone())
                 .map_err(|e| RpcError::InvalidParams(e.to_string()))?,
-            Value::Array(arr) if arr.len() == 3 => SubmitIntentParams {
+            Value::Array(arr) if arr.len() == 3 || arr.len() == 4 => SubmitIntentParams {
                 intent: serde_json::from_value(arr[0].clone())
                     .map_err(|e| RpcError::InvalidParams(e.to_string()))?,
                 signature: serde_json::from_value(arr[1].clone())
                     .map_err(|e| RpcError::InvalidParams(e.to_string()))?,
                 signer_pubkey_hash: serde_json::from_value(arr[2].clone())
                     .map_err(|e| RpcError::InvalidParams(e.to_string()))?,
+                signer_pubkey: arr.get(3).map(|v| {
+                    serde_json::from_value(v.clone())
+                }).transpose()
+                    .map_err(|e| RpcError::InvalidParams(e.to_string()))?,
             },
             _ => return Err(RpcError::InvalidParams(
-                "expected `{intent, signature, signer_pubkey_hash}` (all hex) or 3-element array"
+                "expected `{intent, signature, signer_pubkey_hash, [signer_pubkey]}` (all hex) or 3-4 element array"
                     .into(),
             )),
         };
@@ -246,9 +256,17 @@ pub async fn submit_intent<S: StateView>(state: &S, params: &Value) -> Result<Va
             pkh_bytes.len()
         ))
     })?;
+    let signer_pubkey = p
+        .signer_pubkey
+        .as_deref()
+        .map(|s| decode_hex_field("signer_pubkey", s))
+        .transpose()?;
 
     use crate::context::SubmitIntentError;
-    match state.submit_intent(intent_bytes, signature, pkh).await {
+    match state
+        .submit_intent(intent_bytes, signature, pkh, signer_pubkey)
+        .await
+    {
         Ok(hash) => Ok(serde_json::json!({
             "tx_hash": format!("0x{}", hex::encode(hash)),
         })),
@@ -256,7 +274,7 @@ pub async fn submit_intent<S: StateView>(state: &S, params: &Value) -> Result<Va
             Err(RpcError::InvalidParams(format!("intent decode: {}", msg)))
         }
         Err(SubmitIntentError::UnknownSigner) => Err(RpcError::UnknownSigner(
-            "signer_pubkey_hash not in Authority Ring".into(),
+            "signer not in Authority/Validator Ring and no valid signer_pubkey provided".into(),
         )),
         Err(SubmitIntentError::BadSignature) => {
             Err(RpcError::BadSignature("ML-DSA-65 verify failed".into()))
@@ -264,7 +282,84 @@ pub async fn submit_intent<S: StateView>(state: &S, params: &Value) -> Result<Va
         Err(SubmitIntentError::EnqueueFull) => Err(RpcError::EnqueueFull(
             "intent channel full or closed; retry".into(),
         )),
+        Err(SubmitIntentError::Unauthorized) => Err(RpcError::Unauthorized(
+            "signer address does not match intent sender".into(),
+        )),
     }
+}
+
+/// `gsx_getL1StateRoot` — no params; returns `{ state_root: "0x..." }`.
+/// The L2 sequencer daemon reads this as `prev_l1_state_root` for
+/// each batch header, binding the L2 proof to a specific L1 height.
+pub async fn get_l1_state_root<S: StateView>(state: &S, params: &Value) -> Result<Value, RpcError> {
+    expect_no_params(params)?;
+    let root = state.l1_state_root().await;
+    Ok(serde_json::json!({
+        "state_root": format!("0x{}", hex::encode(root)),
+    }))
+}
+
+#[derive(Deserialize)]
+struct GetL2StateRootParams {
+    /// BLAKE3("gsx-l2-chain-" || chain_id), hex-encoded. Identifies
+    /// which L2 chain's state root to return.
+    l2_chain_id_hash: String,
+}
+
+/// `gsx_getL2StateRoot` — params `{ l2_chain_id_hash: hex }` or
+/// positional `[hex]`; returns `{ state_root: "0x..." }`. Returns
+/// all-zeros if no L2 state-root commit has landed for this chain.
+pub async fn get_l2_state_root<S: StateView>(state: &S, params: &Value) -> Result<Value, RpcError> {
+    let p: GetL2StateRootParams = match params {
+        Value::Object(_) => serde_json::from_value(params.clone())
+            .map_err(|e| RpcError::InvalidParams(e.to_string()))?,
+        Value::Array(arr) if arr.len() == 1 => {
+            let h: String = serde_json::from_value(arr[0].clone())
+                .map_err(|e| RpcError::InvalidParams(e.to_string()))?;
+            GetL2StateRootParams {
+                l2_chain_id_hash: h,
+            }
+        }
+        _ => {
+            return Err(RpcError::InvalidParams(
+                "expected `{l2_chain_id_hash: hex}` or `[hex]`".into(),
+            ))
+        }
+    };
+
+    let trimmed = p
+        .l2_chain_id_hash
+        .strip_prefix("0x")
+        .or_else(|| p.l2_chain_id_hash.strip_prefix("0X"))
+        .unwrap_or(&p.l2_chain_id_hash);
+    let bytes = hex::decode(trimmed)
+        .map_err(|e| RpcError::InvalidParams(format!("l2_chain_id_hash hex: {}", e)))?;
+    let hash: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
+        RpcError::InvalidParams(format!(
+            "l2_chain_id_hash must be 32 bytes, got {}",
+            bytes.len()
+        ))
+    })?;
+
+    let root = state.l2_state_root(hash).await;
+    Ok(serde_json::json!({
+        "state_root": format!("0x{}", hex::encode(root)),
+    }))
+}
+
+/// `gsx_getForceIncludeRegistry` — no params; returns `{ data: "0x..." }`.
+/// The L2 sequencer daemon decodes the raw bytes via
+/// `gsx_execution::force_include::decode_map` to discover pending
+/// force-include obligations.
+pub async fn get_force_include_registry<S: StateView>(
+    state: &S,
+    params: &Value,
+) -> Result<Value, RpcError> {
+    expect_no_params(params)?;
+    let bytes = state.force_include_registry_bytes().await;
+    Ok(serde_json::json!({
+        "data": format!("0x{}", hex::encode(bytes)),
+    }))
 }
 
 /// Strip optional `0x` / `0X` prefix and hex-decode. Used by every

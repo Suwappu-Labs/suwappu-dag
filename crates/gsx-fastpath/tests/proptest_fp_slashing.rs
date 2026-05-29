@@ -34,7 +34,7 @@ fn build_tx(object_seed: u8, lineage_round: u64, payload_seed: u8) -> FastPathTx
         object: OwnedObjectId([object_seed; 32]),
         owner: OwnerAddress([0xAA; 32]),
         nonce: 0,
-        lineage: CertHash([0xBB; 32]),
+        lineage: CertHash::from([0xBB; 32]),
         lineage_round,
         payload_digest: [payload_seed; 32],
     }
@@ -83,7 +83,7 @@ proptest! {
             round: lineage_round + conflict_offset as u64,
             object: tx.object,
             payload_digest: [conflict_payload; 32],
-            lineage: CertHash([0xCC; 32]),
+            lineage: CertHash::from([0xCC; 32]),
         }];
 
         // Detection emits a proof.
@@ -136,7 +136,7 @@ proptest! {
             round: lineage_round + 1,
             object: OwnedObjectId([object_seed.wrapping_add(1); 32]),
             payload_digest: [unrelated_payload; 32],
-            lineage: CertHash([0xCC; 32]),
+            lineage: CertHash::from([0xCC; 32]),
         }];
 
         prop_assert!(detect_fast_path_equivocation(&cert, &main_lane).is_none());
@@ -163,7 +163,7 @@ proptest! {
             round: lineage_round + 1,
             object: tx.object,
             payload_digest: [conflict_payload; 32],
-            lineage: CertHash([0xCC; 32]),
+            lineage: CertHash::from([0xCC; 32]),
         }];
         let proof = detect_fast_path_equivocation(&cert, &main_lane).unwrap();
 
@@ -200,7 +200,7 @@ proptest! {
             round: lineage_round + 1,
             object: tx.object,
             payload_digest: [conflict_payload; 32],
-            lineage: CertHash([0xCC; 32]),
+            lineage: CertHash::from([0xCC; 32]),
         }];
         let proof = detect_fast_path_equivocation(&cert, &main_lane).unwrap();
 

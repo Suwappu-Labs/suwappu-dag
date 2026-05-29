@@ -40,5 +40,5 @@ pub use equivocation::{
 pub use error::ConsensusError;
 pub use joint::{
     authority_equivocators, joint_commit, validator_double_vote_stake, validator_quorum_met,
-    validator_quorum_threshold, voting_stake, Stake, StakeTable, ValidatorId, Vote,
+    validator_quorum_threshold, vote_digest, voting_stake, Stake, StakeTable, ValidatorId, Vote,
 };

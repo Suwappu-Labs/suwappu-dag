@@ -22,6 +22,8 @@ use gsx_consensus::{AuthorityId, CertHash, Certificate, DagStore, Round};
 use proptest::prelude::*;
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 
+const NET: &str = "test";
+
 /// Build a valid random DAG: `n_rounds` rounds, `n_authorities` authors
 /// per round. Each non-genesis certificate references *all* certificates
 /// of the previous round as parents (a fully-connected DAG, the densest
@@ -46,7 +48,7 @@ fn build_dag(
             p
         };
         let cert = Certificate::genesis(a as AuthorityId, payload);
-        round_0.push(cert.hash());
+        round_0.push(cert.hash(NET));
         all_certs.push(cert);
     }
     hashes_by_round.push(round_0);
@@ -69,8 +71,9 @@ fn build_dag(
                 round: r as Round,
                 parents: parents.clone(),
                 payload_digest: payload,
+                signature: vec![],
             };
-            this_round.push(cert.hash());
+            this_round.push(cert.hash(NET));
             all_certs.push(cert);
         }
         hashes_by_round.push(this_round);
@@ -123,11 +126,11 @@ proptest! {
 
         let mut store_a = DagStore::new();
         for c in insertion_a {
-            store_a.insert(c).expect("valid topo insertion must succeed");
+            store_a.insert(c, NET).expect("valid topo insertion must succeed");
         }
         let mut store_b = DagStore::new();
         for c in insertion_b {
-            store_b.insert(c).expect("valid topo insertion must succeed");
+            store_b.insert(c, NET).expect("valid topo insertion must succeed");
         }
 
         prop_assert_eq!(store_a.linearize(), store_b.linearize());
@@ -146,7 +149,7 @@ proptest! {
         let insertion = topo_sorted(certs.clone(), insert_seed);
         let mut store = DagStore::new();
         for c in insertion {
-            store.insert(c).unwrap();
+            store.insert(c, NET).unwrap();
         }
 
         let order = store.linearize();
@@ -157,7 +160,7 @@ proptest! {
             .collect();
 
         for cert in &certs {
-            let child_pos = position[&cert.hash()];
+            let child_pos = position[&cert.hash(NET)];
             for parent_hash in &cert.parents {
                 let parent_pos = position[parent_hash];
                 prop_assert!(
@@ -181,14 +184,14 @@ proptest! {
         let insertion = topo_sorted(certs.clone(), insert_seed);
         let mut store = DagStore::new();
         for c in insertion {
-            store.insert(c).unwrap();
+            store.insert(c, NET).unwrap();
         }
 
         let order = store.linearize();
         prop_assert_eq!(order.len(), certs.len());
 
         let order_set: HashSet<CertHash> = order.into_iter().collect();
-        let expected: HashSet<CertHash> = certs.iter().map(|c| c.hash()).collect();
+        let expected: HashSet<CertHash> = certs.iter().map(|c| c.hash(NET)).collect();
         prop_assert_eq!(order_set, expected);
     }
 
@@ -204,7 +207,7 @@ proptest! {
         let insertion = topo_sorted(certs.clone(), insert_seed);
         let mut store = DagStore::new();
         for c in insertion {
-            store.insert(c).unwrap();
+            store.insert(c, NET).unwrap();
         }
 
         let order = store.linearize();

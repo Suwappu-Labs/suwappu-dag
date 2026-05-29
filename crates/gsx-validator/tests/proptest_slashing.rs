@@ -33,6 +33,8 @@ use gsx_validator::{
 };
 use proptest::prelude::*;
 
+const NET: &str = "test";
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 256,
@@ -66,12 +68,12 @@ proptest! {
             let mut p = [0u8; 32];
             p[0] = i as u8;
             p[1] = 0x01;
-            dag.insert(Certificate::genesis(i as AuthorityId, p)).unwrap();
+            dag.insert(Certificate::genesis(i as AuthorityId, p), NET).unwrap();
         }
         let mut p2 = [0u8; 32];
         p2[0] = equivocator as u8;
         p2[1] = 0x02;
-        dag.insert(Certificate::genesis(equivocator as AuthorityId, p2)).unwrap();
+        dag.insert(Certificate::genesis(equivocator as AuthorityId, p2), NET).unwrap();
 
         // Detection: exactly one proof, accusing the equivocator.
         let proofs = detect_authority_equivocation(&dag);
@@ -103,16 +105,17 @@ proptest! {
             registry.admit(ValidatorMember {
                 id: i,
                 stake_gsx: stake,
+                public_key_bytes: vec![i as u8; 32],
             }).unwrap();
         }
 
-        let cand_a = CertHash([0xAA; 32]);
-        let cand_b = CertHash([0xBB; 32]);
+        let cand_a = CertHash::from([0xAA; 32]);
+        let cand_b = CertHash::from([0xBB; 32]);
         let mut votes = Vec::new();
         for i in 0..n_validators {
-            votes.push(Vote { validator: i, candidate: cand_a });
+            votes.push(Vote { validator: i, candidate: cand_a, signature: vec![] });
             if i == double_voter {
-                votes.push(Vote { validator: i, candidate: cand_b });
+                votes.push(Vote { validator: i, candidate: cand_b, signature: vec![] });
             }
         }
 
@@ -137,13 +140,13 @@ proptest! {
         for i in 0..n_authorities {
             let mut p = [0u8; 32];
             p[0] = i as u8;
-            dag.insert(Certificate::genesis(i as AuthorityId, p)).unwrap();
+            dag.insert(Certificate::genesis(i as AuthorityId, p), NET).unwrap();
         }
         prop_assert!(detect_authority_equivocation(&dag).is_empty());
 
-        let cand = CertHash([0xCC; 32]);
+        let cand = CertHash::from([0xCC; 32]);
         let votes: Vec<Vote> = (0..n_validators)
-            .map(|i| Vote { validator: i, candidate: cand })
+            .map(|i| Vote { validator: i, candidate: cand, signature: vec![] })
             .collect();
         prop_assert!(detect_validator_double_vote(&votes).is_empty());
     }
@@ -175,6 +178,7 @@ proptest! {
             val_reg.admit(ValidatorMember {
                 id: i,
                 stake_gsx: VALIDATOR_STAKE_THRESHOLD_GSX * 10,
+                public_key_bytes: vec![i as u8; 32],
             }).unwrap();
         }
         let first = slash_validator_double_vote(&mut val_reg, target_v).unwrap();

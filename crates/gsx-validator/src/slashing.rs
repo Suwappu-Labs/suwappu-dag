@@ -56,19 +56,22 @@ pub fn slash_validator(
     voter: ValidatorId,
     severity: SlashSeverity,
 ) -> Option<ValidatorSlash> {
-    let current = registry.get(voter)?.stake_gsx;
+    let member = registry.get(voter)?;
+    let current = member.stake_gsx;
+    let pk_bytes = member.public_key_bytes.clone();
     let percent = severity.percent() as Stake;
     let stake_lost = current * percent / 100;
     let remaining = current - stake_lost;
 
     // Update the stake in-place. We remove + readmit because the
     // registry exposes members through &; this keeps the type internal
-    // invariants intact.
+    // invariants intact. The public key is preserved across re-admission.
     registry.remove(voter);
     if remaining > 0 {
         let _ = registry.admit(crate::ValidatorMember {
             id: voter,
             stake_gsx: remaining,
+            public_key_bytes: pk_bytes,
         });
     }
     Some(ValidatorSlash {
@@ -95,6 +98,7 @@ mod tests {
         ValidatorMember {
             id,
             stake_gsx: stake,
+            public_key_bytes: vec![id as u8; 32],
         }
     }
 

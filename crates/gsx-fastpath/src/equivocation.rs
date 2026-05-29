@@ -74,7 +74,7 @@ mod tests {
                 object,
                 owner: OwnerAddress([0; 32]),
                 nonce: 0,
-                lineage: CertHash([0; 32]),
+                lineage: CertHash::from([0; 32]),
                 lineage_round: round,
                 payload_digest: payload,
             },
@@ -96,7 +96,7 @@ mod tests {
             round: 12,
             object: obj,
             payload_digest: [0xB; 32],
-            lineage: CertHash([0; 32]),
+            lineage: CertHash::from([0; 32]),
         }];
         let proof = detect_fast_path_equivocation(&cert, &ml).unwrap();
         assert_eq!(proof.cert.tx.lineage_round, 10);
@@ -112,7 +112,7 @@ mod tests {
             round: 15,
             object: obj,
             payload_digest: [0xB; 32],
-            lineage: CertHash([0; 32]),
+            lineage: CertHash::from([0; 32]),
         }];
         assert!(detect_fast_path_equivocation(&cert, &ml).is_none());
     }

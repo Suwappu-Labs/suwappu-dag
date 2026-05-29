@@ -17,6 +17,9 @@
 //! - `gsx_getBalance { address: hex }`
 //! - `gsx_getBlock { round }`
 //! - `gsx_getTransaction { tx_hash: hex }`
+//! - `gsx_getL1StateRoot`
+//! - `gsx_getL2StateRoot { l2_chain_id_hash: hex }`
+//! - `gsx_getForceIncludeRegistry`
 //!
 //! Write:
 //! - `gsx_submitIntent { intent: hex, signature: hex, signer_pubkey_hash: hex }`

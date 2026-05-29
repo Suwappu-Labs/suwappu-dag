@@ -9,6 +9,7 @@
 
 use pqcrypto_mlkem::mlkem768;
 use pqcrypto_traits::kem::{Ciphertext as _, PublicKey as _, SecretKey as _, SharedSecret as _};
+use subtle::ConstantTimeEq;
 
 use crate::error::CryptoError;
 
@@ -17,16 +18,36 @@ use crate::error::CryptoError;
 pub struct PublicKey(Vec<u8>);
 
 /// ML-KEM-768 secret key.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `PartialEq` uses constant-time comparison via `subtle::ConstantTimeEq`
+/// to prevent timing side-channels (C6 hardening).
+#[derive(Debug, Clone)]
 pub struct SecretKey(Vec<u8>);
+
+impl PartialEq for SecretKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.ct_eq(&other.0).into()
+    }
+}
+impl Eq for SecretKey {}
 
 /// ML-KEM-768 ciphertext (the sealed session key on the wire).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ciphertext(Vec<u8>);
 
 /// ML-KEM-768 derived shared secret.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `PartialEq` uses constant-time comparison to prevent timing
+/// side-channels on shared secret values (C6 hardening).
+#[derive(Debug, Clone)]
 pub struct SharedSecret(Vec<u8>);
+
+impl PartialEq for SharedSecret {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.ct_eq(&other.0).into()
+    }
+}
+impl Eq for SharedSecret {}
 
 impl PublicKey {
     /// Borrow the public-key bytes.

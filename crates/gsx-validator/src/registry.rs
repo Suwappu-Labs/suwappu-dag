@@ -57,6 +57,9 @@ pub struct ValidatorMember {
     /// Posted stake in GSX. Must be at least
     /// `VALIDATOR_STAKE_THRESHOLD_GSX` at admission time.
     pub stake_gsx: Stake,
+    /// ML-DSA-65 public key bytes for vote signature verification.
+    /// Mirrors `AuthorityMember::public_key_bytes`.
+    pub public_key_bytes: Vec<u8>,
 }
 
 /// Validator Ring registry.
@@ -131,9 +134,12 @@ impl ValidatorRegistry {
     /// two-thirds of total stake. Matches paper Definition 2 and the
     /// `gsx_consensus::validator_quorum_threshold` formula used by the
     /// joint-quorum AND-gate.
+    ///
+    /// C9 hardening: division-first formulation avoids the `2 * total`
+    /// multiplication that overflows u128.
     pub fn quorum_threshold_stake(&self) -> Stake {
         let total = self.total_stake();
-        (2 * total) / 3 + 1
+        (total / 3) * 2 + ((total % 3) * 2) / 3 + 1
     }
 }
 
@@ -145,6 +151,7 @@ mod tests {
         ValidatorMember {
             id,
             stake_gsx: stake,
+            public_key_bytes: vec![id as u8; 32],
         }
     }
 

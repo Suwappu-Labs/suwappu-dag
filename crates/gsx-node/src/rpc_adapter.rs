@@ -218,7 +218,7 @@ impl StateView for NodeStateView {
         }?;
         let block_intents = {
             let blocks = self.state.blocks.lock();
-            blocks.get(&cert_hash).map(|b| b.intents.clone())
+            blocks.get(&cert_hash).cloned()
         }?;
         // F2: recompute the per-intent blake3(bincode(intent)) hashes
         // so the block view is self-sufficient for indexers. This
@@ -236,7 +236,7 @@ impl StateView for NodeStateView {
             .collect();
         Some(BlockView {
             round,
-            cert_hash: format!("0x{}", hex::encode(cert_hash.0)),
+            cert_hash: format!("0x{}", hex::encode(cert_hash.as_bytes())),
             intents: block_intents.iter().map(intent_to_view).collect(),
             tx_hashes,
         })
@@ -252,14 +252,12 @@ impl StateView for NodeStateView {
         }?;
         let intent = {
             let blocks = self.state.blocks.lock();
-            blocks
-                .get(&cert_hash)
-                .and_then(|b| b.intents.get(index).cloned())
+            blocks.get(&cert_hash).and_then(|b| b.get(index).cloned())
         }?;
         Some(TransactionView {
             tx_hash: format!("0x{}", hex::encode(tx_hash)),
             round,
-            cert_hash: format!("0x{}", hex::encode(cert_hash.0)),
+            cert_hash: format!("0x{}", hex::encode(cert_hash.as_bytes())),
             index,
             intent: intent_to_view(&intent),
         })
@@ -270,6 +268,7 @@ impl StateView for NodeStateView {
         intent_bincode: Vec<u8>,
         signature: Vec<u8>,
         signer_pubkey_hash: [u8; 32],
+        signer_pubkey: Option<Vec<u8>>,
     ) -> Result<[u8; 32], SubmitIntentError> {
         // 1. Decode the bincode-serialized Intent. SDK clients build
         //    this exact form before signing, so we can reuse the same
@@ -278,18 +277,23 @@ impl StateView for NodeStateView {
             .map_err(|e| SubmitIntentError::BadIntentEncoding(e.to_string()))?;
 
         // 2. Verify the signature using the same gate the TCP wire uses.
+        //    Pass the original `intent_bincode` bytes so the digest is
+        //    computed over exactly what the client signed — no re-serialize.
         match verify_signed_intent(
             &self.state,
             &self.network_id,
             &intent,
+            &intent_bincode,
             &signature,
             &signer_pubkey_hash,
+            signer_pubkey.as_deref(),
         )
         .await
         {
             AuthOutcome::Ok => {}
             AuthOutcome::UnknownSigner => return Err(SubmitIntentError::UnknownSigner),
             AuthOutcome::BadSignature => return Err(SubmitIntentError::BadSignature),
+            AuthOutcome::Unauthorized => return Err(SubmitIntentError::Unauthorized),
         }
 
         // 3. Compute the canonical intent hash — same blake3 over the
@@ -319,6 +323,44 @@ impl StateView for NodeStateView {
             })?;
 
         Ok(intent_hash)
+    }
+
+    async fn l1_state_root(&self) -> [u8; 32] {
+        use gsx_execution::Substrate;
+        let inner = self.state.inner.lock().await;
+        inner.substrate.state_root()
+    }
+
+    async fn l2_state_root(&self, l2_chain_id_hash: [u8; 32]) -> [u8; 32] {
+        let inner = self.state.inner.lock().await;
+        let registry = inner.substrate.l2_registry();
+        // BTreeMap is sorted by (l2_chain_id_hash, batch_id). Range
+        // query for the matching chain, take the last entry (highest
+        // batch_id) = current state root.
+        use gsx_execution::l2_state::L2BatchKey;
+        registry
+            .state_roots
+            .range(
+                L2BatchKey {
+                    l2_chain_id_hash,
+                    batch_id: 0,
+                }..=L2BatchKey {
+                    l2_chain_id_hash,
+                    batch_id: u64::MAX,
+                },
+            )
+            .next_back()
+            .map(|(_, record)| record.state_root)
+            .unwrap_or([0u8; 32])
+    }
+
+    async fn force_include_registry_bytes(&self) -> Vec<u8> {
+        use gsx_execution::Substrate;
+        let inner = self.state.inner.lock().await;
+        inner
+            .substrate
+            .read_bytes(&gsx_execution::reserved::force_include_registry_address())
+            .unwrap_or_default()
     }
 
     fn subscribe_events(&self) -> broadcast::Receiver<EventView> {

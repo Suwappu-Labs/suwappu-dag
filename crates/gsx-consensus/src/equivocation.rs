@@ -24,7 +24,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    cert::{AuthorityId, CertHash, Round},
+    cert::{AuthorityId, CertHash, Certificate, Round},
     dag::DagStore,
     joint::{ValidatorId, Vote},
 };
@@ -32,11 +32,15 @@ use crate::{
 /// Cryptographically-verifiable proof that an Authority Node authored
 /// two distinct certificates at the same round.
 ///
-/// Phase-1 phase carries the two `CertHash` values; production wraps
-/// the original `Certificate` payloads plus their ML-DSA-65 signatures
-/// so a verifier without the local `DagStore` can independently
-/// reconstruct the proof.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Carries the full signed certificates so that any verifier —
+/// including one without access to the local `DagStore` — can
+/// independently confirm equivocation by:
+///
+/// 1. Verifying both ML-DSA-65 signatures against the author's pubkey.
+/// 2. Confirming `cert_a.author == cert_b.author` and
+///    `cert_a.round == cert_b.round`.
+/// 3. Confirming `cert_a.hash(network_id) != cert_b.hash(network_id)`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EquivocationProof {
     /// Equivocating Authority Node.
     pub author: AuthorityId,
@@ -46,11 +50,23 @@ pub struct EquivocationProof {
     pub cert_a: CertHash,
     /// The other distinct certificate hash. Always `cert_a != cert_b`.
     pub cert_b: CertHash,
+    /// Full signed certificate backing `cert_a`. Enables independent
+    /// verification without the local DAG.
+    pub cert_a_signed: Certificate,
+    /// Full signed certificate backing `cert_b`.
+    pub cert_b_signed: Certificate,
 }
 
 /// Cryptographically-verifiable proof that a Validator Ring member
 /// voted for two distinct candidates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// Carries the full signed votes so that any verifier can independently
+/// confirm the double-vote by:
+///
+/// 1. Verifying both ML-DSA-65 signatures against the voter's pubkey.
+/// 2. Confirming `vote_a.validator == vote_b.validator`.
+/// 3. Confirming `vote_a.candidate != vote_b.candidate`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ValidatorEquivocationProof {
     /// Double-voting validator.
     pub validator: ValidatorId,
@@ -58,6 +74,11 @@ pub struct ValidatorEquivocationProof {
     pub candidate_a: CertHash,
     /// The other distinct candidate. Always `candidate_a != candidate_b`.
     pub candidate_b: CertHash,
+    /// Full signed vote backing `candidate_a`. Enables independent
+    /// verification without the local vote set.
+    pub vote_a: Vote,
+    /// Full signed vote backing `candidate_b`.
+    pub vote_b: Vote,
 }
 
 /// Walk the DAG and return one proof per equivocating Authority. If an
@@ -77,11 +98,15 @@ pub fn detect_authority_equivocation(dag: &DagStore) -> Vec<EquivocationProof> {
     for ((author, round), mut hashes) in buckets {
         if hashes.len() >= 2 {
             hashes.sort();
+            let cert_a_signed = dag.get(&hashes[0]).expect("hash from bucket").clone();
+            let cert_b_signed = dag.get(&hashes[1]).expect("hash from bucket").clone();
             proofs.push(EquivocationProof {
                 author,
                 round,
                 cert_a: hashes[0],
                 cert_b: hashes[1],
+                cert_a_signed,
+                cert_b_signed,
             });
         }
     }
@@ -94,22 +119,24 @@ pub fn detect_authority_equivocation(dag: &DagStore) -> Vec<EquivocationProof> {
 /// *same* candidate is not flagged (duplicate votes are deduped by
 /// `voting_stake`). Only distinct candidates trigger a proof.
 pub fn detect_validator_double_vote(votes: &[Vote]) -> Vec<ValidatorEquivocationProof> {
-    // validator -> sorted vec of distinct candidate hashes
-    let mut buckets: BTreeMap<ValidatorId, Vec<CertHash>> = BTreeMap::new();
+    // validator -> vec of (candidate, first vote with that candidate)
+    let mut buckets: BTreeMap<ValidatorId, Vec<(CertHash, Vote)>> = BTreeMap::new();
     for v in votes {
         let entry = buckets.entry(v.validator).or_default();
-        if !entry.contains(&v.candidate) {
-            entry.push(v.candidate);
+        if !entry.iter().any(|(c, _)| *c == v.candidate) {
+            entry.push((v.candidate, v.clone()));
         }
     }
     let mut proofs = Vec::new();
     for (validator, mut candidates) in buckets {
         if candidates.len() >= 2 {
-            candidates.sort();
+            candidates.sort_by_key(|(c, _)| *c);
             proofs.push(ValidatorEquivocationProof {
                 validator,
-                candidate_a: candidates[0],
-                candidate_b: candidates[1],
+                candidate_a: candidates[0].0,
+                candidate_b: candidates[1].0,
+                vote_a: candidates[0].1.clone(),
+                vote_b: candidates[1].1.clone(),
             });
         }
     }
@@ -121,11 +148,14 @@ mod tests {
     use super::*;
     use crate::cert::Certificate;
 
+    const NET: &str = "test";
+
     #[test]
     fn honest_dag_yields_no_authority_proofs() {
         let mut dag = DagStore::new();
         for a in 0..5u32 {
-            dag.insert(Certificate::genesis(a, [a as u8; 32])).unwrap();
+            dag.insert(Certificate::genesis(a, [a as u8; 32]), NET)
+                .unwrap();
         }
         assert!(detect_authority_equivocation(&dag).is_empty());
     }
@@ -137,14 +167,14 @@ mod tests {
         // payload digest — distinct hashes, same (author, round).
         let c1 = Certificate::genesis(0, [0xA1; 32]);
         let c2 = Certificate::genesis(0, [0xB2; 32]);
-        let h1 = c1.hash();
-        let h2 = c2.hash();
-        dag.insert(c1).unwrap();
-        dag.insert(c2).unwrap();
+        let h1 = c1.hash(NET);
+        let h2 = c2.hash(NET);
+        dag.insert(c1, NET).unwrap();
+        dag.insert(c2, NET).unwrap();
 
         let proofs = detect_authority_equivocation(&dag);
         assert_eq!(proofs.len(), 1);
-        let p = proofs[0];
+        let p = &proofs[0];
         assert_eq!(p.author, 0);
         assert_eq!(p.round, 0);
         // Sorted; the canonical pair is (min, max) of the two hashes.
@@ -155,19 +185,22 @@ mod tests {
 
     #[test]
     fn honest_votes_yield_no_validator_proofs() {
-        let cand = CertHash([1; 32]);
+        let cand = CertHash::from([1; 32]);
         let votes = vec![
             Vote {
                 validator: 0,
                 candidate: cand,
+                signature: vec![],
             },
             Vote {
                 validator: 1,
                 candidate: cand,
+                signature: vec![],
             },
             Vote {
                 validator: 0,
                 candidate: cand,
+                signature: vec![],
             }, // duplicate, not double
         ];
         assert!(detect_validator_double_vote(&votes).is_empty());
@@ -175,24 +208,30 @@ mod tests {
 
     #[test]
     fn double_voter_produces_proof() {
-        let a = CertHash([1; 32]);
-        let b = CertHash([2; 32]);
+        let a = CertHash::from([1; 32]);
+        let b = CertHash::from([2; 32]);
         let votes = vec![
             Vote {
                 validator: 0,
                 candidate: a,
+                signature: vec![],
             },
             Vote {
                 validator: 0,
                 candidate: b,
+                signature: vec![],
             }, // double
             Vote {
                 validator: 1,
                 candidate: a,
+                signature: vec![],
             },
         ];
         let proofs = detect_validator_double_vote(&votes);
         assert_eq!(proofs.len(), 1);
-        assert_eq!(proofs[0].validator, 0);
+        let p = &proofs[0];
+        assert_eq!(p.validator, 0);
+        assert_eq!(p.vote_a.candidate, a);
+        assert_eq!(p.vote_b.candidate, b);
     }
 }

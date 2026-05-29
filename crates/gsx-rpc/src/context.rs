@@ -252,7 +252,27 @@ pub trait StateView: Send + Sync + 'static {
         intent_bincode: Vec<u8>,
         signature: Vec<u8>,
         signer_pubkey_hash: [u8; 32],
+        signer_pubkey: Option<Vec<u8>>,
     ) -> impl std::future::Future<Output = Result<[u8; 32], SubmitIntentError>> + Send;
+
+    /// Current L1 state root — the substrate's deterministic hash
+    /// over all committed state. Used by the L2 sequencer as
+    /// `prev_l1_state_root` in batch headers.
+    fn l1_state_root(&self) -> impl std::future::Future<Output = [u8; 32]> + Send;
+
+    /// Current L2 state root for a given chain (identified by
+    /// `l2_chain_id_hash`). Returns `[0u8; 32]` if no L2
+    /// state-root commit has landed for this chain yet.
+    fn l2_state_root(
+        &self,
+        l2_chain_id_hash: [u8; 32],
+    ) -> impl std::future::Future<Output = [u8; 32]> + Send;
+
+    /// Raw encoded bytes of the force-include obligation registry.
+    /// The L2 sequencer decodes via
+    /// `gsx_execution::force_include::decode_map`. Returns an empty
+    /// vec if no obligations are registered.
+    fn force_include_registry_bytes(&self) -> impl std::future::Future<Output = Vec<u8>> + Send;
 
     /// T6: subscribe to live events. The receiver gets every event
     /// emitted from this moment forward — no replay of historical
@@ -273,8 +293,8 @@ pub enum SubmitIntentError {
     /// Intent bytes failed bincode decoding into `gsx_execution::Intent`.
     /// Maps to `-32602 InvalidParams`.
     BadIntentEncoding(String),
-    /// `signer_pubkey_hash` is not in the active Authority Ring.
-    /// Maps to `-32001 UnknownSigner`.
+    /// `signer_pubkey_hash` is not in either the Authority Ring or
+    /// the Validator Ring. Maps to `-32001 UnknownSigner`.
     UnknownSigner,
     /// Signature failed ML-DSA-65 verification against the resolved
     /// pubkey. Maps to `-32002 BadSignature`.
@@ -282,6 +302,9 @@ pub enum SubmitIntentError {
     /// The daemon's intent channel is full / closed; the caller should
     /// retry. Maps to `-32003 EnqueueFull`.
     EnqueueFull,
+    /// Signature is valid but the signer's address does not match the
+    /// intent's sender field. Maps to `-32004 Unauthorized`.
+    Unauthorized,
 }
 
 /// Concrete context handle passed into the router. Wraps an

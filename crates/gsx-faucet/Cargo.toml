@@ -21,10 +21,8 @@ path = "src/main.rs"
 # JSON-RPC + sign path. We deliberately don't depend on `gsx-node`
 # (the full validator daemon) — it pulls in gsxdb-bridge + the entire
 # consensus stack. The faucet only needs to (a) bincode an Intent,
-# (b) compute the canonical signing digest, (c) ML-DSA-sign it,
-# (d) submit_intent_raw via the SDK. The digest recipe is reproduced
-# inline (see src/lib.rs::intent_signing_digest) so this crate's dep
-# tree stays minimal.
+# (b) compute the canonical signing digest via gsx-execution, (c)
+# ML-DSA-sign it, (d) submit_intent_raw via the SDK.
 gsx-client = { workspace = true }
 gsx-crypto = { workspace = true }
 gsx-execution = { workspace = true }

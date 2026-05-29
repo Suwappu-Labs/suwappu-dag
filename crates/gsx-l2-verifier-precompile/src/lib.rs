@@ -72,8 +72,9 @@ pub mod public_inputs {
     /// Offset of `range_vk_commitment` (32 bytes — embedded per
     /// the op-succinct "multiBlockVKey" trick).
     pub const RANGE_VK_COMMITMENT_OFFSET: usize = 112;
-    /// Offset of `prev_l1_state_root` (32 bytes — bound to the
-    /// L1 state via one in-circuit SHA3-256).
+    /// Offset of `prev_l1_state_root` (32 bytes — L1 BLAKE3
+    /// state root at `l1_anchor_height`; on-chain verification
+    /// of this anchor deferred to Phase 2.1, #104).
     pub const PREV_L1_STATE_ROOT_OFFSET: usize = 144;
     /// Offset of `l2_chain_id_hash` (32 bytes — multi-L2
     /// namespacing).

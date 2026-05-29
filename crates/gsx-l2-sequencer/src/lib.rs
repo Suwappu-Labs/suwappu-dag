@@ -245,9 +245,12 @@ pub struct BatchHeader {
     /// proof's public values; the L1 verifier checks against
     /// the chain-state pinned value.
     pub range_vk_commitment: [u8; 32],
-    /// L1 BLAKE3 state root at `l1_anchor_height`. Bound into
-    /// the L2 proof via one in-circuit SHA3-256 per the Track
-    /// G L1↔L2 binding pattern.
+    /// L1 BLAKE3 state root at `l1_anchor_height`. The L1
+    /// substrate computes this via `BLAKE3("GSX-STATE-ROOT-V1"
+    /// || balances || bytes_state)`. The ZK circuit binds this
+    /// value into the proof's public inputs at offset 144;
+    /// on-chain Solidity verification of this binding is
+    /// deferred to Phase 2.1 (SP1 prover integration, #104).
     pub prev_l1_state_root: [u8; 32],
     /// BLAKE3("gsx-l2-chain-" || chain_id) for multi-L2
     /// namespacing per IQ-006.

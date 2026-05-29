@@ -131,18 +131,6 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // Convert bucket refill from per-hour (operator-friendly) to
-    // per-sec (LeakyBucket's internal unit). Round up so we don't
-    // silently throttle harder than the operator asked.
-    let refill_per_sec = ((args.bucket_refill_per_hour as f64) / 3600.0).ceil() as u64;
-    if refill_per_sec == 0 {
-        warn!(
-            "bucket refill rounds to 0 tokens/sec; raising to 1 — set \
-             --bucket-refill-per-hour ≥ 3600 to avoid this."
-        );
-    }
-    let refill_per_sec = refill_per_sec.max(1);
-
     let faucet = Arc::new(Faucet::new(
         args.rpc_url.clone(),
         secret_key,
@@ -151,7 +139,7 @@ async fn main() -> anyhow::Result<()> {
         args.network_id.clone(),
         args.drip_amount,
         args.bucket_capacity,
-        refill_per_sec,
+        args.bucket_refill_per_hour,
     ));
 
     info!(

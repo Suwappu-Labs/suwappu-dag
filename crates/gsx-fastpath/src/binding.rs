@@ -75,7 +75,7 @@ mod tests {
                 object,
                 owner: OwnerAddress([0; 32]),
                 nonce: 0,
-                lineage: CertHash([0; 32]),
+                lineage: CertHash::from([0; 32]),
                 lineage_round: round,
                 payload_digest: payload,
             },
@@ -103,7 +103,7 @@ mod tests {
             round: 12,
             object: obj,
             payload_digest: payload,
-            lineage: CertHash([0; 32]),
+            lineage: CertHash::from([0; 32]),
         }];
         assert!(is_main_lane_consistent(&cert, &ml));
     }
@@ -116,7 +116,7 @@ mod tests {
             round: 12,
             object: obj,
             payload_digest: [0xB; 32], // different payload
-            lineage: CertHash([0; 32]),
+            lineage: CertHash::from([0; 32]),
         }];
         assert!(!is_main_lane_consistent(&cert, &ml));
     }
@@ -130,7 +130,7 @@ mod tests {
             round: 15,
             object: obj,
             payload_digest: [0xB; 32],
-            lineage: CertHash([0; 32]),
+            lineage: CertHash::from([0; 32]),
         }];
         assert!(is_main_lane_consistent(&cert, &ml));
     }
@@ -142,7 +142,7 @@ mod tests {
             round: 12,
             object: OwnedObjectId([2; 32]), // different object
             payload_digest: [0xB; 32],
-            lineage: CertHash([0; 32]),
+            lineage: CertHash::from([0; 32]),
         }];
         assert!(is_main_lane_consistent(&cert, &ml));
     }

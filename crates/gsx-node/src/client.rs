@@ -21,9 +21,11 @@
 //!
 //! ## Auth — ML-DSA-65 (Paper §3.3, Issue #28)
 //!
-//! `CLIENT_WIRE_VERSION` is bumped to **2**: every submission carries a
-//! detached ML-DSA-65 signature and the blake3 hash of the signing
-//! public key. The signing payload binds:
+//! `CLIENT_WIRE_VERSION` is bumped to **3**: wire-version 2 added
+//! ML-DSA-65 signature enforcement; wire-version 3 (Task 5) adds the
+//! optional `signer_pubkey` field for open signers. Every submission
+//! carries a detached ML-DSA-65 signature and the blake3 hash of the
+//! signing public key. The signing payload binds:
 //!
 //! ```text
 //! blake3( b"GSX_INTENT_V1" || network_id_bytes || bincode(intent) )
@@ -35,11 +37,19 @@
 //! - `bincode(intent)` — canonical serialization of the intent.
 //!
 //! The signer is resolved by looking up `signer_pubkey_hash` (=
-//! `blake3(pubkey_bytes)`) in the seated `AuthorityRegistry`. The
-//! Validator-Ring registry does NOT carry pubkey material today
-//! (`ValidatorMember` lacks the field), so for Phase 2.6 only seated
-//! Authority Ring members may submit. Extending this to validator-ring
-//! submitters is tracked as a follow-up.
+//! `blake3(pubkey_bytes)`) against both the seated `AuthorityRegistry`
+//! and the `ValidatorRegistry`. A match in either ring allows
+//! submission — the signer's public key is recovered from the matching
+//! registry entry and used for ML-DSA-65 signature verification.
+//!
+//! **Open signer path (Task 5):** if the hash is NOT in either ring but
+//! the submission carries the full `signer_pubkey` bytes, the verifier
+//! falls through to an open-signer path: `blake3(signer_pubkey) ==
+//! signer_pubkey_hash` is checked, then ML-DSA-65 verify runs against
+//! the provided key. This lets ordinary users submit `Transfer`,
+//! `Delegate`, and other user-tier intents without ring membership.
+//! Governance intents (`AdmitAuthority`, `EjectAuthority`, etc.)
+//! require ring membership and reject open signers.
 //!
 //! Authority-management intents (`AdmitAuthority`, `ExitAuthority`,
 //! `EjectAuthority`): for Phase 2.6 these accept ANY one valid signature
@@ -71,43 +81,38 @@ use crate::{
     events::{Event, EventLog, Lane},
 };
 
-/// Client wire protocol version. Bumped from 1 → 2 in Phase 2.6 (Issue
-/// #28) when ML-DSA signature enforcement landed. The version is not
-/// exchanged on the wire today — bincode decode failure is the signal —
-/// but is documented here so a future framed-handshake version exchange
-/// has the canonical value to use.
-pub const CLIENT_WIRE_VERSION: u32 = 2;
+/// Client wire protocol version. 1 → 2 in Phase 2.6 (Issue #28) when
+/// ML-DSA signature enforcement landed. 2 → 3 in Task 5 when the
+/// optional `signer_pubkey` field was added for open signers. The
+/// version is not exchanged on the wire today — bincode decode failure
+/// is the signal — but is documented here so a future framed-handshake
+/// version exchange has the canonical value to use.
+pub const CLIENT_WIRE_VERSION: u32 = 3;
 
-/// Domain-separation tag mixed into every signed intent payload. Bound
-/// alongside the genesis `network_id` and the bincoded intent to bind
-/// the signature to this protocol and this network.
-pub const INTENT_DOMAIN_TAG: &[u8] = b"GSX_INTENT_V1";
+/// Re-export the canonical domain tag from `gsx-execution`.
+pub use gsx_execution::INTENT_DOMAIN_TAG;
 
 /// Compute the canonical signing digest for an intent under `network_id`.
 ///
-/// `digest = blake3( INTENT_DOMAIN_TAG || network_id_bytes || bincode(intent) )`.
-///
-/// Both submitter and verifier MUST compute the digest the same way;
-/// any divergence rejects every signature.
+/// Serializes the intent via `crate::codec::encode` (bincode legacy) and
+/// delegates to [`gsx_execution::intent_signing_digest`].
 pub fn intent_signing_digest(network_id: &str, intent: &Intent) -> [u8; 32] {
     let intent_bytes = crate::codec::encode(intent).expect("intent serialize");
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(INTENT_DOMAIN_TAG);
-    hasher.update(network_id.as_bytes());
-    hasher.update(&intent_bytes);
-    *hasher.finalize().as_bytes()
+    gsx_execution::intent_signing_digest(network_id, &intent_bytes)
 }
 
 /// Compute the blake3 hash of an ML-DSA public key — used as the
 /// `signer_pubkey_hash` on the client wire. The validator side resolves
-/// the hash against the seated Authority Ring to recover the public key.
+/// the hash against the Authority Ring or Validator Ring to recover the
+/// public key.
 pub fn signer_pubkey_hash(pubkey_bytes: &[u8]) -> [u8; 32] {
     *blake3::hash(pubkey_bytes).as_bytes()
 }
 
-/// Client → validator messages. **Wire-version 2 (Issue #28):** every
-/// submission carries an ML-DSA-65 signature and the blake3 hash of the
-/// signing public key.
+/// Client → validator messages. **Wire-version 3 (Task 5):** adds the
+/// optional `signer_pubkey` field for open-signer submission. Ring
+/// members omit it (the node resolves the key from the registry); open
+/// signers provide it so the node can verify without ring membership.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ClientMessage {
     /// Submit one intent for inclusion in the next block.
@@ -124,6 +129,12 @@ pub enum ClientMessage {
         /// the seated `AuthorityRegistry` to recover the verifier
         /// public key.
         signer_pubkey_hash: [u8; 32],
+        /// Full ML-DSA-65 public key bytes (1,952 B). Required for
+        /// open signers (not in any ring); ring members may omit.
+        /// When present, the node verifies `blake3(signer_pubkey)
+        /// == signer_pubkey_hash` before using the key.
+        #[serde(default)]
+        signer_pubkey: Option<Vec<u8>>,
     },
     /// Submit many intents in a single roundtrip (DAG-S29.2). Each
     /// intent carries its own signature so a single batch can mix
@@ -143,6 +154,10 @@ pub enum ClientMessage {
         /// bytes. A batch is one-signer for now; per-intent signers
         /// can be added when wallets multiplex.
         signer_pubkey_hash: [u8; 32],
+        /// Full ML-DSA-65 public key bytes. Same semantics as
+        /// `Submit::signer_pubkey`.
+        #[serde(default)]
+        signer_pubkey: Option<Vec<u8>>,
     },
     /// No-op liveness probe.
     Ping(u64),
@@ -311,7 +326,7 @@ pub(crate) async fn run(
 }
 
 /// Outcome of looking up + verifying a (`signer_pubkey_hash`, `signature`)
-/// pair against the seated Authority Ring. Bumped from private to
+/// pair against the seated Authority Ring and Validator Ring. Bumped from private to
 /// `pub(crate)` in T2 so the in-crate `rpc_adapter` reuses the exact
 /// gate the TCP wire uses — two ingress wires sharing one verify
 /// function means a signed payload accepted by one is also accepted
@@ -319,47 +334,155 @@ pub(crate) async fn run(
 /// `pub(crate)`: exposing `verify_signed_intent` to external crates
 /// would require exporting the daemon's whole state shape.
 pub(crate) enum AuthOutcome {
-    /// Signer resolved AND signature verified.
+    /// Signer resolved AND signature verified AND authorized for this intent.
     Ok,
-    /// `signer_pubkey_hash` does not match any seated Authority member.
+    /// `signer_pubkey_hash` does not match any seated Authority or Validator member.
     UnknownSigner,
     /// Signer resolved but the signature failed ML-DSA verification.
     BadSignature,
+    /// Signature is valid but the signer's derived address does not
+    /// match the intent's sender field (e.g. `Transfer::from`).
+    Unauthorized,
 }
 
-/// Resolve a `signer_pubkey_hash` against the seated Authority Ring and
-/// verify the detached ML-DSA-65 signature over the intent's signing
-/// digest. The Validator Ring registry isn't consulted because
-/// `ValidatorMember` doesn't yet carry pubkey material — extending the
-/// auth surface to validator-ring submitters is tracked as a follow-up
-/// (Issue #28 discussion).
+/// Extract the sender address from a user-tier intent, if it has one.
+/// Governance intents return `None` (authorization is ring membership,
+/// not address matching).
+fn intent_sender_address(intent: &Intent) -> Option<[u8; 20]> {
+    match intent {
+        Intent::Transfer { from, .. }
+        | Intent::Delegate { from, .. }
+        | Intent::UndelegateBegin { from, .. }
+        | Intent::UndelegateClaim { from, .. }
+        | Intent::DepositSequencerBond { from, .. }
+        | Intent::DepositSafetyBond { from, .. }
+        | Intent::DepositAuthorityStake { from, .. }
+        | Intent::DepositValidatorStake { from, .. } => Some(*from),
+        Intent::L1Lock { user_address, .. } => Some(*user_address),
+        Intent::L2ForceInclude { submitter, .. } => Some(*submitter),
+        _ => None,
+    }
+}
+
+/// `true` if the intent is a governance / protocol-level operation that
+/// requires the signer to be a seated Authority or Validator Ring
+/// member. User-tier intents (`Transfer`, `Delegate`, etc.) return
+/// `false` and are open to any signer with a valid ML-DSA-65 key.
+fn intent_requires_ring_membership(intent: &Intent) -> bool {
+    // Full `match` (not `matches!`) so the compiler emits an error when
+    // a new Intent variant is added without being classified here.
+    // Default-open would be a security hole — new governance intents
+    // silently accepting open signers — so every variant is explicit.
+    match intent {
+        // ── Governance / protocol intents — ring-only ──────────────
+        Intent::AdmitAuthority { .. }
+        | Intent::ExitAuthority { .. }
+        | Intent::EjectAuthority { .. }
+        | Intent::AdmitValidator { .. }
+        | Intent::ExitValidator { .. }
+        | Intent::EjectValidator { .. }
+        | Intent::GenesisAllocation { .. }
+        | Intent::MintInflation { .. }
+        | Intent::DistributeRewards { .. }
+        | Intent::DistributeSlashedFunds { .. }
+        | Intent::SetL2VerifyingKey { .. }
+        | Intent::SlashSequencer { .. }
+        | Intent::EjectSequencer { .. }
+        | Intent::MarkForceIncludeHonored { .. }
+        | Intent::DisburseTreasury { .. }
+        | Intent::ClaimInsurance { .. }
+        | Intent::PostL2DA { .. }
+        | Intent::PostL2DAv2 { .. }
+        | Intent::CommitL2StateRoot { .. }
+        | Intent::AddBridgeAsset { .. }
+        | Intent::PauseBridgeAsset { .. }
+        | Intent::RemoveBridgeAsset { .. } => true,
+
+        // ── User-tier intents — open to any ML-DSA-65 signer ──────
+        Intent::Transfer { .. }
+        | Intent::Delegate { .. }
+        | Intent::UndelegateBegin { .. }
+        | Intent::UndelegateClaim { .. }
+        | Intent::L1Lock { .. }
+        | Intent::L2BurnProven { .. }
+        | Intent::L2ForceInclude { .. }
+        | Intent::DepositSequencerBond { .. }
+        | Intent::DepositSafetyBond { .. }
+        | Intent::DepositAuthorityStake { .. }
+        | Intent::DepositValidatorStake { .. }
+        | Intent::WithdrawAuthorityStake { .. }
+        | Intent::WithdrawValidatorStake { .. } => false,
+
+        // `Intent` is `#[non_exhaustive]`. If a future variant lands
+        // and is not listed above, default to ring-required (safe
+        // side). The catch-all arm fires only for variants added
+        // after this code was written; the `match` above is
+        // exhaustive for the current enum.
+        _ => true,
+    }
+}
+
+/// Resolve a `signer_pubkey_hash` against the Authority Ring, Validator
+/// Ring, and (for user-tier intents) the optional open-signer public
+/// key, then verify the detached ML-DSA-65 signature over the intent's
+/// signing digest.
 ///
-/// Bumped to `pub(crate)` in T2 so the in-crate `rpc_adapter` reuses
-/// this exact function. New ingress wires MUST call this rather than
-/// reinventing the lookup + verify dance — otherwise the two wires
-/// drift on what "signed intent" means and security audits get
-/// nightmarish.
+/// Resolution order:
+/// 1. Authority Ring — hash lookup against seated members.
+/// 2. Validator Ring — same lookup.
+/// 3. Open signer — `signer_pubkey` provided by the caller; accepted
+///    only for user-tier intents (governance intents are ring-gated).
+///
+/// `pub(crate)` so the in-crate `rpc_adapter` reuses this exact
+/// function. New ingress wires MUST call this rather than reinventing
+/// the lookup + verify dance — otherwise the two wires drift on what
+/// "signed intent" means and security audits get nightmarish.
 pub(crate) async fn verify_signed_intent(
     state: &State,
     network_id: &str,
     intent: &Intent,
+    intent_bytes: &[u8],
     signature_bytes: &[u8],
     signer_pubkey_hash: &[u8; 32],
+    signer_pubkey: Option<&[u8]>,
 ) -> AuthOutcome {
-    // Authority Ring lookup. Hold the read guard only for the lookup,
-    // then drop before the (CPU-heavy) signature verify.
+    // Try Authority Ring first, then fall back to Validator Ring.
+    // Hold each read guard only for the lookup, then drop before the
+    // (CPU-heavy) signature verify.
     let pubkey_bytes_opt: Option<Vec<u8>> = {
-        let registry = state.authority_registry.read().await;
-        let found = registry
+        let auth = state.authority_registry.read().await;
+        let found = auth
             .members()
             .find(|m| blake3::hash(&m.public_key_bytes).as_bytes() == signer_pubkey_hash)
             .map(|m| m.public_key_bytes.clone());
-        drop(registry);
-        found
+        drop(auth);
+        if found.is_some() {
+            found
+        } else {
+            let val = state.validator_registry.read().await;
+            let found = val
+                .members()
+                .find(|m| blake3::hash(&m.public_key_bytes).as_bytes() == signer_pubkey_hash)
+                .map(|m| m.public_key_bytes.clone());
+            drop(val);
+            found
+        }
     };
+    // Open-signer fallback: if the hash isn't in either ring, check
+    // whether the caller supplied a raw public key. Governance intents
+    // are ring-gated — open signers can only submit user-tier intents.
     let pubkey_bytes = match pubkey_bytes_opt {
         Some(b) => b,
-        None => return AuthOutcome::UnknownSigner,
+        None => match signer_pubkey {
+            Some(pk_bytes) if !intent_requires_ring_membership(intent) => {
+                // Verify the provided key hashes to the claimed hash.
+                if blake3::hash(pk_bytes).as_bytes() != signer_pubkey_hash {
+                    return AuthOutcome::UnknownSigner;
+                }
+                pk_bytes.to_vec()
+            }
+            _ => return AuthOutcome::UnknownSigner,
+        },
     };
     let pubkey = match mldsa::PublicKey::from_bytes(&pubkey_bytes) {
         Ok(pk) => pk,
@@ -369,11 +492,22 @@ pub(crate) async fn verify_signed_intent(
         Ok(s) => s,
         Err(_) => return AuthOutcome::BadSignature,
     };
-    let digest = intent_signing_digest(network_id, intent);
-    match mldsa::verify(&digest, &signature, &pubkey) {
-        Ok(()) => AuthOutcome::Ok,
-        Err(_) => AuthOutcome::BadSignature,
+    let digest = gsx_execution::intent_signing_digest(network_id, intent_bytes);
+    if mldsa::verify(&digest, &signature, &pubkey).is_err() {
+        return AuthOutcome::BadSignature;
     }
+    // Bind the signer's derived address to the intent's sender field.
+    // Without this check, any valid signer could submit a Transfer
+    // debiting an arbitrary address.
+    if let Some(sender) = intent_sender_address(intent) {
+        let signer_hash = blake3::hash(&pubkey_bytes);
+        let mut signer_addr = [0u8; 20];
+        signer_addr.copy_from_slice(&signer_hash.as_bytes()[..20]);
+        if signer_addr != sender {
+            return AuthOutcome::Unauthorized;
+        }
+    }
+    AuthOutcome::Ok
 }
 
 /// Default priority for intents submitted via the TCP wire — no fee
@@ -418,21 +552,23 @@ async fn handle_conn(
                 intent,
                 signature,
                 signer_pubkey_hash,
+                signer_pubkey,
             } => {
+                let intent_bytes = crate::codec::encode(&intent).expect("intent serialize");
                 match verify_signed_intent(
                     &state,
                     &network_id,
                     &intent,
+                    &intent_bytes,
                     &signature,
                     &signer_pubkey_hash,
+                    signer_pubkey.as_deref(),
                 )
                 .await
                 {
                     AuthOutcome::Ok => {}
                     AuthOutcome::UnknownSigner => {
-                        let resp = ClientResponse::Err(
-                            "auth: unknown signer (pubkey hash not in Authority Ring)".to_string(),
-                        );
+                        let resp = ClientResponse::Err("auth: unknown signer".to_string());
                         let _ = write_response(&mut stream, &resp).await;
                         return Ok(());
                     }
@@ -441,9 +577,15 @@ async fn handle_conn(
                         let _ = write_response(&mut stream, &resp).await;
                         return Ok(());
                     }
+                    AuthOutcome::Unauthorized => {
+                        let resp = ClientResponse::Err(
+                            "auth: signer address does not match intent sender".to_string(),
+                        );
+                        let _ = write_response(&mut stream, &resp).await;
+                        return Ok(());
+                    }
                 }
-                let intent_hash: [u8; 32] =
-                    blake3::hash(&crate::codec::encode(&intent).expect("intent serialize")).into();
+                let intent_hash: [u8; 32] = blake3::hash(&intent_bytes).into();
                 match state.mempool.submit(
                     intent,
                     DEFAULT_INTENT_PRIORITY,
@@ -466,6 +608,7 @@ async fn handle_conn(
                 intents,
                 signatures,
                 signer_pubkey_hash,
+                signer_pubkey,
             } => {
                 if signatures.len() != intents.len() {
                     let resp = ClientResponse::Err(format!(
@@ -476,25 +619,34 @@ async fn handle_conn(
                     let _ = write_response(&mut stream, &resp).await;
                     return Ok(());
                 }
+                // Serialize each intent once — the same bytes feed
+                // both the signing digest and the intent hash.
+                let intent_bytes_vec: Vec<Vec<u8>> = intents
+                    .iter()
+                    .map(|i| crate::codec::encode(i).expect("intent serialize"))
+                    .collect();
                 // Verify every signature BEFORE pushing any intent so a
                 // bad sig anywhere in the batch rejects the whole batch
                 // (no partial-application surprise on the client side).
-                for (intent, sig) in intents.iter().zip(signatures.iter()) {
+                for ((intent, sig), ib) in intents
+                    .iter()
+                    .zip(signatures.iter())
+                    .zip(intent_bytes_vec.iter())
+                {
                     match verify_signed_intent(
                         &state,
                         &network_id,
                         intent,
+                        ib,
                         sig,
                         &signer_pubkey_hash,
+                        signer_pubkey.as_deref(),
                     )
                     .await
                     {
                         AuthOutcome::Ok => {}
                         AuthOutcome::UnknownSigner => {
-                            let resp = ClientResponse::Err(
-                                "auth: unknown signer (pubkey hash not in Authority Ring)"
-                                    .to_string(),
-                            );
+                            let resp = ClientResponse::Err("auth: unknown signer".to_string());
                             let _ = write_response(&mut stream, &resp).await;
                             return Ok(());
                         }
@@ -505,16 +657,22 @@ async fn handle_conn(
                             let _ = write_response(&mut stream, &resp).await;
                             return Ok(());
                         }
+                        AuthOutcome::Unauthorized => {
+                            let resp = ClientResponse::Err(
+                                "auth: signer address does not match intent sender in batch"
+                                    .to_string(),
+                            );
+                            let _ = write_response(&mut stream, &resp).await;
+                            return Ok(());
+                        }
                     }
                 }
                 // DAG-S29.2 + A3: amortise the ack roundtrip across N
                 // intents; each intent flows through `state.mempool.submit`
                 // for priority/dedup/rate-limit accounting.
                 let mut hashes: Vec<[u8; 32]> = Vec::with_capacity(intents.len());
-                for intent in intents {
-                    let intent_hash: [u8; 32] =
-                        blake3::hash(&crate::codec::encode(&intent).expect("intent serialize"))
-                            .into();
+                for (intent, ib) in intents.into_iter().zip(intent_bytes_vec.iter()) {
+                    let intent_hash: [u8; 32] = blake3::hash(ib).into();
                     match state.mempool.submit(
                         intent,
                         DEFAULT_INTENT_PRIORITY,
@@ -653,6 +811,7 @@ impl LoadGenClient {
             intent,
             signature: signature.as_bytes().to_vec(),
             signer_pubkey_hash: pkh,
+            signer_pubkey: None,
         };
         let bytes = crate::codec::encode_frame(&msg)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
@@ -691,6 +850,7 @@ impl LoadGenClient {
             intents,
             signatures,
             signer_pubkey_hash: pkh,
+            signer_pubkey: None,
         };
         let bytes = crate::codec::encode_frame(&msg)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
@@ -798,6 +958,198 @@ mod tests {
         let digest = intent_signing_digest("rt-net", &intent);
         let sig = mldsa::sign(&digest, &sk).unwrap();
         mldsa::verify(&digest, &sig, &pk).expect("genuine signature must verify");
+    }
+
+    // ----- Governance gate tests (Task 5) ------------------------------
+
+    #[test]
+    fn governance_intents_require_ring_membership() {
+        // Every governance intent must return true.
+        let governance = vec![
+            Intent::AdmitAuthority {
+                authority_id: 0,
+                stake_gsx: 100_000,
+                mldsa_public_key: vec![0u8; 1952],
+                bls_public_key: vec![0u8; 48],
+            },
+            Intent::ExitAuthority { authority_id: 0 },
+            Intent::EjectAuthority {
+                authority_id: 0,
+                proof_ref: [0u8; 32],
+            },
+            Intent::AdmitValidator {
+                validator_id: 0,
+                stake_gsx: 25_000,
+                mldsa_public_key: vec![0u8; 1952],
+                bls_public_key: vec![0u8; 48],
+            },
+            Intent::ExitValidator { validator_id: 0 },
+            Intent::EjectValidator {
+                validator_id: 0,
+                proof_ref: [0u8; 32],
+            },
+            Intent::GenesisAllocation {
+                allocations: vec![],
+            },
+            Intent::MintInflation {
+                epoch: 0,
+                authority_share: 0,
+                validator_share: 0,
+                treasury_share: 0,
+            },
+            Intent::DistributeRewards {
+                epoch: 0,
+                ring: gsx_execution::RewardsRing::Authority,
+                recipients: vec![],
+            },
+            Intent::DistributeSlashedFunds {
+                slash_event_id: [0u8; 32],
+                counterparties: vec![],
+                insurance_share: 0,
+                treasury_share: 0,
+            },
+            Intent::SetL2VerifyingKey {
+                chain_id_hash: [0u8; 32],
+                new_aggregation_vk: [0u8; 32],
+                new_range_commitment: [0u8; 32],
+            },
+            Intent::SlashSequencer {
+                reason: gsx_execution::substrate::SlashReason::MissedForceInclude,
+                intent_hash: [0u8; 32],
+            },
+            Intent::EjectSequencer {
+                obligation_id: [0u8; 32],
+                ejector: [0u8; 20],
+            },
+            Intent::MarkForceIncludeHonored {
+                obligation_id: [0u8; 32],
+            },
+            Intent::DisburseTreasury {
+                recipient: [1u8; 20],
+                amount: 0,
+                purpose_tag: [0u8; 32],
+            },
+            Intent::ClaimInsurance {
+                claimant: [1u8; 20],
+                amount: 0,
+                claim_reference: [0u8; 32],
+            },
+            Intent::PostL2DA {
+                batch_id: 0,
+                da_blob: vec![],
+            },
+            Intent::PostL2DAv2 {
+                batch_id: 0,
+                da_blob: vec![],
+                l2_chain_id_hash: [0u8; 32],
+            },
+            Intent::CommitL2StateRoot {
+                batch_id: 0,
+                new_state_root: [0u8; 32],
+                proof_bytes: vec![],
+                public_inputs: vec![],
+                vk_hash: [0u8; 32],
+            },
+            Intent::AddBridgeAsset {
+                source_chain: 0,
+                source_contract: vec![],
+                decimals: 18,
+                name: vec![],
+                symbol: vec![],
+            },
+            Intent::PauseBridgeAsset {
+                asset_id: [0u8; 32],
+            },
+            Intent::RemoveBridgeAsset {
+                asset_id: [0u8; 32],
+            },
+        ];
+        for (i, intent) in governance.iter().enumerate() {
+            assert!(
+                intent_requires_ring_membership(intent),
+                "governance intent #{i} should require ring membership"
+            );
+        }
+    }
+
+    #[test]
+    fn user_tier_intents_do_not_require_ring_membership() {
+        // Every user-tier intent must return false.
+        let user_tier = vec![
+            Intent::Transfer {
+                from: [1u8; 20],
+                to: [2u8; 20],
+                amount: 1,
+            },
+            Intent::Delegate {
+                from: [1u8; 20],
+                validator_id: 0,
+                amount: 1,
+            },
+            Intent::UndelegateBegin {
+                from: [1u8; 20],
+                validator_id: 0,
+                amount: 1,
+            },
+            Intent::UndelegateClaim {
+                from: [1u8; 20],
+                validator_id: 0,
+            },
+            Intent::L1Lock {
+                user_address: [1u8; 20],
+                l2_recipient: [2u8; 20],
+                amount: 1,
+                asset_id: None,
+            },
+            Intent::L2BurnProven {
+                batch_id: 0,
+                recipient: [1u8; 20],
+                amount: 1,
+                merkle_path: vec![],
+                asset_id: None,
+                l2_chain_id_hash: [0u8; 32],
+            },
+            Intent::L2ForceInclude {
+                tx: vec![],
+                deadline_l1_height: 0,
+                submitter: [1u8; 20],
+                l2_nonce: 0,
+            },
+            Intent::DepositSequencerBond {
+                from: [1u8; 20],
+                amount: 1,
+            },
+            Intent::DepositSafetyBond {
+                from: [1u8; 20],
+                amount: 1,
+            },
+            Intent::DepositAuthorityStake {
+                from: [1u8; 20],
+                authority_id: 0,
+                amount: 1,
+            },
+            Intent::DepositValidatorStake {
+                from: [1u8; 20],
+                validator_id: 0,
+                amount: 1,
+            },
+            Intent::WithdrawAuthorityStake {
+                to: [1u8; 20],
+                authority_id: 0,
+                amount: 1,
+            },
+            Intent::WithdrawValidatorStake {
+                to: [1u8; 20],
+                validator_id: 0,
+                amount: 1,
+            },
+        ];
+        for (i, intent) in user_tier.iter().enumerate() {
+            assert!(
+                !intent_requires_ring_membership(intent),
+                "user-tier intent #{i} should NOT require ring membership"
+            );
+        }
     }
 
     // ----- Property tests (Issue #28) ---------------------------------

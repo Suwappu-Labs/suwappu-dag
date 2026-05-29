@@ -32,7 +32,7 @@ fn build_tx(object_seed: u8, lineage_round: Round, payload_seed: u8) -> FastPath
         object: OwnedObjectId([object_seed; 32]),
         owner: OwnerAddress([0xAA; 32]),
         nonce: 0,
-        lineage: CertHash([0xBB; 32]),
+        lineage: CertHash::from([0xBB; 32]),
         lineage_round,
         payload_digest: [payload_seed; 32],
     }
@@ -73,7 +73,7 @@ proptest! {
                 round,
                 object: other_object,
                 payload_digest: [unrelated_payload; 32],
-                lineage: CertHash([0xCC; 32]),
+                lineage: CertHash::from([0xCC; 32]),
             });
         }
         // Add the same object's confirmation INSIDE the window (matching payload).
@@ -81,7 +81,7 @@ proptest! {
             round: lineage_round + 1,
             object: tx.object,
             payload_digest: tx.payload_digest,
-            lineage: CertHash([0xDD; 32]),
+            lineage: CertHash::from([0xDD; 32]),
         });
 
         prop_assert!(is_main_lane_consistent(&cert, &main_lane));
@@ -123,7 +123,7 @@ proptest! {
             round: lineage_round + conflict_offset as u64,
             object: tx.object,
             payload_digest: [conflict_payload; 32],
-            lineage: CertHash([0xCC; 32]),
+            lineage: CertHash::from([0xCC; 32]),
         }];
 
         prop_assert!(!is_main_lane_consistent(&cert, &main_lane));
@@ -151,7 +151,7 @@ proptest! {
             round: lineage_round + beyond_offset as u64,
             object: tx.object,
             payload_digest: [conflict_payload; 32],
-            lineage: CertHash([0xCC; 32]),
+            lineage: CertHash::from([0xCC; 32]),
         }];
 
         prop_assert!(is_main_lane_consistent(&cert, &main_lane));

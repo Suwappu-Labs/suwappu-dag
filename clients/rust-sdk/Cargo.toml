@@ -22,6 +22,11 @@ hex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+gsx-execution = { workspace = true }
+gsx-crypto = { workspace = true }
+blake3 = { workspace = true }
+bincode = { workspace = true }
+
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }

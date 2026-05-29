@@ -330,7 +330,7 @@ async fn submit_intent_raw_round_trips_hash() {
     let mut pkh = [0u8; 32];
     pkh.fill(0xab); // not the all-zero sentinel
     let h: [u8; 32] = client
-        .submit_intent_raw(&[0xde, 0xad, 0xbe, 0xef], &[0u8; 3309], pkh)
+        .submit_intent_raw(&[0xde, 0xad, 0xbe, 0xef], &[0u8; 3309], pkh, None)
         .await
         .unwrap();
     assert_eq!(h, [0xeeu8; 32]);
@@ -341,7 +341,7 @@ async fn submit_intent_raw_unknown_signer_surfaces_rpc_error() {
     let addr = spawn_mock_server().await;
     let client = client_for(addr);
     let err = client
-        .submit_intent_raw(&[0xde, 0xad], &[0u8; 3309], [0u8; 32])
+        .submit_intent_raw(&[0xde, 0xad], &[0u8; 3309], [0u8; 32], None)
         .await
         .expect_err("unknown signer must surface as Error::Rpc(-32001)");
     match err {

@@ -664,4 +664,75 @@ mod tests {
         let c = BatchBuilderTaskConfig::derive_l2_chain_id_hash("gsx-l2-mainnet");
         assert_ne!(a, c);
     }
+
+    // ── Solidity/Rust hash alignment pinned vectors ──────────────
+    //
+    // These tests lock the exact BLAKE3 recipes the Solidity anchor
+    // contract must reproduce. A Solidity implementor can compute
+    // `blake3("gsx-l2-chain-" || "test-chain")` and compare against
+    // the hex literal below. If either side drifts, the pinned
+    // assertion fails immediately.
+
+    /// Pin `l2_chain_id_hash("test-chain")` to a hardcoded hex
+    /// digest. Solidity contract: `blake3("gsx-l2-chain-" || chainId)`.
+    /// If this test fails, either the Rust recipe changed or the
+    /// pinned constant needs updating — either way the Solidity
+    /// side must be re-audited.
+    #[test]
+    fn l2_chain_id_hash_pinned_vector() {
+        let hash = BatchBuilderTaskConfig::derive_l2_chain_id_hash("test-chain");
+        // Hardcoded reference value. A Solidity implementor can
+        // compute blake3("gsx-l2-chain-" || "test-chain") and
+        // compare against this constant byte-for-byte.
+        assert_eq!(
+            hex::encode(hash),
+            "46d743898b7c863a8fea1938f261f52134882771b3dd016999964cad793924af",
+        );
+    }
+
+    /// Pin `da_commitment` = plain `BLAKE3(da_blob)` — no domain
+    /// tag. Solidity contract: `blake3(da_blob)`. Exercises the
+    /// real `BatchBuilder::build` to prove the production path
+    /// emits the same hash an independent `blake3::hash` produces.
+    #[test]
+    fn da_commitment_matches_plain_blake3() {
+        use gsx_l2_sequencer::{BatchBuilder, BuildContext, PendingTx};
+        let txs = vec![PendingTx::new(b"test-tx".to_vec()).unwrap()];
+        let ctx = BuildContext {
+            prev_l2_state_root: [0u8; 32],
+            batch_id: 0,
+            l1_anchor_height: 0,
+            range_vk_commitment: [0u8; 32],
+            prev_l1_state_root: [0u8; 32],
+            l2_chain_id_hash: [0u8; 32],
+            confidential_root: [0u8; 32],
+            new_l2_state_root: [0u8; 32],
+        };
+        let batch = BatchBuilder::build(txs, ctx);
+        // Independently compute BLAKE3(da_blob) — must equal the
+        // header's da_commitment. If either side adds a domain tag,
+        // this assertion catches it.
+        let independent = *blake3::hash(&batch.da_blob).as_bytes();
+        assert_eq!(batch.header.da_commitment, independent);
+    }
+
+    /// `BatchHeader::to_public_inputs()` must be exactly 240 bytes.
+    /// The Solidity verifier hard-codes this width.
+    #[test]
+    fn batch_header_public_inputs_is_240_bytes() {
+        use gsx_l2_sequencer::BatchHeader;
+        let header = BatchHeader {
+            prev_l2_state_root: [0u8; 32],
+            new_l2_state_root: [0u8; 32],
+            batch_id: 0,
+            da_commitment: [0u8; 32],
+            l1_anchor_height: 0,
+            range_vk_commitment: [0u8; 32],
+            prev_l1_state_root: [0u8; 32],
+            l2_chain_id_hash: [0u8; 32],
+            confidential_root: [0u8; 32],
+        };
+        let pi = header.to_public_inputs();
+        assert_eq!(pi.len(), 240);
+    }
 }

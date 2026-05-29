@@ -34,6 +34,9 @@ sqlx = { version = "0.8", default-features = false, features = [
     "chrono",
 ] }
 
+# Constant-time operations (C10 side-channel hardening)
+subtle = { workspace = true }
+
 # Async + utilities
 tokio = { workspace = true }
 serde = { workspace = true }

@@ -244,3 +244,149 @@ pub mod mock {
         }
     }
 }
+
+/// Real JSON-RPC client for the gsx-dag L1 node. Uses `reqwest`
+/// to call the RPC endpoint exposed by `gsx-rpc`. The mock module
+/// above is for unit tests; this module is for integration and
+/// production use.
+pub mod rpc {
+    use async_trait::async_trait;
+
+    use super::{L1Client, L1ClientError};
+
+    /// JSON-RPC client backed by `reqwest`. Thread-safe (the inner
+    /// `reqwest::Client` is `Arc`-backed and clones are cheap).
+    pub struct RpcL1Client {
+        client: reqwest::Client,
+        url: String,
+    }
+
+    impl RpcL1Client {
+        /// Construct a client pointing at the given L1 RPC URL
+        /// (e.g. `"http://127.0.0.1:9095"`).
+        pub fn new(url: String) -> Self {
+            Self {
+                client: reqwest::Client::new(),
+                url,
+            }
+        }
+
+        /// Send a JSON-RPC 2.0 request and return the `result`
+        /// field. Translates HTTP/transport failures to
+        /// `L1ClientError::Transport` and JSON-RPC `error`
+        /// responses to `L1ClientError::Rpc`.
+        async fn rpc_call(
+            &self,
+            method: &str,
+            params: serde_json::Value,
+        ) -> Result<serde_json::Value, L1ClientError> {
+            let body = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": method,
+                "params": params,
+            });
+            let resp = self
+                .client
+                .post(&self.url)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| L1ClientError::Transport(e.to_string()))?;
+            let json: serde_json::Value = resp
+                .json()
+                .await
+                .map_err(|e| L1ClientError::Parse(e.to_string()))?;
+            if let Some(error) = json.get("error") {
+                return Err(L1ClientError::Rpc(error.to_string()));
+            }
+            json.get("result")
+                .cloned()
+                .ok_or_else(|| L1ClientError::Parse("missing 'result' field".into()))
+        }
+    }
+
+    /// Parse a 32-byte hex hash from a JSON field (e.g.
+    /// `"state_root": "0xabcd..."`).
+    fn parse_hash_field(value: &serde_json::Value, field: &str) -> Result<[u8; 32], L1ClientError> {
+        let hex_str = value
+            .get(field)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| L1ClientError::Parse(format!("missing '{field}' field")))?;
+        let trimmed = hex_str
+            .strip_prefix("0x")
+            .or_else(|| hex_str.strip_prefix("0X"))
+            .unwrap_or(hex_str);
+        let bytes =
+            hex::decode(trimmed).map_err(|e| L1ClientError::Parse(format!("{field} hex: {e}")))?;
+        bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| L1ClientError::Parse(format!("{field} must be 32 bytes")))
+    }
+
+    #[async_trait]
+    impl L1Client for RpcL1Client {
+        async fn current_l1_height(&self) -> Result<u64, L1ClientError> {
+            let result = self
+                .rpc_call("gsx_getEpoch", serde_json::Value::Null)
+                .await?;
+            result
+                .get("latest_committed_round")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| L1ClientError::Parse("missing latest_committed_round".into()))
+        }
+
+        async fn current_l2_state_root(
+            &self,
+            l2_chain_id_hash: &[u8; 32],
+        ) -> Result<[u8; 32], L1ClientError> {
+            let result = self
+                .rpc_call(
+                    "gsx_getL2StateRoot",
+                    serde_json::json!({
+                        "l2_chain_id_hash": format!("0x{}", hex::encode(l2_chain_id_hash)),
+                    }),
+                )
+                .await?;
+            parse_hash_field(&result, "state_root")
+        }
+
+        async fn current_l1_state_root(&self) -> Result<[u8; 32], L1ClientError> {
+            let result = self
+                .rpc_call("gsx_getL1StateRoot", serde_json::Value::Null)
+                .await?;
+            parse_hash_field(&result, "state_root")
+        }
+
+        async fn read_force_include_registry(&self) -> Result<Vec<u8>, L1ClientError> {
+            let result = self
+                .rpc_call("gsx_getForceIncludeRegistry", serde_json::Value::Null)
+                .await?;
+            let hex_str = result
+                .get("data")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| L1ClientError::Parse("missing 'data' field".into()))?;
+            let trimmed = hex_str
+                .strip_prefix("0x")
+                .or_else(|| hex_str.strip_prefix("0X"))
+                .unwrap_or(hex_str);
+            hex::decode(trimmed).map_err(|e| L1ClientError::Parse(format!("data hex: {e}")))
+        }
+
+        async fn submit_intent(&self, _intent_bytes: Vec<u8>) -> Result<[u8; 32], L1ClientError> {
+            // Phase 2.2-c: the daemon constructs the signed envelope
+            // (intent + ML-DSA signature + signer_pubkey_hash) via the
+            // SDK before calling this method. For now the read surface
+            // is the critical path — batch submission requires the SP1
+            // prover (Phase 2.1, #104).
+            //
+            // Return an explicit error instead of `unimplemented!` so
+            // the daemon doesn't panic/abort if this path is reached
+            // before SP1 integration lands.
+            Err(L1ClientError::Transport(
+                "RpcL1Client::submit_intent not yet wired — requires SP1 prover integration (Phase 2.1, #104)".into(),
+            ))
+        }
+    }
+}

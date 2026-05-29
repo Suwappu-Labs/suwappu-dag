@@ -71,7 +71,12 @@ pub(crate) struct State {
     // these guards across .await is forbidden; every call site uses
     // them in-statement and drops the guard before the next .await.
     pub(crate) votes: parking_lot::Mutex<HashMap<CertHash, Vec<Vote>>>,
-    pub(crate) blocks: parking_lot::Mutex<HashMap<CertHash, BlockPayload>>,
+    /// Block intents indexed by cert hash. Only the `intents` vec is
+    /// retained — the dead fields (`payload_digest`, `author`, `round`)
+    /// are discarded at insertion time to avoid carrying wire-only
+    /// metadata in long-lived memory. The `BlockPayload` struct remains
+    /// intact for bincode wire serialization.
+    pub(crate) blocks: parking_lot::Mutex<HashMap<CertHash, Vec<Intent>>>,
     pub(crate) committed: parking_lot::Mutex<HashSet<CertHash>>,
     pub(crate) stake_table: tokio::sync::RwLock<StakeTable>,
     pub(crate) authority_registry: tokio::sync::RwLock<AuthorityRegistry>,
@@ -277,17 +282,56 @@ impl State {
             if let Err(e) = authority_registry.admit(AuthorityMember {
                 id: v.authority_id,
                 stake_gsx: v.authority_stake_gsx,
-                public_key_bytes: mldsa_bytes,
+                public_key_bytes: mldsa_bytes.clone(),
             }) {
                 tracing::warn!(auth = v.authority_id, err = %e, "genesis: skipping malformed authority");
             }
             if let Err(e) = validator_registry.admit(ValidatorMember {
                 id: v.authority_id,
                 stake_gsx: v.validator_stake_gsx as u128,
+                public_key_bytes: mldsa_bytes,
             }) {
                 tracing::warn!(val = v.authority_id, err = %e, "genesis: skipping malformed validator");
             }
         }
+        // Apply pre-genesis balances to the substrate before round 0.
+        let mut substrate = InMemorySubstrate::new();
+        if !manifest.prebalances.is_empty() {
+            let allocations: Vec<(gsx_execution::Address, gsx_execution::Balance)> = manifest
+                .prebalances
+                .iter()
+                .filter_map(|b| {
+                    let trimmed = b
+                        .address
+                        .strip_prefix("0x")
+                        .or_else(|| b.address.strip_prefix("0X"))
+                        .unwrap_or(&b.address);
+                    let bytes = match hex::decode(trimmed) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::warn!(address = %b.address, err = %e, "genesis: skipping malformed prebalance address");
+                            return None;
+                        }
+                    };
+                    let addr: [u8; 20] = match bytes.as_slice().try_into() {
+                        Ok(a) => a,
+                        Err(_) => {
+                            tracing::warn!(address = %b.address, len = bytes.len(), "genesis: skipping prebalance address — expected 20 bytes");
+                            return None;
+                        }
+                    };
+                    Some((addr, b.balance_gsx as u128))
+                })
+                .collect();
+            if let Err(e) = substrate.apply_intent(&Intent::GenesisAllocation {
+                allocations: allocations.clone(),
+            }) {
+                tracing::error!(err = %e, "genesis: failed to apply prebalances");
+            } else {
+                tracing::info!(entries = allocations.len(), "genesis: applied prebalances");
+            }
+        }
+
         let n = manifest.validators.len() as u32;
         Self {
             dag: tokio::sync::RwLock::new(DagStore::new()),
@@ -298,7 +342,11 @@ impl State {
             authority_registry: tokio::sync::RwLock::new(authority_registry),
             validator_registry: tokio::sync::RwLock::new(validator_registry),
             inner: tokio::sync::Mutex::new(StateInner {
-                substrate: Box::new(InMemorySubstrate::new()),
+                // Box the genesis-prebalance-applied local substrate
+                // (#267) into the `Box<dyn Substrate>` field (main). Using
+                // a fresh `InMemorySubstrate::new()` here would discard the
+                // applied genesis allocations.
+                substrate: Box::new(substrate),
                 last_authored_round: None,
                 max_observed_round: 0,
                 n_authorities: n,
@@ -344,6 +392,60 @@ fn distinct_authors_at(dag: &DagStore, round: u64, n_authorities: u32) -> u32 {
     (0..n_authorities)
         .filter(|a| cert_at(dag, round, *a).is_some())
         .count() as u32
+}
+
+/// DAG-S30.1: check `seen_at` for an equivocation at `(author, round)`.
+///
+/// If no cert was previously recorded at this key, inserts `cert_hash`
+/// and returns `None`. If a *different* cert was already seen, returns
+/// `Some(prev_hash)` — the caller must construct the full
+/// `EquivocationProof` outside the inner lock (via `record_equivocation`).
+fn check_seen_at(
+    seen_at: &mut BTreeMap<(AuthorityId, Round), CertHash>,
+    author: AuthorityId,
+    round: Round,
+    cert_hash: CertHash,
+) -> Option<CertHash> {
+    let key = (author, round);
+    match seen_at.get(&key).copied() {
+        None => {
+            seen_at.insert(key, cert_hash);
+            None
+        }
+        Some(prev) if prev != cert_hash => Some(prev),
+        _ => None,
+    }
+}
+
+/// DAG-S30.1: construct and record a full `EquivocationProof`.
+///
+/// Called *outside* the inner lock to avoid holding `inner` across the
+/// async `state.dag.read()` call. Looks up the previously-seen cert
+/// from the DAG, pairs it with `new_cert`, and pushes the proof into
+/// `detected_equivocations`.
+async fn record_equivocation(
+    state: &State,
+    author: AuthorityId,
+    round: Round,
+    prev_hash: CertHash,
+    new_hash: CertHash,
+    new_cert: &Certificate,
+) {
+    if let Some(prev_cert) = state.dag.read().await.get(&prev_hash).cloned() {
+        state
+            .inner
+            .lock()
+            .await
+            .detected_equivocations
+            .push(EquivocationProof {
+                author,
+                round,
+                cert_a: prev_hash,
+                cert_b: new_hash,
+                cert_a_signed: prev_cert,
+                cert_b_signed: new_cert.clone(),
+            });
+    }
 }
 
 /// Round R parents = every cert at round R-1 the local DAG has observed.
@@ -419,15 +521,48 @@ impl Daemon {
         // that single tokio task saturated under inbound bursts. One
         // task per peer lets the tokio runtime spread inbox processing
         // across worker threads.
+        // Load the ML-DSA-65 signing key for certificate authentication.
+        // /dev/null is the explicit dev-mode sentinel (used in tests):
+        // generates an ephemeral keypair. Any other path must contain a
+        // valid ML-DSA-65 secret key — misconfiguration is a hard error
+        // so a production node never silently runs with a wrong key.
+        let self_mldsa_sk = {
+            let path = &cfg.mldsa_secret_key_path;
+            if path.as_os_str() == "/dev/null" {
+                tracing::info!(
+                    "mldsa_secret_key_path is /dev/null; using ephemeral key (dev mode)"
+                );
+                let (_pk, sk) = gsx_crypto::mldsa::keypair();
+                Arc::new(sk)
+            } else {
+                let key_bytes = tokio::fs::read(path)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("cannot read ML-DSA-65 key at {path:?}: {e}"))?;
+                let sk = gsx_crypto::mldsa::SecretKey::from_bytes(&key_bytes)
+                    .map_err(|e| anyhow::anyhow!("invalid ML-DSA-65 key at {path:?}: {e}"))?;
+                Arc::new(sk)
+            }
+        };
+
+        // DAG-S31.1: per-peer inbox tasks. Pre-S31 one run_inbox task
+        // multiplexed every peer's stream; on the 4-region perf testnet
+        // that single tokio task saturated under inbound bursts. One
+        // task per peer lets the tokio runtime spread inbox processing
+        // across worker threads.
         for (peer_id, peer_inbox) in inboxes.into_iter() {
             let state = state.clone();
             let outbound = outbound.clone();
             let log = log.clone();
             let self_label = self_label.clone();
             let peer_label = peer_id.0.clone();
+            let sk = self_mldsa_sk.clone();
+            let net_id = manifest.network_id.clone();
             tasks.push(tokio::spawn(async move {
                 tracing::debug!(peer = %peer_label, "inbox task: starting");
-                run_inbox(self_label, self_id, state, outbound, log, peer_inbox).await;
+                run_inbox(
+                    self_label, self_id, state, outbound, log, peer_inbox, sk, net_id,
+                )
+                .await;
                 tracing::debug!(peer = %peer_label, "inbox task: exiting");
             }));
         }
@@ -439,8 +574,13 @@ impl Daemon {
             let outbound = outbound.clone();
             let log = log.clone();
             let self_label = self_label.clone();
+            let sk = self_mldsa_sk.clone();
+            let net_id = manifest.network_id.clone();
             tasks.push(tokio::spawn(async move {
-                run_round_driver(self_label, self_id, round_ms, state, outbound, log).await;
+                run_round_driver(
+                    self_label, self_id, round_ms, state, outbound, log, sk, net_id,
+                )
+                .await;
             }));
         }
 
@@ -487,6 +627,7 @@ impl Daemon {
         // cloned intent sender + network_id to drive the same
         // verify+enqueue gate the TCP wire uses.
         if let Some(rpc_addr) = cfg.rpc_listen {
+            tracing::info!(addr = %rpc_addr, "gsx-rpc server starting");
             // T6: the adapter also needs an EventLog handle to spawn
             // the Event → EventView bridge. The log is already cloneable
             // (Clone for EventLog is cheap — it's just an mpsc sender +
@@ -497,17 +638,17 @@ impl Daemon {
                 &log,
             );
             let ctx = std::sync::Arc::new(gsx_rpc::RpcContext::new(std::sync::Arc::new(view)));
-            // B2.1: thread per-IP rate-limit knobs through to the
-            // router. Other RouterLimits fields keep their B2 defaults
-            // (concurrency cap, body-size cap) until we have a reason
-            // to make them config-driven.
             let limits = gsx_rpc::RouterLimits {
+                max_concurrent_requests: cfg.rpc_max_concurrent_requests,
+                max_request_body_bytes: cfg.rpc_max_request_body_bytes,
                 per_ip_capacity: cfg.rpc_per_ip_capacity,
                 per_ip_refill_per_sec: cfg.rpc_per_ip_refill_per_sec,
-                ..gsx_rpc::RouterLimits::default()
+                request_timeout_ms: cfg.rpc_request_timeout_ms,
             };
             let rpc_task = gsx_rpc::start_with_limits(rpc_addr, ctx, limits).await?;
             tasks.push(rpc_task);
+        } else {
+            tracing::info!("rpc_listen not set — JSON-RPC API disabled. Set rpc_listen in node.toml to enable.");
         }
 
         // G6: Prometheus text-format metrics endpoint. Off by default
@@ -538,6 +679,9 @@ impl Daemon {
     }
 }
 
+// Core consensus inbox task: many independent collaborators (ids, state,
+// network out, log) — a params struct would just obscure the call site.
+#[allow(clippy::too_many_arguments)]
 async fn run_inbox(
     self_label: String,
     self_id: AuthorityId,
@@ -545,46 +689,74 @@ async fn run_inbox(
     outbound: Arc<HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>>,
     log: EventLog,
     mut inbox: tokio::sync::mpsc::Receiver<WireEvent>,
+    self_mldsa_sk: Arc<gsx_crypto::mldsa::SecretKey>,
+    network_id: String,
 ) {
     while let Some(ev) = inbox.recv().await {
         let WireEvent { from, msg } = ev;
         match msg {
             WireMessage::Cert(cert) => {
-                let h = cert.hash();
+                let h = cert.hash(&network_id);
                 let round = cert.round;
                 log.emit(
                     Event::now(&self_label, Lane::Main, "received")
                         .with_round(round)
-                        .with_cert_hash(&h.0)
+                        .with_cert_hash(h.as_bytes())
                         .with_peer(from.0.clone()),
                 );
-                let inserted = ingest_cert(&state, cert, &from, &outbound).await;
+                let inserted = ingest_cert(&state, cert, &from, &outbound, &network_id).await;
                 for ic in inserted {
-                    let vote = Vote {
+                    let mut vote = Vote {
                         validator: self_id,
                         candidate: ic.hash,
+                        signature: vec![],
                     };
-                    state.votes.lock().entry(ic.hash).or_default().push(vote);
+                    crate::validator::sign_vote(&mut vote, &self_mldsa_sk, &network_id);
+                    state
+                        .votes
+                        .lock()
+                        .entry(ic.hash)
+                        .or_default()
+                        .push(vote.clone());
                     log.emit(
                         Event::now(&self_label, Lane::Main, "voted")
                             .with_round(ic.round)
-                            .with_cert_hash(&ic.hash.0),
+                            .with_cert_hash(ic.hash.as_bytes()),
                     );
                     broadcast_traced(&outbound, WireMessage::Vote(vote), &self_label, &log);
                 }
                 try_commit(&state, &self_label, &log).await;
             }
             WireMessage::Block(block) => {
-                state.blocks.lock().insert(block.cert_hash, block);
+                state.blocks.lock().insert(block.cert_hash, block.intents);
             }
             WireMessage::Vote(vote) => {
-                state
-                    .votes
-                    .lock()
-                    .entry(vote.candidate)
-                    .or_default()
-                    .push(vote);
-                try_commit(&state, &self_label, &log).await;
+                // C5 fix: verify the vote's ML-DSA-65 signature against
+                // the voter's public key in the Validator Registry before
+                // accepting it into the quorum set.
+                let valid = {
+                    let vreg = state.validator_registry.read().await;
+                    crate::validator::verify_vote_signature(&vote, &vreg, &network_id)
+                };
+                match valid {
+                    Ok(()) => {
+                        state
+                            .votes
+                            .lock()
+                            .entry(vote.candidate)
+                            .or_default()
+                            .push(vote);
+                        try_commit(&state, &self_label, &log).await;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            validator = vote.validator,
+                            peer = %from.0,
+                            err = %e,
+                            "rejecting vote: signature verification failed",
+                        );
+                    }
+                }
             }
             WireMessage::GetCert(hash) => {
                 let cert_opt = state.dag.read().await.get(&hash).cloned();
@@ -629,19 +801,33 @@ async fn ingest_cert(
     cert: Certificate,
     from: &PeerId,
     outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
+    network_id: &str,
 ) -> Vec<IngestedCert> {
     let mut inserted = Vec::new();
     let mut work: Vec<Certificate> = vec![cert];
     while let Some(c) = work.pop() {
-        let h = c.hash();
+        let h = c.hash(network_id);
         let round = c.round;
+        // Verify the certificate's ML-DSA-65 signature before DAG
+        // insertion. Reject unsigned or mis-signed certs from peers.
+        {
+            let registry = state.authority_registry.read().await;
+            if let Err(e) = crate::validator::verify_cert_signature(&c, &registry, network_id) {
+                tracing::warn!(
+                    author = c.author, round, from = %from.0, err = %e,
+                    "rejecting cert: invalid signature"
+                );
+                continue;
+            }
+        }
         // Acquire dag write lock briefly for the insert.
-        let insert_result = state.dag.write().await.insert(c.clone());
+        let insert_result = state.dag.write().await.insert(c.clone(), network_id);
         match insert_result {
             Ok(_) => {
                 // Update cold-path inner state.
                 let promote_stake: Option<(AuthorityId, gsx_consensus::Stake)>;
                 let unblocked: Option<Vec<Certificate>>;
+                let equivocation_prev: Option<CertHash>;
                 {
                     let mut inner = state.inner.lock().await;
                     if round > inner.max_observed_round {
@@ -665,22 +851,15 @@ async fn ingest_cert(
                         inner.n_authorities = inner.n_authorities.saturating_add(1);
                     }
                     // DAG-S30.1: incremental equivocation detection.
-                    let key = (c.author, round);
-                    match inner.seen_at.get(&key).copied() {
-                        None => {
-                            inner.seen_at.insert(key, h);
-                        }
-                        Some(prev) if prev != h => {
-                            inner.detected_equivocations.push(EquivocationProof {
-                                author: c.author,
-                                round,
-                                cert_a: prev,
-                                cert_b: h,
-                            });
-                        }
-                        _ => {}
-                    }
+                    // check_seen_at is pure; the DAG read + proof push
+                    // happens outside the inner lock via record_equivocation.
+                    equivocation_prev = check_seen_at(&mut inner.seen_at, c.author, round, h);
                     unblocked = inner.orphans.remove(&h);
+                }
+                // Construct the full equivocation proof outside the inner
+                // lock so the async DAG read doesn't hold inner.
+                if let Some(prev) = equivocation_prev {
+                    record_equivocation(state, c.author, round, prev, h, &c).await;
                 }
                 if let Some((id, stake)) = promote_stake {
                     state.stake_table.write().await.insert(id, stake);
@@ -1159,7 +1338,7 @@ fn wire_msg_kind(msg: &WireMessage) -> &'static str {
 async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
     // Snapshot votes + n_authorities + candidate_rounds in brief locks
     // up-front so the rest of the function operates on owned data.
-    let votes_flat: Vec<Vote> = state.votes.lock().values().flatten().copied().collect();
+    let votes_flat: Vec<Vote> = state.votes.lock().values().flatten().cloned().collect();
     let n = state.inner.lock().await.n_authorities;
     let candidate_rounds: BTreeSet<u64> = {
         let dag = state.dag.read().await;
@@ -1207,12 +1386,7 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
                 Some(c) => c.round,
                 None => continue,
             };
-            let intents = state
-                .blocks
-                .lock()
-                .get(&h)
-                .map(|b| b.intents.clone())
-                .unwrap_or_default();
+            let intents = state.blocks.lock().get(&h).cloned().unwrap_or_default();
             // DAG-S26.1: capture intent hashes for compliance trace.
             // Computed once and reused for the `tx_to_block` index below
             // so we don't pay blake3 twice per intent.
@@ -1277,7 +1451,7 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
             log.emit(
                 Event::now(self_label, Lane::Main, "committed")
                     .with_round(cert_round)
-                    .with_cert_hash(&h.0)
+                    .with_cert_hash(h.as_bytes())
                     .with_intent_hashes(intent_hashes),
             );
             state.votes.lock().remove(&h);
@@ -1426,6 +1600,7 @@ async fn apply_governance_intent(
                         .admit(ValidatorMember {
                             id: *authority_id,
                             stake_gsx: *stake_gsx as u128,
+                            public_key_bytes: mldsa_public_key.clone(),
                         });
                     // Issue #18 (deferred activation): the registries are
                     // grown to the new size so the new authority's certs
@@ -1524,6 +1699,8 @@ const LEADER_TIMEOUT_ROUNDS: u32 = 4;
 /// fill rate.
 const MAX_INTENTS_PER_BLOCK: usize = 4096;
 
+// Core consensus round driver: same many-collaborator shape as run_inbox.
+#[allow(clippy::too_many_arguments)]
 async fn run_round_driver(
     self_label: String,
     self_id: AuthorityId,
@@ -1531,6 +1708,8 @@ async fn run_round_driver(
     state: Arc<State>,
     outbound: Arc<HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>>,
     log: EventLog,
+    self_mldsa_sk: Arc<gsx_crypto::mldsa::SecretKey>,
+    network_id: String,
 ) {
     let mut tick = tokio::time::interval(Duration::from_millis(round_ms));
     // Per-round leader timeout: if we haven't advanced after this much
@@ -1605,13 +1784,15 @@ async fn run_round_driver(
             state.mempool.drain_for_block(MAX_INTENTS_PER_BLOCK);
         let payload_digest: [u8; 32] =
             blake3::hash(&crate::codec::encode(&intents).expect("intents serialize")).into();
-        let cert = Certificate {
+        let mut cert = Certificate {
             author: self_id,
             round: target_round,
             parents,
             payload_digest,
+            signature: vec![],
         };
-        let cert_hash = cert.hash();
+        crate::validator::sign_cert(&mut cert, &self_mldsa_sk, &network_id);
+        let cert_hash = cert.hash(&network_id);
 
         // Per-intent hashes for the `tx_to_block` secondary index.
         // Computed BEFORE moving `intents` into the `BlockPayload`.
@@ -1635,6 +1816,7 @@ async fn run_round_driver(
         // Phase 3 (locked): brief — insert cert + block + update
         // markers + record own (author, round) for S30.1 incremental
         // equivocation detection.
+        let equivocation_prev;
         {
             let mut inner = state.inner.lock().await;
             inner.last_authored_round = Some(target_round);
@@ -1647,31 +1829,21 @@ async fn run_round_driver(
                     .tx_to_block
                     .insert(*tx_hash, (target_round, cert_hash, idx));
             }
-            let key = (self_id, target_round);
-            match inner.seen_at.get(&key).copied() {
-                None => {
-                    inner.seen_at.insert(key, cert_hash);
-                }
-                Some(prev) if prev != cert_hash => {
-                    inner.detected_equivocations.push(EquivocationProof {
-                        author: self_id,
-                        round: target_round,
-                        cert_a: prev,
-                        cert_b: cert_hash,
-                    });
-                }
-                _ => {}
-            }
+            equivocation_prev = check_seen_at(&mut inner.seen_at, self_id, target_round, cert_hash);
         }
-        let _ = state.dag.write().await.insert(cert.clone());
-        state.blocks.lock().insert(cert_hash, block.clone());
+        // Construct equivocation proof outside the inner lock.
+        if let Some(prev) = equivocation_prev {
+            record_equivocation(&state, self_id, target_round, prev, cert_hash, &cert).await;
+        }
+        let _ = state.dag.write().await.insert(cert.clone(), &network_id);
+        state.blocks.lock().insert(cert_hash, block.intents.clone());
 
         // Phase 4 (unlocked): event log emit + cluster broadcast. No
         // state access, pure I/O.
         log.emit(
             Event::now(&self_label, Lane::Main, "proposed")
                 .with_round(target_round)
-                .with_cert_hash(&cert_hash.0),
+                .with_cert_hash(cert_hash.as_bytes()),
         );
         broadcast_traced(&outbound, WireMessage::Block(block), &self_label, &log);
         broadcast_traced(&outbound, WireMessage::Cert(cert), &self_label, &log);
@@ -1684,6 +1856,35 @@ mod tests {
 
     use super::*;
     use crate::config::{GenesisValidator, Peer};
+
+    /// Generate `n` ML-DSA-65 keypairs and write each secret key to a
+    /// temp file. Returns `(pk_hex_vec, sk_path_vec, sk_vec)` — the pk
+    /// hexes go into the `GenesisManifest`, the sk paths into
+    /// `NodeConfig`, and the sk vec is available for loadgen clients.
+    fn test_key_files(
+        n: u32,
+    ) -> (
+        Vec<String>,
+        Vec<std::path::PathBuf>,
+        Vec<gsx_crypto::mldsa::SecretKey>,
+        Vec<gsx_crypto::mldsa::PublicKey>,
+    ) {
+        let mut pk_hexes = Vec::with_capacity(n as usize);
+        let mut sk_paths = Vec::with_capacity(n as usize);
+        let mut sks = Vec::with_capacity(n as usize);
+        let mut pks = Vec::with_capacity(n as usize);
+        let pid = std::process::id();
+        for i in 0..n {
+            let (pk, sk) = gsx_crypto::mldsa::keypair();
+            pk_hexes.push(hex::encode(pk.as_bytes()));
+            let path = std::env::temp_dir().join(format!("gsx-test-sk-{}-{}.bin", i, pid));
+            std::fs::write(&path, sk.as_bytes()).unwrap();
+            sk_paths.push(path);
+            pks.push(pk);
+            sks.push(sk);
+        }
+        (pk_hexes, sk_paths, sks, pks)
+    }
 
     #[test]
     fn f_plus_one_matches_byzantine_threshold() {
@@ -1747,6 +1948,7 @@ mod tests {
                 .collect(),
             corridors: Vec::new(),
             rounds_per_epoch: 1024,
+            prebalances: vec![],
         };
         let cfg = NodeConfig {
             self_id: "v0".into(),
@@ -1767,6 +1969,9 @@ mod tests {
             client_per_ip_limit: 8,
             rpc_per_ip_capacity: 60,
             rpc_per_ip_refill_per_sec: 10,
+            rpc_request_timeout_ms: 30_000,
+            rpc_max_request_body_bytes: 1024 * 1024,
+            rpc_max_concurrent_requests: 64,
             metrics_listen: None,
         };
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
@@ -1790,8 +1995,7 @@ mod tests {
         // one round_ms tick of the submit landing on the mpsc.
         let blocks = d.state.blocks.lock();
         let in_block = blocks.values().any(|b| {
-            b.intents
-                .iter()
+            b.iter()
                 .any(|i| matches!(i, gsx_execution::Intent::Transfer { amount: 42, .. }))
         });
         assert!(in_block, "intent was not carried into any block");
@@ -1830,6 +2034,7 @@ mod tests {
                 .collect(),
             corridors: Vec::new(),
             rounds_per_epoch: 1024,
+            prebalances: vec![],
         };
         let cfg = NodeConfig {
             self_id: "v0".into(),
@@ -1850,6 +2055,9 @@ mod tests {
             client_per_ip_limit: 8,
             rpc_per_ip_capacity: 60,
             rpc_per_ip_refill_per_sec: 10,
+            rpc_request_timeout_ms: 30_000,
+            rpc_max_request_body_bytes: 1024 * 1024,
+            rpc_max_concurrent_requests: 64,
             metrics_listen: None,
         };
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
@@ -1876,8 +2084,7 @@ mod tests {
         let total_intents_in_blocks: usize = blocks
             .values()
             .map(|b| {
-                b.intents
-                    .iter()
+                b.iter()
                     .filter(|i| matches!(i, gsx_execution::Intent::Transfer { amount: 99, .. }))
                     .count()
             })
@@ -1897,6 +2104,7 @@ mod tests {
     async fn four_node_main_lane_commits() {
         let n = 4u32;
         let base_port: u16 = 19_000;
+        let (pk_hexes, sk_paths, _sks, _pks) = test_key_files(n);
 
         let manifest = GenesisManifest {
             network_id: "test-4n".into(),
@@ -1904,14 +2112,15 @@ mod tests {
                 .map(|i| GenesisValidator {
                     authority_id: i,
                     label: format!("v{}", i),
-                    mldsa_public_key_hex: "00".into(),
+                    mldsa_public_key_hex: pk_hexes[i as usize].clone(),
                     bls_public_key_hex: "00".into(),
-                    validator_stake_gsx: 1_000,
-                    authority_stake_gsx: 1_000,
+                    validator_stake_gsx: 150_000,
+                    authority_stake_gsx: 150_000,
                 })
                 .collect(),
             corridors: Vec::new(),
             rounds_per_epoch: 1024,
+            prebalances: vec![],
         };
 
         let mut daemons = Vec::new();
@@ -1938,7 +2147,7 @@ mod tests {
                 peers,
                 round_ms: 100,
                 checkpoint_cadence_rounds: 1,
-                mldsa_secret_key_path: "/dev/null".into(),
+                mldsa_secret_key_path: sk_paths[i as usize].clone(),
                 bls_secret_key_path: "/dev/null".into(),
                 genesis_manifest_path: "/dev/null".into(),
                 event_log_path: std::env::temp_dir().join(format!("gsx-daemon-test-v{}.ndjson", i)),
@@ -1948,6 +2157,9 @@ mod tests {
                 client_per_ip_limit: 8,
                 rpc_per_ip_capacity: 60,
                 rpc_per_ip_refill_per_sec: 10,
+                rpc_request_timeout_ms: 30_000,
+                rpc_max_request_body_bytes: 1024 * 1024,
+                rpc_max_concurrent_requests: 64,
                 metrics_listen: None,
             };
             let d = Daemon::start(cfg, manifest.clone()).await.unwrap();
@@ -2030,11 +2242,12 @@ mod tests {
         let base_port: u16 = 19_700;
         let network_id = "phase-g-4n".to_string();
 
-        // Issue #28 (Phase 2.6): generate a real ML-DSA-65 keypair
-        // for v0 so the loadgen client can sign AdmitAuthority /
-        // EjectAuthority intents that pass the new signature gate.
-        let (client_pk, client_sk) = gsx_crypto::mldsa::keypair();
-        let client_pk_hex = hex::encode(client_pk.as_bytes());
+        // Generate real ML-DSA-65 keypairs for all validators so cert
+        // signatures verify across the cluster. v0's key is also used
+        // by the loadgen client to sign governance intents.
+        let (pk_hexes, sk_paths, sks, pks) = test_key_files(n);
+        let client_sk = sks.into_iter().next().unwrap();
+        let client_pk = pks.into_iter().next().unwrap();
 
         let manifest = GenesisManifest {
             network_id: network_id.clone(),
@@ -2042,19 +2255,10 @@ mod tests {
                 .map(|i| GenesisValidator {
                     authority_id: i,
                     label: format!("v{}", i),
-                    // v0 carries the loadgen-known pubkey so this
-                    // test's `client.submit(...)` calls verify.
-                    // Other validators carry "00" — they don't need
-                    // to verify their OWN cert authorship in this
-                    // test, only the client wire on v0.
-                    mldsa_public_key_hex: if i == 0 {
-                        client_pk_hex.clone()
-                    } else {
-                        "00".into()
-                    },
+                    mldsa_public_key_hex: pk_hexes[i as usize].clone(),
                     bls_public_key_hex: "00".into(),
-                    validator_stake_gsx: 30_000, // ≥ VALIDATOR_STAKE_THRESHOLD_GSX
-                    authority_stake_gsx: 150_000, // ≥ AUTHORITY_STAKE_THRESHOLD_GSX
+                    validator_stake_gsx: 30_000, // >= VALIDATOR_STAKE_THRESHOLD_GSX
+                    authority_stake_gsx: 150_000, // >= AUTHORITY_STAKE_THRESHOLD_GSX
                 })
                 .collect(),
             corridors: Vec::new(),
@@ -2062,6 +2266,7 @@ mod tests {
             // (which now lands at the next boundary) is exercised on
             // CI-sane timescales. 16 rounds * 100ms = 1.6s/boundary.
             rounds_per_epoch: 16,
+            prebalances: vec![],
         };
 
         let mut daemons = Vec::new();
@@ -2088,7 +2293,7 @@ mod tests {
                 peers,
                 round_ms: 100,
                 checkpoint_cadence_rounds: 1,
-                mldsa_secret_key_path: "/dev/null".into(),
+                mldsa_secret_key_path: sk_paths[i as usize].clone(),
                 bls_secret_key_path: "/dev/null".into(),
                 genesis_manifest_path: "/dev/null".into(),
                 event_log_path: std::env::temp_dir().join(format!("gsx-phaseg-test-v{}.ndjson", i)),
@@ -2098,6 +2303,9 @@ mod tests {
                 client_per_ip_limit: 8,
                 rpc_per_ip_capacity: 60,
                 rpc_per_ip_refill_per_sec: 10,
+                rpc_request_timeout_ms: 30_000,
+                rpc_max_request_body_bytes: 1024 * 1024,
+                rpc_max_concurrent_requests: 64,
                 metrics_listen: None,
             };
             let d = Daemon::start(cfg, manifest.clone()).await.unwrap();
@@ -2167,7 +2375,7 @@ mod tests {
                         let blocks = d.state.blocks.lock();
                         let votes = d.state.votes.lock();
                         let intent_in_block = blocks.values().any(|b| {
-                            b.intents.iter().any(|x| {
+                            b.iter().any(|x| {
                                 matches!(
                                     x,
                                     Intent::AdmitAuthority {
@@ -2235,7 +2443,7 @@ mod tests {
                 for d in &daemons {
                     let blocks = d.state.blocks.lock();
                     let observed = blocks.values().any(|b| {
-                        b.intents.iter().any(|x| {
+                        b.iter().any(|x| {
                             matches!(
                                 x,
                                 Intent::EjectAuthority {
@@ -2354,7 +2562,6 @@ mod tests {
                         votes_total,
                         votes_keys,
                         eject_cert_hash,
-                        eject_block_round,
                         eject_cert_committed,
                     ) = {
                         let committed = d.state.committed.lock();
@@ -2365,9 +2572,8 @@ mod tests {
                         // actually committed?
                         let mut eject_in_block = false;
                         let mut eject_cert_hash: Option<CertHash> = None;
-                        let mut eject_block_round: Option<u64> = None;
                         for (h, b) in blocks.iter() {
-                            if b.intents.iter().any(|x| {
+                            if b.iter().any(|x| {
                                 matches!(
                                     x,
                                     Intent::EjectAuthority {
@@ -2378,7 +2584,6 @@ mod tests {
                             }) {
                                 eject_in_block = true;
                                 eject_cert_hash = Some(*h);
-                                eject_block_round = Some(b.round);
                                 break;
                             }
                         }
@@ -2391,11 +2596,19 @@ mod tests {
                             votes_total,
                             votes.len(),
                             eject_cert_hash,
-                            eject_block_round,
                             eject_cert_committed,
                         )
                     };
                     let inner = d.state.inner.lock().await;
+                    // Resolve the round from the blocks_by_round index
+                    // (the round field was dropped from in-memory storage).
+                    let eject_block_round: Option<u64> = eject_cert_hash.and_then(|ch| {
+                        inner
+                            .blocks_by_round
+                            .iter()
+                            .find(|(_, v)| **v == ch)
+                            .map(|(r, _)| *r)
+                    });
                     let reg = d.state.authority_registry.read().await;
                     let stake_table = d.state.stake_table.read().await;
                     let last_authored = inner.last_authored_round.unwrap_or(u64::MAX);
@@ -2482,6 +2695,7 @@ mod tests {
                 .collect(),
             corridors: Vec::new(),
             rounds_per_epoch: 1024,
+            prebalances: vec![],
         };
         let cfg = NodeConfig {
             self_id: "v0".into(),
@@ -2502,6 +2716,9 @@ mod tests {
             client_per_ip_limit: 8,
             rpc_per_ip_capacity: 60,
             rpc_per_ip_refill_per_sec: 10,
+            rpc_request_timeout_ms: 30_000,
+            rpc_max_request_body_bytes: 1024 * 1024,
+            rpc_max_concurrent_requests: 64,
             metrics_listen: None,
         };
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
@@ -2538,6 +2755,7 @@ mod tests {
             intent: good_intent.clone(),
             signature: good_sig.as_bytes().to_vec(),
             signer_pubkey_hash: pkh,
+            signer_pubkey: None,
         };
         match round_trip(cfg.client_listen, &good_msg).await {
             ClientResponse::Ack { .. } => {}
@@ -2554,6 +2772,7 @@ mod tests {
             },
             signature: good_sig.as_bytes().to_vec(),
             signer_pubkey_hash: bogus_pkh,
+            signer_pubkey: None,
         };
         match round_trip(cfg.client_listen, &bogus_msg).await {
             ClientResponse::Err(e) => assert!(
@@ -2573,6 +2792,7 @@ mod tests {
             },
             signature: vec![0u8; 3309], // structured-shape garbage
             signer_pubkey_hash: pkh,
+            signer_pubkey: None,
         };
         match round_trip(cfg.client_listen, &garbage_msg).await {
             ClientResponse::Err(e) => assert!(
@@ -2595,6 +2815,7 @@ mod tests {
             intent: intent_b,
             signature: good_sig.as_bytes().to_vec(), // signs good_intent, not intent_b
             signer_pubkey_hash: pkh,
+            signer_pubkey: None,
         };
         match round_trip(cfg.client_listen, &replay_msg).await {
             ClientResponse::Err(e) => assert!(
@@ -2612,7 +2833,7 @@ mod tests {
         let blocks = d.state.blocks.lock();
         let landed: Vec<&Intent> = blocks
             .values()
-            .flat_map(|b| b.intents.iter())
+            .flat_map(|b| b.iter())
             .filter(|i| matches!(i, Intent::Transfer { .. }))
             .collect();
         assert_eq!(
@@ -2653,6 +2874,7 @@ mod tests {
                 .collect(),
             corridors: Vec::new(),
             rounds_per_epoch: 1024,
+            prebalances: vec![],
         };
         let (log, _log_task) =
             EventLog::start(&std::env::temp_dir().join("gsx-fastpath-test.ndjson"))
@@ -2666,7 +2888,7 @@ mod tests {
             object: gsx_fastpath::cert::OwnedObjectId([0xAB; 32]),
             owner: gsx_fastpath::cert::OwnerAddress([0xCD; 32]),
             nonce: 42,
-            lineage: CertHash([0; 32]),
+            lineage: CertHash::from([0; 32]),
             lineage_round: 0,
             payload_digest: [0x11; 32],
         };
@@ -2752,6 +2974,7 @@ mod tests {
                 .collect(),
             corridors: Vec::new(),
             rounds_per_epoch: 1024,
+            prebalances: vec![],
         };
         let (log, _log_task) =
             EventLog::start(&std::env::temp_dir().join("gsx-fp-k-binding-test.ndjson"))
@@ -2773,7 +2996,7 @@ mod tests {
                 round: 5,
                 object: object_a,
                 payload_digest: main_payload,
-                lineage: CertHash([0xDE; 32]),
+                lineage: CertHash::from([0xDE; 32]),
             });
         }
 
@@ -2783,7 +3006,7 @@ mod tests {
             object: object_a,
             owner: gsx_fastpath::cert::OwnerAddress([0xCD; 32]),
             nonce: 1,
-            lineage: CertHash([0; 32]),
+            lineage: CertHash::from([0; 32]),
             lineage_round: 3,
             payload_digest: [0x22; 32], // != main_payload
         };
@@ -2815,7 +3038,7 @@ mod tests {
             object: object_b,
             owner: gsx_fastpath::cert::OwnerAddress([0xCD; 32]),
             nonce: 1,
-            lineage: CertHash([0; 32]),
+            lineage: CertHash::from([0; 32]),
             lineage_round: 3,
             payload_digest: [0x33; 32],
         };
@@ -2858,6 +3081,7 @@ mod tests {
                 .collect(),
             corridors: Vec::new(),
             rounds_per_epoch: 1024,
+            prebalances: vec![],
         };
         let (log, _log_task) = EventLog::start(&std::env::temp_dir().join("gsx-ltp-test.ndjson"))
             .await
@@ -2958,6 +3182,7 @@ mod tests {
                 .collect(),
             corridors: Vec::new(),
             rounds_per_epoch: 1024,
+            prebalances: vec![],
         };
         let (log, _log_task) = EventLog::start(&std::env::temp_dir().join("gsx-ltp-unreg.ndjson"))
             .await
@@ -3010,6 +3235,7 @@ mod tests {
             }],
             corridors: Vec::new(),
             rounds_per_epoch: 1024,
+            prebalances: vec![],
         };
         let cfg = NodeConfig {
             self_id: "v0".into(),
@@ -3030,6 +3256,9 @@ mod tests {
             client_per_ip_limit: 8,
             rpc_per_ip_capacity: 60,
             rpc_per_ip_refill_per_sec: 10,
+            rpc_request_timeout_ms: 30_000,
+            rpc_max_request_body_bytes: 1024 * 1024,
+            rpc_max_concurrent_requests: 64,
             metrics_listen: None,
         };
         let _d = Daemon::start(cfg.clone(), manifest).await.unwrap();
@@ -3100,6 +3329,7 @@ mod tests {
                 .collect(),
             corridors: Vec::new(),
             rounds_per_epoch: 1024,
+            prebalances: vec![],
         };
         let cfg = NodeConfig {
             self_id: "v0".into(),
@@ -3120,6 +3350,9 @@ mod tests {
             client_per_ip_limit: 8,
             rpc_per_ip_capacity: 60,
             rpc_per_ip_refill_per_sec: 10,
+            rpc_request_timeout_ms: 30_000,
+            rpc_max_request_body_bytes: 1024 * 1024,
+            rpc_max_concurrent_requests: 64,
             metrics_listen: None,
         };
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
@@ -3177,11 +3410,11 @@ mod tests {
             let block = blocks
                 .get(&cert_hash)
                 .expect("cert hash from tx_to_block must resolve in state.blocks");
-            let stored = crate::codec::encode(&block.intents[idx]).unwrap();
+            let stored = crate::codec::encode(&block[idx]).unwrap();
             let stored_hash: [u8; 32] = *blake3::hash(&stored).as_bytes();
             assert_eq!(
                 &stored_hash, h,
-                "intent at block.intents[{}] does not match tx_to_block key",
+                "intent at block[{}] does not match tx_to_block key",
                 idx,
             );
         }
@@ -3214,6 +3447,7 @@ mod tests {
             }],
             corridors: Vec::new(),
             rounds_per_epoch: 1024,
+            prebalances: vec![],
         };
         let cfg = NodeConfig {
             self_id: "v0".into(),
@@ -3234,6 +3468,9 @@ mod tests {
             client_per_ip_limit: 8,
             rpc_per_ip_capacity: 60,
             rpc_per_ip_refill_per_sec: 10,
+            rpc_request_timeout_ms: 30_000,
+            rpc_max_request_body_bytes: 1024 * 1024,
+            rpc_max_concurrent_requests: 64,
             metrics_listen: None,
         };
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
@@ -3326,6 +3563,7 @@ mod tests {
             }],
             corridors: Vec::new(),
             rounds_per_epoch: 1024,
+            prebalances: vec![],
         };
         let cfg = NodeConfig {
             self_id: "v0".into(),
@@ -3346,6 +3584,9 @@ mod tests {
             client_per_ip_limit: 8,
             rpc_per_ip_capacity: 60,
             rpc_per_ip_refill_per_sec: 10,
+            rpc_request_timeout_ms: 30_000,
+            rpc_max_request_body_bytes: 1024 * 1024,
+            rpc_max_concurrent_requests: 64,
             metrics_listen: None,
         };
         let _d = Daemon::start(cfg.clone(), manifest).await.unwrap();
@@ -3389,5 +3630,39 @@ mod tests {
             serde_json::from_str(resp_text[body_start..].trim_end()).unwrap();
 
         assert_eq!(parsed["error"]["code"], -32001);
+    }
+
+    #[test]
+    fn genesis_prebalances_applied_to_substrate() {
+        use crate::config::GenesisBalance;
+
+        let faucet_addr = "0x0102030405060708091011121314151617181920";
+        let manifest = GenesisManifest {
+            network_id: "prebal-test".into(),
+            validators: vec![GenesisValidator {
+                authority_id: 0,
+                label: "v0".into(),
+                mldsa_public_key_hex: "00".into(),
+                bls_public_key_hex: "00".into(),
+                validator_stake_gsx: 150_000,
+                authority_stake_gsx: 150_000,
+            }],
+            corridors: Vec::new(),
+            rounds_per_epoch: 1024,
+            prebalances: vec![GenesisBalance {
+                address: faucet_addr.into(),
+                balance_gsx: 1_000_000,
+                role: Some("faucet".into()),
+            }],
+        };
+
+        let state = State::new(&manifest);
+        let inner = state.inner.blocking_lock();
+        let addr: [u8; 20] = [
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x10, 0x11, 0x12, 0x13, 0x14,
+            0x15, 0x16, 0x17, 0x18, 0x19, 0x20,
+        ];
+        let bal = inner.substrate.balance(&addr);
+        assert_eq!(bal, 1_000_000, "prebalance should be applied");
     }
 }

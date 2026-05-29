@@ -24,6 +24,31 @@
 //! `L2StateRootRecord`. All three hashes are the same 32
 //! bytes by construction.
 //!
+//! ## Enforcement status: advisory (current) → enforced (Phase 2.1)
+//!
+//! **Current state:** the cross-check is **advisory only**.
+//! The `CommitL2StateRoot` handler in `apply_intent` does NOT
+//! read the DA anchor registry to verify that the proof's
+//! `da_commitment` (public inputs offset 72..104) matches the
+//! anchored `BLAKE3(da_blob)` for the same `(chain, batch_id)`.
+//! This means a malicious sequencer could submit a
+//! `CommitL2StateRoot` claiming a `da_commitment` that differs
+//! from the blob actually anchored via `PostL2DAv2`. Off-chain
+//! auditors detecting the mismatch would need to trigger
+//! slashing through the governance path.
+//!
+//! **Target state (Phase 2.1, #104):** when the SP1 verifier
+//! precompile lands, `CommitL2StateRoot` should enforce:
+//!
+//! ```text
+//! let anchored = da_anchor_registry.get((chain, batch_id));
+//! if anchored != Some(pi.da_commitment) { reject }
+//! ```
+//!
+//! This upgrades the cross-check from advisory to
+//! substrate-enforced, closing the gap for untrusted
+//! sequencers.
+//!
 //! ## Replay defense
 //!
 //! Re-anchoring the same `(chain, batch)` rejects with

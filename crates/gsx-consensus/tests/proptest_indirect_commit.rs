@@ -33,6 +33,8 @@ use gsx_consensus::{
 };
 use proptest::prelude::*;
 
+const NET: &str = "test";
+
 /// Build a valid topo-ordered DAG of `n_rounds` rounds with the
 /// following sparsity profile at the chosen `sparse_round`:
 ///
@@ -94,9 +96,10 @@ fn build_sparse_dag(
                     round: r as Round,
                     parents,
                     payload_digest: payload,
+                    signature: vec![],
                 }
             };
-            this_round.push(cert.hash());
+            this_round.push(cert.hash(NET));
             all.push(cert);
         }
         prev_round_hashes = this_round;
@@ -107,7 +110,7 @@ fn build_sparse_dag(
 fn store_from(certs: &[Certificate]) -> DagStore {
     let mut s = DagStore::new();
     for c in certs {
-        s.insert(c.clone())
+        s.insert(c.clone(), NET)
             .expect("topo-ordered insert must succeed");
     }
     s

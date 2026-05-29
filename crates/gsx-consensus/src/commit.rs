@@ -328,6 +328,8 @@ mod tests {
     use super::*;
     use crate::cert::Certificate;
 
+    const NET: &str = "test";
+
     fn genesis(author: u32) -> Certificate {
         Certificate::genesis(author, [author as u8; 32])
     }
@@ -338,6 +340,7 @@ mod tests {
             round,
             parents,
             payload_digest: [tag; 32],
+            signature: vec![],
         }
     }
 
@@ -374,8 +377,8 @@ mod tests {
         // n = 1: quorum_threshold is 1. The leader at round 0 is author 0;
         // a single supporter at round 1 commits it.
         let mut dag = DagStore::new();
-        let g = dag.insert(genesis(0)).unwrap();
-        let _r1 = dag.insert(child(0, 1, vec![g], 0xAA)).unwrap();
+        let g = dag.insert(genesis(0), NET).unwrap();
+        let _r1 = dag.insert(child(0, 1, vec![g], 0xAA), NET).unwrap();
         assert_eq!(commit_leader(&dag, 0, 1), Some(g));
     }
 
@@ -384,7 +387,7 @@ mod tests {
         // n = 4, leader at round 0 is author 0. If only author 1 produces
         // a genesis cert, no commit is possible.
         let mut dag = DagStore::new();
-        let _ = dag.insert(genesis(1)).unwrap();
+        let _ = dag.insert(genesis(1), NET).unwrap();
         assert_eq!(commit_leader(&dag, 0, 4), None);
     }
 
@@ -394,11 +397,13 @@ mod tests {
         let mut dag = DagStore::new();
         let mut g_hashes = Vec::new();
         for a in 0..4 {
-            g_hashes.push(dag.insert(genesis(a)).unwrap());
+            g_hashes.push(dag.insert(genesis(a), NET).unwrap());
         }
         let leader_hash = g_hashes[0];
-        dag.insert(child(1, 1, vec![leader_hash], 0x11)).unwrap();
-        dag.insert(child(2, 1, vec![leader_hash], 0x22)).unwrap();
+        dag.insert(child(1, 1, vec![leader_hash], 0x11), NET)
+            .unwrap();
+        dag.insert(child(2, 1, vec![leader_hash], 0x22), NET)
+            .unwrap();
         assert_eq!(commit_leader(&dag, 0, 4), None);
     }
 
@@ -408,11 +413,12 @@ mod tests {
         let mut dag = DagStore::new();
         let mut g_hashes = Vec::new();
         for a in 0..4 {
-            g_hashes.push(dag.insert(genesis(a)).unwrap());
+            g_hashes.push(dag.insert(genesis(a), NET).unwrap());
         }
         let leader_hash = g_hashes[0];
         for a in 0..3 {
-            dag.insert(child(a, 1, vec![leader_hash], a as u8)).unwrap();
+            dag.insert(child(a, 1, vec![leader_hash], a as u8), NET)
+                .unwrap();
         }
         assert_eq!(commit_leader(&dag, 0, 4), Some(leader_hash));
     }
@@ -420,9 +426,9 @@ mod tests {
     #[test]
     fn causal_history_includes_self_and_ancestors() {
         let mut dag = DagStore::new();
-        let g0 = dag.insert(genesis(0)).unwrap();
-        let g1 = dag.insert(genesis(1)).unwrap();
-        let r1 = dag.insert(child(0, 1, vec![g0, g1], 0xCC)).unwrap();
+        let g0 = dag.insert(genesis(0), NET).unwrap();
+        let g1 = dag.insert(genesis(1), NET).unwrap();
+        let r1 = dag.insert(child(0, 1, vec![g0, g1], 0xCC), NET).unwrap();
 
         let history = causal_history(&dag, r1);
         assert!(history.contains(&r1));
@@ -446,7 +452,7 @@ mod tests {
         let mut dag = DagStore::new();
         let mut g = Vec::new();
         for a in 0..4 {
-            g.push(dag.insert(genesis(a)).unwrap());
+            g.push(dag.insert(genesis(a), NET).unwrap());
         }
         let r0_leader = g[0]; // leader(0, 4) = 0
 
@@ -454,19 +460,19 @@ mod tests {
         // Other parents of those round-1 certs include the other genesis
         // certs so we can author round 2 against them.
         let r1_0 = dag
-            .insert(child(0, 1, vec![g[0], g[1], g[2], g[3]], 0x10))
+            .insert(child(0, 1, vec![g[0], g[1], g[2], g[3]], 0x10), NET)
             .unwrap();
         let r1_1 = dag
-            .insert(child(1, 1, vec![g[0], g[1], g[2], g[3]], 0x11))
+            .insert(child(1, 1, vec![g[0], g[1], g[2], g[3]], 0x11), NET)
             .unwrap();
         // Authors 2 and 3 at round 1 do NOT include r0_leader as parent —
         // they only have g[1], g[2], g[3]. So r0_leader has only 2
         // direct supporters at round 1, below q=3.
         let r1_2 = dag
-            .insert(child(2, 1, vec![g[1], g[2], g[3]], 0x12))
+            .insert(child(2, 1, vec![g[1], g[2], g[3]], 0x12), NET)
             .unwrap();
         let r1_3 = dag
-            .insert(child(3, 1, vec![g[1], g[2], g[3]], 0x13))
+            .insert(child(3, 1, vec![g[1], g[2], g[3]], 0x13), NET)
             .unwrap();
 
         // Direct rule for round 0: undecided (only 2 supporters at R+1).
@@ -476,25 +482,25 @@ mod tests {
         // the round-1 leader (author 1 = leader(1,4)) as parent. Direct
         // commit fires for round 2.
         let r2_0 = dag
-            .insert(child(0, 2, vec![r1_0, r1_1, r1_2, r1_3], 0x20))
+            .insert(child(0, 2, vec![r1_0, r1_1, r1_2, r1_3], 0x20), NET)
             .unwrap();
         let r2_1 = dag
-            .insert(child(1, 2, vec![r1_0, r1_1, r1_2, r1_3], 0x21))
+            .insert(child(1, 2, vec![r1_0, r1_1, r1_2, r1_3], 0x21), NET)
             .unwrap();
         let r2_2 = dag
-            .insert(child(2, 2, vec![r1_0, r1_1, r1_2, r1_3], 0x22))
+            .insert(child(2, 2, vec![r1_0, r1_1, r1_2, r1_3], 0x22), NET)
             .unwrap();
         let _r2_3 = dag
-            .insert(child(3, 2, vec![r1_0, r1_1, r1_2, r1_3], 0x23))
+            .insert(child(3, 2, vec![r1_0, r1_1, r1_2, r1_3], 0x23), NET)
             .unwrap();
         let r2_leader = r2_2; // author 2 is leader(2, 4)
 
         // Round 3: ≥ q=3 supporters of r2_leader.
-        dag.insert(child(0, 3, vec![r2_0, r2_1, r2_2], 0x30))
+        dag.insert(child(0, 3, vec![r2_0, r2_1, r2_2], 0x30), NET)
             .unwrap();
-        dag.insert(child(1, 3, vec![r2_0, r2_1, r2_2], 0x31))
+        dag.insert(child(1, 3, vec![r2_0, r2_1, r2_2], 0x31), NET)
             .unwrap();
-        dag.insert(child(2, 3, vec![r2_0, r2_1, r2_2], 0x32))
+        dag.insert(child(2, 3, vec![r2_0, r2_1, r2_2], 0x32), NET)
             .unwrap();
 
         // Direct: round 2 fires.
@@ -521,36 +527,36 @@ mod tests {
         let mut dag = DagStore::new();
         let mut g = Vec::new();
         for a in 0..4 {
-            g.push(dag.insert(genesis(a)).unwrap());
+            g.push(dag.insert(genesis(a), NET).unwrap());
         }
         // Authors 1, 2, 3 at round 1 omit r0_leader = g[0] entirely.
         let r1_1 = dag
-            .insert(child(1, 1, vec![g[1], g[2], g[3]], 0x11))
+            .insert(child(1, 1, vec![g[1], g[2], g[3]], 0x11), NET)
             .unwrap();
         let r1_2 = dag
-            .insert(child(2, 1, vec![g[1], g[2], g[3]], 0x12))
+            .insert(child(2, 1, vec![g[1], g[2], g[3]], 0x12), NET)
             .unwrap();
         let r1_3 = dag
-            .insert(child(3, 1, vec![g[1], g[2], g[3]], 0x13))
+            .insert(child(3, 1, vec![g[1], g[2], g[3]], 0x13), NET)
             .unwrap();
 
         // Round 2: leader(2,4)=2. Parents do not include r0_leader.
         let r2_0 = dag
-            .insert(child(0, 2, vec![r1_1, r1_2, r1_3], 0x20))
+            .insert(child(0, 2, vec![r1_1, r1_2, r1_3], 0x20), NET)
             .unwrap();
         let r2_1 = dag
-            .insert(child(1, 2, vec![r1_1, r1_2, r1_3], 0x21))
+            .insert(child(1, 2, vec![r1_1, r1_2, r1_3], 0x21), NET)
             .unwrap();
         let r2_2 = dag
-            .insert(child(2, 2, vec![r1_1, r1_2, r1_3], 0x22))
+            .insert(child(2, 2, vec![r1_1, r1_2, r1_3], 0x22), NET)
             .unwrap();
 
         // Round 3: ≥ q=3 supporters of r2_2 (= leader of round 2).
-        dag.insert(child(0, 3, vec![r2_0, r2_1, r2_2], 0x30))
+        dag.insert(child(0, 3, vec![r2_0, r2_1, r2_2], 0x30), NET)
             .unwrap();
-        dag.insert(child(1, 3, vec![r2_0, r2_1, r2_2], 0x31))
+        dag.insert(child(1, 3, vec![r2_0, r2_1, r2_2], 0x31), NET)
             .unwrap();
-        dag.insert(child(2, 3, vec![r2_0, r2_1, r2_2], 0x32))
+        dag.insert(child(2, 3, vec![r2_0, r2_1, r2_2], 0x32), NET)
             .unwrap();
 
         // g[0] (round 0 leader cert) exists in DAG but isn't reachable
@@ -581,12 +587,16 @@ mod tests {
         let author = leader(u64::MAX, n);
         let mut dag = DagStore::new();
         let huge = dag
-            .insert(Certificate {
-                author,
-                round: u64::MAX,
-                parents: Vec::new(),
-                payload_digest: [0xEE; 32],
-            })
+            .insert(
+                Certificate {
+                    author,
+                    round: u64::MAX,
+                    parents: Vec::new(),
+                    payload_digest: [0xEE; 32],
+                    signature: Vec::new(),
+                },
+                NET,
+            )
             .unwrap();
         assert!(dag.contains(&huge));
 
@@ -614,11 +624,12 @@ mod tests {
         let mut dag = DagStore::new();
         let mut g = Vec::new();
         for a in 0..4 {
-            g.push(dag.insert(genesis(a)).unwrap());
+            g.push(dag.insert(genesis(a), NET).unwrap());
         }
         let leader_hash = g[0];
         for a in 0..3 {
-            dag.insert(child(a, 1, vec![leader_hash], a as u8)).unwrap();
+            dag.insert(child(a, 1, vec![leader_hash], a as u8), NET)
+                .unwrap();
         }
         assert_eq!(
             decide_slot(&dag, 0, 4),

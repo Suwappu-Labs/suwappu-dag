@@ -369,7 +369,7 @@ pub enum Intent {
     /// governance Intents. Authority Ring quorum (≥ ⌈2n/3⌉+1) must
     /// authorize the rotation via the standard governance path.
     SetL2VerifyingKey {
-        /// L2 chain identifier hash — `SHA3-256("gsx-l2-chain-"
+        /// L2 chain identifier hash — `BLAKE3("gsx-l2-chain-"
         /// || chain_id)` per IQ-006. The substrate looks up
         /// (and updates) this chain's VK pair in the registry's
         /// `chain_vks` map. `[0u8; 32]` is the v1 single-L2
@@ -434,7 +434,7 @@ pub enum Intent {
         /// `Some(asset_id)` = registered + Active asset.
         #[serde(default)]
         asset_id: Option<[u8; 32]>,
-        /// L2 chain identifier hash — `SHA3-256("gsx-l2-chain-"
+        /// L2 chain identifier hash — `BLAKE3("gsx-l2-chain-"
         /// || chain_id)` per IQ-006. Combined with `batch_id`
         /// to look up the committed L2 state root in the
         /// registry. `[0u8; 32]` matches the v1 single-L2
@@ -915,6 +915,18 @@ pub trait Substrate {
     /// behavior of "no record found anywhere".
     fn read_bytes(&self, _addr: &Address) -> Option<Vec<u8>> {
         None
+    }
+
+    /// Read the L2 state-root registry (IQ-006). Decodes the reserved
+    /// `l2_registry_address` bytes-state record via [`Self::read_bytes`],
+    /// returning an empty registry if absent or undecodable. Provided as
+    /// a default method (built only on `read_bytes`) so any `Substrate`
+    /// impl — including through a `Box<dyn Substrate>` trait object, as the
+    /// L2 `l2_state_root` RPC uses — can read it without a concrete
+    /// downcast. `InMemorySubstrate` keeps an identical inherent method.
+    fn l2_registry(&self) -> crate::l2_state::L2Registry {
+        let bytes = self.read_bytes(&reserved::l2_registry_address());
+        crate::l2_state::decode(bytes.as_deref().unwrap_or(&[])).unwrap_or_default()
     }
 
     /// Apply a single intent. On error, the substrate's state is
@@ -3241,7 +3253,7 @@ impl Substrate for InMemorySubstrate {
                     });
                 }
                 registry.insert(key, da_blob_hash(da_blob));
-                self.bytes_state.insert(registry_addr, encode(&registry));
+                self.write_bytes_unchecked(registry_addr, encode(&registry));
                 Ok(())
             }
             // C.8 (#131): slashing-distribution waterfall.

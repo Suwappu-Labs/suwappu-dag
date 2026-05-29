@@ -80,7 +80,12 @@ async fn main() -> Result<()> {
     //    `UnknownSigner` (see header) on a fresh devnet.
     let client = gsx_client::Client::new(&rpc_url);
     match client
-        .submit_intent_raw(&intent_bincode, signature.as_bytes(), signer_pubkey_hash)
+        .submit_intent_raw(
+            &intent_bincode,
+            signature.as_bytes(),
+            signer_pubkey_hash,
+            Some(public_key.as_bytes()),
+        )
         .await
     {
         Ok(intent_hash) => {

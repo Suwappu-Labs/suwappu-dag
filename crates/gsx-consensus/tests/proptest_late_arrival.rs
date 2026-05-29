@@ -31,6 +31,8 @@ use gsx_consensus::{
 };
 use proptest::prelude::*;
 
+const NET: &str = "test";
+
 /// Build a `Certificate` with the given author, round, parents, and a
 /// payload digest derived from `seed`.
 fn cert(author: AuthorityId, round: Round, parents: Vec<CertHash>, seed: u64) -> Certificate {
@@ -46,6 +48,7 @@ fn cert(author: AuthorityId, round: Round, parents: Vec<CertHash>, seed: u64) ->
             round,
             parents,
             payload_digest: payload,
+            signature: vec![],
         }
     }
 }
@@ -53,7 +56,7 @@ fn cert(author: AuthorityId, round: Round, parents: Vec<CertHash>, seed: u64) ->
 fn store_with(certs: &[Certificate]) -> DagStore {
     let mut s = DagStore::new();
     for c in certs {
-        s.insert(c.clone())
+        s.insert(c.clone(), NET)
             .expect("topo-ordered insert must succeed");
     }
     s
@@ -95,7 +98,7 @@ fn decide_slot_scans_past_first_skip_anchor() {
     let r0: Vec<Certificate> = (0..n)
         .map(|a| cert(a as AuthorityId, 0, Vec::new(), 0))
         .collect();
-    let r0h: Vec<CertHash> = r0.iter().map(|c| c.hash()).collect();
+    let r0h: Vec<CertHash> = r0.iter().map(|c| c.hash(NET)).collect();
     let leader_hash = r0h[target_author as usize];
     all.extend(r0);
 
@@ -119,7 +122,7 @@ fn decide_slot_scans_past_first_skip_anchor() {
             cert(a as AuthorityId, 1, parents, 1)
         })
         .collect();
-    let r1h: Vec<CertHash> = r1.iter().map(|c| c.hash()).collect();
+    let r1h: Vec<CertHash> = r1.iter().map(|c| c.hash(NET)).collect();
     all.extend(r1);
 
     // R2: only v0@2 keeps v0@1; v1@2/v2@2/v3@2 drop v0@1 from parents.
@@ -138,14 +141,14 @@ fn decide_slot_scans_past_first_skip_anchor() {
             cert(a as AuthorityId, 2, parents, 2)
         })
         .collect();
-    let r2h: Vec<CertHash> = r2.iter().map(|c| c.hash()).collect();
+    let r2h: Vec<CertHash> = r2.iter().map(|c| c.hash(NET)).collect();
     all.extend(r2);
 
     // R3: all authors reference all R+2 certs → v2@2 directly decided.
     let r3: Vec<Certificate> = (0..n)
         .map(|a| cert(a as AuthorityId, 3, r2h.clone(), 3))
         .collect();
-    let r3h: Vec<CertHash> = r3.iter().map(|c| c.hash()).collect();
+    let r3h: Vec<CertHash> = r3.iter().map(|c| c.hash(NET)).collect();
     all.extend(r3);
 
     // R4: all authors reference all R+3 certs → v3@3 directly decided.
@@ -221,7 +224,7 @@ proptest! {
                 for a in 0..n {
                     let parents = if r == 0 { Vec::new() } else { prev.clone() };
                     let c = cert(a as AuthorityId, r as Round, parents, payload_seed.wrapping_add(seed_offset).wrapping_add(r));
-                    this.push(c.hash());
+                    this.push(c.hash(NET));
                     all.push(c);
                 }
                 prev = this;
@@ -274,7 +277,7 @@ proptest! {
         let r0: Vec<Certificate> = (0..n)
             .map(|a| cert(a as AuthorityId, 0, Vec::new(), payload_seed))
             .collect();
-        let r0h: Vec<CertHash> = r0.iter().map(|c| c.hash()).collect();
+        let r0h: Vec<CertHash> = r0.iter().map(|c| c.hash(NET)).collect();
         let mut all = r0;
 
         // R1: ZERO authors reference leader@0. All R+1 certs use a
@@ -296,7 +299,7 @@ proptest! {
                 cert(a as AuthorityId, 1, parents, payload_seed.wrapping_add(1))
             })
             .collect();
-        let r1h: Vec<CertHash> = r1.iter().map(|c| c.hash()).collect();
+        let r1h: Vec<CertHash> = r1.iter().map(|c| c.hash(NET)).collect();
         all.extend(r1);
 
         // Dense rounds R2..R2+extra_anchor_rounds with all-parents-included
@@ -306,7 +309,7 @@ proptest! {
             let this: Vec<Certificate> = (0..n)
                 .map(|a| cert(a as AuthorityId, r as Round, prev.clone(), payload_seed.wrapping_add(r)))
                 .collect();
-            let this_h: Vec<CertHash> = this.iter().map(|c| c.hash()).collect();
+            let this_h: Vec<CertHash> = this.iter().map(|c| c.hash(NET)).collect();
             all.extend(this);
             prev = this_h;
         }

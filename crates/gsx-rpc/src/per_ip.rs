@@ -59,6 +59,13 @@ pub struct PerIpRateLimiter {
     capacity: u64,
     refill_per_sec: u64,
     buckets: Mutex<HashMap<IpAddr, LeakyBucket>>,
+    /// CIDRs of trusted proxies (ALB, nginx, etc.) whose
+    /// `X-Forwarded-For` header is trusted. When the TCP source IP
+    /// is NOT in this set, `X-Forwarded-For` is ignored and the
+    /// raw TCP source IP is used — preventing direct clients from
+    /// spoofing their IP to bypass rate limiting. Empty means "never
+    /// trust X-Forwarded-For" (safe default for bare-metal deploys).
+    trusted_proxy_ips: Vec<IpAddr>,
 }
 
 impl PerIpRateLimiter {
@@ -66,10 +73,29 @@ impl PerIpRateLimiter {
     /// background GC sweep. `capacity` is the burst allowance per IP;
     /// `refill_per_sec` is the steady-state ceiling.
     pub fn new(capacity: u64, refill_per_sec: u64) -> Arc<Self> {
+        Self::with_trusted_proxies(capacity, refill_per_sec, vec![])
+    }
+
+    /// Build a limiter that trusts `X-Forwarded-For` only when the
+    /// TCP source IP is in `trusted_proxies`. For AWS ALB
+    /// deployments, pass the ALB's internal IPs (or VPC CIDR
+    /// range). For bare-metal, pass `vec![]` (default via `new`).
+    ///
+    /// **Note:** not yet wired through `NodeConfig` — callers today
+    /// always reach this via `new()` which passes `vec![]`. A future
+    /// `rpc_trusted_proxy_ips` config field will complete the
+    /// wire-through. Until then, nodes behind an ALB rate-limit by
+    /// the ALB's IP (safe default; all clients share one bucket).
+    pub fn with_trusted_proxies(
+        capacity: u64,
+        refill_per_sec: u64,
+        trusted_proxies: Vec<IpAddr>,
+    ) -> Arc<Self> {
         let inner = Arc::new(Self {
             capacity,
             refill_per_sec,
             buckets: Mutex::new(HashMap::new()),
+            trusted_proxy_ips: trusted_proxies,
         });
         let gc_handle = Arc::clone(&inner);
         tokio::spawn(async move {
@@ -128,16 +154,43 @@ fn now_ms() -> u64 {
 /// `into_make_service_with_connect_info`), the request is admitted —
 /// rate limiting is a defense-in-depth layer, not a correctness
 /// invariant, and unit tests should not have to fake socket addrs.
+///
+/// When the node sits behind an ALB or reverse proxy, the TCP source
+/// IP is the proxy's address — all clients share one bucket. To fix
+/// this, the middleware checks `X-Forwarded-For` first (standard
+/// header injected by AWS ALB, nginx, etc.) and falls back to
+/// `ConnectInfo` for direct connections. Only the leftmost (client)
+/// IP in the `X-Forwarded-For` chain is used; intermediate proxies
+/// are ignored.
 pub async fn middleware(
     State(limiter): State<Arc<PerIpRateLimiter>>,
     req: Request,
     next: Next,
 ) -> Response {
-    let Some(ip) = req
+    // Resolve the effective client IP. Trust X-Forwarded-For ONLY
+    // when the TCP source is a known proxy (ALB, nginx, etc.).
+    // Direct clients forging X-Forwarded-For are ignored — they
+    // get rate-limited by their real TCP source IP.
+    let tcp_ip = req
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
-        .map(|c| c.0.ip())
-    else {
+        .map(|c| c.0.ip());
+
+    let ip = if let Some(tcp) = tcp_ip {
+        if limiter.trusted_proxy_ips.contains(&tcp) {
+            // TCP source is a trusted proxy — parse the forwarded
+            // client IP (leftmost in X-Forwarded-For chain).
+            req.headers()
+                .get("x-forwarded-for")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.split(',').next())
+                .and_then(|s| s.trim().parse::<IpAddr>().ok())
+                .unwrap_or(tcp)
+        } else {
+            tcp
+        }
+    } else {
+        // No ConnectInfo (unit tests) — admit without rate limiting.
         return next.run(req).await;
     };
 
@@ -185,6 +238,33 @@ mod tests {
             assert!(limiter.try_acquire(ip, 1_000).is_ok());
         }
         assert!(limiter.try_acquire(ip, 1_000).is_err());
+    }
+
+    #[test]
+    fn x_forwarded_for_parsed_correctly() {
+        // Simulate the header parsing logic from the middleware.
+        let parse = |header: &str| -> Option<IpAddr> {
+            header
+                .split(',')
+                .next()
+                .and_then(|s| s.trim().parse::<IpAddr>().ok())
+        };
+        // Single IP.
+        assert_eq!(parse("203.0.113.50"), Some("203.0.113.50".parse().unwrap()));
+        // Multiple IPs — leftmost is the client.
+        assert_eq!(
+            parse("203.0.113.50, 70.41.3.18, 150.172.238.178"),
+            Some("203.0.113.50".parse().unwrap())
+        );
+        // Whitespace around the IP.
+        assert_eq!(
+            parse("  10.0.0.1 , 10.0.0.2"),
+            Some("10.0.0.1".parse().unwrap())
+        );
+        // Garbage — returns None, middleware falls back to ConnectInfo.
+        assert_eq!(parse("not-an-ip, 10.0.0.1"), None);
+        // Empty string.
+        assert_eq!(parse(""), None);
     }
 
     #[tokio::test]

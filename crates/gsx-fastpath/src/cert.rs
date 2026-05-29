@@ -56,7 +56,7 @@ mod tests {
             object: OwnedObjectId([0xAB; 32]),
             owner: OwnerAddress([0xCD; 32]),
             nonce: 42,
-            lineage: CertHash([0xEF; 32]),
+            lineage: CertHash::from([0xEF; 32]),
             lineage_round: 7,
             payload_digest: [0x11; 32],
         };

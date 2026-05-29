@@ -61,6 +61,7 @@ impl StateView for MockState {
         intent_bincode: Vec<u8>,
         _signature: Vec<u8>,
         signer_pubkey_hash: [u8; 32],
+        _signer_pubkey: Option<Vec<u8>>,
     ) -> Result<[u8; 32], SubmitIntentError> {
         // Mock policy:
         //  - First byte 0xFE → BadIntentEncoding (simulates bad bincode)
@@ -82,6 +83,20 @@ impl StateView for MockState {
         // bincode payload. SDK can predict this client-side.
         let hash = blake3::hash(&intent_bincode);
         Ok(*hash.as_bytes())
+    }
+    async fn l1_state_root(&self) -> [u8; 32] {
+        [0xAA; 32]
+    }
+    async fn l2_state_root(&self, l2_chain_id_hash: [u8; 32]) -> [u8; 32] {
+        // Unknown chain → zero sentinel (matches StateView contract).
+        if l2_chain_id_hash == [0xFF; 32] {
+            [0u8; 32]
+        } else {
+            [0xBB; 32]
+        }
+    }
+    async fn force_include_registry_bytes(&self) -> Vec<u8> {
+        Vec::new()
     }
     fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<gsx_rpc::context::EventView> {
         self.event_tx.subscribe()
@@ -651,6 +666,30 @@ async fn submit_intent_positional_params() {
 }
 
 #[tokio::test]
+async fn submit_intent_positional_params_with_signer_pubkey() {
+    let ctx = fixture();
+    let resp = post_rpc(
+        ctx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 106,
+            "method": "gsx_submitIntent",
+            "params": [
+                "deadbeef",
+                "00",
+                format!("0x{}", "ab".repeat(32)),
+                format!("0x{}", "cc".repeat(976)),
+            ],
+        }),
+    )
+    .await;
+
+    // Mock ignores signer_pubkey — we're testing that the 4-element
+    // positional path parses and passes through without error.
+    assert!(resp["result"]["tx_hash"].is_string());
+}
+
+#[tokio::test]
 async fn submit_intent_short_pkh_is_invalid_params() {
     let ctx = fixture();
     let resp = post_rpc(
@@ -685,6 +724,126 @@ async fn invalid_jsonrpc_version() {
     .await;
 
     assert_eq!(resp["error"]["code"], -32600);
+}
+
+// ── L1/L2 anchor reader RPC methods ─────────────────────────────────
+
+#[tokio::test]
+async fn get_l1_state_root_returns_hex() {
+    let ctx = fixture();
+    let resp = post_rpc(
+        ctx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 200,
+            "method": "gsx_getL1StateRoot",
+        }),
+    )
+    .await;
+
+    assert!(resp["error"].is_null());
+    let root = resp["result"]["state_root"].as_str().unwrap();
+    assert!(root.starts_with("0x"));
+    // Mock returns [0xAA; 32]
+    assert_eq!(root, format!("0x{}", "aa".repeat(32)));
+}
+
+#[tokio::test]
+async fn get_l2_state_root_returns_hex() {
+    let ctx = fixture();
+    let resp = post_rpc(
+        ctx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 201,
+            "method": "gsx_getL2StateRoot",
+            "params": { "l2_chain_id_hash": format!("0x{}", "cc".repeat(32)) },
+        }),
+    )
+    .await;
+
+    assert!(resp["error"].is_null());
+    let root = resp["result"]["state_root"].as_str().unwrap();
+    // Mock returns [0xBB; 32] for any chain.
+    assert_eq!(root, format!("0x{}", "bb".repeat(32)));
+}
+
+#[tokio::test]
+async fn get_l2_state_root_positional_params() {
+    let ctx = fixture();
+    let resp = post_rpc(
+        ctx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 202,
+            "method": "gsx_getL2StateRoot",
+            "params": [format!("0x{}", "cc".repeat(32))],
+        }),
+    )
+    .await;
+
+    assert!(resp["error"].is_null());
+    assert_eq!(
+        resp["result"]["state_root"],
+        format!("0x{}", "bb".repeat(32))
+    );
+}
+
+#[tokio::test]
+async fn get_l2_state_root_bad_hex_is_invalid_params() {
+    let ctx = fixture();
+    let resp = post_rpc(
+        ctx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 203,
+            "method": "gsx_getL2StateRoot",
+            "params": { "l2_chain_id_hash": "0xzzzz" },
+        }),
+    )
+    .await;
+
+    assert_eq!(resp["error"]["code"], -32602);
+}
+
+#[tokio::test]
+async fn get_l2_state_root_unknown_chain_returns_zeros() {
+    let ctx = fixture();
+    let resp = post_rpc(
+        ctx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 205,
+            "method": "gsx_getL2StateRoot",
+            // Mock returns [0u8; 32] for chain_id_hash [0xFF; 32]
+            "params": { "l2_chain_id_hash": format!("0x{}", "ff".repeat(32)) },
+        }),
+    )
+    .await;
+
+    assert!(resp["error"].is_null());
+    assert_eq!(
+        resp["result"]["state_root"],
+        format!("0x{}", "00".repeat(32))
+    );
+}
+
+#[tokio::test]
+async fn get_force_include_registry_returns_hex() {
+    let ctx = fixture();
+    let resp = post_rpc(
+        ctx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 204,
+            "method": "gsx_getForceIncludeRegistry",
+        }),
+    )
+    .await;
+
+    assert!(resp["error"].is_null());
+    // Mock returns empty vec → "0x"
+    assert_eq!(resp["result"]["data"], "0x");
 }
 
 // ── T6: gsx_subscribeEvents ──────────────────────────────────────────

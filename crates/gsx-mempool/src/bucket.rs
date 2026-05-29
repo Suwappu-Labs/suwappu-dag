@@ -1,14 +1,19 @@
 //! Per-peer leaky-bucket rate limiter.
 //!
 //! Implements a classic token bucket: each peer has `capacity` tokens
-//! that refill at `refill_per_sec` tokens per second. Every successful
-//! submission costs one token. When the bucket is empty, further
-//! submissions are rejected with the suggested retry-after delay.
+//! that refill at a configured rate. Every successful submission costs
+//! one token. When the bucket is empty, further submissions are
+//! rejected with the suggested retry-after delay.
+//!
+//! Construction: `new(capacity, refill_per_sec, now_ms)` for per-second
+//! rates, or `from_per_hour(capacity, refill_per_hour, now_ms)` for
+//! sub-per-second rates (avoids the integer-rounding trap of dividing
+//! a small per-hour value by 3600).
 //!
 //! This is the same algorithm used by every cloud provider's rate
 //! limiter (AWS, GCP, Cloudflare) because it (a) absorbs bursts up to
-//! capacity, (b) imposes a steady-state ceiling of `refill_per_sec`,
-//! and (c) has O(1) memory per peer.
+//! capacity, (b) imposes a steady-state ceiling, and (c) has O(1)
+//! memory per peer.
 
 /// A single peer's bucket state.
 #[derive(Debug, Clone, Copy)]
@@ -31,6 +36,18 @@ impl LeakyBucket {
             tokens: capacity as f64,
             capacity: capacity as f64,
             refill_per_ms: refill_per_sec as f64 / 1000.0,
+            last_refill_ms: now_ms,
+        }
+    }
+
+    /// Construct a bucket using a per-hour refill rate. Avoids the
+    /// integer-rounding trap in `new()` where sub-1-per-second rates
+    /// (e.g. 5/hour) get `ceil()`-ed to 1/sec (H19).
+    pub fn from_per_hour(capacity: u64, refill_per_hour: u64, now_ms: u64) -> Self {
+        Self {
+            tokens: capacity as f64,
+            capacity: capacity as f64,
+            refill_per_ms: refill_per_hour as f64 / 3_600_000.0,
             last_refill_ms: now_ms,
         }
     }
@@ -112,5 +129,28 @@ mod tests {
         // After consuming the only token, no refill ever happens.
         let retry = b.take_one(u64::MAX / 2).unwrap_err();
         assert_eq!(retry, u64::MAX);
+    }
+
+    #[test]
+    fn from_per_hour_refills_correctly() {
+        // 3600 tokens/hour = 1 token/sec = 1 token per 1000ms.
+        let mut b = LeakyBucket::from_per_hour(1, 3600, 0);
+        b.take_one(0).unwrap();
+        // After 999ms: not yet refilled.
+        assert!(b.take_one(999).is_err());
+        // After 1000ms from start: 1 token refilled.
+        assert!(b.take_one(1000).is_ok());
+    }
+
+    #[test]
+    fn from_per_hour_handles_sub_per_second_rates() {
+        // 5 tokens/hour — the faucet's default. Must NOT round to
+        // 1/sec (the H19 bug). 5/hour = 1 token per 720 seconds.
+        let mut b = LeakyBucket::from_per_hour(1, 5, 0);
+        b.take_one(0).unwrap();
+        // After 719 seconds: not yet refilled.
+        assert!(b.take_one(719_000).is_err());
+        // After 720 seconds: 1 token refilled.
+        assert!(b.take_one(720_000).is_ok());
     }
 }

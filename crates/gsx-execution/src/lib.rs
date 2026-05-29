@@ -55,6 +55,26 @@ pub use error::ExecutionError;
 pub use gsx_db_substrate::GsxDbSubstrate;
 pub use substrate::{Address, Balance, InMemorySubstrate, Intent, RewardsRing, Substrate};
 
+/// Domain-separation tag mixed into every signed intent payload. Bound
+/// alongside the genesis `network_id` and the bincoded intent bytes to
+/// pin the signature to this protocol and this network.
+pub const INTENT_DOMAIN_TAG: &[u8] = b"GSX_INTENT_V1";
+
+/// Compute the canonical intent-signing digest from pre-serialized
+/// intent bytes.
+///
+/// `digest = blake3( INTENT_DOMAIN_TAG || network_id_bytes || intent_bytes )`
+///
+/// Both submitter and verifier MUST serialize the intent identically
+/// (bincode `config::legacy()`, per F4/IQ-005) before calling this.
+pub fn intent_signing_digest(network_id: &str, intent_bytes: &[u8]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(INTENT_DOMAIN_TAG);
+    hasher.update(network_id.as_bytes());
+    hasher.update(intent_bytes);
+    *hasher.finalize().as_bytes()
+}
+
 /// Checkpoint cadence C — the rate at which the Authority Ring co-signs a
 /// (Σ_EVM, Σ_Move) snapshot. Configured per testnet/mainnet; default below
 /// targets the paper's 500 ms reliable-broadcast budget.
@@ -67,5 +87,22 @@ mod tests {
     #[test]
     fn checkpoint_cadence_default_is_one_round() {
         assert_eq!(DEFAULT_CHECKPOINT_CADENCE_ROUNDS, 1);
+    }
+
+    /// Pinned test vector for `intent_signing_digest`. If this test
+    /// breaks, the on-chain signature-verification path and every
+    /// external SDK that reproduces the digest are also broken —
+    /// investigate before updating the expected value.
+    ///
+    /// Recipe: BLAKE3("GSX_INTENT_V1" || "gsx-testnet-v1" || 0xDEADBEEF)
+    /// See also: docs/signing-spec.md §1 (Signing Digest)
+    #[test]
+    fn intent_signing_digest_pinned_vector() {
+        let digest = intent_signing_digest("gsx-testnet-v1", &[0xDE, 0xAD, 0xBE, 0xEF]);
+        assert_eq!(
+            hex::encode(digest),
+            "1229885d89938dadd9d4eb817afc0adf41b69fdbf2b00497231c5d5e207327fd",
+            "intent_signing_digest changed — this breaks signature verification across all clients"
+        );
     }
 }

@@ -33,6 +33,8 @@
 use gsx_node::{run_genesis_flow_with_keys, seed_registry};
 use proptest::prelude::*;
 
+const NET: &str = "test";
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 64,
@@ -47,7 +49,7 @@ proptest! {
         payload_seed in any::<u8>(),
     ) {
         let (registry, sks) = seed_registry(n);
-        let outcome = run_genesis_flow_with_keys(n, &registry, &sks, payload_seed).unwrap();
+        let outcome = run_genesis_flow_with_keys(n, &registry, &sks, payload_seed, NET).unwrap();
         let (leader_hash, _state_root, cosigned) =
             outcome.expect("commit must fire under honest n-of-n quorum");
         // The committed leader is round-0 author 0 (round-robin pick).
@@ -56,7 +58,7 @@ proptest! {
         // and the ratified signatures meet the registry's quorum.
         prop_assert!(cosigned.signatures.len() as u32 >= registry.quorum_threshold());
         // And the committed hash is non-zero.
-        prop_assert_ne!(leader_hash.0, [0u8; 32]);
+        prop_assert_ne!(*leader_hash.as_bytes(), [0u8; 32]);
     }
 
     /// Every validator agrees on the post-state root after executing
@@ -67,7 +69,7 @@ proptest! {
         payload_seed in any::<u8>(),
     ) {
         let (registry, sks) = seed_registry(n);
-        let outcome = run_genesis_flow_with_keys(n, &registry, &sks, payload_seed).unwrap();
+        let outcome = run_genesis_flow_with_keys(n, &registry, &sks, payload_seed, NET).unwrap();
         prop_assert!(outcome.is_some(),
             "honest n-of-n committee must commit and converge on a state root");
     }
@@ -80,7 +82,7 @@ proptest! {
     ) {
         let (registry, sks) = seed_registry(n);
         let (_leader, _root, cosigned) =
-            run_genesis_flow_with_keys(n, &registry, &sks, payload_seed)
+            run_genesis_flow_with_keys(n, &registry, &sks, payload_seed, NET)
                 .unwrap()
                 .unwrap();
         prop_assert_eq!(cosigned.signatures.len() as u32, n);

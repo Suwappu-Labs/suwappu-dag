@@ -67,6 +67,8 @@ mod error;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub use error::Error;
+pub use gsx_crypto::mldsa::{self, PublicKey, SecretKey};
+pub use gsx_execution::Intent;
 pub use gsx_rpc::context::{
     AuthorityMemberView, BalanceView, BlockView, EpochView, IntentView, TransactionView,
     ValidatorMemberView,
@@ -189,6 +191,14 @@ impl Client {
     ///    and signing it with ML-DSA-65.
     /// 3. Computing `blake3(public_key_bytes)` for `signer_pubkey_hash`.
     ///
+    /// `signer_pubkey` is required for **open signers** — callers not
+    /// seated in the Authority or Validator Ring. Ring members may pass
+    /// `None`; the server resolves their public key from the registry
+    /// via `signer_pubkey_hash`. Open signers submitting user-tier
+    /// intents (Transfer, Delegate, etc.) must provide their raw
+    /// ML-DSA-65 public key (1,952 bytes) so the server can verify
+    /// the signature.
+    ///
     /// Returns the daemon's computed intent hash on success (same as
     /// what will appear in `gsx_getTransaction` lookups).
     pub async fn submit_intent_raw(
@@ -196,16 +206,20 @@ impl Client {
         intent_bincode: &[u8],
         signature: &[u8],
         signer_pubkey_hash: [u8; 32],
+        signer_pubkey: Option<&[u8]>,
     ) -> Result<[u8; 32], Error> {
         #[derive(serde::Deserialize)]
         struct Ack {
             tx_hash: String,
         }
-        let params = json!({
+        let mut params = json!({
             "intent": format!("0x{}", hex::encode(intent_bincode)),
             "signature": format!("0x{}", hex::encode(signature)),
             "signer_pubkey_hash": format!("0x{}", hex::encode(signer_pubkey_hash)),
         });
+        if let Some(pk) = signer_pubkey {
+            params["signer_pubkey"] = json!(format!("0x{}", hex::encode(pk)));
+        }
         let ack: Ack = self.call("gsx_submitIntent", params).await?;
         let trimmed = ack
             .tx_hash
@@ -217,6 +231,38 @@ impl Client {
         bytes.as_slice().try_into().map_err(|_| {
             Error::Deserialize(format!("tx_hash must be 32 bytes, got {}", bytes.len()))
         })
+    }
+
+    /// Sign and submit a typed intent in one call.
+    ///
+    /// Handles bincode serialization, digest computation, ML-DSA-65
+    /// signing, and `signer_pubkey` derivation internally. Callers
+    /// only need the typed `Intent`, their keypair, and the network id.
+    ///
+    /// Ring members (Authority/Validator) can pass `is_ring_member: true`
+    /// to omit the public key from the submission (the server resolves
+    /// it from the registry). Open signers must pass `false`.
+    pub async fn submit_signed(
+        &self,
+        intent: &gsx_execution::Intent,
+        sk: &gsx_crypto::mldsa::SecretKey,
+        pk: &gsx_crypto::mldsa::PublicKey,
+        network_id: &str,
+        is_ring_member: bool,
+    ) -> Result<[u8; 32], Error> {
+        let intent_bytes = bincode::serde::encode_to_vec(intent, bincode::config::legacy())
+            .map_err(|e| Error::Deserialize(format!("bincode encode: {e}")))?;
+        let digest = gsx_execution::intent_signing_digest(network_id, &intent_bytes);
+        let signature = gsx_crypto::mldsa::sign(&digest, sk)
+            .map_err(|e| Error::Deserialize(format!("sign: {e:?}")))?;
+        let pkh = *blake3::hash(pk.as_bytes()).as_bytes();
+        let signer_pubkey = if is_ring_member {
+            None
+        } else {
+            Some(pk.as_bytes())
+        };
+        self.submit_intent_raw(&intent_bytes, signature.as_bytes(), pkh, signer_pubkey)
+            .await
     }
 
     /// Generic JSON-RPC call. Public so callers can drive any method

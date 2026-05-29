@@ -22,6 +22,8 @@ use gsx_consensus::{
 };
 use proptest::prelude::*;
 
+const NET: &str = "test";
+
 /// Build a valid dense DAG of `n_rounds` rounds with `n_authorities`
 /// authors per round, where each non-genesis cert references every
 /// round-(r-1) cert as parents. Returns the certs in topo-order.
@@ -48,9 +50,10 @@ fn build_dense_dag(
                     round: r as Round,
                     parents: prev_round_hashes.clone(),
                     payload_digest: payload,
+                    signature: vec![],
                 }
             };
-            this_round.push(cert.hash());
+            this_round.push(cert.hash(NET));
             all.push(cert);
         }
         prev_round_hashes = this_round;
@@ -62,7 +65,7 @@ fn build_dense_dag(
 fn store_from(certs: &[Certificate]) -> DagStore {
     let mut s = DagStore::new();
     for c in certs {
-        s.insert(c.clone())
+        s.insert(c.clone(), NET)
             .expect("topo-ordered insert must succeed");
     }
     s
@@ -132,8 +135,8 @@ proptest! {
             p[0] = a as u8;
             p[1] = (payload_seed & 0xFF) as u8;
             let cert = Certificate::genesis(a as AuthorityId, p);
-            genesis_hashes.push(cert.hash());
-            dag.insert(cert).unwrap();
+            genesis_hashes.push(cert.hash(NET));
+            dag.insert(cert, NET).unwrap();
         }
 
         let leader_author = leader(0, n_authorities);
@@ -149,7 +152,8 @@ proptest! {
                 round: 1,
                 parents: vec![leader_hash],
                 payload_digest: p,
-            })
+                signature: vec![],
+            }, NET)
                 .unwrap();
         }
         prop_assert_eq!(commit_leader(&dag, 0, n_authorities), None);
@@ -175,7 +179,7 @@ proptest! {
         for (_r, mut group) in by_round {
             group.reverse();
             for c in group {
-                store_b.insert(c).unwrap();
+                store_b.insert(c, NET).unwrap();
             }
         }
 

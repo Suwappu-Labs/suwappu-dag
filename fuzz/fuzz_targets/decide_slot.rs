@@ -47,7 +47,7 @@ fuzz_target!(|bytes: &[u8]| {
         if let Ok((cert, _)) =
             bincode::serde::decode_from_slice::<Certificate, _>(chunk, bincode::config::legacy())
         {
-            let _ = dag.insert(cert);
+            let _ = dag.insert(cert, "test");
         }
     }
 

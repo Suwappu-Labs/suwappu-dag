@@ -26,6 +26,8 @@ use gsx_consensus::{
 };
 use proptest::prelude::*;
 
+const NET: &str = "test";
+
 /// Build a DAG where authors in `dishonest_set` author *two* round-1
 /// certs (one supporting `cand_a`, one supporting `cand_b`). Honest
 /// authors author one round-1 cert supporting `cand_a`. Returns
@@ -51,15 +53,15 @@ fn build_equivocation_dag(
     p_a[0] = 0xAA;
     p_a[1] = (payload_seed & 0xFF) as u8;
     let cand_a_cert = Certificate::genesis(0, p_a);
-    let cand_a = cand_a_cert.hash();
-    dag.insert(cand_a_cert).unwrap();
+    let cand_a = cand_a_cert.hash(NET);
+    dag.insert(cand_a_cert, NET).unwrap();
 
     let mut p_b = [0u8; 32];
     p_b[0] = 0xBB;
     p_b[1] = (payload_seed & 0xFF) as u8;
     let cand_b_cert = Certificate::genesis(1, p_b);
-    let cand_b = cand_b_cert.hash();
-    dag.insert(cand_b_cert).unwrap();
+    let cand_b = cand_b_cert.hash(NET);
+    dag.insert(cand_b_cert, NET).unwrap();
 
     // Genesis certs for the rest of the authorities so they can author
     // round-1 certs. (Round 1 certs need parents; we let everyone use
@@ -69,8 +71,8 @@ fn build_equivocation_dag(
         let mut p = [0u8; 32];
         p[0] = a as u8;
         let g = Certificate::genesis(a as AuthorityId, p);
-        let h = g.hash();
-        dag.insert(g).unwrap();
+        let h = g.hash(NET);
+        dag.insert(g, NET).unwrap();
         other_genesis.push(h);
     }
 
@@ -91,8 +93,9 @@ fn build_equivocation_dag(
             round: 1,
             parents: vec![cand_a],
             payload_digest: payload_1,
+            signature: vec![],
         };
-        dag.insert(cert_a).unwrap();
+        dag.insert(cert_a, NET).unwrap();
 
         if a < dishonest_authorities {
             let mut payload_2 = [0u8; 32];
@@ -103,8 +106,9 @@ fn build_equivocation_dag(
                 round: 1,
                 parents: vec![cand_b],
                 payload_digest: payload_2,
+                signature: vec![],
             };
-            dag.insert(cert_b).unwrap();
+            dag.insert(cert_b, NET).unwrap();
         }
     }
     (dag, cand_a, cand_b)
@@ -129,11 +133,13 @@ fn votes_with_double_voters(
         votes.push(Vote {
             validator: v as ValidatorId,
             candidate: cand_a,
+            signature: vec![],
         });
         if v < dishonest {
             votes.push(Vote {
                 validator: v as ValidatorId,
                 candidate: cand_b,
+                signature: vec![],
             });
         }
     }

@@ -103,22 +103,54 @@ impl StakeTable {
 
 /// A Validator Ring vote for a candidate commit.
 ///
-/// Phase-1 votes carry no signature; cert signature verification lands
-/// in DAG-S6.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// The vote carries an ML-DSA-65 detached signature over
+/// `vote_digest(network_id, validator, candidate)` so the Validator Ring leg of
+/// the AND-gate is cryptographically authenticated.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Vote {
     /// The voter.
     pub validator: ValidatorId,
     /// The candidate certificate hash being ratified.
     pub candidate: CertHash,
+    /// ML-DSA-65 detached signature over `vote_digest()`. Empty in
+    /// topology-only tests; verified at the daemon ingestion boundary.
+    pub signature: Vec<u8>,
+}
+
+/// Domain-tagged BLAKE3 digest of a vote's content fields.
+///
+/// `BLAKE3("GSX-VOTE-V1" || network_id || validator_be_bytes || candidate_bytes)`
+///
+/// `network_id` prevents cross-network replay: the same vote on devnet
+/// and testnet produces different digests, so a signature valid on one
+/// network cannot be replayed on another.
+///
+/// Uses big-endian (network byte order) for `ValidatorId`, matching the
+/// encoding convention of `Certificate::hash()` for `AuthorityId`.
+/// The signature field is deliberately excluded — same non-circularity
+/// principle as `Certificate::hash()`.
+pub fn vote_digest(network_id: &str, validator: ValidatorId, candidate: &CertHash) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"GSX-VOTE-V1");
+    hasher.update(network_id.as_bytes());
+    hasher.update(&validator.to_be_bytes());
+    hasher.update(candidate.as_bytes());
+    *hasher.finalize().as_bytes()
 }
 
 /// Stake-weighted Validator-Ring quorum threshold: strictly greater than
 /// two-thirds of total stake. Matches paper Definition 2.
+///
+/// C9 hardening: division-first formulation avoids the `2 * total`
+/// multiplication that overflows u128 when `total > u128::MAX / 2`.
+/// `(total / 3) * 2` never overflows because `total / 3 <= u128::MAX / 3`
+/// and `(u128::MAX / 3) * 2 < u128::MAX`. The remainder term
+/// `((total % 3) * 2) / 3` is at most 1, handling the rounding
+/// difference between `floor(2n/3)` and `floor(n/3) * 2`.
 pub fn validator_quorum_threshold(stake_table: &StakeTable) -> Stake {
     // Integer "strictly greater than 2/3" → `>= floor(2*total/3) + 1`.
-    let two_thirds = (2 * stake_table.total()) / 3;
-    two_thirds + 1
+    let total = stake_table.total();
+    (total / 3) * 2 + ((total % 3) * 2) / 3 + 1
 }
 
 /// Aggregate stake voting for `candidate`. Counts each `ValidatorId` at
@@ -220,6 +252,8 @@ mod tests {
     use super::*;
     use crate::cert::Certificate;
 
+    const NET: &str = "test";
+
     fn genesis(author: u32) -> Certificate {
         Certificate::genesis(author, [author as u8; 32])
     }
@@ -230,6 +264,7 @@ mod tests {
             round,
             parents,
             payload_digest: [tag; 32],
+            signature: vec![],
         }
     }
 
@@ -255,19 +290,22 @@ mod tests {
     #[test]
     fn voting_stake_dedups_double_votes() {
         let t = equal_stake_table(3, 100); // total 300
-        let cand = CertHash([0x11; 32]);
+        let cand = CertHash::from([0x11; 32]);
         let votes = vec![
             Vote {
                 validator: 0,
                 candidate: cand,
+                signature: vec![],
             },
             Vote {
                 validator: 0,
                 candidate: cand,
+                signature: vec![],
             }, // duplicate
             Vote {
                 validator: 1,
                 candidate: cand,
+                signature: vec![],
             },
         ];
         assert_eq!(voting_stake(&t, cand, &votes), 200);
@@ -278,8 +316,8 @@ mod tests {
         // n_authorities = 1: trivially commits Authority-side with a
         // single supporter. Then bolt on a Validator quorum.
         let mut dag = DagStore::new();
-        let g = dag.insert(genesis(0)).unwrap();
-        dag.insert(child(0, 1, vec![g], 0xAA)).unwrap();
+        let g = dag.insert(genesis(0), NET).unwrap();
+        dag.insert(child(0, 1, vec![g], 0xAA), NET).unwrap();
 
         let stake = equal_stake_table(3, 100); // total 300, threshold 201
         let cand_hash = g;
@@ -288,14 +326,17 @@ mod tests {
             Vote {
                 validator: 0,
                 candidate: cand_hash,
+                signature: vec![],
             },
             Vote {
                 validator: 1,
                 candidate: cand_hash,
+                signature: vec![],
             },
             Vote {
                 validator: 2,
                 candidate: cand_hash,
+                signature: vec![],
             },
         ];
         assert_eq!(joint_commit(&dag, 0, 1, &stake, &votes), Some(cand_hash));
@@ -308,11 +349,11 @@ mod tests {
     #[test]
     fn authority_equivocators_detects_overlap() {
         let mut dag = DagStore::new();
-        let g0 = dag.insert(genesis(0)).unwrap();
-        let g1 = dag.insert(genesis(1)).unwrap();
+        let g0 = dag.insert(genesis(0), NET).unwrap();
+        let g1 = dag.insert(genesis(1), NET).unwrap();
         // Author 0 supports both g0 and g1 at round 1 by issuing two
         // different round-1 certs. That equivocates.
-        dag.insert(child(0, 1, vec![g0], 0xA0)).unwrap();
+        dag.insert(child(0, 1, vec![g0], 0xA0), NET).unwrap();
         // (In a real DAG this would also be a per-round equivocation,
         // caught in DAG-S7. Here we only test the joint-quorum lens.)
         let cert_dup = Certificate {
@@ -320,8 +361,9 @@ mod tests {
             round: 1,
             parents: vec![g1],
             payload_digest: [0xB0; 32],
+            signature: vec![],
         };
-        dag.insert(cert_dup).unwrap();
+        dag.insert(cert_dup, NET).unwrap();
 
         let equivocators = authority_equivocators(&dag, g0, g1, 1);
         assert_eq!(equivocators, BTreeSet::from([0]));
@@ -330,32 +372,38 @@ mod tests {
     #[test]
     fn validator_double_vote_stake_sums_overlap() {
         let stake = equal_stake_table(4, 50); // total 200
-        let a = CertHash([1; 32]);
-        let b = CertHash([2; 32]);
+        let a = CertHash::from([1; 32]);
+        let b = CertHash::from([2; 32]);
         let votes = vec![
             Vote {
                 validator: 0,
                 candidate: a,
+                signature: vec![],
             },
             Vote {
                 validator: 0,
                 candidate: b,
+                signature: vec![],
             }, // double-voter
             Vote {
                 validator: 1,
                 candidate: a,
+                signature: vec![],
             },
             Vote {
                 validator: 2,
                 candidate: b,
+                signature: vec![],
             },
             Vote {
                 validator: 3,
                 candidate: a,
+                signature: vec![],
             },
             Vote {
                 validator: 3,
                 candidate: b,
+                signature: vec![],
             }, // double-voter
         ];
         assert_eq!(validator_double_vote_stake(&stake, a, b, &votes), 100);
