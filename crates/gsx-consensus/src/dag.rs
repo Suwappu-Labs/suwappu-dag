@@ -100,6 +100,20 @@ impl DagStore {
         Ok(hash)
     }
 
+    /// Distinct rounds for which at least one certificate exists, in
+    /// ascending order.
+    ///
+    /// Commit-rule scans must iterate the rounds that are *actually
+    /// present* in the DAG, never a dense integer range bounded by
+    /// `max_round`: an adversary (or a fuzz input) can seat a single
+    /// parentless certificate at an arbitrarily large round (e.g.
+    /// `u64::MAX`), and a dense `0..=max_round` walk would then loop ~1.8e19
+    /// times — a denial-of-service hang. Iterating present rounds keeps
+    /// every scan `O(rounds)` regardless of round magnitude.
+    pub fn rounds(&self) -> impl Iterator<Item = Round> + '_ {
+        self.by_round.keys().copied()
+    }
+
     /// Produce the deterministic linearization of the DAG.
     ///
     /// Order: rounds ascending; within a round, certificates sorted by

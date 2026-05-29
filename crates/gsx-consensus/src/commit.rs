@@ -135,7 +135,14 @@ pub fn try_direct_decide(dag: &DagStore, round: Round, n: CommitteeSize) -> Lead
         Some(h) => h,
         None => return LeaderStatus::Undecided,
     };
-    let support = supporters(dag, leader_hash, round + 1);
+    // A leader at `u64::MAX` can have no supporters at `round + 1` (no
+    // higher round exists), so it can never be directly committed.
+    // Guard the arithmetic rather than panicking on overflow.
+    let support_round = match round.checked_add(1) {
+        Some(r) => r,
+        None => return LeaderStatus::Undecided,
+    };
+    let support = supporters(dag, leader_hash, support_round);
     if support.len() as u32 >= quorum_threshold(n) {
         LeaderStatus::Direct(leader_hash)
     } else {
@@ -205,15 +212,6 @@ pub fn decide_slot(dag: &DagStore, target_round: Round, n: CommitteeSize) -> Lea
         LeaderStatus::Skip => return LeaderStatus::Skip,
         LeaderStatus::Undecided => {}
     }
-    let max_round = match dag
-        .linearize()
-        .into_iter()
-        .filter_map(|h| dag.get(&h).map(|c| c.round))
-        .max()
-    {
-        Some(r) => r,
-        None => return LeaderStatus::Undecided,
-    };
     // Search every anchor at R' >= target+2 in ascending order. The
     // "+2" gap is the canonical wave length: direct commit at R'
     // relies on supporters at R'+1, so an anchor at R' = target+2
@@ -221,9 +219,21 @@ pub fn decide_slot(dag: &DagStore, target_round: Round, n: CommitteeSize) -> Lea
     // honest authority at R+1 supported it. Smaller anchors
     // (R'=target+1) are the leader itself and not informative.
     //
+    // We iterate the rounds *actually present* in the DAG, not a dense
+    // `(target_round + 2)..=max_round` integer range: a parentless cert
+    // can sit at an arbitrarily large round (up to `u64::MAX`), and a
+    // dense walk would hang for ~1.8e19 iterations (closes #226). Absent
+    // rounds make `try_direct_decide` return `Undecided` (no cert →
+    // `cert_at` is `None`) and would be skipped anyway, so iterating only
+    // present rounds is behavior-identical and terminating.
+    //
     // We do NOT early-return on the first anchor's Skip — see IQ-004.
+    let min_anchor = match target_round.checked_add(2) {
+        Some(r) => r,
+        None => return LeaderStatus::Undecided,
+    };
     let mut any_anchor_seen = false;
-    for anchor_round in (target_round + 2)..=max_round {
+    for anchor_round in dag.rounds().filter(|&r| r >= min_anchor) {
         if let LeaderStatus::Direct(anchor_hash) = try_direct_decide(dag, anchor_round, n) {
             any_anchor_seen = true;
             match try_indirect_decide(dag, target_round, anchor_hash, n) {
@@ -289,24 +299,19 @@ pub fn causal_history(dag: &DagStore, start: CertHash) -> Vec<CertHash> {
 /// inherited via the indirect rule — deduplicated to preserve
 /// append-only finality.
 pub fn finalize(dag: &DagStore, n: CommitteeSize) -> Vec<CertHash> {
-    let max_round = match dag
-        .linearize()
-        .into_iter()
-        .map(|h| dag.get(&h).unwrap().round)
-        .max()
-    {
-        Some(r) => r,
-        None => return Vec::new(),
-    };
-
     let mut finalized: Vec<CertHash> = Vec::new();
     let mut included: HashSet<CertHash> = HashSet::new();
 
-    // Iterate rounds in ascending order. `decide_slot` consults the
-    // indirect rule for each, so an undecided round at evaluation time
-    // can still resolve here if a later anchor (within the same DAG
-    // snapshot) is directly decided.
-    for r in 0..max_round {
+    // Iterate the rounds *actually present* in the DAG in ascending order
+    // (not a dense `0..max_round` range — see `decide_slot` and #226 for
+    // why a dense walk hangs on an adversarial high-round cert). A slot
+    // can only be `Direct` if a leader cert exists at that round, and a
+    // leader cert can only exist at a present round, so iterating present
+    // rounds is behavior-identical to the dense walk and terminating.
+    // `decide_slot` consults the indirect rule for each, so an undecided
+    // round at evaluation time can still resolve here if a later anchor
+    // (within the same DAG snapshot) is directly decided.
+    for r in dag.rounds() {
         if let LeaderStatus::Direct(leader_hash) = decide_slot(dag, r, n) {
             for h in causal_history(dag, leader_hash) {
                 if included.insert(h) {
@@ -551,6 +556,55 @@ mod tests {
         // g[0] (round 0 leader cert) exists in DAG but isn't reachable
         // from r2_2 → Skip.
         assert_eq!(decide_slot(&dag, 0, 4), LeaderStatus::Skip);
+    }
+
+    #[test]
+    fn decide_slot_terminates_on_high_round_cert() {
+        // Regression for #226 (fuzz: decide_slot crash on main).
+        //
+        // `DagStore::insert` accepts a *parentless* certificate at any
+        // non-zero round (the genesis rule only forces `round == 0 ⟹ no
+        // parents`, not the converse). A fuzz input seated such a cert at
+        // a huge round; `decide_slot`'s old `(target+2)..=max_round` dense
+        // integer-range loop then iterated toward `u64::MAX` — a ~1.8e19
+        // iteration hang (libfuzzer reported it as a timeout/crash), and
+        // `try_direct_decide`'s `round + 1` would overflow-panic if it ever
+        // reached `u64::MAX`.
+        //
+        // The fix iterates the rounds actually present in the DAG and
+        // guards the arithmetic. This test must return ~instantly.
+        let n: CommitteeSize = 4;
+
+        // Author the cert so it lands on the round-robin leader slot for
+        // `u64::MAX`, exercising the `round + 1` overflow guard inside
+        // `try_direct_decide` as well as the loop-termination fix.
+        let author = leader(u64::MAX, n);
+        let mut dag = DagStore::new();
+        let huge = dag
+            .insert(Certificate {
+                author,
+                round: u64::MAX,
+                parents: Vec::new(),
+                payload_digest: [0xEE; 32],
+            })
+            .unwrap();
+        assert!(dag.contains(&huge));
+
+        // Direct decision for the huge round itself must not panic on the
+        // `round + 1` overflow: no supporters can exist above it.
+        assert_eq!(
+            try_direct_decide(&dag, u64::MAX, n),
+            LeaderStatus::Undecided
+        );
+
+        // The previously-hanging path: probe a low round. No anchor is
+        // directly decided, so the slot is Undecided — returned without
+        // hanging or panicking.
+        assert_eq!(decide_slot(&dag, 0, n), LeaderStatus::Undecided);
+
+        // `finalize` shares the present-rounds iteration and must also
+        // terminate.
+        assert!(finalize(&dag, n).is_empty());
     }
 
     #[test]
