@@ -3458,6 +3458,53 @@ mod tests {
             u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
         }
 
+        // Compile-time exhaustiveness guard. `#[non_exhaustive]` does NOT
+        // apply within the defining crate, so this wildcard-free match
+        // fails to COMPILE the moment a variant is added to `Intent`
+        // without an arm here — forcing the author to the table below.
+        // (A `cases.len()` count cannot do this: a bare append leaves the
+        // array literal's length unchanged, so the new variant ships
+        // silently unpinned — the single most likely future mutation.)
+        fn ordinal(intent: &Intent) -> u32 {
+            match intent {
+                Intent::Transfer { .. } => 0,
+                Intent::GenesisAllocation { .. } => 1,
+                Intent::DistributeRewards { .. } => 2,
+                Intent::Delegate { .. } => 3,
+                Intent::UndelegateBegin { .. } => 4,
+                Intent::UndelegateClaim { .. } => 5,
+                Intent::MintInflation { .. } => 6,
+                Intent::AdmitAuthority { .. } => 7,
+                Intent::ExitAuthority { .. } => 8,
+                Intent::EjectAuthority { .. } => 9,
+                Intent::AdmitValidator { .. } => 10,
+                Intent::ExitValidator { .. } => 11,
+                Intent::EjectValidator { .. } => 12,
+                Intent::CommitL2StateRoot { .. } => 13,
+                Intent::SetL2VerifyingKey { .. } => 14,
+                Intent::L1Lock { .. } => 15,
+                Intent::L2BurnProven { .. } => 16,
+                Intent::L2ForceInclude { .. } => 17,
+                Intent::SlashSequencer { .. } => 18,
+                Intent::MarkForceIncludeHonored { .. } => 19,
+                Intent::EjectSequencer { .. } => 20,
+                Intent::DepositSequencerBond { .. } => 21,
+                Intent::DepositSafetyBond { .. } => 22,
+                Intent::DepositAuthorityStake { .. } => 23,
+                Intent::DepositValidatorStake { .. } => 24,
+                Intent::WithdrawAuthorityStake { .. } => 25,
+                Intent::WithdrawValidatorStake { .. } => 26,
+                Intent::DisburseTreasury { .. } => 27,
+                Intent::ClaimInsurance { .. } => 28,
+                Intent::PostL2DA { .. } => 29,
+                Intent::DistributeSlashedFunds { .. } => 30,
+                Intent::AddBridgeAsset { .. } => 31,
+                Intent::PauseBridgeAsset { .. } => 32,
+                Intent::RemoveBridgeAsset { .. } => 33,
+                Intent::PostL2DAv2 { .. } => 34,
+            }
+        }
+
         // One constructed instance per variant, paired with its
         // EXPECTED ordinal (variant position in the enum). Deriving
         // the assertion from the listed ordinal — not from whatever
@@ -3738,14 +3785,15 @@ mod tests {
                  NOT renumber existing entries (it breaks the canonical \
                  blake3(bincode(intent)) hash recipe)."
             );
+            // Cross-check the table's claimed ordinal against the
+            // exhaustive `ordinal()` match, so a stale or mis-numbered
+            // table entry can't silently disagree with the enum.
+            assert_eq!(
+                ordinal(intent),
+                *expected,
+                "table ordinal disagrees with the exhaustive ordinal() match for {intent:?}"
+            );
         }
-
-        // Belt-and-suspenders: the table must cover every variant. If a
-        // new variant is appended without a table entry, this fails and
-        // points the author at the table above. `Intent` is
-        // `#[non_exhaustive]`, so this count is the canonical variant
-        // total pinned by #241.
-        assert_eq!(cases.len(), 35, "Intent variant count changed (#241)");
     }
 
     #[test]
