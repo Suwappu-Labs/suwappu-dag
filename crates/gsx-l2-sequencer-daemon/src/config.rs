@@ -105,6 +105,18 @@ pub struct SequencerConfig {
     /// CPU footprint on shared instances.
     #[serde(default)]
     pub tokio_worker_threads: usize,
+
+    /// Directory for the daemon's durable on-disk state. Today
+    /// this holds the committed-batch-tx-hash history (#256) so
+    /// force-include honor evidence survives a restart; future
+    /// phases may colocate other checkpoints here. Defaults to
+    /// `/var/lib/gsx-l2-sequencer` to match the deploy layout.
+    #[serde(default = "default_data_dir")]
+    pub data_dir: String,
+}
+
+fn default_data_dir() -> String {
+    "/var/lib/gsx-l2-sequencer".to_string()
 }
 
 fn default_batch_interval_ms() -> u64 {
@@ -195,6 +207,26 @@ signer_key_path = "/etc/gsx/sequencer.key"
         assert_eq!(cfg.batch_interval_ms, 250);
         assert_eq!(cfg.force_include_interval_l1_blocks, 1);
         assert_eq!(cfg.tokio_worker_threads, 0);
+        assert_eq!(cfg.data_dir, "/var/lib/gsx-l2-sequencer");
+    }
+
+    /// `data_dir` is `#[serde(default)]`, so existing configs that
+    /// omit it still load, and an explicit value round-trips.
+    #[test]
+    fn data_dir_defaults_and_overrides() {
+        let with_dir = r#"
+l1_rpc_url = "x"
+l2_chain_id = "y"
+rpc_bind_addr = "0.0.0.0:1"
+signer_key_path = "/k"
+data_dir = "/mnt/state/gsx-l2"
+"#;
+        let cfg: SequencerConfig = toml::from_str(with_dir).unwrap();
+        cfg.validate().unwrap();
+        assert_eq!(cfg.data_dir, "/mnt/state/gsx-l2");
+        let reser = toml::to_string(&cfg).unwrap();
+        let reparsed: SequencerConfig = toml::from_str(&reser).unwrap();
+        assert_eq!(cfg, reparsed);
     }
 
     #[test]
