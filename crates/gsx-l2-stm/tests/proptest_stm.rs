@@ -367,9 +367,10 @@ fn mkaddr(b: u8) -> Address {
 }
 
 fn funded(balance: u128) -> Account {
-    let mut a = Account::default();
-    a.balance = balance;
-    a
+    Account {
+        balance,
+        ..Default::default()
+    }
 }
 
 proptest! {
