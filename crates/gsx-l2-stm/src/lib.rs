@@ -722,7 +722,7 @@ mod tests {
         // Sender balance + nonce unchanged; recipient never created.
         assert_eq!(ledger.get(&addr(1)).unwrap().balance, 1_000);
         assert_eq!(ledger.get(&addr(1)).unwrap().nonce, u64::MAX);
-        assert!(ledger.get(&addr(2)).is_none());
+        assert!(!ledger.contains_key(&addr(2)));
     }
 
     #[test]
