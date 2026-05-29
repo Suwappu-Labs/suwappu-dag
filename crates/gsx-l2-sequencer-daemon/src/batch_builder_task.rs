@@ -114,6 +114,31 @@ const L1_SNAPSHOT_MAX_RETRIES: usize = 3;
 ///
 /// `current_l2_state_root` is intentionally NOT part of this
 /// loop: #248 is about the `(height, l1_state_root)` pair only.
+///
+/// # Consistency guarantee (and its limits)
+///
+/// This loop guarantees the returned `(l1_height,
+/// l1_state_root)` pair is consistent ONLY against a
+/// *monotonic forward advance* of the L1 (height strictly
+/// increasing between reads). It is NOT safe against an
+/// equal-height reorg: if the L1 forks at height `100`,
+/// abandons it, and re-forms a *different* chain that is also
+/// at height `100` with a different state root, both height
+/// reads observe `100`, the `height_after == height` check
+/// passes, and the loop binds the post-reorg root to the
+/// pre-reorg height (or vice versa) without detecting the
+/// swap. Closing that gap needs a height+root-in-one-call RPC
+/// or a block-hash check, neither of which the [`L1Client`]
+/// trait exposes today.
+///
+/// Additionally, the L2 state root (`current_l2_state_root`,
+/// read by the caller AFTER this snapshot returns) is OUTSIDE
+/// this consistency window: it is fetched in a separate RPC
+/// once the `(height, root)` pair is already bound, so an L1
+/// advance between this snapshot and that read is not covered
+/// here. Treat the returned pair as forward-advance-consistent
+/// only — not as a full reorg-safe or cross-root-atomic
+/// snapshot.
 async fn fetch_consistent_l1_snapshot<C: L1Client>(
     l1: &C,
 ) -> Result<(u64, [u8; 32]), L1ClientError> {
@@ -286,18 +311,27 @@ mod tests {
         advances_left: AtomicU64,
         /// Count of `current_l1_height` calls, for assertions.
         height_reads: AtomicU64,
-        root: [u8; 32],
+    }
+
+    /// Deterministic state root for a given L1 height. The
+    /// state-root the test client returns is derived FROM the
+    /// current height via this function, so a returned
+    /// `(height, root)` pair can be checked for internal
+    /// consistency: `root == l1_state_root_for_height(height)`.
+    /// A client that returned a root belonging to a *different*
+    /// height (a torn snapshot) would fail that check.
+    fn l1_state_root_for_height(height: u64) -> [u8; 32] {
+        [height as u8; 32]
     }
 
     impl CountingL1Client {
         /// L1 that never moves.
-        fn stable(height: u64, root: [u8; 32]) -> Self {
+        fn stable(height: u64) -> Self {
             Self {
                 height: AtomicU64::new(height),
                 advance_per_read: 0,
                 advances_left: AtomicU64::new(0),
                 height_reads: AtomicU64::new(0),
-                root,
             }
         }
 
@@ -309,19 +343,17 @@ mod tests {
                 advance_per_read: 1,
                 advances_left: AtomicU64::new(u64::MAX),
                 height_reads: AtomicU64::new(0),
-                root: [0u8; 32],
             }
         }
 
         /// L1 that advances exactly once (on the confirming
         /// re-read) then settles, so one retry recovers.
-        fn advance_once(height: u64, root: [u8; 32]) -> Self {
+        fn advance_once(height: u64) -> Self {
             Self {
                 height: AtomicU64::new(height),
                 advance_per_read: 1,
                 advances_left: AtomicU64::new(1),
                 height_reads: AtomicU64::new(0),
-                root,
             }
         }
 
@@ -363,7 +395,14 @@ mod tests {
         }
 
         async fn current_l1_state_root(&self) -> Result<[u8; 32], L1ClientError> {
-            Ok(self.root)
+            // Derive the root from the LIVE height so the
+            // returned root always corresponds to whatever
+            // height the L1 is currently at. If a height read
+            // already advanced the L1, this picks up the new
+            // height — exactly the torn-read window the snapshot
+            // loop must reconcile.
+            let h = self.height.load(Ordering::SeqCst);
+            Ok(l1_state_root_for_height(h))
         }
 
         async fn read_force_include_registry(&self) -> Result<Vec<u8>, L1ClientError> {
@@ -455,10 +494,17 @@ mod tests {
     /// reads, no retry).
     #[tokio::test]
     async fn stable_l1_snapshot_does_not_retry() {
-        let l1 = CountingL1Client::stable(100, [0x11; 32]);
+        let l1 = CountingL1Client::stable(100);
         let (h, r) = fetch_consistent_l1_snapshot(&l1).await.unwrap();
         assert_eq!(h, 100);
-        assert_eq!(r, [0x11; 32]);
+        // The returned root must be the one that BELONGS to the
+        // returned height, not merely some fixed value: prove the
+        // pair is internally consistent.
+        assert_eq!(
+            r,
+            l1_state_root_for_height(h),
+            "returned root must correspond to the returned height"
+        );
         assert_eq!(
             l1.height_reads(),
             2,
@@ -483,11 +529,23 @@ mod tests {
     /// retries with the fresh height and stabilizes.
     #[tokio::test]
     async fn single_l1_advance_recovers_on_retry() {
-        let l1 = CountingL1Client::advance_once(100, [0x22; 32]);
+        let l1 = CountingL1Client::advance_once(100);
         let (h, r) = fetch_consistent_l1_snapshot(&l1).await.unwrap();
         // After one advance the height settles at 101.
         assert_eq!(h, 101);
-        assert_eq!(r, [0x22; 32]);
+        // The returned root must track the SETTLED height (101),
+        // not the pre-advance height (100): the loop discarded
+        // the torn read and rebound the root to the fresh height.
+        assert_eq!(
+            r,
+            l1_state_root_for_height(h),
+            "returned root must correspond to the settled height, not the pre-advance one"
+        );
+        assert_ne!(
+            r,
+            l1_state_root_for_height(100),
+            "the stale pre-advance root must not survive the retry"
+        );
     }
 
     #[tokio::test]
