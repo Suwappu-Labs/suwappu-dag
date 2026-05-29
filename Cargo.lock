@@ -1136,6 +1136,7 @@ dependencies = [
 name = "gsx-l2-confidential"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "gsx-crypto",
  "hex",
  "proptest",

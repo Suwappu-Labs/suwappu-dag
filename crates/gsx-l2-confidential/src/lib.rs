@@ -53,6 +53,10 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod nullifier_tree;
+
+pub use nullifier_tree::{IndexedMerkleTree, Leaf, MembershipProof, NonMembershipProof, TreeError};
+
 use gsx_crypto::hash::{
     sha3_256_domain, GSX_L2_ADDRESS_V1, GSX_L2_NF_KEY_V1, GSX_L2_NOTE_COMMIT_V1,
     GSX_L2_NULLIFIER_V1,
