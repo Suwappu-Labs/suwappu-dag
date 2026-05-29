@@ -97,8 +97,25 @@ jobs:
           key: ${{ matrix.target }}
 
       # Build the binaries that have crate-level `[[bin]]` entries.
-      # gsx-faucet is optional — gate on its crate existing so this
-      # workflow doesn't break before G3 lands.
+      #
+      # NOTE on gsx-loadgen / gsx-metrics: these are NOT standalone
+      # packages — they are `[[bin]]` targets *of the gsx-node package*
+      # (see crates/gsx-node/Cargo.toml). `--bins` builds every bin
+      # target of each selected `-p` package, so `-p gsx-node --bins`
+      # already emits gsx-node, gsx-loadgen, and gsx-metrics into
+      # target/<target>/release/, where the Package step picks them up.
+      # Do NOT add `-p gsx-loadgen` / `-p gsx-metrics`: cargo fails with
+      # "package ID specification `gsx-loadgen` did not match any
+      # packages" because no such package exists. There are likewise no
+      # crates/gsx-loadgen or crates/gsx-metrics dirs to gate on.
+      #
+      # gsx-faucet IS a standalone package (crates/gsx-faucet) and is
+      # optional — gate on its crate dir existing so this workflow
+      # doesn't break before G3 lands.
+      #
+      # Releases cannot actually run yet: GitHub Actions billing has been
+      # blocked since 2026-05-18 (#227), so no tag push will start this
+      # job until billing is restored.
       - name: cargo build --release
         env:
           CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
