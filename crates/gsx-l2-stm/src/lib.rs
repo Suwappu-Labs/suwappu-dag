@@ -630,6 +630,65 @@ mod tests {
     }
 
     #[test]
+    fn execute_full_balance_spend_retains_zero_balance_nonce_bumped_sender() {
+        // A Transfer that spends the sender's ENTIRE balance leaves the
+        // sender at balance==0 but nonce==1. compute_state_root only prunes
+        // accounts with balance==0 AND nonce==0, so the nonce>0 sender MUST
+        // be retained and fold into the state root. Pins the amount==balance
+        // edge against a future prune-rule regression that drops it.
+        let mut ledger = BTreeMap::new();
+        ledger.insert(
+            addr(1),
+            Account {
+                balance: 1_000,
+                nonce: 0,
+            },
+        );
+
+        let txs = vec![BatchTransaction::Transfer {
+            from: addr(1),
+            to: addr(2),
+            amount: 1_000, // spend the entire balance
+            nonce: 0,
+        }];
+        let blob = encode_da_blob(1, &txs);
+
+        let input = BatchInput {
+            prev_l2_state_root: compute_state_root(&ledger),
+            batch_id: 1,
+            da_blob: blob,
+            prev_l1_state_root: [0u8; 32],
+            l2_chain_id_hash: [0u8; 32],
+            l1_anchor_height: 0,
+            range_vk_commitment: [0u8; 32],
+            ledger,
+        };
+
+        let out = execute_batch(&input).unwrap();
+
+        // Sender drained to zero but nonce bumped — and therefore retained.
+        let sender = out.ledger.get(&addr(1)).expect("sender must be retained");
+        assert_eq!(sender.balance, 0);
+        assert_eq!(sender.nonce, 1);
+        assert!(out.ledger.contains_key(&addr(1)));
+        // Recipient received the full amount.
+        assert_eq!(out.ledger.get(&addr(2)).unwrap().balance, 1_000);
+
+        // The retained zero-balance/nonce-bumped sender contributes to the
+        // state root: removing it changes the root. (Both ledgers still fold
+        // the recipient, so this diff isolates the sender's 44-byte entry.)
+        let root_with_sender = compute_state_root(&out.ledger);
+        let mut ledger_without_sender = out.ledger.clone();
+        ledger_without_sender.remove(&addr(1));
+        let root_without_sender = compute_state_root(&ledger_without_sender);
+        assert_ne!(
+            root_with_sender, root_without_sender,
+            "zero-balance nonce-bumped sender must fold into the state root"
+        );
+        assert_eq!(out.new_l2_state_root, root_with_sender);
+    }
+
+    #[test]
     fn execute_rejects_nonce_mismatch() {
         let mut ledger = BTreeMap::new();
         ledger.insert(
