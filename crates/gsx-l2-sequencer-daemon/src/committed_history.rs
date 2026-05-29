@@ -43,13 +43,21 @@
 //!
 //! `persist` writes to a temp file in the *same directory* as
 //! the target (so the final `rename` stays within one
-//! filesystem and is atomic) and renames it over the target. A
-//! crash mid-write leaves either the old complete file or the
-//! new complete file, never a torn one.
+//! filesystem and is atomic) and renames it over the target. The
+//! guarantee covers **power loss**, not just process crashes: the
+//! temp file's bytes are `fsync`ed (`sync_all`) *before* the
+//! rename, so the rename can never expose a torn or zero-length
+//! file, and the parent directory is `fsync`ed *after* the rename
+//! so the rename entry itself survives a power cut. A crash or
+//! power loss thus leaves either the old complete file or the new
+//! complete file on disk, never a torn one. (On macOS, directory
+//! `fsync` is best-effort — see `persist` — but the data-file
+//! `fsync` before the rename is the primary durability barrier.)
 
 use std::{
     collections::BTreeMap,
-    fs, io,
+    fs::{self, File},
+    io::{self, Write},
     path::{Path, PathBuf},
 };
 
@@ -275,12 +283,29 @@ impl CommittedHistory {
         self.entries.is_empty()
     }
 
-    /// Atomically write the current state to the backing file.
+    /// Atomically and **durably** write the current state to the
+    /// backing file.
     ///
     /// Writes a temp file in the **same directory** as the target
-    /// (keeping the rename within one filesystem so it is atomic)
-    /// then renames it over the target. A crash mid-write leaves
-    /// the old complete file intact; the next boot replays it.
+    /// (keeping the rename within one filesystem so it is atomic),
+    /// `fsync`s the temp file's bytes (`sync_all`) so they are on
+    /// stable storage *before* the rename, renames it over the
+    /// target, then `fsync`s the parent directory so the rename
+    /// entry itself survives a power cut. Sequencing the data
+    /// `fsync` before the rename is what defeats the torn /
+    /// zero-length file a naive `write` + `rename` exposes on
+    /// power loss: the rename can only ever publish fully-flushed
+    /// bytes. The result is that a crash *or* power loss leaves
+    /// either the old complete file or the new complete file
+    /// intact; the next boot replays it.
+    ///
+    /// The parent-directory `fsync` is best-effort: on some
+    /// platforms (notably macOS) `fsync` on a directory descriptor
+    /// is unsupported and returns an error. We log and continue in
+    /// that case rather than fail the persist, because the
+    /// data-file `fsync` before the rename is the primary
+    /// durability barrier; on Linux the directory `fsync`
+    /// succeeds and adds the rename-entry guarantee.
     ///
     /// A no-op for an in-memory-only store ([`Self::in_memory`]).
     pub fn persist(&self) -> Result<(), HistoryError> {
@@ -310,16 +335,52 @@ impl CommittedHistory {
             source,
         })?;
 
-        // Temp file in the same directory as the target.
+        // Temp file in the same directory as the target. Write the
+        // bytes, then fsync them to stable storage *before* the
+        // rename so the rename can never publish a torn or
+        // zero-length file after a power loss.
         let tmp_path = temp_path_for(path);
-        fs::write(&tmp_path, &bytes).map_err(|source| HistoryError::Io {
-            path: tmp_path.display().to_string(),
-            source,
-        })?;
+        {
+            let mut tmp = File::create(&tmp_path).map_err(|source| HistoryError::Io {
+                path: tmp_path.display().to_string(),
+                source,
+            })?;
+            tmp.write_all(&bytes).map_err(|source| HistoryError::Io {
+                path: tmp_path.display().to_string(),
+                source,
+            })?;
+            tmp.sync_all().map_err(|source| HistoryError::Io {
+                path: tmp_path.display().to_string(),
+                source,
+            })?;
+            // `tmp` is dropped (closed) here, before the rename.
+        }
+
         fs::rename(&tmp_path, path).map_err(|source| HistoryError::Io {
             path: path.display().to_string(),
             source,
         })?;
+
+        // fsync the parent directory so the rename entry itself is
+        // durable across power loss. Best-effort: directory fsync
+        // is unsupported on some platforms (e.g. macOS) and the
+        // data-file fsync above is the primary guarantee.
+        let dir = match path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => Path::new("."),
+        };
+        match File::open(dir).and_then(|d| d.sync_all()) {
+            Ok(()) => {}
+            Err(source) => {
+                warn!(
+                    dir = %dir.display(),
+                    error = %source,
+                    "committed-history: parent-dir fsync unsupported/failed; \
+                     relying on data-file fsync (rename-entry durability not guaranteed)"
+                );
+            }
+        }
+
         debug!(
             count = self.entries.len(),
             path = %path.display(),
@@ -454,12 +515,46 @@ mod tests {
         let mut h = CommittedHistory::load(&p).unwrap();
         h.record_commit(hash(7), 1234);
         h.record_commit(hash(9), 5678);
+        // Exercises the durable write path: write tmp, fsync tmp,
+        // rename, fsync parent dir. The persisted file must be
+        // readable and complete (not torn/zero-length) afterward.
         h.persist().unwrap();
 
         let reloaded = CommittedHistory::load(&p).unwrap();
         assert_eq!(reloaded.len(), 2);
         assert!(reloaded.contains(&hash(7)));
         assert!(reloaded.contains(&hash(9)));
+        // The recorded L1 heights must survive serialization, not
+        // just the hash keys.
+        assert_eq!(reloaded.entries.get(&hash(7)), Some(&1234));
+        assert_eq!(reloaded.entries.get(&hash(9)), Some(&5678));
+
+        let _ = fs::remove_file(&p);
+    }
+
+    /// Persisting twice (e.g. two commit ticks) must leave the
+    /// final state durable and the temp file cleaned up by the
+    /// rename — verifying the fsync+rename sequence is repeatable
+    /// and does not leave a stray `.tmp` behind.
+    #[test]
+    fn persist_overwrites_and_leaves_no_temp() {
+        let p = scratch_path("overwrite");
+        let mut h = CommittedHistory::load(&p).unwrap();
+        h.record_commit(hash(1), 10);
+        h.persist().unwrap();
+
+        h.record_commit(hash(2), 20);
+        h.persist().unwrap();
+
+        let reloaded = CommittedHistory::load(&p).unwrap();
+        assert_eq!(reloaded.len(), 2);
+        assert!(reloaded.contains(&hash(1)));
+        assert!(reloaded.contains(&hash(2)));
+
+        // The temp file is renamed away each persist; nothing
+        // should remain beside the target.
+        let tmp = temp_path_for(&p);
+        assert!(!tmp.exists(), "temp file should not survive persist");
 
         let _ = fs::remove_file(&p);
     }
