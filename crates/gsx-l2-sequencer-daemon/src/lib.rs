@@ -32,9 +32,11 @@
 //! PR that exercises one I/O surface.
 
 pub mod batch_builder_task;
+pub mod committed_history;
 pub mod config;
 pub mod l1_client;
 
 pub use batch_builder_task::{BatchBuilderTaskConfig, SequencerState};
+pub use committed_history::{CommittedHistory, HistoryError, HISTORY_FILE_NAME};
 pub use config::{ConfigError, SequencerConfig};
 pub use l1_client::{L1Client, L1ClientError};

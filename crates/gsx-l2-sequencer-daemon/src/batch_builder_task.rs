@@ -56,12 +56,32 @@ pub struct SequencerState {
     pub next_batch_id: u64,
     /// The most recently built batch, for tests + observability.
     pub last_built: Option<Batch>,
+    /// Durable record of committed force-include tx hashes
+    /// (#256). Replayed from disk at startup so force-include
+    /// honor evidence survives a daemon restart and a later
+    /// tick does not false-slash an already-honored obligation.
+    /// The default is an in-memory-only store; `main` replaces
+    /// it with a disk-backed one loaded from the data dir.
+    pub committed_history: crate::committed_history::CommittedHistory,
 }
 
 impl SequencerState {
-    /// New empty state.
+    /// New empty state with an in-memory-only committed-history
+    /// store. The daemon binary swaps in a disk-backed store at
+    /// startup via [`SequencerState::with_committed_history`].
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// New state seeded with a (typically disk-backed)
+    /// committed-history store.
+    pub fn with_committed_history(
+        committed_history: crate::committed_history::CommittedHistory,
+    ) -> Self {
+        Self {
+            committed_history,
+            ..Self::default()
+        }
     }
 }
 

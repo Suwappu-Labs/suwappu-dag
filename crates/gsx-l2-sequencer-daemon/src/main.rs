@@ -14,8 +14,8 @@ use std::{
 use anyhow::{Context, Result};
 use clap::Parser;
 use gsx_l2_sequencer_daemon::{
-    batch_builder_task, l1_client::mock::MockL1Client, BatchBuilderTaskConfig, SequencerConfig,
-    SequencerState,
+    batch_builder_task, committed_history::CommittedHistory, l1_client::mock::MockL1Client,
+    BatchBuilderTaskConfig, SequencerConfig, SequencerState, HISTORY_FILE_NAME,
 };
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -63,7 +63,23 @@ async fn run(cfg: SequencerConfig) -> Result<()> {
         "gsx-l2-sequencer-daemon: starting"
     );
 
-    let state = Arc::new(Mutex::new(SequencerState::new()));
+    // Replay the durable committed-batch-tx-hash history (#256)
+    // so force-include honor evidence survives a restart. A
+    // missing file is the normal first-boot case; a corrupt or
+    // wrong-version file is fatal — silently discarding it would
+    // reintroduce the post-restart false-slash bug.
+    let history_path = PathBuf::from(&cfg.data_dir).join(HISTORY_FILE_NAME);
+    let committed_history = CommittedHistory::load(&history_path)
+        .with_context(|| format!("loading committed history from {}", history_path.display()))?;
+    info!(
+        entries = committed_history.len(),
+        path = %history_path.display(),
+        "committed-history: replayed checkpoint at startup"
+    );
+
+    let state = Arc::new(Mutex::new(SequencerState::with_committed_history(
+        committed_history,
+    )));
 
     // Phase 2.2-c will replace the mock with the real
     // gsx-client-backed L1Client. The mock keeps the binary
