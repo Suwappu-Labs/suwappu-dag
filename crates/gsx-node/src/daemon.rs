@@ -2009,12 +2009,22 @@ mod tests {
     /// test is still flaky on shared GHA runners (~60s admit timeout
     /// fires under load even with the diagnostic instrumentation from
     /// #35). The un-ignore in #35 was deliberate — those eject-path
-    /// regressions still need coverage. Un-ignore again once the
-    /// underlying round-time-starvation flake is fixed; see #171 for
-    /// suggested investigations (test split, dedicated integration
-    /// budget, RUST_LOG=trace local repro).
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-    #[ignore = "flaky on CI under load; tracked in #171 (regression of #35 un-ignore)"]
+    /// regressions still need coverage.
+    ///
+    /// **Un-`#[ignore]`'d 2026-05-28** under #171: the flake's root
+    /// cause was thread oversubscription, not the consensus pipeline.
+    /// The runner spun `worker_threads = 8` for a 4-node mesh on
+    /// 2-core GHA boxes — 8 Tokio workers fighting over 2 cores
+    /// produced the scheduler jitter that starved round progress and
+    /// fired the admit timeout. Dropping to `worker_threads = 4` (one
+    /// per simulated node, matching the physical reality the runners
+    /// can actually deliver) removes the oversubscription. The large
+    /// 60s/30s/180s deadlines are kept as failure ceilings, not
+    /// expected wall-clock: a healthy run converges in a few seconds
+    /// and only a genuine regression burns the budget. Verified stable
+    /// with `for i in $(seq 1 20); do cargo test -p gsx-node \
+    /// phase_g_admit_and_eject -- --exact || break; done`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn phase_g_admit_and_eject() {
         let n = 4u32;
         let base_port: u16 = 19_700;
