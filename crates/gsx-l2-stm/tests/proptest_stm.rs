@@ -341,3 +341,114 @@ proptest! {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Credit-overflow coverage (#257 / #260 follow-up).
+//
+// IMPORTANT — why these live OUTSIDE `ledger_strategy` rather than widening
+// it: in a conserved-transfer system every account's balance is bounded by
+// the total supply, so a Transfer can overflow a recipient (`CreditOverflow`)
+// ONLY when the ledger's total supply already exceeds `u128::MAX`. The shared
+// strategy can't produce that — `supply_is_preserved` sums every balance into
+// a plain `u128`, which would itself overflow. So the overflow branch is
+// genuinely unreachable from the shared strategy, and the dedicated ledgers
+// below intentionally hold supply > u128::MAX (a single recipient at
+// `u128::MAX`) to exercise it without destabilizing the conservation property.
+// (Nonce overflow is likewise only reachable at `nonce == u64::MAX`; it is
+// pinned by the deterministic unit tests in lib.rs, not here.)
+// ---------------------------------------------------------------------------
+
+/// Distinct non-zero address (first byte set) so the state-root's
+/// "skip default-zero entries" rule doesn't collide with pre-funding.
+fn mkaddr(b: u8) -> Address {
+    let mut a = [0u8; 20];
+    a[0] = b;
+    a
+}
+
+fn funded(balance: u128) -> Account {
+    let mut a = Account::default();
+    a.balance = balance;
+    a
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
+
+    /// **#257 regression — overflow skip must not corrupt the preview.**
+    /// `apply_until_done` filters a tx that would overflow a near-max
+    /// recipient, and that skip must leave the sender's preview state
+    /// untouched so a *following* tx from the same sender is still filtered
+    /// against the correct (un-debited, un-incremented) state.
+    ///
+    /// The pre-fix helper debited + bumped the sender's nonce before the
+    /// recipient-overflow check and `continue`d without rolling back, so the
+    /// follow-up tx (nonce 0) would mismatch the phantom-advanced nonce 1 and
+    /// be dropped — diverging from `execute_batch`. This asserts the surviving
+    /// set is exactly the follow-up, which a non-rolling-back helper fails.
+    #[test]
+    fn overflow_tx_is_skipped_without_corrupting_followups(
+        bal in 2u128..=1_000_000,
+        amt1 in 1u128..=1_000_000,
+        amt2 in 1u128..=1_000_000,
+    ) {
+        // tx1 must be affordable so it REACHES the credit step (and overflows
+        // there), not bounce off the insufficient-balance check first; tx2
+        // must be affordable from the restored balance.
+        prop_assume!(amt1 <= bal && amt2 <= bal);
+
+        let (a, b, r) = (mkaddr(1), mkaddr(2), mkaddr(3));
+        let mut ledger = BTreeMap::new();
+        ledger.insert(a, funded(bal));
+        ledger.insert(r, funded(u128::MAX)); // any credit overflows
+
+        let txs = vec![
+            BatchTransaction::Transfer { from: a, to: r, amount: amt1, nonce: 0 },
+            BatchTransaction::Transfer { from: a, to: b, amount: amt2, nonce: 0 },
+        ];
+
+        let (input, applied) = apply_until_done(ledger, &txs);
+        prop_assert_eq!(applied.as_slice(), &txs[1..2]);
+
+        let out = execute_batch(&input).expect("filtered batch must succeed");
+        prop_assert_eq!(out.ledger.get(&a).unwrap().balance, bal - amt2);
+        prop_assert_eq!(out.ledger.get(&a).unwrap().nonce, 1);
+        prop_assert_eq!(out.ledger.get(&b).unwrap().balance, amt2);
+        prop_assert_eq!(out.ledger.get(&r).unwrap().balance, u128::MAX);
+    }
+}
+
+/// **`execute_batch` totality — `CreditOverflow` is surfaced, not wrapped.**
+/// A batch that *does* include a recipient-overflowing transfer must reject
+/// deterministically with `StmError::CreditOverflow` (apply_tx's
+/// `checked_add` guard), rather than panicking (debug) or saturating
+/// silently — the SP1 guest reuses this path verbatim.
+#[test]
+fn execute_batch_rejects_credit_overflow() {
+    let (a, r) = (mkaddr(1), mkaddr(3));
+    let mut ledger = BTreeMap::new();
+    ledger.insert(a, funded(1_000));
+    ledger.insert(r, funded(u128::MAX));
+
+    let tx = BatchTransaction::Transfer {
+        from: a,
+        to: r,
+        amount: 500,
+        nonce: 0,
+    };
+    let input = BatchInput {
+        prev_l2_state_root: compute_state_root(&ledger),
+        batch_id: 1,
+        da_blob: encode_da_blob(1, std::slice::from_ref(&tx)),
+        prev_l1_state_root: [0u8; 32],
+        l2_chain_id_hash: [0u8; 32],
+        l1_anchor_height: 0,
+        range_vk_commitment: [0u8; 32],
+        ledger,
+    };
+
+    match execute_batch(&input) {
+        Err(StmError::CreditOverflow { to }) => assert_eq!(to, r),
+        other => panic!("expected CreditOverflow, got {other:?}"),
+    }
+}
