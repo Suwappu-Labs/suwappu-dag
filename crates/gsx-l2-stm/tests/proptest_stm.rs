@@ -388,15 +388,15 @@ proptest! {
     /// set is exactly the follow-up, which a non-rolling-back helper fails.
     #[test]
     fn overflow_tx_is_skipped_without_corrupting_followups(
-        bal in 2u128..=1_000_000,
-        amt1 in 1u128..=1_000_000,
-        amt2 in 1u128..=1_000_000,
+        // amt1/amt2 are drawn DEPENDENT on bal (1..=bal) via prop_flat_map so
+        // both are affordable by construction — no `prop_assume`, hence no
+        // rejection-rate ceiling that would abort the high-case (10k) run.
+        // tx1 being affordable is what makes it REACH the credit step and
+        // overflow there (rather than bouncing off the balance check first);
+        // tx2 being affordable is what lets it apply from the restored balance.
+        (bal, amt1, amt2) in (2u128..=1_000_000u128)
+            .prop_flat_map(|bal| (Just(bal), 1u128..=bal, 1u128..=bal)),
     ) {
-        // tx1 must be affordable so it REACHES the credit step (and overflows
-        // there), not bounce off the insufficient-balance check first; tx2
-        // must be affordable from the restored balance.
-        prop_assume!(amt1 <= bal && amt2 <= bal);
-
         let (a, b, r) = (mkaddr(1), mkaddr(2), mkaddr(3));
         let mut ledger = BTreeMap::new();
         ledger.insert(a, funded(bal));
