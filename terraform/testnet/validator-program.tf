@@ -63,6 +63,26 @@ resource "aws_secretsmanager_secret_version" "program_db_password" {
   secret_string = random_password.program_db.result
 }
 
+# Admin token — bearer token the points-accumulator daemon presents on
+# its privileged control endpoints (read by the OPERATIONS.md deploy
+# runbook). Alphanumeric so it is safe to carry in an HTTP header / URL.
+resource "random_password" "program_admin_token" {
+  length  = 64
+  special = false # keep header/URL-safe
+}
+
+resource "aws_secretsmanager_secret" "program_admin_token" {
+  provider                = aws.us_east_1
+  name                    = "gsx-testnet/program/admin-token"
+  recovery_window_in_days = 7
+}
+
+resource "aws_secretsmanager_secret_version" "program_admin_token" {
+  provider      = aws.us_east_1
+  secret_id     = aws_secretsmanager_secret.program_admin_token.id
+  secret_string = random_password.program_admin_token.result
+}
+
 resource "aws_db_instance" "program" {
   provider                  = aws.us_east_1
   identifier                = "gsx-testnet-program"
@@ -156,9 +176,12 @@ resource "aws_iam_role_policy" "program_secrets_read" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Effect   = "Allow"
-      Action   = ["secretsmanager:GetSecretValue"]
-      Resource = [aws_secretsmanager_secret.program_db_password.arn]
+      Effect = "Allow"
+      Action = ["secretsmanager:GetSecretValue"]
+      Resource = [
+        aws_secretsmanager_secret.program_db_password.arn,
+        aws_secretsmanager_secret.program_admin_token.arn,
+      ]
     }]
   })
 }
