@@ -1144,6 +1144,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "gsx-l2-prover"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "clap",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "gsx-l2-sequencer"
 version = "0.1.0"
 dependencies = [
