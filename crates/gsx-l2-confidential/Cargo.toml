@@ -10,6 +10,7 @@ publish.workspace = true
 description = "GSX L2 PQ-confidential transfer primitives (Track H). Note commitment + nullifier + L2-address derivation. Phase 1 — viewing-key + hybrid AEAD encryption land in phase 2."
 
 [dependencies]
+blake3.workspace = true
 gsx-crypto.workspace = true
 serde.workspace = true
 thiserror.workspace = true
