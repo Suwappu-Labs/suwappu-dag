@@ -85,17 +85,32 @@ fn apply_until_done(
             } => (from, to, amount, nonce),
             _ => continue,
         };
-        let from_acct = ledger_preview.entry(*from).or_default();
+        // Run the tx on a per-tx scratch clone and commit only on
+        // full success. This mirrors `execute_batch`'s own
+        // clone-then-apply_tx sequence exactly (debit → nonce++ →
+        // credit, on the SAME account for a self-transfer), so the
+        // filter accepts precisely the txs `execute_batch` will apply.
+        //
+        // The previous version mutated `ledger_preview` (debit +
+        // nonce++) and then `continue`d on credit-overflow WITHOUT
+        // rolling back, leaving the preview carrying a tx absent from
+        // `applied`. Later txs were then filtered against a phantom
+        // state, diverging from `execute_batch` and crashing the
+        // `.expect("filtered batch must succeed")`. Discarding the
+        // scratch on the overflow path makes it a true no-op. (#257)
+        let mut scratch = ledger_preview.clone();
+        let from_acct = scratch.entry(*from).or_default();
         if from_acct.nonce != *nonce || from_acct.balance < *amount {
             continue;
         }
         from_acct.balance -= amount;
         from_acct.nonce += 1;
-        let to_acct = ledger_preview.entry(*to).or_default();
+        let to_acct = scratch.entry(*to).or_default();
         let Some(sum) = to_acct.balance.checked_add(*amount) else {
-            continue;
+            continue; // scratch dropped -> ledger_preview untouched
         };
         to_acct.balance = sum;
+        ledger_preview = scratch;
         applied.push(tx.clone());
     }
 

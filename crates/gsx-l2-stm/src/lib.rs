@@ -301,6 +301,18 @@ pub enum StmError {
         /// Recipient that would have overflowed.
         to: Address,
     },
+    /// Sender's nonce was already at `u64::MAX`, so incrementing it
+    /// would overflow. In debug builds the `+= 1` would panic and in
+    /// release it would silently wrap to 0 — either is a
+    /// consensus-critical divergence on a transition that is supposed
+    /// to be a pure, deterministic `Result`. Surfaced explicitly so
+    /// the proof rejects rather than diverging. Unreachable under any
+    /// realistic tx volume, but the STM must be total.
+    #[error("nonce overflow for sender 0x{from}: nonce already at u64::MAX", from = hex::encode(from))]
+    NonceOverflow {
+        /// Sender whose nonce would have overflowed.
+        from: Address,
+    },
     /// `BatchInput.prev_l2_state_root` did not match
     /// `compute_state_root(&input.ledger)`. Without this check the
     /// SP1 guest would happily commit a caller-provided claimed
@@ -450,8 +462,17 @@ fn apply_tx(
                     need: *amount,
                 });
             }
+            // Checked nonce increment: at `u64::MAX` a plain `+= 1`
+            // would panic in debug and wrap to 0 in release — a
+            // consensus-critical divergence on what must be a pure
+            // deterministic transition. Compute the next nonce before
+            // any mutation so the early return leaves state untouched.
+            let next_nonce = from_account
+                .nonce
+                .checked_add(1)
+                .ok_or(StmError::NonceOverflow { from: *from })?;
             from_account.balance -= *amount;
-            from_account.nonce += 1;
+            from_account.nonce = next_nonce;
 
             let to_account = ledger.entry(*to).or_default();
             to_account.balance = to_account
@@ -643,6 +664,65 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn execute_rejects_nonce_overflow() {
+        // Sender sits at u64::MAX. A plain `nonce += 1` would panic in
+        // debug / wrap to 0 in release; the STM must instead return a
+        // deterministic error and leave the ledger untouched.
+        let mut ledger = BTreeMap::new();
+        ledger.insert(
+            addr(1),
+            Account {
+                balance: 1_000,
+                nonce: u64::MAX,
+            },
+        );
+        let txs = vec![BatchTransaction::Transfer {
+            from: addr(1),
+            to: addr(2),
+            amount: 250,
+            nonce: u64::MAX,
+        }];
+        let input = BatchInput {
+            prev_l2_state_root: compute_state_root(&ledger),
+            batch_id: 1,
+            da_blob: encode_da_blob(1, &txs),
+            prev_l1_state_root: [0u8; 32],
+            l2_chain_id_hash: [0u8; 32],
+            l1_anchor_height: 0,
+            range_vk_commitment: [0u8; 32],
+            ledger,
+        };
+        let err = execute_batch(&input).unwrap_err();
+        assert_eq!(err, StmError::NonceOverflow { from: addr(1) });
+    }
+
+    #[test]
+    fn apply_tx_nonce_overflow_leaves_state_untouched() {
+        // The checked nonce increment must reject before mutating the
+        // sender's balance, so a failed tx is a no-op on the ledger.
+        let mut ledger = BTreeMap::new();
+        ledger.insert(
+            addr(1),
+            Account {
+                balance: 1_000,
+                nonce: u64::MAX,
+            },
+        );
+        let tx = BatchTransaction::Transfer {
+            from: addr(1),
+            to: addr(2),
+            amount: 250,
+            nonce: u64::MAX,
+        };
+        let err = apply_tx(&mut ledger, &tx).unwrap_err();
+        assert_eq!(err, StmError::NonceOverflow { from: addr(1) });
+        // Sender balance + nonce unchanged; recipient never created.
+        assert_eq!(ledger.get(&addr(1)).unwrap().balance, 1_000);
+        assert_eq!(ledger.get(&addr(1)).unwrap().nonce, u64::MAX);
+        assert!(ledger.get(&addr(2)).is_none());
     }
 
     #[test]
