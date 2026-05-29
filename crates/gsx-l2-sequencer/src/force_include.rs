@@ -146,13 +146,34 @@ pub enum DaemonAction {
 /// (`committed_batch_tx_hashes`). The daemon should call
 /// `evaluate` after every newly committed batch + on a
 /// background tick for the deadline / ejection arms.
+///
+/// ## `committed_batch_tx_hashes` precondition
+///
+/// This set MUST cover every committed batch tx hash whose
+/// origin obligation might still be `Pending` at any past or
+/// present L1 height — not just commits "since this daemon last
+/// ran". A daemon restart that loses this history would let a
+/// later tick fire `SlashMissedForceInclude` against an
+/// obligation whose tx was already committed on time. The
+/// substrate rejects the slash on the pending-status check, but
+/// only after the daemon has wasted an RPC and (worse) attempted
+/// an incorrect adjudication that the network logs as Byzantine.
+///
+/// The daemon binary owns this precondition. It must persist the
+/// committed-hash history (e.g. an indexed log) and replay it at
+/// startup, or alternatively scan L1 commits back to the oldest
+/// still-Pending obligation's submission height before invoking
+/// `evaluate`. The pure logic here trusts the caller's input;
+/// see #229 for the daemon-side implementation tracking.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvaluateInput<'a> {
     /// All registered obligations, decoded from the L1
     /// `force_include_registry_address`. Keyed by obligation_id.
     pub obligations: &'a BTreeMap<ObligationId, ObligationSnapshot>,
     /// L2 tx hashes the sequencer has committed via
-    /// `Intent::CommitL2StateRoot` since this daemon last ran.
+    /// `Intent::CommitL2StateRoot`, covering all batches
+    /// relevant to currently-Pending obligations (see the
+    /// `committed_batch_tx_hashes` precondition section above).
     /// `BLAKE3(tx_bytes)` per
     /// `gsx_execution::force_include::tx_hash`.
     pub committed_batch_tx_hashes: &'a BTreeSet<TxHash>,
@@ -179,26 +200,40 @@ pub struct EvaluateInput<'a> {
 ///
 /// Returns actions in this order:
 /// 1. All `MarkHonored` for `Pending` obligations whose `tx_hash`
-///    is in `committed_batch_tx_hashes`.
+///    is in `committed_batch_tx_hashes` AND whose deadline has
+///    not yet passed (i.e. `current_l1_height <=
+///    deadline_l1_height`).
 /// 2. All `SlashMissedForceInclude` for `Pending` obligations
 ///    whose `deadline_l1_height < current_l1_height` AND were
 ///    NOT honored this tick.
 /// 3. All `EjectSequencer` for `Slashed` obligations past the
 ///    ejection window AND not yet in `ejected_obligations`.
 ///
-/// Honor-first ordering is load-bearing: if a tx lands inside
-/// the deadline grace AND the deadline also passes in the same
-/// tick, the daemon must emit `MarkHonored` rather than
-/// `SlashMissedForceInclude`. The substrate would still reject
-/// the slash (status is Pending → Honored transition), but
-/// honoring keeps the sequencer's bond intact.
+/// **Deadline-gated honor.** Late inclusions (tx_hash committed
+/// but the daemon only sees it after `deadline_l1_height`) are
+/// NOT eligible for `MarkHonored` — the sequencer was late, and
+/// the SLA's slashing arm fires. The previous "any inclusion
+/// honors" behaviour let a malicious sequencer dodge slashing
+/// by including a censored tx after the deadline; closes Codex
+/// P1 on `force_include.rs:206`. The user still receives their
+/// tx via the included batch — both events stand: the user got
+/// inclusion, the sequencer got slashed.
 pub fn evaluate(input: EvaluateInput<'_>) -> Vec<DaemonAction> {
     let mut actions = Vec::new();
     let mut honored_this_tick: BTreeSet<ObligationId> = BTreeSet::new();
 
-    // Pass 1: Pending obligations whose tx_hash was committed.
+    // Pass 1: Pending obligations whose tx_hash was committed
+    // before the deadline elapsed.
     for (id, ob) in input.obligations {
         if ob.status != ObligationStatus::Pending {
+            continue;
+        }
+        // Codex P1 (force_include.rs:206): deadline-gated honor.
+        // If the daemon only sees the commit after the deadline
+        // has passed, the sequencer was late and the slashing arm
+        // applies. `<=` lets the deadline block itself still count
+        // as honor (matches `pending_at_deadline_exact_does_not_slash`).
+        if input.current_l1_height > ob.deadline_l1_height {
             continue;
         }
         if input.committed_batch_tx_hashes.contains(&ob.tx_hash) {
@@ -344,12 +379,15 @@ mod tests {
     }
 
     #[test]
-    fn honor_wins_over_slash_in_same_tick() {
-        // The obligation is BOTH committed AND past its deadline
-        // (sequencer was late but still honored). Daemon must
-        // emit MarkHonored, not Slash — the substrate rejects
-        // the slash anyway (Pending → Honored transition), but
-        // emitting honor preserves the sequencer's bond.
+    fn late_inclusion_after_deadline_slashes_not_honors() {
+        // Codex P1 regression (force_include.rs:206): a sequencer
+        // that includes a censored tx *after* the deadline must
+        // not avoid `SlashMissedForceInclude` by virtue of the
+        // late inclusion. Before this fix, the daemon emitted
+        // `MarkHonored` on any committed tx hash regardless of
+        // current_l1_height, and the late-inclusion case dodged
+        // slashing entirely. With the deadline-gated honor
+        // semantics, the same scenario now emits Slash.
         let mut map = BTreeMap::new();
         map.insert(id(1), ob(0x42, 100, ObligationStatus::Pending));
         let mut committed = BTreeSet::new();
@@ -358,7 +396,33 @@ mod tests {
         let actions = evaluate(EvaluateInput {
             obligations: &map,
             committed_batch_tx_hashes: &committed,
-            current_l1_height: 200,
+            current_l1_height: 200, // past deadline 100
+            ejected_obligations: &no_ejected(),
+            ejector: ejector(),
+        });
+        assert_eq!(
+            actions,
+            vec![DaemonAction::SlashMissedForceInclude {
+                obligation_id: id(1)
+            }]
+        );
+    }
+
+    #[test]
+    fn on_time_inclusion_at_exact_deadline_honors() {
+        // Boundary case: the deadline_l1_height block is the LAST
+        // acceptable height for inclusion. A commit at exactly
+        // that height (current == deadline) must honor, not
+        // slash — the sequencer met the SLA on the wire.
+        let mut map = BTreeMap::new();
+        map.insert(id(1), ob(0x42, 100, ObligationStatus::Pending));
+        let mut committed = BTreeSet::new();
+        committed.insert([0x42; 32]);
+
+        let actions = evaluate(EvaluateInput {
+            obligations: &map,
+            committed_batch_tx_hashes: &committed,
+            current_l1_height: 100, // exact deadline
             ejected_obligations: &no_ejected(),
             ejector: ejector(),
         });
@@ -443,22 +507,24 @@ mod tests {
     #[test]
     fn multi_obligation_emits_in_ordered_groups() {
         let mut map = BTreeMap::new();
-        // id(1): Pending, will be honored
-        map.insert(id(1), ob(0x11, 100, ObligationStatus::Pending));
-        // id(2): Pending, will be slashed
+        // id(1): Pending, committed within deadline → MarkHonored.
+        // (Deadline 20_000 stays above current_l1_height; the
+        // sequencer is still inside the SLA window when the
+        // daemon evaluates.)
+        map.insert(id(1), ob(0x11, 20_000, ObligationStatus::Pending));
+        // id(2): Pending, deadline missed → SlashMissedForceInclude.
         map.insert(id(2), ob(0x22, 50, ObligationStatus::Pending));
-        // id(3): Slashed past window, will be ejected
+        // id(3): Slashed past ejection window → EjectSequencer.
         map.insert(id(3), ob(0x33, 10, ObligationStatus::Slashed));
-        // id(4): Slashed inside window, no-op (deadline well
-        // above current_l1_height even with the +window)
+        // id(4): Slashed inside ejection window → no-op.
         map.insert(id(4), ob(0x44, 50_000, ObligationStatus::Slashed));
 
         let mut committed = BTreeSet::new();
         committed.insert([0x11; 32]);
 
-        // current_l1_height past id(2)'s deadline AND past
-        // id(3)'s deadline+EJECTION_WINDOW, but still below
-        // id(4)'s deadline.
+        // current_l1_height: past id(2)'s deadline + past id(3)'s
+        // deadline+ejection-window, still inside id(1)'s deadline
+        // (so the honor path applies) and still below id(4)'s.
         let current_l1_height = 10 + EJECTION_WINDOW_L1_BLOCKS + 5;
         let actions = evaluate(EvaluateInput {
             obligations: &map,
