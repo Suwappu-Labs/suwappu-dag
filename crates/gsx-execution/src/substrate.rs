@@ -3426,6 +3426,376 @@ mod tests {
         [seed; 20]
     }
 
+    /// IQ-007 / #241: pins the canonical bincode discriminant byte of
+    /// every `Intent` variant so a future mid-enum insert (which would
+    /// shift every following variant's discriminant) fails CI.
+    ///
+    /// The discriminant is load-bearing: the mempool dedup key and the
+    /// consensus tx-hash are both `blake3(bincode(intent))`, and
+    /// `rpc_adapter` decodes submitted `intent_bincode` positionally.
+    /// `bincode::config::legacy()` (fixint, little-endian — the exact
+    /// codec the mempool/rpc hash path uses) encodes the serde variant
+    /// index as a 4-byte LE `u32` prefix. Reordering or inserting a
+    /// variant changes that prefix for every downstream variant, which
+    /// is an unplanned wire-format break.
+    ///
+    /// Per IQ-007 the current ordering is ratified pre-mainnet; this
+    /// test makes it append-only going forward. To add a variant,
+    /// append it at the END of the enum (or use the versioned-variant
+    /// pattern) and add its expected ordinal at the END of the table
+    /// below — never renumber an existing entry.
+    #[test]
+    fn intent_bincode_discriminants_are_pinned() {
+        // The canonical hash-path codec (mirrors gsx-mempool and
+        // gsx-node's codec): bincode 1.x-compatible legacy config.
+        fn discriminant(intent: &Intent) -> u32 {
+            let bytes = bincode::serde::encode_to_vec(intent, bincode::config::legacy())
+                .expect("intent encodes");
+            assert!(
+                bytes.len() >= 4,
+                "legacy bincode prefixes the variant index as a 4-byte LE u32"
+            );
+            u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+        }
+
+        // Compile-time exhaustiveness guard. `#[non_exhaustive]` does NOT
+        // apply within the defining crate, so this wildcard-free match
+        // fails to COMPILE the moment a variant is added to `Intent`
+        // without an arm here — forcing the author to the table below.
+        // (A `cases.len()` count cannot do this: a bare append leaves the
+        // array literal's length unchanged, so the new variant ships
+        // silently unpinned — the single most likely future mutation.)
+        fn ordinal(intent: &Intent) -> u32 {
+            match intent {
+                Intent::Transfer { .. } => 0,
+                Intent::GenesisAllocation { .. } => 1,
+                Intent::DistributeRewards { .. } => 2,
+                Intent::Delegate { .. } => 3,
+                Intent::UndelegateBegin { .. } => 4,
+                Intent::UndelegateClaim { .. } => 5,
+                Intent::MintInflation { .. } => 6,
+                Intent::AdmitAuthority { .. } => 7,
+                Intent::ExitAuthority { .. } => 8,
+                Intent::EjectAuthority { .. } => 9,
+                Intent::AdmitValidator { .. } => 10,
+                Intent::ExitValidator { .. } => 11,
+                Intent::EjectValidator { .. } => 12,
+                Intent::CommitL2StateRoot { .. } => 13,
+                Intent::SetL2VerifyingKey { .. } => 14,
+                Intent::L1Lock { .. } => 15,
+                Intent::L2BurnProven { .. } => 16,
+                Intent::L2ForceInclude { .. } => 17,
+                Intent::SlashSequencer { .. } => 18,
+                Intent::MarkForceIncludeHonored { .. } => 19,
+                Intent::EjectSequencer { .. } => 20,
+                Intent::DepositSequencerBond { .. } => 21,
+                Intent::DepositSafetyBond { .. } => 22,
+                Intent::DepositAuthorityStake { .. } => 23,
+                Intent::DepositValidatorStake { .. } => 24,
+                Intent::WithdrawAuthorityStake { .. } => 25,
+                Intent::WithdrawValidatorStake { .. } => 26,
+                Intent::DisburseTreasury { .. } => 27,
+                Intent::ClaimInsurance { .. } => 28,
+                Intent::PostL2DA { .. } => 29,
+                Intent::DistributeSlashedFunds { .. } => 30,
+                Intent::AddBridgeAsset { .. } => 31,
+                Intent::PauseBridgeAsset { .. } => 32,
+                Intent::RemoveBridgeAsset { .. } => 33,
+                Intent::PostL2DAv2 { .. } => 34,
+            }
+        }
+
+        // One constructed instance per variant, paired with its
+        // EXPECTED ordinal (variant position in the enum). Deriving
+        // the assertion from the listed ordinal — not from whatever
+        // bytes happen to fall out — is what makes a reorder fail.
+        let cases: &[(u32, Intent)] = &[
+            (
+                0,
+                Intent::Transfer {
+                    from: addr(1),
+                    to: addr(2),
+                    amount: 1,
+                },
+            ),
+            (
+                1,
+                Intent::GenesisAllocation {
+                    allocations: vec![(addr(1), 1)],
+                },
+            ),
+            (
+                2,
+                Intent::DistributeRewards {
+                    epoch: 1,
+                    ring: RewardsRing::Authority,
+                    recipients: vec![(addr(1), 1)],
+                },
+            ),
+            (
+                3,
+                Intent::Delegate {
+                    from: addr(1),
+                    validator_id: 0,
+                    amount: 1,
+                },
+            ),
+            (
+                4,
+                Intent::UndelegateBegin {
+                    from: addr(1),
+                    validator_id: 0,
+                    amount: 1,
+                },
+            ),
+            (
+                5,
+                Intent::UndelegateClaim {
+                    from: addr(1),
+                    validator_id: 0,
+                },
+            ),
+            (
+                6,
+                Intent::MintInflation {
+                    epoch: 1,
+                    authority_share: 1,
+                    validator_share: 1,
+                    treasury_share: 1,
+                },
+            ),
+            (
+                7,
+                Intent::AdmitAuthority {
+                    authority_id: 0,
+                    stake_gsx: 1,
+                    mldsa_public_key: vec![],
+                    bls_public_key: vec![],
+                },
+            ),
+            (8, Intent::ExitAuthority { authority_id: 0 }),
+            (
+                9,
+                Intent::EjectAuthority {
+                    authority_id: 0,
+                    proof_ref: [0u8; 32],
+                },
+            ),
+            (
+                10,
+                Intent::AdmitValidator {
+                    validator_id: 0,
+                    stake_gsx: 1,
+                    mldsa_public_key: vec![],
+                    bls_public_key: vec![],
+                },
+            ),
+            (11, Intent::ExitValidator { validator_id: 0 }),
+            (
+                12,
+                Intent::EjectValidator {
+                    validator_id: 0,
+                    proof_ref: [0u8; 32],
+                },
+            ),
+            (
+                13,
+                Intent::CommitL2StateRoot {
+                    batch_id: 1,
+                    new_state_root: [0u8; 32],
+                    proof_bytes: vec![],
+                    public_inputs: vec![],
+                    vk_hash: [0u8; 32],
+                },
+            ),
+            (
+                14,
+                Intent::SetL2VerifyingKey {
+                    chain_id_hash: [0u8; 32],
+                    new_aggregation_vk: [0u8; 32],
+                    new_range_commitment: [0u8; 32],
+                },
+            ),
+            (
+                15,
+                Intent::L1Lock {
+                    user_address: addr(1),
+                    l2_recipient: addr(2),
+                    amount: 1,
+                    asset_id: None,
+                },
+            ),
+            (
+                16,
+                Intent::L2BurnProven {
+                    batch_id: 1,
+                    recipient: addr(1),
+                    amount: 1,
+                    merkle_path: vec![],
+                    asset_id: None,
+                    l2_chain_id_hash: [0u8; 32],
+                },
+            ),
+            (
+                17,
+                Intent::L2ForceInclude {
+                    tx: vec![],
+                    deadline_l1_height: 1,
+                    submitter: addr(1),
+                    l2_nonce: 0,
+                },
+            ),
+            (
+                18,
+                Intent::SlashSequencer {
+                    reason: SlashReason::MissedForceInclude,
+                    intent_hash: [0u8; 32],
+                },
+            ),
+            (
+                19,
+                Intent::MarkForceIncludeHonored {
+                    obligation_id: [0u8; 32],
+                },
+            ),
+            (
+                20,
+                Intent::EjectSequencer {
+                    obligation_id: [0u8; 32],
+                    ejector: addr(1),
+                },
+            ),
+            (
+                21,
+                Intent::DepositSequencerBond {
+                    from: addr(1),
+                    amount: 1,
+                },
+            ),
+            (
+                22,
+                Intent::DepositSafetyBond {
+                    from: addr(1),
+                    amount: 1,
+                },
+            ),
+            (
+                23,
+                Intent::DepositAuthorityStake {
+                    from: addr(1),
+                    authority_id: 0,
+                    amount: 1,
+                },
+            ),
+            (
+                24,
+                Intent::DepositValidatorStake {
+                    from: addr(1),
+                    validator_id: 0,
+                    amount: 1,
+                },
+            ),
+            (
+                25,
+                Intent::WithdrawAuthorityStake {
+                    to: addr(1),
+                    authority_id: 0,
+                    amount: 1,
+                },
+            ),
+            (
+                26,
+                Intent::WithdrawValidatorStake {
+                    to: addr(1),
+                    validator_id: 0,
+                    amount: 1,
+                },
+            ),
+            (
+                27,
+                Intent::DisburseTreasury {
+                    recipient: addr(1),
+                    amount: 1,
+                    purpose_tag: [0u8; 32],
+                },
+            ),
+            (
+                28,
+                Intent::ClaimInsurance {
+                    claimant: addr(1),
+                    amount: 1,
+                    claim_reference: [0u8; 32],
+                },
+            ),
+            (
+                29,
+                Intent::PostL2DA {
+                    batch_id: 1,
+                    da_blob: vec![],
+                },
+            ),
+            (
+                30,
+                Intent::DistributeSlashedFunds {
+                    slash_event_id: [0u8; 32],
+                    counterparties: vec![],
+                    insurance_share: 1,
+                    treasury_share: 1,
+                },
+            ),
+            (
+                31,
+                Intent::AddBridgeAsset {
+                    source_chain: 1,
+                    source_contract: vec![],
+                    decimals: 0,
+                    name: vec![],
+                    symbol: vec![],
+                },
+            ),
+            (
+                32,
+                Intent::PauseBridgeAsset {
+                    asset_id: [0u8; 32],
+                },
+            ),
+            (
+                33,
+                Intent::RemoveBridgeAsset {
+                    asset_id: [0u8; 32],
+                },
+            ),
+            (
+                34,
+                Intent::PostL2DAv2 {
+                    batch_id: 1,
+                    da_blob: vec![],
+                    l2_chain_id_hash: [0u8; 32],
+                },
+            ),
+        ];
+
+        for (expected, intent) in cases {
+            assert_eq!(
+                discriminant(intent),
+                *expected,
+                "bincode discriminant for {intent:?} shifted — a variant was \
+                 reordered or inserted mid-enum. Append new variants at the \
+                 END of `Intent` (IQ-007 / #241) and extend this table; do \
+                 NOT renumber existing entries (it breaks the canonical \
+                 blake3(bincode(intent)) hash recipe)."
+            );
+            // Cross-check the table's claimed ordinal against the
+            // exhaustive `ordinal()` match, so a stale or mis-numbered
+            // table entry can't silently disagree with the enum.
+            assert_eq!(
+                ordinal(intent),
+                *expected,
+                "table ordinal disagrees with the exhaustive ordinal() match for {intent:?}"
+            );
+        }
+    }
+
     #[test]
     fn empty_substrate_zero_balance() {
         let s = InMemorySubstrate::new();

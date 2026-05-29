@@ -25,3 +25,7 @@ tracing.workspace = true
 [dev-dependencies]
 proptest.workspace = true
 rand.workspace = true
+# Pins the canonical bincode discriminant of each `Intent` variant
+# (IQ-007, #241). Must match the codec the mempool/rpc_adapter hash
+# path uses: `bincode::config::legacy()` (fixint, little-endian).
+bincode = { workspace = true }
