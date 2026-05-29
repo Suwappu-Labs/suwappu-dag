@@ -22,6 +22,7 @@ members = [
     "crates/gsx-l2-sequencer",
     "crates/gsx-l2-stm",
     "crates/gsx-l2-sequencer-daemon",
+    "crates/gsx-l2-prover",
     "clients/rust-sdk",
 ]
 # B4: keep the cargo-fuzz workspace out of the main one — cargo-fuzz
