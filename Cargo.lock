@@ -1050,6 +1050,7 @@ dependencies = [
 name = "gsx-execution"
 version = "0.1.0"
 dependencies = [
+ "bincode 2.0.1",
  "blake3",
  "gsx-authority",
  "gsx-consensus",
