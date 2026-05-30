@@ -53,9 +53,16 @@ resource "aws_route53_zone" "devnet" {
   }
 }
 
-# ALIAS records pointing at the load balancers + CloudFront distros.
-# The ALB + CloudFront resources are defined in alb.tf + (future)
-# explorer.tf / status.tf.
+# ALIAS records pointing at the CloudFront distributions + (explorer/
+# status) CloudFront distros. rpc/ws/faucet front via CloudFront
+# (cf_rpc.tf / cf_faucet.tf) — NOT the ALBs in alb.tf, whose target
+# groups are empty (ALB target_type=ip can't attach the validators'
+# cross-VPC public EIPs → 503). The alb.tf RPC/faucet skeleton is left
+# in place, unreferenced, as a rollback anchor.
+#
+# evaluate_target_health is false for CloudFront aliases — the distro
+# does its own per-origin health checking via the origin group's 5xx
+# failover criteria (cf_rpc.tf).
 
 resource "aws_route53_record" "rpc" {
   provider = aws.us_east_1
@@ -64,16 +71,16 @@ resource "aws_route53_record" "rpc" {
   type     = "A"
 
   alias {
-    name                   = aws_lb.rpc.dns_name
-    zone_id                = aws_lb.rpc.zone_id
-    evaluate_target_health = true
+    name                   = aws_cloudfront_distribution.rpc.domain_name
+    zone_id                = aws_cloudfront_distribution.rpc.hosted_zone_id
+    evaluate_target_health = false
   }
 }
 
-# WebSocket subscription path also lands on the same ALB — the ALB
-# upgrades the GET /ws to a WebSocket connection. Separate DNS name
-# so SDK consumers can configure RPC + WS endpoints distinctly
-# (some clients won't accept https:// → wss:// transparent upgrade).
+# WebSocket subscription path rides the same CloudFront distro (the
+# `/ws*` behavior in cf_rpc.tf). Separate DNS name so SDK consumers can
+# configure RPC + WS endpoints distinctly (some clients won't accept
+# an https:// → wss:// transparent upgrade).
 resource "aws_route53_record" "ws" {
   provider = aws.us_east_1
   zone_id  = aws_route53_zone.devnet.zone_id
@@ -81,9 +88,9 @@ resource "aws_route53_record" "ws" {
   type     = "A"
 
   alias {
-    name                   = aws_lb.rpc.dns_name
-    zone_id                = aws_lb.rpc.zone_id
-    evaluate_target_health = true
+    name                   = aws_cloudfront_distribution.rpc.domain_name
+    zone_id                = aws_cloudfront_distribution.rpc.hosted_zone_id
+    evaluate_target_health = false
   }
 }
 
@@ -94,14 +101,27 @@ resource "aws_route53_record" "faucet" {
   type     = "A"
 
   alias {
-    name                   = aws_lb.faucet.dns_name
-    zone_id                = aws_lb.faucet.zone_id
-    evaluate_target_health = true
+    name                   = aws_cloudfront_distribution.faucet.domain_name
+    zone_id                = aws_cloudfront_distribution.faucet.hosted_zone_id
+    evaluate_target_health = false
   }
 }
 
-# explorer.devnet.gsx + status.devnet.gsx record stubs live with
-# their respective CloudFront distributions (G7 + G8 add them).
+# Note: this stack previously published `origin-<region>.devnet.*` A
+# records here so CloudFront could resolve them as origins. That made
+# CloudFront's first-apply distribution-create lookup fail with
+# `InvalidOrigin` until the devnet subzone's NS records were
+# delegated under the apex — a deadlock on bootstrap. cf_rpc.tf /
+# cf_faucet.tf now synthesise the AWS-provided EC2 public hostname
+# (`ec2-<dashed-eip>.<region>.compute.amazonaws.com`) from each
+# validator / faucet EIP directly, so no devnet-subzone A records
+# are needed for the origin lookups. The user-facing rpc/ws/faucet
+# aliases above still need apex delegation for end-users to reach
+# the devnet, but that's a runtime concern, not an
+# infrastructure-create blocker.
+
+# explorer.devnet.gsx + status.devnet.gsx records live with their
+# CloudFront distributions (explorer.tf / status.tf).
 
 # Output the NS records so an operator can paste them into the apex
 # zone for delegation.

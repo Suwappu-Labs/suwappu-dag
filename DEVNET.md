@@ -222,7 +222,7 @@ Expected output (the `current` epoch will advance over time):
 ```
 
 For an interactive walkthrough across more methods, see
-[`examples/`](examples/) (lands with PR C2).
+[`examples/`](examples/).
 
 ## Run the faucet
 
@@ -265,18 +265,31 @@ printed in the faucet's startup log; both should equal
 
 ## Submit a transaction
 
-Once C2 lands the examples directory:
-
 ```sh
-# Rust
-cargo run -p gsx-client --example submit_transfer
-
-# TypeScript
-cd clients/ts-sdk && npm run example:submit
+# Rust (signs an ML-DSA-65 Transfer intent and submits it). NOTE:
+# `submit_transfer` is a [[bin]] in the standalone `examples/rust`
+# crate (excluded from the workspace), NOT a `gsx-client` example —
+# run it from that directory:
+cd examples/rust && cargo run --bin submit_transfer
+# Against the public devnet instead of a local node — you MUST also
+# pass the public devnet's network_id (the example defaults to
+# "gsx-devnet-local"); otherwise the cross-network digest mismatches:
+GSX_RPC_URL=https://rpc.devnet.gsx.globalsettlement.com \
+GSX_NETWORK_ID=gsx-devnet \
+  cargo run --bin submit_transfer   # run from examples/rust
 ```
 
-Until then, submit directly via the faucet (above), the JSON-RPC
-`gsx_submitIntent` method, or the TCP/bincode client wire — see
+> Heads-up: this example mints a **fresh** ML-DSA-65 key each run, so the
+> node accepts the signature but `verify_signed_intent` rejects the intent
+> as `UnknownSigner` (the key isn't a seated authority/signer and the
+> `from` address holds no balance). It demonstrates the end-to-end signing
+> + submit path; to actually *settle* a transfer, sign with a seated key
+> (e.g. the faucet's) whose address was pre-balanced in genesis.
+
+The TypeScript SDK is read-only for now — signing/submit is WIP
+(pending an audited JS ML-DSA-65 library), so use the Rust example
+to submit. You can also submit directly via the faucet (above), the
+JSON-RPC `gsx_submitIntent` method, or the TCP/bincode client wire — see
 [`docs/visuals/governance-flow.html`](docs/visuals/governance-flow.html)
 for the protocol shape.
 
@@ -299,8 +312,7 @@ client.subscribeEvents({
 use gsx_client::Client;
 
 let client = Client::new("http://127.0.0.1:9092".into());
-// Rust SDK's subscribe_events helper lands in the example crate
-// alongside `subscribe_events.rs` (PR C2).
+// See examples/rust/subscribe_events.rs for a full runnable example.
 ```
 
 ## Common operations
@@ -396,7 +408,7 @@ devnet `node.toml`, so a stale pidfile never kills an unrelated process.
 
 ## Next steps
 
-- **Build something on top:** see [`examples/`](examples/) (C2),
+- **Build something on top:** see [`examples/`](examples/),
   the [Rust SDK](clients/rust-sdk), and the
   [TypeScript SDK](clients/ts-sdk).
 - **Read the spec:** [`docs/architecture/`](docs/architecture/) tracks
