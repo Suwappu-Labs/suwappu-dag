@@ -4,7 +4,7 @@ The pre-mainnet roadmap for **gsx-dag**. This document tracks the
 public-facing milestones; `docs/architecture/sprint-map.md` is the
 internal dependency graph + per-sprint exit gates.
 
-For day-to-day work see [`CLAUDE.md`](./CLAUDE.md) (sprint backlog table)
+For day-to-day work see [`GSXHELPER.md`](./GSXHELPER.md) (sprint backlog table)
 and [`CHANGELOG.md`](./CHANGELOG.md) (released versions).
 
 ---
@@ -31,7 +31,7 @@ and [`CHANGELOG.md`](./CHANGELOG.md) (released versions).
 - Companion LTP paper in `gsx_ltp_academic_v7.pdf`.
 - Repo bootstrap: workspace layout, crate skeletons, CI matrix
   (rustfmt / clippy / test / cargo-deny), collaboration contract in
-  `CLAUDE.md`.
+  `GSXHELPER.md`.
 
 ## Phase 1 — Consensus + crypto (v0.1.0)
 

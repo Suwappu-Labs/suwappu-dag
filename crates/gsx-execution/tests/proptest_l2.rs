@@ -15,7 +15,7 @@
 //!
 //! Default 256 cases under CI; sprint close runs
 //! `PROPTEST_CASES=10000 cargo test -p gsx-execution --release`
-//! per `CLAUDE.md` exit-gate convention.
+//! per `GSXHELPER.md` exit-gate convention.
 
 use gsx_execution::{
     force_include::{obligation_id, ObligationStatus},

@@ -359,7 +359,7 @@ AWS_PROFILE=gsn aws secretsmanager list-secrets \
 
 **Internal:**
 
-- `CLAUDE.md` — sprint backlog table, load-bearing invariants.
+- `GSXHELPER.md` — sprint backlog table, load-bearing invariants.
 - `docs/architecture/sprint-map.md`.
 - `docs/iq/IQ-001-quorum-formula.md` — ratified 2026-05-14 ([gsx-papers#1](https://github.com/GlobalSettlementNetwork/gsx-papers/pull/1)).
 - `docs/iq/IQ-002-indirect-commit.md` — ratified 2026-05-14 ([gsx-papers#1](https://github.com/GlobalSettlementNetwork/gsx-papers/pull/1)).

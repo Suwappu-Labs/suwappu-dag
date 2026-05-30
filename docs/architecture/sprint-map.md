@@ -55,7 +55,7 @@ flowchart TB
 
 **Status:** S1 through S20 ✅ closed; each through its 10,000-case property
 test exit gate. Post-S20 work continues in named sub-sprints (S21–S33+);
-see [Post-S20 backlog](#post-s20-backlog) below. CLAUDE.md's sprint-backlog
+see [Post-S20 backlog](#post-s20-backlog) below. GSXHELPER.md's sprint-backlog
 table is the day-to-day source of truth — this file is the dependency
 diagram + exit-gate registry.
 
@@ -87,7 +87,7 @@ diagram + exit-gate registry.
 ## Post-S20 backlog
 
 Sprints since the full-node E2E gate closed. Many close hot-fixes,
-ratifications, or perf campaigns rather than new invariants; see CLAUDE.md
+ratifications, or perf campaigns rather than new invariants; see GSXHELPER.md
 for the canonical day-to-day status.
 
 | Sprint | Crate / scope | Closes |

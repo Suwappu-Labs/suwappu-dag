@@ -231,7 +231,7 @@ against the existing test suite + add their own:
 | `sha3_256_domain` | `crates/gsx-crypto/src/hash.rs` | length-prefix correctness, boundary-shift defense, KAT for empty + "abc" |
 | `hkdf_sha3_256` | same | determinism, info-label independence, salt independence, variable-length output |
 | Domain-tag distinctness | both crates | distinctness + identical-input separation |
-| Proptest property tests | both crates | 256 cases at default, 10k for sprint exit gates per CLAUDE.md |
+| Proptest property tests | both crates | 256 cases at default, 10k for sprint exit gates per GSXHELPER.md |
 
 Audit firms should run the existing proptest at 100k cases
 (`PROPTEST_CASES=100000 cargo test -p gsx-l2-confidential`)

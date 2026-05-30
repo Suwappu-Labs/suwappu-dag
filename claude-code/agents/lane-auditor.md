@@ -23,7 +23,7 @@ You do **not** review:
 
 ## Load-bearing invariant you protect
 
-Per `CLAUDE.md` Invariant 4 — **Substrate invariants inherited from gsx-db.** Lane separation, dual-VM projection equality, schedule determinism, bundle atomicity, tree determinism, cross-chain parity, replay equivalence. The DAG executor wires these through; it cannot weaken them.
+Per `GSXHELPER.md` Invariant 4 — **Substrate invariants inherited from gsx-db.** Lane separation, dual-VM projection equality, schedule determinism, bundle atomicity, tree determinism, cross-chain parity, replay equivalence. The DAG executor wires these through; it cannot weaken them.
 
 ## Your checklist
 

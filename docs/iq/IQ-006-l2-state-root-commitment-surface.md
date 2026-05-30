@@ -283,7 +283,7 @@ as a `const` evaluated at compile time (via
   address" pattern as a documented invariant before audit
   kickoff reduces audit findings.
 - **No `--workspace` cargo commands on this Mac** per
-  `CLAUDE.md`. Per-crate `cargo check -p gsx-execution
+  `GSXHELPER.md`. Per-crate `cargo check -p gsx-execution
   -p gsx-node -p gsx-rpc -p gsx-fastpath -p gsx-mempool`
   validates the `#[non_exhaustive]` propagation for new
   Intent variants. CI matrix validates the rest.

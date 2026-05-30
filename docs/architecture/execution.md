@@ -25,7 +25,7 @@ path.
 - **Checkpoint joint co-signature (S11 exit gate):** `proptest_checkpoint.rs`
   × 10,000 cases — a checkpoint is finalized iff both rings co-sign;
   drift between rings produces no valid checkpoint.
-- **Substrate invariants inherited bit-for-bit (Invariant 4 in CLAUDE.md):**
+- **Substrate invariants inherited bit-for-bit (Invariant 4 in GSXHELPER.md):**
   lane separation, dual-VM projection equality, schedule determinism,
   bundle atomicity, tree determinism, cross-chain parity, replay
   equivalence — all enforced inside `gsx-db`, threaded through unchanged by

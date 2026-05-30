@@ -144,7 +144,7 @@ Validator-Ring stake side. A candidate cert finalizes iff:
    validator_quorum_threshold(stake_table)` (strictly >2/3 of total stake).
 
 This is paper Theorem 2: a safety violation requires Byzantine corruption
-of *both* rings simultaneously. CLAUDE.md tracks this as Invariant 1.
+of *both* rings simultaneously. GSXHELPER.md tracks this as Invariant 1.
 Full safety + liveness writeup: [safety-liveness.md](safety-liveness.md).
 
 ## Inter-validator transport

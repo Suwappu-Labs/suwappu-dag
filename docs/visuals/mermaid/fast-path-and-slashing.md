@@ -33,7 +33,7 @@ flowchart LR
 - Slashing (S9): the proof is non-interactive and publishable; any
   honest validator can submit it. Slashing is total (100% bonded
   stake) plus immediate Authority Ring expulsion. Paper Invariant 5,
-  CLAUDE.md.
+  GSXHELPER.md.
 - The IQ-003 implementation status: handler + proposer wired,
   K-binding cross-check defined in `binding.rs` but not yet exercised
   outside unit tests at the daemon level. See

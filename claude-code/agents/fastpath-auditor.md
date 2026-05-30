@@ -22,7 +22,7 @@ You do **not** review:
 
 ## Load-bearing invariant you protect
 
-Per `CLAUDE.md`:
+Per `GSXHELPER.md`:
 
 - **Invariant 5 — Fast-path equivocation = 100% slashing.** An Authority Node that signs a fast-path certificate for a transaction whose main-lane confirmation observes a conflicting ordering forfeits 100% of bonded stake plus expulsion. The detection-to-slash pipeline must be airtight.
 

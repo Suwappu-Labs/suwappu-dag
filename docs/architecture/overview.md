@@ -64,7 +64,7 @@ All four layers run on a single chain.
 ```
 
 Each crate maps 1:1 to a paper section. Crate boundaries are also the
-**review boundaries** for specialist subagents (see `CLAUDE.md`).
+**review boundaries** for specialist subagents (see `GSXHELPER.md`).
 
 ## What's structural, what's swappable
 

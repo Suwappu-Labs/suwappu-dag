@@ -24,7 +24,7 @@ ciphertext ~1,568 B + BLS aggregate sig ~96 B + SHA3-256 payload root
 
 ## Key invariants
 
-- **Constant-size LTP commitment (Invariant 3 in CLAUDE.md):** every
+- **Constant-size LTP commitment (Invariant 3 in GSXHELPER.md):** every
   attestation, regardless of payload bytes, commits to the same on-chain
   envelope size.
 - **7-of-9 super-node aggregate (S15 exit gate):** see [super-node.md](super-node.md).

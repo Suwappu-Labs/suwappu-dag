@@ -152,7 +152,7 @@ QRL Zond, Naoris).
 
 **Internal:**
 
-- `CLAUDE.md` — sprint backlog table, load-bearing invariants.
+- `GSXHELPER.md` — sprint backlog table, load-bearing invariants.
 - `docs/architecture/sprint-map.md` — sprint dependency DAG.
 - `docs/architecture/security.md` (NEW) — ingress + fuzz catalog.
 - `docs/iq/IQ-001-quorum-formula.md` — ratified 2026-05-14.

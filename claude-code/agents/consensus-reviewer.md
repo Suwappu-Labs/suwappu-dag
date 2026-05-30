@@ -25,7 +25,7 @@ You do **not** review:
 
 ## Load-bearing invariants you protect
 
-Per `CLAUDE.md`:
+Per `GSXHELPER.md`:
 
 - **Invariant 1 — Joint-quorum AND-gate safety (Theorem 2).** A safety violation requires Byzantine corruption of *both* the Authority Ring and the Validator Ring simultaneously. Quorum logic that collapses either ring into the other is rejected.
 - **Invariant 4 — Substrate invariants inherited from gsx-db.** Lane separation, dual-VM projection equality, schedule determinism, bundle atomicity, tree determinism, cross-chain parity, replay equivalence. The DAG executor wires these through; it cannot weaken them.

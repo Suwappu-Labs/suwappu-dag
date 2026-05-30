@@ -25,7 +25,7 @@ You do **not** review:
 
 ## Load-bearing invariants you protect
 
-Per `CLAUDE.md`:
+Per `GSXHELPER.md`:
 
 - **Invariant 2 — PQ-conservative surface.** Every long-lived confidentiality/integrity surface uses NIST PQ primitives (ML-DSA-65, ML-KEM-768). Classical primitives (ECDSA secp256k1, BLS12-381, Groth16/BN254) are retained ONLY on documented exception zones with migration targets.
 - **Invariant 3 — Constant-size LTP commitment.** Every LTP attestation commits ~1,600 B on-chain (ML-KEM-768 ct ≈1,568 B + BLS12-381 agg sig 96 B + SHA3-256 payload root 32 B). Changes that add per-payload bytes to the on-chain commitment surface are rejected.

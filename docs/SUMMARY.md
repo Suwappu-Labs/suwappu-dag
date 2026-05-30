@@ -5,7 +5,7 @@
 * [Overview](README.md)
 * [Chain README](../README.md)
 * [Visuals](visuals/README.md)
-* [Contributing](../CLAUDE.md)
+* [Contributing](../GSXHELPER.md)
 
 ## Architecture
 

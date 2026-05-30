@@ -132,7 +132,7 @@ substrate layer. Companion to the v0.1.0 consensus surface.
 **Mainnet-track consensus + crypto + transport stack.** Sprints
 DAG-S1 through DAG-S20 plus the F (F1–F4) and C (C1–C4) hardening
 tracks. Every sprint shipped its 4 properties × 10k proptest cases
-exit gate; see [CLAUDE.md](./CLAUDE.md) sprint backlog table for
+exit gate; see [GSXHELPER.md](./GSXHELPER.md) sprint backlog table for
 per-sprint scope.
 
 ### Added

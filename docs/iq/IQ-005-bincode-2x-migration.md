@@ -77,7 +77,7 @@ Per-PR scope:
   marker → `FrameDecodeError::UnknownVersion`). This is a **hard
   fork** relative to anything running pre-flip, but no public
   network is live today, so the cutover is free.
-- **No `--workspace` cargo commands on this Mac** per `CLAUDE.md`.
+- **No `--workspace` cargo commands on this Mac** per `GSXHELPER.md`.
   Per-crate `cargo check` + `cargo clippy --all-targets -- -D
   warnings` validated F4-touched crates locally; CI matrix
   validates the rest once billing is restored.

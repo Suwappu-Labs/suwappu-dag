@@ -41,7 +41,7 @@ The substrate enforces (and gsx-dag inherits):
 7. **Replay equivalence** — recovery replay produces the same state as
    live commit.
 
-CLAUDE.md tracks these as "Invariant 4 — substrate invariants inherited
+GSXHELPER.md tracks these as "Invariant 4 — substrate invariants inherited
 from gsx-db". Any change in the executor adapter that would weaken one
 of these must be rejected at review.
 

@@ -54,7 +54,7 @@ explain why and which test pins the new shape). -->
 
 <!-- For PRs touching gsx-crypto / gsx-consensus / gsx-fastpath /
 gsx-transport / joint-quorum logic, paste the specialist-subagent
-verdicts from CLAUDE.md§Specialist-subagents. Skip otherwise. -->
+verdicts from GSXHELPER.md§Specialist-subagents. Skip otherwise. -->
 
 ## Closes
 

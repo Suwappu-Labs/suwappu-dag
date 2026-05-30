@@ -338,7 +338,7 @@ workflow, the local-vs-CI guidance, branch-naming conventions, and
 DCO sign-off requirements.
 
 Sprint cadence + collaboration contract are in
-[`CLAUDE.md`](./CLAUDE.md). The dependency graph and per-sprint exit
+[`GSXHELPER.md`](./GSXHELPER.md). The dependency graph and per-sprint exit
 gates are in
 [`docs/architecture/sprint-map.md`](./docs/architecture/sprint-map.md).
 

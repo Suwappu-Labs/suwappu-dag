@@ -36,7 +36,7 @@ PR. We do **not** require a CLA.
 1. **Fork** the repo and create a topic branch off `main`.
    - Branch naming: `<scope>/<short-slug>`. Examples:
      `consensus/iq-005-something`, `harden/scion-tls`,
-     `extern/rust-sdk-docs`. See [`CLAUDE.md`](CLAUDE.md) for the
+     `extern/rust-sdk-docs`. See [`GSXHELPER.md`](GSXHELPER.md) for the
      full convention.
 2. **Make focused commits.** One logical change per commit; imperative
    mood ("Add X" not "Added X"); reference issues via `Refs #N` or

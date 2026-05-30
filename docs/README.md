@@ -135,7 +135,7 @@ flowchart LR
 | Surface | Status | Reference |
 |---|---|---|
 | Sprints S1–S20 (Phase 1 invariants) | ✅ closed; 5 invariants verified at 10k cases each | [architecture/sprint-map.md](architecture/sprint-map.md) |
-| Post-S20 backlog (S21–S33+) | In progress; perf + governance + JSON-RPC + indexer landed | [architecture/sprint-map.md](architecture/sprint-map.md#post-s20-backlog), CLAUDE.md |
+| Post-S20 backlog (S21–S33+) | In progress; perf + governance + JSON-RPC + indexer landed | [architecture/sprint-map.md](architecture/sprint-map.md#post-s20-backlog), GSXHELPER.md |
 | IQ-001 + IQ-002 ratification | ✅ ratified 2026-05-14 ([gsx-papers#1](https://github.com/GlobalSettlementNetwork/gsx-papers/pull/1)) | [iq/README.md](iq/README.md) |
 | IQ-003 fast-path architecture | Pending sign-off | [iq/IQ-003-fast-path-architecture.md](iq/IQ-003-fast-path-architecture.md) |
 | IQ-004 decide_slot orphan window | Pending sign-off; tracking [#45](https://github.com/GlobalSettlementNetwork/gsx-dag/issues/45) | [iq/IQ-004-decide-slot-orphan-window.md](iq/IQ-004-decide-slot-orphan-window.md) |
