@@ -1,0 +1,56 @@
+name: Stale branch report (dry-run)
+
+# Reports branches that look abandoned (no open PR + no commits in
+# STALE_DAYS) so they can be pruned deliberately. This is REPORT-ONLY —
+# it never deletes anything. Promote to an actual pruning action
+# (e.g. the "Remove Stale Branches" marketplace action) once the report
+# looks right; keep `delete_branch_on_merge: true` doing the routine work.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 9 * * 1" # Mondays 09:00 UTC
+
+permissions:
+  contents: read
+  pull-requests: read
+
+env:
+  STALE_DAYS: "30"
+
+jobs:
+  report:
+    name: Report stale branches (no delete)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: List stale-branch candidates
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          base="${{ github.event.repository.default_branch }}"
+          cutoff=$(( $(date +%s) - STALE_DAYS*86400 ))
+          # branches with an OPEN PR are never stale candidates
+          open_pr_heads=$(gh pr list --state open --limit 200 --json headRefName --jq '.[].headRefName' | sort -u)
+          echo "## Stale-branch report (no commits in ${STALE_DAYS}d, no open PR)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| branch | last commit | author | behind $base |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          found=0
+          for ref in $(git for-each-ref --format='%(refname:short)' refs/remotes/origin | grep -vx "origin/HEAD" | grep -vx "origin/$base"); do
+            b="${ref#origin/}"
+            printf '%s\n' "$open_pr_heads" | grep -qxF "$b" && continue
+            ts=$(git log -1 --format=%ct "$ref")
+            [ "$ts" -ge "$cutoff" ] && continue
+            last=$(git log -1 --format='%cs' "$ref")
+            who=$(git log -1 --format='%an' "$ref")
+            behind=$(git rev-list --count "$ref..origin/$base")
+            echo "| \`$b\` | $last | $who | $behind |" >> "$GITHUB_STEP_SUMMARY"
+            found=$((found+1))
+          done
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**$found stale candidate(s).** Report-only — nothing deleted. Prune deliberately or promote this workflow to an auto-prune action." >> "$GITHUB_STEP_SUMMARY"
