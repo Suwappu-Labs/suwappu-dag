@@ -1992,7 +1992,9 @@ mod tests {
             // `from` MUST equal the signer's derived address (blake3(pk)[..20])
             // or the #267 cross-account-drain guard rejects the submit with
             // "signer address does not match intent sender".
-            from: blake3::hash(pk.as_bytes()).as_bytes()[..20].try_into().unwrap(),
+            from: blake3::hash(pk.as_bytes()).as_bytes()[..20]
+                .try_into()
+                .unwrap(),
             to: [2u8; 20],
             amount: 42,
         };
@@ -2761,7 +2763,9 @@ mod tests {
         // ----- Case 1: properly-signed intent → Ack + lands in block.
         let good_intent = gsx_execution::Intent::Transfer {
             // signer-bound sender (#267): from == blake3(pk)[..20].
-            from: blake3::hash(pk.as_bytes()).as_bytes()[..20].try_into().unwrap(),
+            from: blake3::hash(pk.as_bytes()).as_bytes()[..20]
+                .try_into()
+                .unwrap(),
             to: [2u8; 20],
             amount: 42,
         };
@@ -3505,7 +3509,9 @@ mod tests {
         // Sign client-side using the same primitives the TCP wire uses.
         let intent = Intent::Transfer {
             // signer-bound sender (#267): from == blake3(pk)[..20].
-            from: blake3::hash(pk.as_bytes()).as_bytes()[..20].try_into().unwrap(),
+            from: blake3::hash(pk.as_bytes()).as_bytes()[..20]
+                .try_into()
+                .unwrap(),
             to: [2u8; 20],
             amount: 42,
         };

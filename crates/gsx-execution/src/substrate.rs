@@ -3760,6 +3760,7 @@ mod tests {
                     recipient: addr(1),
                     amount: 1,
                     merkle_path: vec![],
+                    path_directions: vec![],
                     asset_id: None,
                     l2_chain_id_hash: [0u8; 32],
                 },

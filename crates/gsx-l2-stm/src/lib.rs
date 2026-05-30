@@ -1154,7 +1154,8 @@ mod tests {
             amount: 250,
             nonce: u64::MAX,
         };
-        let err = apply_tx(&mut ledger, &tx).unwrap_err();
+        let mut withdrawals: Vec<BurnEntry> = Vec::new();
+        let err = apply_tx(&mut ledger, &mut withdrawals, &tx).unwrap_err();
         assert_eq!(err, StmError::NonceOverflow { from: addr(1) });
         // Sender balance + nonce unchanged; recipient never created.
         assert_eq!(ledger.get(&addr(1)).unwrap().balance, 1_000);

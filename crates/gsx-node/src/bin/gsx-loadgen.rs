@@ -320,7 +320,6 @@ async fn main() -> anyhow::Result<()> {
         let batch = batch_size;
         let signer_sk = signer_sk.clone();
         let signer_pk = signer_pk.clone();
-        let from_addr = from_addr;
         let network_id = args.network_id.clone();
         task_set.spawn(async move {
             let mut client =

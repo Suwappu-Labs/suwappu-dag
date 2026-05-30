@@ -1106,6 +1106,7 @@ mod tests {
                 recipient: [1u8; 20],
                 amount: 1,
                 merkle_path: vec![],
+                path_directions: vec![],
                 asset_id: None,
                 l2_chain_id_hash: [0u8; 32],
             },
