@@ -2288,8 +2288,10 @@ mod tests {
             corridors: Vec::new(),
             // Issue #18: short epochs so governance application
             // (which now lands at the next boundary) is exercised on
-            // CI-sane timescales. 16 rounds * 100ms = 1.6s/boundary.
-            rounds_per_epoch: 16,
+            // CI-sane timescales. 8 rounds * 250ms = 2s/boundary at the
+            // target cadence — and shorter epochs give a committed eject
+            // more frequent boundaries to apply at under slow CI.
+            rounds_per_epoch: 8,
             prebalances: vec![],
             signers: vec![],
         };
@@ -2316,7 +2318,13 @@ mod tests {
                     .unwrap(),
                 rpc_listen: None,
                 peers,
-                round_ms: 100,
+                // De-flake: 250ms (the production cadence), not 100ms. On a
+                // shared 2-core CI runner the 4 in-process daemons cannot keep
+                // pace with 100ms rounds — they fall ~30x behind (observed
+                // ~0.3 rounds/s), timer/scheduler thrash backs up the commit
+                // pipeline, and the eject-bearing cert never commits within
+                // budget. 250ms gives the starved runtime room to commit steadily.
+                round_ms: 250,
                 checkpoint_cadence_rounds: 1,
                 mldsa_secret_key_path: sk_paths[i as usize].clone(),
                 bls_secret_key_path: "/dev/null".into(),
@@ -2461,7 +2469,7 @@ mod tests {
         // the eject cert" panic when the bug is in propagation,
         // and keeps the rest of the budget for the
         // boundary-application stage that's the actual bottleneck.
-        let propagate_deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let propagate_deadline = std::time::Instant::now() + Duration::from_secs(60);
         let mut propagate_last_resubmit = std::time::Instant::now();
         loop {
             let observers = {
@@ -2502,7 +2510,7 @@ mod tests {
                     .map(|(i, _)| format!("v{i}"))
                     .collect();
                 panic!(
-                    "phase G eject-cert propagation timed out (30s): \
+                    "phase G eject-cert propagation timed out (60s): \
                      node(s) [{}] never observed a block carrying the \
                      EjectAuthority{{id=4}} intent. Bug is in cert \
                      broadcast / orphan-pull, NOT in pending-governance \
