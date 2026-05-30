@@ -165,8 +165,9 @@ host's loopback.
 - **`curl`** (for sanity-checking JSON-RPC from the host).
 
 If you don't have Docker, use `./scripts/devnet-local.sh up-baremetal`
-instead — it builds `gsx-node` (single-package release) and runs four
-processes on loopback (`127.0.0.1:9{0..3}90/91/92`). v0's RPC stays on
+instead — it builds `gsx-node` (single-package release) and runs N
+processes (default 4) on loopback with distinct per-node ports
+(v<i> binds rpc on `127.0.0.1:$((9092+10*i))`). v0's RPC stays on
 `127.0.0.1:9092` so the `curl` and `faucet` subcommands below work the
 same way. See [Bare-metal alternative](#bare-metal-alternative) for
 details.
@@ -360,7 +361,8 @@ changes.
 If Docker isn't an option:
 
 ```sh
-./scripts/devnet-local.sh up-baremetal
+./scripts/devnet-local.sh up-baremetal        # 4 nodes (default)
+./scripts/devnet-local.sh up-baremetal 7      # or N nodes
 ```
 
 What this does:
@@ -369,21 +371,27 @@ What this does:
 2. Runs `gen-devnet-genesis.py` to produce `target/devnet/` exactly
    like the docker path — same genesis, same faucet keypair, same
    `[[prebalances]]`.
-3. Writes per-validator `node.toml`s with loopback ports:
-   v{N} listens on `127.0.0.1:9{N}90` (peer), `:9{N}91` (client),
-   `:9{N}92` (rpc). v0's RPC stays on `127.0.0.1:9092` so the rest
-   of this guide (`curl`, `faucet`) is unchanged.
-4. Starts the four `gsx-node` processes in the background. PIDs are
-   written to `target/devnet/v{0..3}.pid`; logs to
-   `target/devnet/v{0..3}.log`.
+3. Writes per-validator `node.toml`s with DISTINCT loopback ports so N
+   nodes coexist on one host: v<i> listens on `127.0.0.1:$((9090+10*i))`
+   (peer), `:$((9091+10*i))` (client), `:$((9092+10*i))` (rpc). v0's RPC
+   stays on `127.0.0.1:9092` so the rest of this guide (`curl`, `faucet`)
+   is unchanged.
+4. Launches the N `gsx-node` processes in the background, recording their
+   PIDs in `target/devnet/baremetal.pids` and logs in
+   `target/devnet/v<i>/stdout.log`. It fails fast if a launched node exits
+   immediately (ports already bound by a stale cluster) so it never falsely
+   reports a cluster up.
 
-Tail logs and stop:
+Check status, tail logs, and stop:
 
 ```sh
-./scripts/devnet-local.sh logs-baremetal     # tail v0.log
-./scripts/devnet-local.sh down-baremetal     # kill the four processes
+./scripts/devnet-local.sh status-baremetal     # per-node epoch + committed round
+./scripts/devnet-local.sh logs-baremetal [i]   # tail v<i>'s stdout (default v0)
+./scripts/devnet-local.sh down-baremetal       # stop the processes (kept state)
 ```
 
+`down-baremetal` only signals processes whose cmdline still matches a
+devnet `node.toml`, so a stale pidfile never kills an unrelated process.
 `./scripts/devnet-local.sh reset` clears both flavors safely.
 
 ## Next steps
