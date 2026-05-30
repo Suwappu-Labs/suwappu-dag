@@ -1985,11 +1985,14 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         let mut client =
-            crate::client::LoadGenClient::connect(cfg.client_listen, sk, pk, network_id)
+            crate::client::LoadGenClient::connect(cfg.client_listen, sk, pk.clone(), network_id)
                 .await
                 .unwrap();
         let intent = gsx_execution::Intent::Transfer {
-            from: [1u8; 20],
+            // `from` MUST equal the signer's derived address (blake3(pk)[..20])
+            // or the #267 cross-account-drain guard rejects the submit with
+            // "signer address does not match intent sender".
+            from: blake3::hash(pk.as_bytes()).as_bytes()[..20].try_into().unwrap(),
             to: [2u8; 20],
             amount: 42,
         };
@@ -2072,12 +2075,14 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         let mut client =
-            crate::client::LoadGenClient::connect(cfg.client_listen, sk, pk, network_id)
+            crate::client::LoadGenClient::connect(cfg.client_listen, sk, pk.clone(), network_id)
                 .await
                 .unwrap();
         let batch: Vec<gsx_execution::Intent> = (0..50u8)
+            // `from` must be the signer's derived address (#267 sender-binding);
+            // `to`/amount vary by `i` so the 50 intents stay distinct.
             .map(|i| gsx_execution::Intent::Transfer {
-                from: [i; 20],
+                from: blake3::hash(pk.as_bytes()).as_bytes()[..20].try_into().unwrap(),
                 to: [i.wrapping_add(1); 20],
                 amount: 99,
             })
@@ -2755,7 +2760,8 @@ mod tests {
 
         // ----- Case 1: properly-signed intent → Ack + lands in block.
         let good_intent = gsx_execution::Intent::Transfer {
-            from: [1u8; 20],
+            // signer-bound sender (#267): from == blake3(pk)[..20].
+            from: blake3::hash(pk.as_bytes()).as_bytes()[..20].try_into().unwrap(),
             to: [2u8; 20],
             amount: 42,
         };
@@ -3376,12 +3382,14 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         let mut client =
-            crate::client::LoadGenClient::connect(cfg.client_listen, sk, pk, network_id)
+            crate::client::LoadGenClient::connect(cfg.client_listen, sk, pk.clone(), network_id)
                 .await
                 .unwrap();
         let intents: Vec<Intent> = (0..3u8)
+            // from must be the signer's address (#267 sender-binding); to/amount
+            // vary so the 3 intents stay distinct.
             .map(|i| Intent::Transfer {
-                from: [i + 1; 20],
+                from: blake3::hash(pk.as_bytes()).as_bytes()[..20].try_into().unwrap(),
                 to: [i + 2; 20],
                 amount: 1_000 + i as u128,
             })
@@ -3496,7 +3504,8 @@ mod tests {
 
         // Sign client-side using the same primitives the TCP wire uses.
         let intent = Intent::Transfer {
-            from: [1u8; 20],
+            // signer-bound sender (#267): from == blake3(pk)[..20].
+            from: blake3::hash(pk.as_bytes()).as_bytes()[..20].try_into().unwrap(),
             to: [2u8; 20],
             amount: 42,
         };
