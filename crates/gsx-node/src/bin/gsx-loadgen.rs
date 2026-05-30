@@ -185,6 +185,16 @@ async fn main() -> anyhow::Result<()> {
         hex::encode(signer_pkh.as_bytes())
     );
 
+    // The Transfer's `from` must be an account the signer actually
+    // controls AND that holds balance, or the intent is acked but
+    // dropped before it settles (a random `from` never commits). Use
+    // the signer's own canonical address (= blake3(pk)[..20], the same
+    // recipe the node/faucet derive), so the transfers genuinely settle
+    // and end-to-end throughput/finality is measurable.
+    let from_addr: [u8; 20] = signer_pkh.as_bytes()[..20]
+        .try_into()
+        .expect("blake3 digest is 32 bytes");
+
     // Resolve target list — accept either `--target` (single) or
     // `--targets` (multi). Reject both for clarity.
     let targets: Vec<SocketAddr> = match (args.target, args.targets.is_empty()) {
@@ -310,6 +320,7 @@ async fn main() -> anyhow::Result<()> {
         let batch = batch_size;
         let signer_sk = signer_sk.clone();
         let signer_pk = signer_pk.clone();
+        let from_addr = from_addr;
         let network_id = args.network_id.clone();
         task_set.spawn(async move {
             let mut client =
@@ -335,7 +346,7 @@ async fn main() -> anyhow::Result<()> {
                     if sent_local + intents.len() as u64 >= planned {
                         break;
                     }
-                    let from: [u8; 20] = rng.gen();
+                    let from = from_addr;
                     let to: [u8; 20] = rng.gen();
                     intents.push(Intent::Transfer { from, to, amount });
                 }
