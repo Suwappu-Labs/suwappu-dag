@@ -46,14 +46,42 @@ USER_NAME="gsx-testnet-operator-${LABEL}"
 POLICY_NAME="gsx-testnet-operator-${LABEL}-upload"
 BUCKET="gsx-dag-testnet-validator-uploads"
 
+# Verify the authority_id is actually admitted on-chain before minting
+# IAM credentials. Without this check, a foundation operator can mint
+# an orphaned IAM user whose authority_id was never registered, leaving
+# stale credentials lying around in IAM. The RPC endpoint is the
+# CloudFront wildcard once Phase 1 fronting is live; falls back to the
+# us-east-1 validator EIP if the wildcard isn't resolving yet.
+RPC_URL="${GSX_TESTNET_RPC_URL:-https://rpc.testnet.gsx.globalsettlement.com}"
+echo "[onboard-operator] verifying authority_id=${AUTHORITY_ID} is in the Authority Ring (rpc=${RPC_URL})"
+REGISTRY_JSON=$(curl -fsS --max-time 10 -X POST -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"gsx_getAuthorityRegistry"}' \
+    "$RPC_URL" 2>&1) || {
+    echo "error: failed to reach $RPC_URL — set GSX_TESTNET_RPC_URL if the wildcard isn't live yet (e.g. http://52.5.240.86:9092)" >&2
+    exit 1
+}
+# `gsx_getAuthorityRegistry` returns the authority array directly in
+# `.result`, not nested under `.result.members`. The prior path
+# always evaluated to null and made `jq -e` fail, so this script
+# rejected every authority_id as "NOT in the Authority Ring" even
+# when admission had succeeded. (Codex #228 P1.)
+if ! echo "$REGISTRY_JSON" | jq -e --argjson aid "$AUTHORITY_ID" '.result[] | select(.id == $aid)' >/dev/null 2>&1; then
+    echo "error: authority_id=${AUTHORITY_ID} is NOT in the Authority Ring." >&2
+    echo "  Submit an AdmitAuthority Intent first via scripts/testnet/admit-operator.sh." >&2
+    echo "  Registry snapshot: $(echo "$REGISTRY_JSON" | jq -c '.result // []')" >&2
+    exit 1
+fi
+
 # Render the policy from the template (which has AUTHORITY_ID_PLACEHOLDER).
+# s3:PutObject is the only permission needed — operators upload but
+# never list, read, or modify ACLs. Tightest possible scope.
 POLICY_DOC=$(cat <<EOF
 {
   "Version": "2012-10-17",
   "Statement": [
     {
       "Effect": "Allow",
-      "Action": ["s3:PutObject", "s3:PutObjectAcl"],
+      "Action": ["s3:PutObject"],
       "Resource": ["arn:aws:s3:::${BUCKET}/uploads/${AUTHORITY_ID}/*"]
     }
   ]

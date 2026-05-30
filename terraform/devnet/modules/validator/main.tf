@@ -55,7 +55,7 @@ data "aws_ami" "ubuntu" {
 resource "aws_vpc" "this" {
   cidr_block           = "10.43.0.0/16" # /16 picked to avoid colliding with perf testnet's 10.42.0.0/16
   enable_dns_hostnames = true
-  tags                 = { Name = "gsx-devnet-${var.region_label}-vpc" }
+  tags                 = { Name = "${var.name_prefix}${var.region_label}-vpc" }
 }
 
 resource "aws_subnet" "public" {
@@ -63,12 +63,12 @@ resource "aws_subnet" "public" {
   cidr_block              = "10.43.1.0/24"
   map_public_ip_on_launch = true
   availability_zone       = sort(data.aws_ec2_instance_type_offerings.supported.locations)[0]
-  tags                    = { Name = "gsx-devnet-${var.region_label}-subnet" }
+  tags                    = { Name = "${var.name_prefix}${var.region_label}-subnet" }
 }
 
 resource "aws_internet_gateway" "this" {
   vpc_id = aws_vpc.this.id
-  tags   = { Name = "gsx-devnet-${var.region_label}-igw" }
+  tags   = { Name = "${var.name_prefix}${var.region_label}-igw" }
 }
 
 resource "aws_route_table" "public" {
@@ -77,11 +77,31 @@ resource "aws_route_table" "public" {
     cidr_block = "0.0.0.0/0"
     gateway_id = aws_internet_gateway.this.id
   }
-  tags = { Name = "gsx-devnet-${var.region_label}-rt" }
+  tags = { Name = "${var.name_prefix}${var.region_label}-rt" }
 }
 
 resource "aws_route_table_association" "public" {
   subnet_id      = aws_subnet.public.id
+  route_table_id = aws_route_table.public.id
+}
+
+# Optional second public subnet in a distinct AZ. Created only when the
+# consumer places an in-region ALB in this VPC to front the validator's
+# RPC port (testnet); ALBs require subnets in >=2 AZs. Assumes the
+# instance type is offered in >=2 AZs in the region — true for the
+# testnet's c7g.xlarge across all 7 seed regions.
+resource "aws_subnet" "public_b" {
+  count                   = var.with_alb_subnets ? 1 : 0
+  vpc_id                  = aws_vpc.this.id
+  cidr_block              = "10.43.2.0/24"
+  map_public_ip_on_launch = true
+  availability_zone       = sort(data.aws_ec2_instance_type_offerings.supported.locations)[1]
+  tags                    = { Name = "${var.name_prefix}${var.region_label}-subnet-b" }
+}
+
+resource "aws_route_table_association" "public_b" {
+  count          = var.with_alb_subnets ? 1 : 0
+  subnet_id      = aws_subnet.public_b[0].id
   route_table_id = aws_route_table.public.id
 }
 
@@ -101,7 +121,7 @@ resource "aws_route_table_association" "public" {
 # For production, replace this rule with the ALB SG (alb.tf) and bind
 # rpc_listen to 127.0.0.1 so only the ALB can reach the validator.
 resource "aws_security_group" "this" {
-  name        = "gsx-devnet-${var.region_label}-sg"
+  name        = "${var.name_prefix}${var.region_label}-sg"
   description = "GSX devnet - validator ingress"
   vpc_id      = aws_vpc.this.id
 
@@ -141,11 +161,11 @@ resource "aws_security_group" "this" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  tags = { Name = "gsx-devnet-${var.region_label}-sg" }
+  tags = { Name = "${var.name_prefix}${var.region_label}-sg" }
 }
 
 resource "aws_key_pair" "operator" {
-  key_name   = "gsx-devnet-${var.region_label}"
+  key_name   = "${var.name_prefix}${var.region_label}"
   public_key = var.ssh_public_key
 }
 
@@ -153,7 +173,7 @@ resource "aws_key_pair" "operator" {
 # event logs back. CloudWatchAgentServerPolicy lets the local agent
 # forward metrics to CloudWatch.
 resource "aws_iam_role" "ec2" {
-  name = "gsx-devnet-${var.region_label}-ec2"
+  name = "${var.name_prefix}${var.region_label}-ec2"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -201,7 +221,7 @@ resource "aws_iam_role_policy_attachment" "cloudwatch_agent" {
 }
 
 resource "aws_iam_instance_profile" "this" {
-  name = "gsx-devnet-${var.region_label}"
+  name = "${var.name_prefix}${var.region_label}"
   role = aws_iam_role.ec2.name
 }
 
@@ -216,7 +236,7 @@ resource "aws_ebs_volume" "state" {
   encrypted         = true
 
   tags = {
-    Name                  = "gsx-devnet-${var.region_label}-state"
+    Name                  = "${var.name_prefix}${var.region_label}-state"
     "devnet:role"         = "state-volume"
     "devnet:region"       = var.region_label
     "devnet:authority_id" = tostring(var.authority_id)
@@ -258,7 +278,7 @@ resource "aws_instance" "validator" {
   })
 
   tags = {
-    Name                  = "gsx-devnet-${var.region_label}"
+    Name                  = "${var.name_prefix}${var.region_label}"
     "devnet:role"         = "validator"
     "devnet:region"       = var.region_label
     "devnet:authority_id" = tostring(var.authority_id)
@@ -268,5 +288,5 @@ resource "aws_instance" "validator" {
 resource "aws_eip" "this" {
   instance = aws_instance.validator.id
   domain   = "vpc"
-  tags     = { Name = "gsx-devnet-${var.region_label}-eip" }
+  tags     = { Name = "${var.name_prefix}${var.region_label}-eip" }
 }

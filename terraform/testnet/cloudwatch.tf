@@ -163,6 +163,57 @@ resource "aws_cloudwatch_metric_alarm" "program_down" {
   ok_actions    = [aws_sns_topic.ops_pages.arn]
 }
 
+# Origin-health alarms on the LIVE path. DNS (dns.tf) points rpc/ws/faucet at
+# Global Accelerator → per-region ALB; the CloudFront distributions are the
+# retired Phase-1 path (kept one release as a rollback anchor), so an alarm on
+# AWS/CloudFront 5xxErrorRate watches an endpoint no traffic flows through and
+# would never page on a real outage (Codex P2). GA is L4 (TCP) and sees no HTTP
+# status, so the right signal is the ALB target group's UnHealthyHostCount —
+# it fires exactly when the validator/faucet behind the ALB fails its health
+# check, which is what these alarms were meant to catch.
+#
+# NOTE: repoint not yet `terraform plan`-validated (testnet stack unapplied);
+# validate the ApplicationELB dimensions against a plan before apply.
+resource "aws_cloudwatch_metric_alarm" "alb_rpc_unhealthy" {
+  provider            = aws.us_east_1
+  alarm_name          = "gsx-testnet-alb-rpc-unhealthy"
+  alarm_description   = "rpc.testnet.gsx.* ALB target group has ≥1 unhealthy target for two consecutive 5-minute windows — the in-region validator behind the GA/ALB path is failing health checks (down or unreachable). Check the validator EC2 + EIP table in `terraform output validators`."
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  evaluation_periods  = 2
+  metric_name         = "UnHealthyHostCount"
+  namespace           = "AWS/ApplicationELB"
+  period              = 300
+  statistic           = "Maximum"
+  threshold           = 1
+  treat_missing_data  = "notBreaching"
+  dimensions = {
+    LoadBalancer = aws_lb.rpc.arn_suffix
+    TargetGroup  = aws_lb_target_group.rpc.arn_suffix
+  }
+  alarm_actions = [aws_sns_topic.ops_pages.arn]
+  ok_actions    = [aws_sns_topic.ops_pages.arn]
+}
+
+resource "aws_cloudwatch_metric_alarm" "alb_faucet_unhealthy" {
+  provider            = aws.us_east_1
+  alarm_name          = "gsx-testnet-alb-faucet-unhealthy"
+  alarm_description   = "faucet.testnet.gsx.* ALB target group has ≥1 unhealthy target for two consecutive 5-minute windows. Singleton faucet — no failover — so this typically means the faucet EC2 is down or out of GSX balance. Complements the Route53 `faucet_down` health check."
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  evaluation_periods  = 2
+  metric_name         = "UnHealthyHostCount"
+  namespace           = "AWS/ApplicationELB"
+  period              = 300
+  statistic           = "Maximum"
+  threshold           = 1
+  treat_missing_data  = "notBreaching"
+  dimensions = {
+    LoadBalancer = aws_lb.faucet.arn_suffix
+    TargetGroup  = aws_lb_target_group.faucet.arn_suffix
+  }
+  alarm_actions = [aws_sns_topic.ops_pages.arn]
+  ok_actions    = [aws_sns_topic.ops_pages.arn]
+}
+
 # Dashboard — testnet adds a row showing the 7-region tip vs
 # expected progress + an external-uploads-bucket activity tile.
 resource "aws_cloudwatch_dashboard" "testnet" {

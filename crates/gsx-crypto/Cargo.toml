@@ -21,6 +21,7 @@ blst.workspace = true
 # Hashing
 sha3.workspace = true
 hkdf.workspace = true
+blake3 = { workspace = true }
 
 # Constant-time operations (C6 side-channel hardening)
 subtle.workspace = true
@@ -32,15 +33,15 @@ hex.workspace = true
 rand = { workspace = true }
 rand_chacha = { workspace = true }
 
-blake3.workspace = true
-clap = { version = "4", features = ["derive"], optional = true }
+# CLI dep for the `gsx-keygen` bin (gen-genesis.py invokes this to mint the
+# faucet's real ML-DSA-65 keypair). Always-on (not feature-gated) so the
+# operator build `cargo build -p gsx-crypto --bin gsx-keygen` needs no extra
+# --features flag.
+clap = { workspace = true }
 
 [[bin]]
 name = "gsx-keygen"
-required-features = ["cli"]
-
-[features]
-cli = ["dep:clap"]
+path = "src/bin/gsx-keygen.rs"
 
 [dev-dependencies]
 proptest.workspace = true

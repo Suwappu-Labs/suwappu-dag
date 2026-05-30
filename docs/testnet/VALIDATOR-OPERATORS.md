@@ -23,7 +23,7 @@ For the foundation-internal infrastructure side, see
 ## Eligibility
 
 - Foundation reviews each application via a public form at
-  `https://testnet.gsx.globalsettlement.com/apply`.
+  `https://apply.testnet.gsx.globalsettlement.com`.
 - Must run hardware meeting the spec below.
 - Must complete KYC (jurisdictional restrictions per the
   foundation's token-distribution policy).
@@ -49,7 +49,7 @@ under-performing validators after 30 days; you can re-apply.
 
 ## Onboarding flow
 
-1. **Apply** at `https://testnet.gsx.globalsettlement.com/apply`.
+1. **Apply** at `https://apply.testnet.gsx.globalsettlement.com`.
    Foundation runs basic identity + jurisdictional checks.
 2. **Foundation submits an `AdmitAuthority` governance Intent**
    with the ML-DSA-65 pubkey you mint locally (next step). Your
@@ -81,16 +81,30 @@ cat ./bls.pk | base64
 # 3. Get your authority_id back from the foundation once admit
 #    lands. Then on your validator hardware:
 
-# 3a. Pull the testnet binary release.
-gh release download gsx-dag-v0.X.Y --pattern '*linux-musl-x86_64*'
-tar -xzf gsx-dag-0.X.Y-x86_64-unknown-linux-musl.tar.gz
+# 3a. Pull the testnet binary release. Tagged releases publish two
+#     Linux targets; pick the one that matches your hardware. The
+#     seed cluster runs aarch64-linux-gnu on c7g.xlarge — the arm64
+#     build is the reference target. The amd64 build uses musl
+#     (static-linked) so it boots on Alpine and older-glibc distros
+#     without a runtime install. Build matrix:
+#     `.github/workflows/release.yml`.
+TARGET=aarch64-unknown-linux-gnu   # or x86_64-unknown-linux-musl
+gh release download gsx-dag-v0.X.Y --pattern "*${TARGET}*"
+tar -xzf gsx-dag-0.X.Y-${TARGET}.tar.gz
 
-# 3b. Pull the public testnet genesis.
+# 3b. Pull the public testnet genesis. While the wildcard
+#     ALB serves 503 (see DEVNET.md § "Public testnet" for the
+#     fronting story), pull genesis directly from the artifact
+#     bucket via its public-read prefix once foundation
+#     republishes it, OR via the URL the foundation sends in
+#     your onboarding packet.
 curl -fsSL https://testnet.gsx.globalsettlement.com/genesis.toml \
     -o /etc/gsx/genesis.toml
 
-# 3c. Write your own node.toml. The seed peer list is published
-#     at https://testnet.gsx.globalsettlement.com/peers.txt.
+# 3c. Write your own node.toml. The seed peer list is in your
+#     onboarding packet (foundation hands out the per-region
+#     EIPs at admit time; the wildcard endpoint that publishes
+#     peers.txt is parked behind the same fronting follow-up).
 cat > /etc/gsx/node.toml <<EOF
 self_id = "<your-operator-label>"
 authority_id = <your-assigned-id>

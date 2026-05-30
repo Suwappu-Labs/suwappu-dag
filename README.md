@@ -192,6 +192,25 @@ down with `./scripts/devnet-local.sh down`.
 - Rust examples: [`examples/rust/`](./examples/rust)
 - Full RPC surface: [`crates/gsx-rpc/`](./crates/gsx-rpc)
 
+### Other entry points
+
+- **Build a dApp on the public testnet.** The **testnet** is the
+  durable network (7 regions, persists until mainnet cutover);
+  the devnet endpoints above are ephemeral and brought up on
+  demand for protocol/perf work. See
+  [`DEVNET.md § Public testnet`](DEVNET.md#public-testnet) for the
+  testnet endpoints, faucet, and SDK examples. Don't anchor
+  long-lived dApp testing to the devnet.
+- **Run a testnet validator.** See
+  [`docs/testnet/VALIDATOR-OPERATORS.md`](docs/testnet/VALIDATOR-OPERATORS.md)
+  for the application + onboarding flow, hardware spec, and
+  points formula.
+- **Operate the foundation seed cluster.** See
+  [`OPERATIONS.md § 10`](OPERATIONS.md) and
+  [`terraform/testnet/README.md`](terraform/testnet/README.md)
+  for the bootstrap procedure, CodeBuild + SSM gotchas, and the
+  fronting follow-up.
+
 ---
 
 ## Architecture

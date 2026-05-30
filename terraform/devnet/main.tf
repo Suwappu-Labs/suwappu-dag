@@ -149,6 +149,10 @@ module "us_east_1" {
   metrics_port      = var.metrics_port
   artifact_bucket   = aws_s3_bucket.artifacts.id
   state_volume_gb   = var.state_volume_gb
+  # devnet uses `gsx-dev-*` (not `gsx-devnet-*`) because the running
+  # testnet owns the `gsx-devnet-` namespace in the same AWS account.
+  # See terraform/testnet/main.tf for the historical context.
+  name_prefix       = "gsx-dev-"
 }
 
 module "eu_west_1" {
@@ -165,6 +169,10 @@ module "eu_west_1" {
   metrics_port      = var.metrics_port
   artifact_bucket   = aws_s3_bucket.artifacts.id
   state_volume_gb   = var.state_volume_gb
+  # devnet uses `gsx-dev-*` (not `gsx-devnet-*`) because the running
+  # testnet owns the `gsx-devnet-` namespace in the same AWS account.
+  # See terraform/testnet/main.tf for the historical context.
+  name_prefix       = "gsx-dev-"
 }
 
 module "ap_southeast_1" {
@@ -181,6 +189,10 @@ module "ap_southeast_1" {
   metrics_port      = var.metrics_port
   artifact_bucket   = aws_s3_bucket.artifacts.id
   state_volume_gb   = var.state_volume_gb
+  # devnet uses `gsx-dev-*` (not `gsx-devnet-*`) because the running
+  # testnet owns the `gsx-devnet-` namespace in the same AWS account.
+  # See terraform/testnet/main.tf for the historical context.
+  name_prefix       = "gsx-dev-"
 }
 
 module "sa_east_1" {
@@ -197,4 +209,8 @@ module "sa_east_1" {
   metrics_port      = var.metrics_port
   artifact_bucket   = aws_s3_bucket.artifacts.id
   state_volume_gb   = var.state_volume_gb
+  # devnet uses `gsx-dev-*` (not `gsx-devnet-*`) because the running
+  # testnet owns the `gsx-devnet-` namespace in the same AWS account.
+  # See terraform/testnet/main.tf for the historical context.
+  name_prefix       = "gsx-dev-"
 }

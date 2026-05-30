@@ -17,7 +17,9 @@ pub mod rpc_adapter;
 pub mod validator;
 pub mod wire;
 
-pub use config::{ConfigError, GenesisManifest, GenesisValidator, NodeConfig, Peer};
+pub use config::{
+    ConfigError, GenesisBalance, GenesisManifest, GenesisSigner, GenesisValidator, NodeConfig, Peer,
+};
 pub use daemon::Daemon;
 pub use events::{Event, EventLog, Lane};
 pub use validator::{

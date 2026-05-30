@@ -22,3 +22,23 @@ output "authority_id" {
   description = "Echoes the authority id for downstream consumers."
   value       = var.authority_id
 }
+
+output "vpc_id" {
+  description = "Validator VPC id. An in-region ALB (testnet RPC fronting) is placed here so it can target the validator instance without cross-VPC peering."
+  value       = aws_vpc.this.id
+}
+
+output "alb_subnet_ids" {
+  description = "Public subnet ids for an in-region ALB. Two AZs when with_alb_subnets=true; a single-element list otherwise (ALB needs >=2, so consumers must set with_alb_subnets)."
+  value       = concat([aws_subnet.public.id], aws_subnet.public_b[*].id)
+}
+
+output "security_group_id" {
+  description = "Validator security group id. RPC port is already open to 0.0.0.0/0, so an in-VPC ALB can reach the instance on rpc_port."
+  value       = aws_security_group.this.id
+}
+
+output "private_ip" {
+  description = "Validator private IP within its VPC (for ip-type ALB targeting; instance-type targeting uses instance_id)."
+  value       = aws_instance.validator.private_ip
+}

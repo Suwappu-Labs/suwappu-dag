@@ -143,7 +143,6 @@ def main() -> int:
 
     _faucet_sk, faucet_pk = mint_real_faucet_key(args.out_dir)
     faucet_pk_hex = faucet_pk.hex()
-    faucet_bls_pk_hex = hashlib.blake2b(b"faucet-bls-placeholder-testnet", digest_size=48).hexdigest()
 
     genesis = args.out_dir / "genesis.toml"
     with genesis.open("w") as f:
@@ -158,25 +157,54 @@ def main() -> int:
             f.write(f"validator_stake_gsx = {args.validator_stake_gsx}\n")
             f.write(f"authority_stake_gsx = {args.authority_stake_gsx}\n\n")
 
-        f.write("[[validators]]\n")
+        # The faucet sits in the Authority Ring purely as a registered
+        # signer (so client-submitted Transfer intents from
+        # authority_id = 7 pass the UnknownSigner gate). It does NOT
+        # vote on consensus — so it MUST be a [[signers]] entry, not a
+        # [[validators]] entry. Seating it as a validator inflates the
+        # committee size n (= validators.len()) and both quorum
+        # thresholds; since the faucet runs no node it never proposes or
+        # votes, which starves finalization. stake_gsx must still clear
+        # AUTHORITY_STAKE_THRESHOLD_GSX = 100_000 or AuthorityRegistry::admit
+        # silently drops it and submissions hit UnknownSigner.
+        f.write("[[signers]]\n")
         f.write(f"authority_id = {FAUCET_AUTHORITY_ID}\n")
         f.write(f'label = "{FAUCET_LABEL}"\n')
         f.write(f'mldsa_public_key_hex = "{faucet_pk_hex}"\n')
-        f.write(f'bls_public_key_hex = "{faucet_bls_pk_hex}"\n')
-        # Faucet stake must clear AUTHORITY_STAKE_THRESHOLD_GSX (100,000)
-        # so registry.admit() succeeds. Without this, the faucet's
-        # pubkey never enters the AuthorityRegistry and every signed
-        # drip intent is rejected with UnknownSigner.
-        f.write(f"validator_stake_gsx = {args.authority_stake_gsx}\n")
-        f.write(f"authority_stake_gsx = {args.authority_stake_gsx}\n\n")
+        f.write(f"stake_gsx = 100000\n\n")
 
-    import blake3 as _b3  # pip install blake3
-    faucet_addr_20 = _b3.blake3(faucet_pk).digest()[:20]
-    faucet_addr_hex = "0x" + faucet_addr_20.hex()
-
-    with genesis.open("a") as f:
-        f.write("# Pre-genesis balances applied before round 0.\n")
+        # Inline pre-balances in the genesis manifest itself so every
+        # validator applies the same allocations to its substrate
+        # before consensus begins. The standalone prebalances.toml
+        # below is kept as a human-readable audit trail; the runtime
+        # reads ONLY this inline block.
+        #
+        # Address derivation: blake3(pk)[:20] — MUST match
+        # `gsx_faucet::address_from_pubkey` in
+        # `crates/gsx-faucet/src/lib.rs:90`. An earlier blake2b recipe
+        # here drifted from the faucet binary's blake3 and required a
+        # `GSX_FAUCET_ADDRESS` env override to bridge — that workaround
+        # was retired alongside this fix. Requires the `blake3` Python
+        # package: `pip install blake3`.
+        import blake3 as _b3
+        _faucet_addr_20 = _b3.blake3(faucet_pk).digest()[:20]
+        _faucet_addr_hex = "0x" + _faucet_addr_20.hex()
         f.write("[[prebalances]]\n")
+        f.write(f'address = "{_faucet_addr_hex}"\n')
+        f.write(f"balance_gsx = {args.faucet_initial_balance_gsx}\n")
+        f.write(f'role = "faucet"\n\n')
+
+    # Keep the standalone prebalances.toml as an operator-readable
+    # artifact. Not consumed by the runtime anymore; preserved so
+    # legacy tooling that grep'd this file still works.
+    faucet_addr_hex = _faucet_addr_hex
+    prebalances = args.out_dir / "prebalances.toml"
+    with prebalances.open("w") as f:
+        f.write("# Testnet pre-balances applied at genesis.\n")
+        f.write("# NOTE: the runtime reads pre-balances from\n")
+        f.write("# genesis.toml's [[prebalances]] block, not from this\n")
+        f.write("# file. Kept here for operator-readable audit only.\n\n")
+        f.write("[[balances]]\n")
         f.write(f'address = "{faucet_addr_hex}"\n')
         f.write(f"balance_gsx = {args.faucet_initial_balance_gsx}\n")
         f.write(f'role = "faucet"\n\n')
@@ -184,9 +212,10 @@ def main() -> int:
     print(f"wrote {genesis}", file=sys.stderr)
     for aid, region, _, _ in validator_entries:
         print(f"  validators[{aid}] = {region}", file=sys.stderr)
-    print(f"  validators[{FAUCET_AUTHORITY_ID}] = {FAUCET_LABEL} (pk={faucet_pk_hex[:16]}...)", file=sys.stderr)
+    print(f"  signers[{FAUCET_AUTHORITY_ID}] = {FAUCET_LABEL} (pk={faucet_pk_hex[:16]}...)", file=sys.stderr)
     print(f"  faucet address = {faucet_addr_hex}", file=sys.stderr)
     print(f"  faucet initial balance = {args.faucet_initial_balance_gsx:,} GSX", file=sys.stderr)
+    print(f"wrote {prebalances}", file=sys.stderr)
     print(
         "NOTE: validator keys are placeholders (matches devnet/perf); "
         "only the faucet ML-DSA key is real. Do NOT reuse this output "

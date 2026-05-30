@@ -6,22 +6,29 @@ name: release
 # source.
 #
 # Matrix:
-#   - linux-x86_64-musl  (ubuntu-latest + musl-tools)
-#   - macos-x86_64       (macos-13, Intel)
-#   - macos-aarch64      (macos-14, Apple Silicon)
+#   - linux-x86_64-musl     (ubuntu-latest + musl-tools)
+#   - linux-aarch64-gnu     (ubuntu-24.04-arm — GitHub-hosted Graviton runner)
+#   - macos-x86_64          (macos-13, Intel)
+#   - macos-aarch64         (macos-14, Apple Silicon)
 #
-# Targets NOT in the matrix:
-#   - linux-aarch64-musl — needs `cross` or a Graviton runner; deferred
-#     until there's demand. Linux x86_64 musl covers >95% of devs.
+# `aarch64-unknown-linux-gnu` is now first-class because the testnet
+# seed cluster runs `c7g.xlarge` (Graviton 3) and external operators on
+# arm64 Linux hardware need the binary published per
+# `docs/testnet/VALIDATOR-OPERATORS.md`. We use the native ARM runner
+# (GA on GitHub since 2025) instead of `cross` because pqcrypto-mldsa's
+# pq-clean C code has historically misbehaved under cross-compile, and
+# the runner is free for public repos.
 #
 # Binaries shipped per platform:
-#   - gsx-node      (validator daemon)
-#   - gsx-loadgen   (load generator + LoadGenClient CLI helper)
-#   - gsx-metrics   (post-hoc event-log analyzer)
-#   - gsx-indexer   (streaming indexer with HTTP read API)
-#   - gsx-faucet    (devnet faucet HTTP service — landed in G3; the
-#                    release workflow attempts to build it and skips
-#                    silently if the crate doesn't exist yet)
+#   - gsx-node              (validator daemon)
+#   - gsx-loadgen           (load generator + LoadGenClient CLI helper)
+#   - gsx-metrics           (post-hoc event-log analyzer)
+#   - gsx-indexer           (streaming indexer with HTTP read API)
+#   - gsx-faucet            (devnet/testnet faucet HTTP service)
+#   - gsx-validator-program (testnet points-accumulator daemon —
+#                            foundation-side; published so the
+#                            operator-program EC2 can pull it on
+#                            bootstrap)
 #
 # Each platform's binaries are tarballed and uploaded with a SHA256
 # checksum. The Release page collects all platform tarballs plus a
@@ -54,6 +61,9 @@ jobs:
         include:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
             archive: tar.gz
           - target: x86_64-apple-darwin
             os: macos-13
@@ -124,6 +134,9 @@ jobs:
           if [ -d crates/gsx-faucet ]; then
             CRATES="$CRATES -p gsx-faucet"
           fi
+          if [ -d crates/gsx-validator-program ]; then
+            CRATES="$CRATES -p gsx-validator-program"
+          fi
           cargo build --release --target ${{ matrix.target }} $CRATES \
               --bins
 
@@ -139,7 +152,7 @@ jobs:
           # libraries, build artifacts, and the non-gsx side products
           # (e.g. ureq's bundled binaries).
           BIN_DIR="target/${TARGET}/release"
-          for b in gsx-node gsx-loadgen gsx-metrics gsx-indexer gsx-faucet; do
+          for b in gsx-node gsx-loadgen gsx-metrics gsx-indexer gsx-faucet gsx-validator-program; do
             if [ -f "$BIN_DIR/$b" ]; then
               cp "$BIN_DIR/$b" "$STAGING/$b"
               chmod +x "$STAGING/$b"

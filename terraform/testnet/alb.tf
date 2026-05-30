@@ -1,8 +1,17 @@
 # ALB layer — fork of terraform/devnet/alb.tf scaled to 7 backend
 # validators. Same target-group + listener pattern; same
 # cross-region IP target trick.
+#
+# SUPERSEDED (RPC): the single-region RPC ALB below (empty target group
+# → 503) is replaced by the per-region ALBs in regional_alb.tf fronted
+# by Global Accelerator in ga.tf. It is kept here, unreferenced, only as
+# a one-release rollback anchor (flip the rpc/ws aliases in dns.tf back
+# to cf_rpc.tf's CloudFront distribution if GA misbehaves) and is slated
+# for deletion in the follow-up cleanup once GA is verified live. The
+# faucet ALB + shared ALB networking below are unchanged (faucet
+# fronting is a separate, still-parked decision).
 
-# ------------- RPC ALB -------------
+# ------------- RPC ALB (superseded — see note above) -------------
 
 resource "aws_lb" "rpc" {
   provider           = aws.us_east_1
@@ -48,86 +57,32 @@ resource "aws_lb_target_group" "rpc" {
   tags = { Name = "gsx-testnet-rpc-tg" }
 }
 
-# Cross-region IP targets — 7 seed validators registered.
-resource "aws_lb_target_group_attachment" "rpc_us_east_1" {
-  provider          = aws.us_east_1
-  target_group_arn  = aws_lb_target_group.rpc.arn
-  target_id         = module.us_east_1.public_ip
-  port              = var.rpc_port
-  availability_zone = "all"
-}
-resource "aws_lb_target_group_attachment" "rpc_us_west_2" {
-  provider          = aws.us_east_1
-  target_group_arn  = aws_lb_target_group.rpc.arn
-  target_id         = module.us_west_2.public_ip
-  port              = var.rpc_port
-  availability_zone = "all"
-}
-resource "aws_lb_target_group_attachment" "rpc_eu_west_1" {
-  provider          = aws.us_east_1
-  target_group_arn  = aws_lb_target_group.rpc.arn
-  target_id         = module.eu_west_1.public_ip
-  port              = var.rpc_port
-  availability_zone = "all"
-}
-resource "aws_lb_target_group_attachment" "rpc_eu_central_1" {
-  provider          = aws.us_east_1
-  target_group_arn  = aws_lb_target_group.rpc.arn
-  target_id         = module.eu_central_1.public_ip
-  port              = var.rpc_port
-  availability_zone = "all"
-}
-resource "aws_lb_target_group_attachment" "rpc_ap_southeast_1" {
-  provider          = aws.us_east_1
-  target_group_arn  = aws_lb_target_group.rpc.arn
-  target_id         = module.ap_southeast_1.public_ip
-  port              = var.rpc_port
-  availability_zone = "all"
-}
-resource "aws_lb_target_group_attachment" "rpc_ap_northeast_1" {
-  provider          = aws.us_east_1
-  target_group_arn  = aws_lb_target_group.rpc.arn
-  target_id         = module.ap_northeast_1.public_ip
-  port              = var.rpc_port
-  availability_zone = "all"
-}
-resource "aws_lb_target_group_attachment" "rpc_sa_east_1" {
-  provider          = aws.us_east_1
-  target_group_arn  = aws_lb_target_group.rpc.arn
-  target_id         = module.sa_east_1.public_ip
-  port              = var.rpc_port
-  availability_zone = "all"
-}
+# NOTE: ALB target_type = "ip" rejects public IPs that are not in the
+# ALB's own VPC subnet, RFC1918, or RFC6598 — AWS does not allow
+# cross-region public-IP targets despite what the devnet comment
+# suggests. To front the 7-region seed cluster behind a single
+# `rpc.testnet.gsx.globalsettlement.com` endpoint we need either
+#   (a) per-region NLB + Global Accelerator, or
+#   (b) VPC peering from this ALB VPC to each validator VPC + target
+#       by private IP.
+# Both are scope-expansion follow-ups. For now the ALB + listener +
+# wildcard cert are kept (cheap; gives us the public DNS name) but
+# the target group has no attachments, so the ALB returns 503. Until
+# the proper fronting lands, external operators reach validators
+# directly by EIP (printed in `terraform output validators`).
 
-resource "aws_lb_listener" "rpc_https" {
-  provider          = aws.us_east_1
-  load_balancer_arn = aws_lb.rpc.arn
-  port              = 443
-  protocol          = "HTTPS"
-  ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
-  certificate_arn   = aws_acm_certificate_validation.wildcard.certificate_arn
-
-  default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.rpc.arn
-  }
-}
-
-resource "aws_lb_listener" "rpc_http_redirect" {
-  provider          = aws.us_east_1
-  load_balancer_arn = aws_lb.rpc.arn
-  port              = 80
-  protocol          = "HTTP"
-
-  default_action {
-    type = "redirect"
-    redirect {
-      protocol    = "HTTPS"
-      port        = "443"
-      status_code = "HTTP_301"
-    }
-  }
-}
+# RPC ALB listeners (HTTPS + HTTP→HTTPS redirect) are NOT declared in
+# Phase 1 — the public TLS surface lives on CloudFront (`cf_rpc.tf`).
+# Re-add these listeners when Phase 2 (per-region NLB + Global
+# Accelerator) lands and we have private-IP targets that ALB will
+# accept. See
+# /Users/mongolraider/.claude/plans/validated-prancing-curry.md.
+#
+# Keeping the ALB + target group + VPC + SGs in TF as a no-op skeleton
+# so Phase 2 doesn't need to re-issue the cert or re-allocate subnets.
+# ALBs without listeners do not incur listener-hour charges; the
+# remaining cost is the LCU minimum (~$16/mo per ALB) which is the
+# price of keeping the cert + WAF + DNS skeleton ready to swap in.
 
 # ------------- Faucet ALB -------------
 
@@ -167,43 +122,14 @@ resource "aws_lb_target_group" "faucet" {
   tags = { Name = "gsx-testnet-faucet-tg" }
 }
 
-resource "aws_lb_target_group_attachment" "faucet" {
-  provider          = aws.us_east_1
-  target_group_arn  = aws_lb_target_group.faucet.arn
-  target_id         = aws_eip.faucet.public_ip
-  port              = 8080
-  availability_zone = "all"
-}
+# NOTE: same ALB-public-IP limitation as the RPC target group above.
+# The faucet EIP is publicly routable but lives outside this ALB's
+# VPC, so ALB rejects the attachment. Park behind the same fronting
+# follow-up; until then, the faucet is reachable directly by EIP on
+# port 8080.
 
-resource "aws_lb_listener" "faucet_https" {
-  provider          = aws.us_east_1
-  load_balancer_arn = aws_lb.faucet.arn
-  port              = 443
-  protocol          = "HTTPS"
-  ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
-  certificate_arn   = aws_acm_certificate_validation.wildcard.certificate_arn
-
-  default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.faucet.arn
-  }
-}
-
-resource "aws_lb_listener" "faucet_http_redirect" {
-  provider          = aws.us_east_1
-  load_balancer_arn = aws_lb.faucet.arn
-  port              = 80
-  protocol          = "HTTP"
-
-  default_action {
-    type = "redirect"
-    redirect {
-      protocol    = "HTTPS"
-      port        = "443"
-      status_code = "HTTP_301"
-    }
-  }
-}
+# Faucet ALB listeners stripped in Phase 1 for the same reason as the
+# RPC ones above — public TLS lives on CloudFront (`cf_faucet.tf`).
 
 # ------------- Shared ALB networking -------------
 

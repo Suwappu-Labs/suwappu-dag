@@ -25,7 +25,7 @@ resource "aws_db_subnet_group" "program" {
 resource "aws_security_group" "program_db" {
   provider    = aws.us_east_1
   name        = "gsx-testnet-program-db-sg"
-  description = "RDS access — only the program EC2 can reach the DB."
+  description = "RDS access - only the program EC2 can reach the DB."
   vpc_id      = aws_vpc.program.id
 
   ingress {

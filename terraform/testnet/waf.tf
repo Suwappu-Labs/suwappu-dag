@@ -1,11 +1,21 @@
-# AWS WAF in front of the public RPC + faucet ALBs.
-# Same posture as terraform/devnet/waf.tf; bumped rate-limit
-# slightly because the testnet supports higher TPS targets.
+# AWS WAF in front of the public RPC + faucet CloudFront distributions.
+#
+# Scope is CLOUDFRONT (not REGIONAL) because the fronting layer moved
+# from ALB → CloudFront in Phase 1 — see
+# /Users/mongolraider/.claude/plans/validated-prancing-curry.md.
+#
+# CloudFront-scoped web ACLs MUST be created in us-east-1 regardless
+# of the distribution's edge footprint (AWS constraint, not ours).
+# Same provider alias as the REGIONAL ACL had before.
+#
+# Association is via `web_acl_id` ON each
+# `aws_cloudfront_distribution.*` resource (see cf_rpc.tf, cf_faucet.tf)
+# — CloudFront-scoped ACLs do NOT use `aws_wafv2_web_acl_association`.
 
-resource "aws_wafv2_web_acl" "testnet" {
+resource "aws_wafv2_web_acl" "testnet_cf" {
   provider = aws.us_east_1
-  name     = "gsx-testnet-waf"
-  scope    = "REGIONAL"
+  name     = "gsx-testnet-cf-waf"
+  scope    = "CLOUDFRONT"
 
   default_action {
     allow {}
@@ -79,21 +89,9 @@ resource "aws_wafv2_web_acl" "testnet" {
 
   visibility_config {
     cloudwatch_metrics_enabled = true
-    metric_name                = "gsx-testnet-waf"
+    metric_name                = "gsx-testnet-cf-waf"
     sampled_requests_enabled   = true
   }
 
-  tags = { Name = "gsx-testnet-waf" }
-}
-
-resource "aws_wafv2_web_acl_association" "rpc" {
-  provider     = aws.us_east_1
-  resource_arn = aws_lb.rpc.arn
-  web_acl_arn  = aws_wafv2_web_acl.testnet.arn
-}
-
-resource "aws_wafv2_web_acl_association" "faucet" {
-  provider     = aws.us_east_1
-  resource_arn = aws_lb.faucet.arn
-  web_acl_arn  = aws_wafv2_web_acl.testnet.arn
+  tags = { Name = "gsx-testnet-cf-waf" }
 }

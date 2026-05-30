@@ -294,45 +294,51 @@ impl State {
                 tracing::warn!(val = v.authority_id, err = %e, "genesis: skipping malformed validator");
             }
         }
-        // Apply pre-genesis balances to the substrate before round 0.
-        let mut substrate = InMemorySubstrate::new();
-        if !manifest.prebalances.is_empty() {
-            let allocations: Vec<(gsx_execution::Address, gsx_execution::Balance)> = manifest
-                .prebalances
-                .iter()
-                .filter_map(|b| {
-                    let trimmed = b
-                        .address
-                        .strip_prefix("0x")
-                        .or_else(|| b.address.strip_prefix("0X"))
-                        .unwrap_or(&b.address);
-                    let bytes = match hex::decode(trimmed) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            tracing::warn!(address = %b.address, err = %e, "genesis: skipping malformed prebalance address");
-                            return None;
-                        }
-                    };
-                    let addr: [u8; 20] = match bytes.as_slice().try_into() {
-                        Ok(a) => a,
-                        Err(_) => {
-                            tracing::warn!(address = %b.address, len = bytes.len(), "genesis: skipping prebalance address — expected 20 bytes");
-                            return None;
-                        }
-                    };
-                    Some((addr, b.balance_gsx as u128))
-                })
-                .collect();
-            if let Err(e) = substrate.apply_intent(&Intent::GenesisAllocation {
-                allocations: allocations.clone(),
+        // Non-validating client-intent signers (e.g. the faucet) are seated
+        // ONLY in the AuthorityRegistry so `verify_signed_intent` can resolve
+        // their pubkey hash. They are deliberately excluded from the
+        // StakeTable, the ValidatorRegistry, and the committee size `n` below:
+        // a signer runs no node, so counting it as a validator would inflate
+        // the quorum thresholds and starve finalization.
+        for s in &manifest.signers {
+            let mldsa_bytes = hex::decode(&s.mldsa_public_key_hex).unwrap_or_default();
+            if let Err(e) = authority_registry.admit(AuthorityMember {
+                id: s.authority_id,
+                stake_gsx: s.stake_gsx,
+                public_key_bytes: mldsa_bytes,
             }) {
-                tracing::error!(err = %e, "genesis: failed to apply prebalances");
-            } else {
-                tracing::info!(entries = allocations.len(), "genesis: applied prebalances");
+                tracing::warn!(signer = s.authority_id, err = %e, "genesis: skipping malformed signer");
             }
         }
-
+        // Committee size counts ONLY the consensus validators — signers are
+        // excluded by construction (see the loop above).
         let n = manifest.validators.len() as u32;
+        // Pre-balances from the genesis manifest are applied to the
+        // substrate before consensus begins. Equivalent to a block-0
+        // `Intent::GenesisAllocation` but without the race against
+        // the round driver. Malformed addresses log + skip rather
+        // than abort the daemon so a single fat-finger in the manifest
+        // doesn't take the cluster down.
+        let prebalances = manifest
+            .prebalances
+            .iter()
+            .filter_map(|p| {
+                let hex = p
+                    .address
+                    .strip_prefix("0x")
+                    .or_else(|| p.address.strip_prefix("0X"))
+                    .unwrap_or(p.address.as_str());
+                match hex::decode(hex)
+                    .ok()
+                    .and_then(|b| <[u8; 20]>::try_from(b.as_slice()).ok())
+                {
+                    Some(addr) => Some((addr, p.balance_gsx as u128)),
+                    None => {
+                        tracing::warn!(addr = %p.address, "genesis: skipping malformed prebalance address");
+                        None
+                    }
+                }
+            });
         Self {
             dag: tokio::sync::RwLock::new(DagStore::new()),
             votes: parking_lot::Mutex::new(HashMap::new()),
@@ -342,11 +348,11 @@ impl State {
             authority_registry: tokio::sync::RwLock::new(authority_registry),
             validator_registry: tokio::sync::RwLock::new(validator_registry),
             inner: tokio::sync::Mutex::new(StateInner {
-                // Box the genesis-prebalance-applied local substrate
-                // (#267) into the `Box<dyn Substrate>` field (main). Using
-                // a fresh `InMemorySubstrate::new()` here would discard the
-                // applied genesis allocations.
-                substrate: Box::new(substrate),
+                // Seed the substrate from the genesis manifest's
+                // [[prebalances]] (the `let prebalances` iterator above) and
+                // box it into main's `Box<dyn Substrate>` field. A fresh
+                // `InMemorySubstrate::new()` would drop the genesis balances.
+                substrate: Box::new(InMemorySubstrate::from_balances(prebalances)),
                 last_authored_round: None,
                 max_observed_round: 0,
                 n_authorities: n,
@@ -1949,6 +1955,7 @@ mod tests {
             corridors: Vec::new(),
             rounds_per_epoch: 1024,
             prebalances: vec![],
+            signers: vec![],
         };
         let cfg = NodeConfig {
             self_id: "v0".into(),
@@ -2035,6 +2042,7 @@ mod tests {
             corridors: Vec::new(),
             rounds_per_epoch: 1024,
             prebalances: vec![],
+            signers: vec![],
         };
         let cfg = NodeConfig {
             self_id: "v0".into(),
@@ -2121,6 +2129,7 @@ mod tests {
             corridors: Vec::new(),
             rounds_per_epoch: 1024,
             prebalances: vec![],
+            signers: vec![],
         };
 
         let mut daemons = Vec::new();
@@ -2267,6 +2276,7 @@ mod tests {
             // CI-sane timescales. 16 rounds * 100ms = 1.6s/boundary.
             rounds_per_epoch: 16,
             prebalances: vec![],
+            signers: vec![],
         };
 
         let mut daemons = Vec::new();
@@ -2696,6 +2706,7 @@ mod tests {
             corridors: Vec::new(),
             rounds_per_epoch: 1024,
             prebalances: vec![],
+            signers: vec![],
         };
         let cfg = NodeConfig {
             self_id: "v0".into(),
@@ -2875,6 +2886,7 @@ mod tests {
             corridors: Vec::new(),
             rounds_per_epoch: 1024,
             prebalances: vec![],
+            signers: vec![],
         };
         let (log, _log_task) =
             EventLog::start(&std::env::temp_dir().join("gsx-fastpath-test.ndjson"))
@@ -2975,6 +2987,7 @@ mod tests {
             corridors: Vec::new(),
             rounds_per_epoch: 1024,
             prebalances: vec![],
+            signers: vec![],
         };
         let (log, _log_task) =
             EventLog::start(&std::env::temp_dir().join("gsx-fp-k-binding-test.ndjson"))
@@ -3082,6 +3095,7 @@ mod tests {
             corridors: Vec::new(),
             rounds_per_epoch: 1024,
             prebalances: vec![],
+            signers: vec![],
         };
         let (log, _log_task) = EventLog::start(&std::env::temp_dir().join("gsx-ltp-test.ndjson"))
             .await
@@ -3183,6 +3197,7 @@ mod tests {
             corridors: Vec::new(),
             rounds_per_epoch: 1024,
             prebalances: vec![],
+            signers: vec![],
         };
         let (log, _log_task) = EventLog::start(&std::env::temp_dir().join("gsx-ltp-unreg.ndjson"))
             .await
@@ -3236,6 +3251,7 @@ mod tests {
             corridors: Vec::new(),
             rounds_per_epoch: 1024,
             prebalances: vec![],
+            signers: vec![],
         };
         let cfg = NodeConfig {
             self_id: "v0".into(),
@@ -3330,6 +3346,7 @@ mod tests {
             corridors: Vec::new(),
             rounds_per_epoch: 1024,
             prebalances: vec![],
+            signers: vec![],
         };
         let cfg = NodeConfig {
             self_id: "v0".into(),
@@ -3448,6 +3465,7 @@ mod tests {
             corridors: Vec::new(),
             rounds_per_epoch: 1024,
             prebalances: vec![],
+            signers: vec![],
         };
         let cfg = NodeConfig {
             self_id: "v0".into(),
@@ -3564,6 +3582,7 @@ mod tests {
             corridors: Vec::new(),
             rounds_per_epoch: 1024,
             prebalances: vec![],
+            signers: vec![],
         };
         let cfg = NodeConfig {
             self_id: "v0".into(),
@@ -3654,6 +3673,7 @@ mod tests {
                 balance_gsx: 1_000_000,
                 role: Some("faucet".into()),
             }],
+            signers: vec![],
         };
 
         let state = State::new(&manifest);

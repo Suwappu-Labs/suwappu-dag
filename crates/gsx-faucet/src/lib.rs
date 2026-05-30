@@ -81,11 +81,20 @@ pub fn intent_signing_digest(network_id: &str, intent: &Intent) -> Result<[u8; 3
 
 /// Derive a 20-byte address from an ML-DSA-65 public key.
 ///
-/// `address = blake3(pk_bytes)[:20]`
+/// Recipe: `blake3(pk)[:20]`. The same recipe is used by
+/// `scripts/{devnet,testnet}/gen-genesis.py` when writing the faucet's
+/// pre-balance entry into the genesis manifest, so the faucet binary's
+/// computed address always matches the address that received the
+/// pre-balance allocation. (Earlier versions of the genesis scripts
+/// used blake2b — that drift was retired in favor of a single blake3
+/// recipe across the codebase, matching `intent_signing_digest` and
+/// the rest of the hash surface.)
 ///
-/// Genesis scripts (`scripts/devnet/gen-genesis.py`, etc.) MUST use
-/// the same BLAKE3 recipe. Callers can also pass `--faucet-address`
-/// directly to bypass derivation.
+/// If you EVER need to override the derivation (e.g., a faucet
+/// keypair was minted before this recipe was canonicalized, and the
+/// pre-balance is keyed by a different address), pass `--faucet-address`
+/// or set `GSX_FAUCET_ADDRESS` on the binary — main.rs accepts an
+/// explicit override.
 pub fn address_from_pubkey(pk: &PublicKey) -> [u8; 20] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(pk.as_bytes());

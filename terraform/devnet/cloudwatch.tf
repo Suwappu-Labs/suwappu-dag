@@ -68,17 +68,18 @@ resource "aws_cloudwatch_metric_alarm" "halt" {
     }
   }
 
-  metric_query {
-    id          = "lagged_max"
-    return_data = false
-    expression  = "FILL(current_max, REPEAT)"
-  }
-
+  # Per-period rate of change in committed-round MAX. `RATE` returns
+  # a TimeSeries (one data-point per period). A halt is detectable as
+  # `rate ≤ 0` for two consecutive windows (counter flat or regressed).
+  # The previous shape (`MAX(current_max) - MAX(lagged_max)`) collapsed
+  # to a scalar, which CloudWatch rejects for an alarm-returning
+  # expression. Mirrors the testnet fix in
+  # terraform/testnet/cloudwatch.tf (PR #220).
   metric_query {
     id          = "delta"
     return_data = true
-    expression  = "MAX(current_max) - MAX(lagged_max)"
-    label       = "rounds advanced in window"
+    expression  = "RATE(current_max)"
+    label       = "round advance rate"
   }
 
   alarm_actions = [aws_sns_topic.ops_pages.arn]

@@ -6,17 +6,28 @@
 #
 # Both terminate TLS on the wildcard ACM cert. The ALBs live in
 # us-east-1 (where the artifact bucket + faucet + ACM cert all
-# already are). The rpc ALB has cross-region targets via plain IP
-# addresses — the 4 validators sit in 4 different regional VPCs.
+# already are).
 #
-# AWS supports cross-region ALB targets via "IP" target type as
-# long as the target IP is publicly routable (it is — each
-# validator has a public EIP). The ALB pushes traffic over the
-# public internet to the target IP. This is intentional: the
-# alternative (VPC peering + private IPs) is more complex and
-# doesn't materially change the security posture (the validators'
-# RPC ports are already open to 0.0.0.0/0 at the security group
-# layer).
+# IMPORTANT — ALB target_type = "ip" rejects public IPs that are not
+# in the ALB's own VPC subnet, RFC1918, or RFC6598, even within the
+# same region. The previous header comment here claimed otherwise;
+# that was wrong, and it cost the testnet a full apply round when
+# the same pattern was inherited (see
+# terraform/testnet/alb.tf for the matching note). The 4 validators
+# each live in their own regional VPC and have public EIPs, so none
+# of them qualify as ALB targets.
+#
+# Two viable fronting shapes for the follow-up:
+#   1. Per-region NLB + AWS Global Accelerator. Validators stay
+#      reachable by EIP; GA anycast IPs become the public surface.
+#   2. VPC peering from this ALB VPC to each validator VPC, then
+#      target by private IP. Requires non-overlapping CIDR planning
+#      across the regional VPCs.
+#
+# Until one of those lands, this stack ships the ALBs + cert + DNS
+# skeleton with NO target attachments (the wildcard endpoint will
+# return 503 until fronting is layered in). Clients reach validators
+# by direct EIP from `terraform output validators`.
 
 # ------------- RPC ALB -------------
 
@@ -69,41 +80,13 @@ resource "aws_lb_target_group" "rpc" {
   tags = { Name = "gsx-devnet-rpc-tg" }
 }
 
-# Cross-region IP targets. We register the public EIP of each
-# validator. The ALB pushes traffic over the public internet to
-# the target IP — same security posture as a direct dev → validator
-# request, with the ALB just providing TLS termination + DNS + WAF.
-resource "aws_lb_target_group_attachment" "rpc_us_east_1" {
-  provider          = aws.us_east_1
-  target_group_arn  = aws_lb_target_group.rpc.arn
-  target_id         = module.us_east_1.public_ip
-  port              = var.rpc_port
-  availability_zone = "all" # IP target outside ALB's VPC
-}
-
-resource "aws_lb_target_group_attachment" "rpc_eu_west_1" {
-  provider          = aws.us_east_1
-  target_group_arn  = aws_lb_target_group.rpc.arn
-  target_id         = module.eu_west_1.public_ip
-  port              = var.rpc_port
-  availability_zone = "all"
-}
-
-resource "aws_lb_target_group_attachment" "rpc_ap_southeast_1" {
-  provider          = aws.us_east_1
-  target_group_arn  = aws_lb_target_group.rpc.arn
-  target_id         = module.ap_southeast_1.public_ip
-  port              = var.rpc_port
-  availability_zone = "all"
-}
-
-resource "aws_lb_target_group_attachment" "rpc_sa_east_1" {
-  provider          = aws.us_east_1
-  target_group_arn  = aws_lb_target_group.rpc.arn
-  target_id         = module.sa_east_1.public_ip
-  port              = var.rpc_port
-  availability_zone = "all"
-}
+# NOTE: ALB target_type = "ip" rejects public IPs that are not in the
+# ALB's own VPC subnet, RFC1918, or RFC6598 — see the header comment
+# above. The 4 cross-VPC `aws_lb_target_group_attachment.rpc_*` blocks
+# that used to live here were removed for the same reason as in
+# terraform/testnet/alb.tf. Until per-region NLB + Global Accelerator
+# or VPC peering with private-IP targets lands, this target group
+# stays empty and the wildcard endpoint returns 503.
 
 resource "aws_lb_listener" "rpc_https" {
   provider          = aws.us_east_1
@@ -174,13 +157,11 @@ resource "aws_lb_target_group" "faucet" {
   tags = { Name = "gsx-devnet-faucet-tg" }
 }
 
-resource "aws_lb_target_group_attachment" "faucet" {
-  provider          = aws.us_east_1
-  target_group_arn  = aws_lb_target_group.faucet.arn
-  target_id         = aws_eip.faucet.public_ip
-  port              = 8080
-  availability_zone = "all"
-}
+# NOTE: same ALB-public-IP limitation as the RPC target group above.
+# The faucet EIP is publicly routable but lives outside this ALB's
+# VPC, so ALB rejects the attachment. Park behind the same fronting
+# follow-up; until then, the faucet is reachable directly by EIP on
+# port 8080.
 
 resource "aws_lb_listener" "faucet_https" {
   provider          = aws.us_east_1

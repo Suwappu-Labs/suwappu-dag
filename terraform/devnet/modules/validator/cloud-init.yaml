@@ -11,8 +11,13 @@
 package_update: true
 package_upgrade: false
 packages:
-  - awscli
+  # NB: `awscli` is no longer published in the Ubuntu 24.04 noble apt
+  # repo — installing it via cloud-init silently fails with
+  # `Package awscli is not available`, leaving `aws` off the PATH and
+  # breaking `bootstrap.sh` on first boot. We install the official
+  # `awscli-exe-linux-aarch64.zip` from `runcmd:` below instead.
   - jq
+  - unzip
   - amazon-cloudwatch-agent
 
 write_files:
@@ -170,6 +175,15 @@ runcmd:
   - useradd --system --gid gsx --no-create-home --shell /usr/sbin/nologin gsx
   - mkdir -p /var/log/gsx
   - chown gsx:gsx /var/log/gsx
+  # Install awscli v2 from the official zip. Replaces the apt path,
+  # which is gone on Ubuntu 24.04 noble (see packages: comment above).
+  # `uname -m` resolves to aarch64 on c7g.* and t4g.* (the only
+  # instance families used today); add a `case` here if x86_64 ever
+  # needs to be supported.
+  - curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip -o /tmp/awscli.zip
+  - unzip -q -o /tmp/awscli.zip -d /tmp/
+  - /tmp/aws/install --update
+  - rm -rf /tmp/awscli.zip /tmp/aws
   - /opt/gsx/mount-state.sh
   - systemctl daemon-reload
   - systemctl enable var-lib-gsx.mount

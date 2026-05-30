@@ -1,10 +1,27 @@
-# `terraform/devnet/` — public devnet infra
+# `terraform/devnet/` — ephemeral 4-region devnet
 
-4-region always-on devnet that external developers point their SDKs at.
+4-region devnet for testing and performance work — spun up and torn
+down as needed. **Not** always-on; the durable public surface that
+external developers target is the
+[testnet](../testnet/README.md). Use this stack when you need a
+mutable sandbox without putting the testnet at risk.
 
 This stack is the **operational** layer; the **DNS + ALB + WAF** layer
 that fronts these validators lives in [G2 — to be added in a follow-up
 PR for `terraform/devnet/{dns,alb,acm,waf}.tf`].
+
+## AWS-name prefix: `gsx-dev-*`
+
+This stack passes `name_prefix = "gsx-dev-"` to the validator module
+in [`./modules/validator/`](./modules/validator/). The prefix is
+deliberately **not** the historical `gsx-devnet-` — that namespace
+is owned by the live testnet (the testnet stack reuses this module
+and got there first). All key_pair / SG / IAM-role / EIP / instance
+Name fields under this stack therefore read `gsx-dev-<region>`. The
+next clean window for the testnet will flip testnet to
+`gsx-testnet-*` and free up `gsx-devnet-*` for the devnet; until
+then, keep the prefixes distinct so the two stacks can coexist in
+the same AWS account.
 
 ## What this stack provisions
 

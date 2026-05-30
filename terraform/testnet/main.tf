@@ -139,6 +139,15 @@ module "us_east_1" {
   metrics_port      = var.metrics_port
   artifact_bucket   = aws_s3_bucket.artifacts.id
   state_volume_gb   = var.state_volume_gb
+  with_alb_subnets  = true # in-region RPC ALB (regional_alb.tf + ga.tf)
+  # Historical: the testnet went live with `gsx-devnet-*` Name tags
+  # because the validator module hardcoded that prefix. Those names
+  # are baked into AWS state (key_pair, IAM role, SG names — all
+  # immutable), so flipping to `gsx-testnet-*` would force
+  # destroy+recreate of every seed. The rename is deferred to the
+  # next clean window. Until then, devnet (when applied) must use a
+  # non-colliding prefix — see terraform/devnet/main.tf.
+  name_prefix = "gsx-devnet-"
 }
 
 module "us_west_2" {
@@ -155,6 +164,15 @@ module "us_west_2" {
   metrics_port      = var.metrics_port
   artifact_bucket   = aws_s3_bucket.artifacts.id
   state_volume_gb   = var.state_volume_gb
+  with_alb_subnets  = true # in-region RPC ALB (regional_alb.tf + ga.tf)
+  # Historical: the testnet went live with `gsx-devnet-*` Name tags
+  # because the validator module hardcoded that prefix. Those names
+  # are baked into AWS state (key_pair, IAM role, SG names — all
+  # immutable), so flipping to `gsx-testnet-*` would force
+  # destroy+recreate of every seed. The rename is deferred to the
+  # next clean window. Until then, devnet (when applied) must use a
+  # non-colliding prefix — see terraform/devnet/main.tf.
+  name_prefix = "gsx-devnet-"
 }
 
 module "eu_west_1" {
@@ -171,6 +189,15 @@ module "eu_west_1" {
   metrics_port      = var.metrics_port
   artifact_bucket   = aws_s3_bucket.artifacts.id
   state_volume_gb   = var.state_volume_gb
+  with_alb_subnets  = true # in-region RPC ALB (regional_alb.tf + ga.tf)
+  # Historical: the testnet went live with `gsx-devnet-*` Name tags
+  # because the validator module hardcoded that prefix. Those names
+  # are baked into AWS state (key_pair, IAM role, SG names — all
+  # immutable), so flipping to `gsx-testnet-*` would force
+  # destroy+recreate of every seed. The rename is deferred to the
+  # next clean window. Until then, devnet (when applied) must use a
+  # non-colliding prefix — see terraform/devnet/main.tf.
+  name_prefix = "gsx-devnet-"
 }
 
 module "eu_central_1" {
@@ -187,6 +214,15 @@ module "eu_central_1" {
   metrics_port      = var.metrics_port
   artifact_bucket   = aws_s3_bucket.artifacts.id
   state_volume_gb   = var.state_volume_gb
+  with_alb_subnets  = true # in-region RPC ALB (regional_alb.tf + ga.tf)
+  # Historical: the testnet went live with `gsx-devnet-*` Name tags
+  # because the validator module hardcoded that prefix. Those names
+  # are baked into AWS state (key_pair, IAM role, SG names — all
+  # immutable), so flipping to `gsx-testnet-*` would force
+  # destroy+recreate of every seed. The rename is deferred to the
+  # next clean window. Until then, devnet (when applied) must use a
+  # non-colliding prefix — see terraform/devnet/main.tf.
+  name_prefix = "gsx-devnet-"
 }
 
 module "ap_southeast_1" {
@@ -203,6 +239,15 @@ module "ap_southeast_1" {
   metrics_port      = var.metrics_port
   artifact_bucket   = aws_s3_bucket.artifacts.id
   state_volume_gb   = var.state_volume_gb
+  with_alb_subnets  = true # in-region RPC ALB (regional_alb.tf + ga.tf)
+  # Historical: the testnet went live with `gsx-devnet-*` Name tags
+  # because the validator module hardcoded that prefix. Those names
+  # are baked into AWS state (key_pair, IAM role, SG names — all
+  # immutable), so flipping to `gsx-testnet-*` would force
+  # destroy+recreate of every seed. The rename is deferred to the
+  # next clean window. Until then, devnet (when applied) must use a
+  # non-colliding prefix — see terraform/devnet/main.tf.
+  name_prefix = "gsx-devnet-"
 }
 
 module "ap_northeast_1" {
@@ -219,6 +264,15 @@ module "ap_northeast_1" {
   metrics_port      = var.metrics_port
   artifact_bucket   = aws_s3_bucket.artifacts.id
   state_volume_gb   = var.state_volume_gb
+  with_alb_subnets  = true # in-region RPC ALB (regional_alb.tf + ga.tf)
+  # Historical: the testnet went live with `gsx-devnet-*` Name tags
+  # because the validator module hardcoded that prefix. Those names
+  # are baked into AWS state (key_pair, IAM role, SG names — all
+  # immutable), so flipping to `gsx-testnet-*` would force
+  # destroy+recreate of every seed. The rename is deferred to the
+  # next clean window. Until then, devnet (when applied) must use a
+  # non-colliding prefix — see terraform/devnet/main.tf.
+  name_prefix = "gsx-devnet-"
 }
 
 module "sa_east_1" {
@@ -235,4 +289,13 @@ module "sa_east_1" {
   metrics_port      = var.metrics_port
   artifact_bucket   = aws_s3_bucket.artifacts.id
   state_volume_gb   = var.state_volume_gb
+  with_alb_subnets  = true # in-region RPC ALB (regional_alb.tf + ga.tf)
+  # Historical: the testnet went live with `gsx-devnet-*` Name tags
+  # because the validator module hardcoded that prefix. Those names
+  # are baked into AWS state (key_pair, IAM role, SG names — all
+  # immutable), so flipping to `gsx-testnet-*` would force
+  # destroy+recreate of every seed. The rename is deferred to the
+  # next clean window. Until then, devnet (when applied) must use a
+  # non-colliding prefix — see terraform/devnet/main.tf.
+  name_prefix = "gsx-devnet-"
 }

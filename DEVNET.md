@@ -1,30 +1,51 @@
-# Devnet — quickstart
+# Devnet + testnet — quickstart
 
-Two ways to develop against gsx-dag:
+Two long-lived networks + a laptop option:
 
-1. **Use the public hosted devnet** (recommended for most devs).
-   No setup; point your SDK at a stable URL; ask the faucet for
-   test tokens. See [§ Public devnet](#public-devnet) below.
-2. **Run a local 4-node cluster on your laptop**. One docker-compose
-   command. See [§ Local devnet](#local-devnet) below.
+1. **Public testnet** — 7-region, points-bearing, durable.
+   This is the network external developers and validator
+   operators target day-to-day. Genesis lives on-chain until
+   the mainnet cutover.
+   See [§ Public testnet](#public-testnet).
+2. **Devnet** — ephemeral 4-region cluster the foundation
+   spins up on demand for protocol-change testing,
+   performance experiments, or scenario reproductions. **Not**
+   always-on. When it's down, build against testnet instead.
+   See [§ Devnet (ephemeral)](#devnet-ephemeral).
+3. **Local 4-node cluster** on your laptop via docker-compose.
+   Use this only when you need to test changes to the validator
+   itself with full host control. See [§ Local devnet](#local-devnet).
 
-Use the **public devnet** unless you need to test changes to the
-validator itself.
-
+For foundation-internal seed-cluster procedures, see
+[`OPERATIONS.md § 10`](OPERATIONS.md) and
+[`terraform/testnet/README.md`](terraform/testnet/README.md).
 For mainnet operator procedures, see
 [`docs/architecture/governance-phasing.md`](docs/architecture/governance-phasing.md).
 
 ---
 
-## Public devnet
+## Devnet (ephemeral)
 
-| Endpoint | URL |
-|---|---|
-| JSON-RPC | `https://rpc.devnet.gsx.globalsettlement.com` |
-| WebSocket subscribe | `wss://ws.devnet.gsx.globalsettlement.com/ws` |
-| Faucet (POST `/faucet { address }`) | `https://faucet.devnet.gsx.globalsettlement.com` |
-| Block explorer | `https://explorer.devnet.gsx.globalsettlement.com` |
-| Status page | `https://status.devnet.gsx.globalsettlement.com` |
+The devnet is the foundation's mutable sandbox in AWS, brought up
+on demand from [`terraform/devnet/`](terraform/devnet/) when we
+need to test protocol changes, run performance experiments, or
+reproduce incidents without touching the live testnet.
+
+- **Not always-on.** When the stack is down, none of the URLs
+  below resolve. Check `terraform/devnet` state before assuming
+  it's up: `aws s3 ls s3://gsx-dag-tf-state/gsx-dag/devnet/`.
+- **State is disposable.** Every fresh apply mints a new genesis
+  unless you explicitly carry the EBS volumes over. Don't keep
+  long-running dApp work pointed at this network.
+- **For long-lived dApp testing, use the testnet** ([§ Public
+  testnet](#public-testnet)). The testnet's chain history
+  persists until mainnet cutover.
+
+When the devnet is up, it provisions four `t4g.medium` validators
+across us-east-1 / eu-west-1 / ap-southeast-1 / sa-east-1 under
+the `gsx-dev-*` AWS-name prefix (not `gsx-devnet-*` — the testnet
+owns that namespace; see
+[`terraform/devnet/README.md`](terraform/devnet/README.md)).
 
 | Network | |
 |---|---|
@@ -32,67 +53,95 @@ For mainnet operator procedures, see
 | `chain_id` | `2025` |
 | Validators | 4 (us-east-1, eu-west-1, ap-southeast-1, sa-east-1) |
 | Faucet drip | 100 GSX, max 5 drips/hour per IP |
-| Wipe policy | State persists across patch releases; minor-version bumps regenesis (rare) |
+| Wipe policy | Stack is torn down and re-applied as needed; assume any state can disappear. |
 
-### Submit your first transaction
+Bring-up runbook lives in
+[`OPERATIONS.md § 1`](OPERATIONS.md#1-bootstrap-a-fresh-devnet).
+Endpoints (when up) follow the same pattern as testnet
+(`rpc.devnet.gsx.*`, `faucet.devnet.gsx.*`, etc.), with the same
+ALB-fronting gap called out in
+[`terraform/testnet/README.md § Known limitations`](terraform/testnet/README.md#known-limitations).
+Until the per-region NLB + Global Accelerator follow-up lands,
+reach validators directly by EIP from `terraform output validators`.
+
+---
+
+## Public testnet
+
+Long-lived 7-region cluster. External validator operators earn
+points convertible to mainnet token at TGE; dApps developers can
+use it as a stable target without running infra. Genesis was
+minted on 2026-05-18; chain history is retained until the
+mainnet cutover.
+
+| Network | |
+|---|---|
+| `network_id` | `gsx-testnet-v1` |
+| `chain_id` | `20251` |
+| Seed validators | 7 (us-east-1, us-west-2, eu-west-1, eu-central-1, ap-southeast-1, ap-northeast-1, sa-east-1) |
+| `rounds_per_epoch` | 4096 (4× devnet — longer epochs reduce governance churn) |
+| Faucet drip | 100 GSX, max 5 drips/hour per IP |
+| Wipe policy | None until mainnet cutover. State + points data is preserved across patch + minor releases. |
+
+### Endpoints
+
+Once the per-region NLB + Global Accelerator fronting lands
+(tracked in `terraform/testnet/README.md` § "Known limitations"),
+the public wildcard endpoint will be:
+
+| Endpoint | URL |
+|---|---|
+| JSON-RPC | `https://rpc.testnet.gsx.globalsettlement.com` |
+| WebSocket subscribe | `wss://ws.testnet.gsx.globalsettlement.com/ws` |
+| Faucet (POST `/faucet { address }`) | `https://faucet.testnet.gsx.globalsettlement.com` |
+| Block explorer | `https://explorer.testnet.gsx.globalsettlement.com` |
+| Status page | `https://status.testnet.gsx.globalsettlement.com` |
+
+Today the wildcard endpoint returns 503 — see the same § for
+why. Until then, reach validators directly by EIP on port 9092:
+
+| Region | EIP | JSON-RPC |
+|---|---|---|
+| us-east-1      | 52.5.240.86      | `http://52.5.240.86:9092/` |
+| us-west-2      | 16.148.234.2     | `http://16.148.234.2:9092/` |
+| eu-west-1      | 54.73.42.237     | `http://54.73.42.237:9092/` |
+| eu-central-1   | 63.185.0.111     | `http://63.185.0.111:9092/` |
+| ap-southeast-1 | 18.139.179.124   | `http://18.139.179.124:9092/` |
+| ap-northeast-1 | 3.114.228.57     | `http://3.114.228.57:9092/` |
+| sa-east-1      | 54.233.81.124    | `http://54.233.81.124:9092/` |
+
+Pick the geographically closest one for lower RTT; all 7 serve
+the same chain state once committed.
+
+### Liveness probe
 
 ```sh
-# 1. Pick a fresh address (or use one derived from your test
-#    ML-DSA-65 keypair — see examples/rust/submit_transfer.rs).
-ADDR="0x$(openssl rand -hex 20)"
-
-# 2. Ask the faucet for tokens.
-curl -X POST -H 'Content-Type: application/json' \
-     -d "{\"address\":\"$ADDR\"}" \
-     https://faucet.devnet.gsx.globalsettlement.com/faucet
-
-# 3. Confirm the balance landed (wait a few seconds for commit).
-sleep 5
-curl -X POST -H 'Content-Type: application/json' \
-     -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"gsx_getBalance\",\"params\":{\"address\":\"$ADDR\"}}" \
-     https://rpc.devnet.gsx.globalsettlement.com/
+for ip in 52.5.240.86 16.148.234.2 54.73.42.237 63.185.0.111 \
+          18.139.179.124 3.114.228.57 54.233.81.124; do
+  echo "$ip $(curl -fsS --max-time 5 -X POST \
+       -H 'Content-Type: application/json' \
+       -d '{"jsonrpc":"2.0","id":1,"method":"gsx_getEpoch"}' \
+       "http://$ip:9092/" | jq -r '.result.latest_committed_round')"
+done
 ```
 
-### SDKs
-
-Both SDKs work against the public devnet out of the box:
-
-```rust
-// Rust SDK
-let client = gsx_client::Client::new("https://rpc.devnet.gsx.globalsettlement.com");
-```
-
-```ts
-// TypeScript SDK
-import { Client } from "@gsx/client";
-const client = new Client("https://rpc.devnet.gsx.globalsettlement.com");
-```
-
-See [`examples/rust/`](examples/rust/) +
-[`examples/typescript/`](examples/typescript/) for end-to-end
-examples (submit a transfer, watch the commit, look up the
-transaction).
-
-### What we promise about stability
-
-- **Patch releases** (e.g. `0.1.0` → `0.1.1`): no wipe. Your
-  transactions stay queryable.
-- **Minor releases** (e.g. `0.1` → `0.2`): may include a
-  regenesis. Announced ≥ 7 days in advance on the status page +
-  Discord.
-- **API surface**: semver with 0.x carve-outs — see the stability
-  promise in [`clients/rust-sdk/src/lib.rs`](clients/rust-sdk/src/lib.rs).
-  Method signatures stable within a minor version; new methods +
-  `#[non_exhaustive]` enum variants may appear between minor
-  versions.
+Every IP should return the same (or within ~5 of) a
+monotonically advancing `latest_committed_round`.
 
 ### Trust posture
 
-This is a **devnet** — tokens have $0 economic security. Per-IP
-faucet rate limit caps the worst spam; no anti-sybil beyond that.
-Do NOT use addresses derived from your mainnet wallet here; the
-`chain_id = 2025` is replay-protective in any well-written SDK,
-but defense in depth is cheaper.
+Larger than devnet but still **a testnet** — tokens have $0
+economic security. The points program assigns weight per
+[`docs/testnet/POINTS.md`](docs/testnet/POINTS.md) but the
+token itself is non-tradeable until TGE. Replay-protected via
+`chain_id = 20251`.
+
+### Running a testnet validator (external operators)
+
+See [`docs/testnet/VALIDATOR-OPERATORS.md`](docs/testnet/VALIDATOR-OPERATORS.md)
+for the application + onboarding flow and the hardware spec.
+External validators bring their own infra and peer into the
+foundation's 7 seed regions over the public internet.
 
 ---
 
@@ -110,15 +159,17 @@ host's loopback.
 
 - **Docker** + **Docker Compose v2** (`docker compose version` ≥ 2.20).
 - **Python 3.8+** (for genesis generation — no third-party packages).
+- **Rust 1.78+** (`up` builds the host-side `gsx-keygen` to mint the
+  faucet ML-DSA key; `faucet` builds `gsx-faucet`).
 - **~3 GB free disk** for the build image and four-node logs.
 - **`curl`** (for sanity-checking JSON-RPC from the host).
-- *Optional*: **Rust 1.78+** if you want to run the SDK examples or
-  drive `gsx-loadgen` against the cluster.
 
-If you don't have Docker, the entire stack also builds with
-`cargo build --release -p gsx-node` and runs four `gsx-node` processes
-side-by-side on different ports — see [Bare-metal alternative](#bare-metal-alternative)
-at the bottom.
+If you don't have Docker, use `./scripts/devnet-local.sh up-baremetal`
+instead — it builds `gsx-node` (single-package release) and runs four
+processes on loopback (`127.0.0.1:9{0..3}90/91/92`). v0's RPC stays on
+`127.0.0.1:9092` so the `curl` and `faucet` subcommands below work the
+same way. See [Bare-metal alternative](#bare-metal-alternative) for
+details.
 
 ## One-command bring-up
 
@@ -130,9 +181,14 @@ cd gsx-dag
 
 What this does:
 
-1. Runs `scripts/gen-devnet-genesis.py` to write
-   `target/devnet/` containing `genesis.toml` and per-validator
-   `v{0..3}/{node.toml, mldsa.sk, bls.sk}`.
+1. Builds the `gsx-keygen` binary host-side and runs
+   `scripts/gen-devnet-genesis.py`. The script writes `target/devnet/`
+   containing `genesis.toml`, per-validator `v{0..3}/{mldsa,bls}.sk`,
+   and `faucet/{mldsa.sk, mldsa.pk, address.hex}` — a real ML-DSA-65
+   keypair (validator-side keys are placeholders; the faucet's must be
+   real because `verify_signed_intent` checks signatures on drips).
+   The genesis seats the faucet as `authority_id = 4` and funds its
+   address via a `[[prebalances]]` entry.
 2. Renders four `node.toml`s with peer-list entries pointing at
    the docker-compose bridge IPs (`172.30.0.10..13`).
 3. Builds the `gsx-dag:devnet` Docker image (cold ~10 min; warm
@@ -167,6 +223,45 @@ Expected output (the `current` epoch will advance over time):
 For an interactive walkthrough across more methods, see
 [`examples/`](examples/) (lands with PR C2).
 
+## Run the faucet
+
+The faucet is a separate HTTP service that signs Transfer intents
+with the seeded ML-DSA-65 key from `target/devnet/faucet/` and
+submits them via the local cluster's JSON-RPC. In a second terminal:
+
+```sh
+./scripts/devnet-local.sh faucet
+```
+
+This builds `gsx-faucet` (single-package release build) and launches
+it on `127.0.0.1:8080` against `http://127.0.0.1:9092`, pinned to the
+genesis `network_id` (`gsx-devnet-local`). Ctrl-C stops it.
+
+End-to-end smoke test from a third terminal:
+
+```sh
+# 1. Faucet health — short-circuits the most common misconfig
+#    (address derivation drift between gen-script and runtime).
+curl -s http://127.0.0.1:8080/health | python3 -m json.tool
+
+# 2. Drip 100 GSX to a fresh address.
+ADDR="0x$(openssl rand -hex 20)"
+curl -sX POST -H 'Content-Type: application/json' \
+     -d "{\"address\":\"$ADDR\"}" http://127.0.0.1:8080/faucet
+
+# 3. Confirm the balance (wait a few seconds for commit).
+sleep 5
+curl -sX POST -H 'content-type: application/json' \
+     -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"gsx_getBalance\",\"params\":{\"address\":\"$ADDR\"}}" \
+     http://127.0.0.1:9092
+```
+
+If `/health` returns 503: the address in `target/devnet/genesis.toml`
+`[[prebalances]]` doesn't match the runtime-derived address. Compare
+`grep address target/devnet/genesis.toml` to the `faucet_address`
+printed in the faucet's startup log; both should equal
+`cat target/devnet/faucet/address.hex`.
+
 ## Submit a transaction
 
 Once C2 lands the examples directory:
@@ -179,8 +274,8 @@ cargo run -p gsx-client --example submit_transfer
 cd clients/ts-sdk && npm run example:submit
 ```
 
-Until then, you can submit directly via the JSON-RPC `gsx_submitIntent`
-method or via the TCP/bincode client wire — see
+Until then, submit directly via the faucet (above), the JSON-RPC
+`gsx_submitIntent` method, or the TCP/bincode client wire — see
 [`docs/visuals/governance-flow.html`](docs/visuals/governance-flow.html)
 for the protocol shape.
 
@@ -262,28 +357,34 @@ changes.
 
 ## Bare-metal alternative
 
-If Docker isn't an option, bring up four nodes side-by-side on the
-host:
+If Docker isn't an option:
 
 ```sh
-# 1. Build the binaries.
-cargo build --release -p gsx-node --bin gsx-node
-
-# 2. Generate genesis (loopback peer IPs).
-python3 scripts/gen-devnet-genesis.py --num-nodes 4 --out-dir target/devnet
-
-# 3. Write per-validator node.toml's. The bare-metal layout uses
-#    127.0.0.1:909N for peer-listen and 127.0.0.1:90M for the
-#    client-listen. Adapt scripts/devnet-local.sh's writer loop
-#    (the `cat > target/devnet/vN/node.toml` block) by substituting
-#    `127.0.0.1:909N` for `172.30.0.1N:9090` etc.
-
-# 4. Start four shells, one per validator:
-target/release/gsx-node --config target/devnet/v0/node.toml &
-target/release/gsx-node --config target/devnet/v1/node.toml &
-target/release/gsx-node --config target/devnet/v2/node.toml &
-target/release/gsx-node --config target/devnet/v3/node.toml &
+./scripts/devnet-local.sh up-baremetal
 ```
+
+What this does:
+
+1. Builds `gsx-keygen` and `gsx-node` (single-package release builds).
+2. Runs `gen-devnet-genesis.py` to produce `target/devnet/` exactly
+   like the docker path — same genesis, same faucet keypair, same
+   `[[prebalances]]`.
+3. Writes per-validator `node.toml`s with loopback ports:
+   v{N} listens on `127.0.0.1:9{N}90` (peer), `:9{N}91` (client),
+   `:9{N}92` (rpc). v0's RPC stays on `127.0.0.1:9092` so the rest
+   of this guide (`curl`, `faucet`) is unchanged.
+4. Starts the four `gsx-node` processes in the background. PIDs are
+   written to `target/devnet/v{0..3}.pid`; logs to
+   `target/devnet/v{0..3}.log`.
+
+Tail logs and stop:
+
+```sh
+./scripts/devnet-local.sh logs-baremetal     # tail v0.log
+./scripts/devnet-local.sh down-baremetal     # kill the four processes
+```
+
+`./scripts/devnet-local.sh reset` clears both flavors safely.
 
 ## Next steps
 

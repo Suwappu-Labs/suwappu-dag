@@ -38,3 +38,11 @@ path = "subscribe_events.rs"
 [[bin]]
 name = "submit_transfer"
 path = "submit_transfer.rs"
+
+[[bin]]
+name = "admit_authority"
+path = "admit_authority.rs"
+
+[dependencies.clap]
+version = "4"
+features = ["derive"]

@@ -16,28 +16,43 @@ emits a flat directory tree:
             bls.sk
         v1/
             ...
+        faucet/
+            mldsa.sk       <-- real ML-DSA-65 key (the faucet binary loads this)
+            mldsa.pk       <-- matching public key
+            address.hex    <-- 0x<20-byte hex> derived via blake3(pk)[:20]
 
-The per-validator `node.toml` is filled in by `scripts/devnet-local.sh`
-(or `docker-compose.yml`) at startup since the peer-list IPs depend on
-the deployment target.
+Keys: validator-side keys are deterministic placeholder bytes — the
+validator-to-validator wire doesn't verify ML-DSA today (paper §3.3
+exception). The faucet authority is different: its ML-DSA-65 keypair
+MUST be real because the daemon's `verify_signed_intent` gate checks
+the signature on every drip. This script invokes `gsx-keygen` (built
+from `crates/gsx-crypto/src/bin/gsx-keygen.rs`) for that one keypair
+and writes a `[[prebalances]]` entry funding the faucet's address.
 
-Keys: this script writes deterministic placeholder bytes derived from
-a seed. **Acceptable only for a LOCAL devnet that never accepts
-external traffic.** For any public testnet / mainnet, use the
-real `gsx-crypto` keygen path.
+**Acceptable only for a LOCAL devnet that never accepts external
+traffic.** For any public testnet / mainnet, use the
+`scripts/devnet/gen-genesis.py` or `scripts/testnet/gen-genesis.py`
+paths.
 
 Usage:
     ./scripts/gen-devnet-genesis.py --num-nodes 4 --out-dir target/devnet
+
+Requires `gsx-keygen` on PATH:
+    cargo build --release -p gsx-crypto --bin gsx-keygen
+    export PATH="$PWD/target/release:$PATH"
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
 DEFAULT_NETWORK_ID = "gsx-devnet-local"
+FAUCET_LABEL = "faucet"
 
 
 def placeholder_key(seed: bytes, length: int) -> bytes:
@@ -60,6 +75,44 @@ ML_DSA_PK_BYTES = 1952
 ML_DSA_SK_BYTES = 4032
 BLS_PK_BYTES = 48
 BLS_SK_BYTES = 32
+
+
+def mint_faucet_keypair(out_dir: Path) -> tuple[str, str]:
+    """Invoke `gsx-keygen` to mint a real ML-DSA-65 faucet keypair.
+
+    Returns `(faucet_pk_hex, faucet_address_hex)` where the address is
+    the canonical `blake3(pk)[:20]` recipe used by
+    `gsx_faucet::address_from_pubkey` at runtime.
+    """
+    if shutil.which("gsx-keygen") is None:
+        print(
+            "error: gsx-keygen not found on PATH. Build it first:\n"
+            "    cargo build --release -p gsx-crypto --bin gsx-keygen\n"
+            "    export PATH=\"$PWD/target/release:$PATH\"",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    faucet_dir = out_dir / "faucet"
+    faucet_dir.mkdir(parents=True, exist_ok=True)
+    sk_path = faucet_dir / "mldsa.sk"
+    pk_path = faucet_dir / "mldsa.pk"
+    addr_path = faucet_dir / "address.hex"
+
+    subprocess.run(
+        [
+            "gsx-keygen",
+            "--algo", "mldsa",
+            "--sk", str(sk_path),
+            "--pk", str(pk_path),
+            "--addr", str(addr_path),
+        ],
+        check=True,
+    )
+
+    faucet_pk_hex = pk_path.read_bytes().hex()
+    faucet_addr_hex = addr_path.read_text().strip()
+    return faucet_pk_hex, faucet_addr_hex
 
 
 def main() -> int:
@@ -93,6 +146,13 @@ def main() -> int:
         type=int,
         default=150_000,
         help="Per-validator stake (default 150_000 — above AUTHORITY_STAKE_THRESHOLD_GSX).",
+    )
+    ap.add_argument(
+        "--faucet-initial-balance-gsx",
+        type=int,
+        default=1_000_000_000,
+        help="Genesis-time balance of the faucet address (1 billion GSX by default — "
+             "enough for ~10 million drips at 100 GSX/drip).",
     )
     ap.add_argument(
         "--rounds-per-epoch",
@@ -142,6 +202,12 @@ def main() -> int:
             }
         )
 
+    # Faucet authority — needs a REAL ML-DSA-65 keypair because every drip
+    # passes through `verify_signed_intent`. No BLS key: the faucet is a
+    # [[signers]] entry (AuthorityRegistry only), not a consensus validator.
+    faucet_pk_hex, faucet_addr_hex = mint_faucet_keypair(out)
+    faucet_authority_id = args.num_nodes
+
     # Render genesis.toml.
     lines = [
         f'network_id = "{args.network_id}"',
@@ -161,14 +227,50 @@ def main() -> int:
                 "",
             ]
         )
+
+    # Faucet signer — seated ONLY in the AuthorityRegistry via a [[signers]]
+    # entry, NOT as a consensus validator. Seating the faucet as a
+    # [[validators]] entry inflates committee size n (= validators.len()) and
+    # the quorum thresholds; since the faucet runs no node it never proposes
+    # or votes, so finalization starves. As a signer it still resolves
+    # `verify_signed_intent`'s pubkey hash. stake_gsx must clear
+    # AUTHORITY_STAKE_THRESHOLD_GSX (100,000) or `admit` silently drops it and
+    # drips hit UnknownSigner.
+    lines.extend(
+        [
+            "[[signers]]",
+            f"authority_id = {faucet_authority_id}",
+            f'label = "{FAUCET_LABEL}"',
+            f'mldsa_public_key_hex = "{faucet_pk_hex}"',
+            "stake_gsx = 100000",
+            "",
+        ]
+    )
+
+    # Pre-balance the faucet so drips have something to spend. Loaded by
+    # `gsx_node::config::GenesisManifest::prebalances` at startup.
+    lines.extend(
+        [
+            "[[prebalances]]",
+            f'address = "{faucet_addr_hex}"',
+            f"balance_gsx = {args.faucet_initial_balance_gsx}",
+            'role = "faucet"',
+            "",
+        ]
+    )
+
     (out / "genesis.toml").write_text("\n".join(lines))
 
     print(f"devnet genesis written to {out}/")
     print(f"  validators: {args.num_nodes}")
     print(f"  network_id: {args.network_id}")
     print(f"  per-node keys: {out}/v{{0..{args.num_nodes - 1}}}/{{mldsa,bls}}.sk")
+    print(f"  faucet authority_id: {faucet_authority_id}")
+    print(f"  faucet address: {faucet_addr_hex}")
+    print(f"  faucet initial balance: {args.faucet_initial_balance_gsx:,} GSX")
     print()
-    print("WARNING: placeholder keys — devnet ONLY. Never expose to the public.")
+    print("WARNING: validator keys are placeholders — devnet ONLY. The faucet key")
+    print("is real but never reuse it for any non-devnet deployment.")
     return 0
 
 

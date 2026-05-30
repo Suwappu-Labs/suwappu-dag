@@ -1,0 +1,82 @@
+# AWS CodeBuild spec for the gsx-testnet validator binaries.
+#
+# Image: aws/codebuild/amazonlinux2-aarch64-standard:3.0 (Amazon Linux 2,
+# aarch64). Native arm64 target — matches the c7g.xlarge seed instances.
+# Target is aarch64-unknown-linux-gnu (the native target of the image);
+# glibc 2.26 there is forward-compatible with the Ubuntu 24.04 (glibc 2.39+)
+# AMI we deploy to.
+
+version: 0.2
+
+env:
+  variables:
+    CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+    # Pin codegen to the lowest-common-denominator Graviton CPU so the
+    # same binary runs on both the c7g.xlarge validators (Graviton 3
+    # / neoverse-v1) and the t4g.small faucet (Graviton 2 /
+    # neoverse-n1). Without this, pqcrypto-mldsa / blst pull in
+    # Graviton-3-only intrinsics at build time and the faucet
+    # SIGILLs the first time it tries to mldsa::sign() a drip.
+    # neoverse-n1 = Graviton 2 baseline = ARMv8.2-A + Crypto + DotProd.
+    RUSTFLAGS: "-C target-cpu=neoverse-n1"
+    CFLAGS: "-march=armv8.2-a+crypto"
+    CXXFLAGS: "-march=armv8.2-a+crypto"
+
+phases:
+  install:
+    commands:
+      - yum install -y gcc gcc-c++ make pkgconfig openssl-devel zip jq tar gzip git
+      - rustc --version || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+      - export PATH="$HOME/.cargo/bin:$PATH"
+      - rustc --version
+      - uname -m
+
+  pre_build:
+    commands:
+      - export PATH="$HOME/.cargo/bin:$PATH"
+      # Pull the gsx-db deploy key from SSM SecureString. Reuses the perf
+      # parameter — it's the same gsx-db repo, same deploy key.
+      - |
+        if ! aws ssm get-parameter --name /gsx-perf/gsx-db-deploy-key --with-decryption --query Parameter.Value --output text > /tmp/gsx-db.key 2>/tmp/ssm-err; then
+          echo "ERROR: SSM /gsx-perf/gsx-db-deploy-key not found." >&2
+          cat /tmp/ssm-err >&2
+          exit 1
+        fi
+      - chmod 600 /tmp/gsx-db.key
+      - mkdir -p ~/.ssh
+      - ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
+      - eval "$(ssh-agent -s)"
+      - ssh-add /tmp/gsx-db.key
+      - git config --global url."git@github.com:".insteadOf "https://github.com/"
+
+  build:
+    commands:
+      - export PATH="$HOME/.cargo/bin:$PATH"
+      - cd $CODEBUILD_SRC_DIR
+      - cargo build --release --target aarch64-unknown-linux-gnu --bin gsx-node --bin gsx-loadgen --bin gsx-metrics --bin gsx-faucet --bin gsx-validator-program
+
+  post_build:
+    commands:
+      - mkdir -p $CODEBUILD_SRC_DIR/out
+      - cp target/aarch64-unknown-linux-gnu/release/gsx-node $CODEBUILD_SRC_DIR/out/
+      - cp target/aarch64-unknown-linux-gnu/release/gsx-loadgen $CODEBUILD_SRC_DIR/out/
+      - cp target/aarch64-unknown-linux-gnu/release/gsx-metrics $CODEBUILD_SRC_DIR/out/
+      - cp target/aarch64-unknown-linux-gnu/release/gsx-faucet $CODEBUILD_SRC_DIR/out/
+      - cp target/aarch64-unknown-linux-gnu/release/gsx-validator-program $CODEBUILD_SRC_DIR/out/
+      - strip $CODEBUILD_SRC_DIR/out/* || true
+      - ls -lh $CODEBUILD_SRC_DIR/out/
+      - file $CODEBUILD_SRC_DIR/out/gsx-node
+
+artifacts:
+  files:
+    - out/gsx-node
+    - out/gsx-loadgen
+    - out/gsx-metrics
+    - out/gsx-faucet
+    - out/gsx-validator-program
+  discard-paths: yes
+
+cache:
+  paths:
+    - "/root/.cargo/registry/**/*"
+    - "/root/.cargo/git/**/*"
