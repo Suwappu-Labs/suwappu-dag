@@ -1062,6 +1062,7 @@ dependencies = [
  "gsx-authority",
  "gsx-consensus",
  "gsx-crypto",
+ "gsx-l2-bridge",
  "gsx-l2-verifier-precompile",
  "gsxdb-bridge",
  "gsxdb-state",
@@ -1135,7 +1136,9 @@ dependencies = [
 name = "gsx-l2-bridge"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "hex",
+ "proptest",
  "serde",
  "thiserror 1.0.69",
 ]
@@ -1207,6 +1210,7 @@ name = "gsx-l2-stm"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "gsx-l2-bridge",
  "gsx-l2-verifier-precompile",
  "hex",
  "proptest",

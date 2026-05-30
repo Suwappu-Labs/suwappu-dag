@@ -114,6 +114,53 @@ pub enum BatchTransaction {
         /// stored nonce or the tx rejects.
         nonce: u64,
     },
+    /// Burn `amount` from `from` on L2; record a withdrawal claim
+    /// for `l1_recipient` on L1. Pairs with the L1-side
+    /// `Intent::L2BurnProven`: once this batch's state root is
+    /// committed on L1, the user (or anyone with the burn-leaf
+    /// merkle proof) can submit `L2BurnProven` to release the
+    /// matching amount from the L1 bridge escrow.
+    ///
+    /// IQ-008 defines the leaf encoding the L1 substrate verifies
+    /// against; this STM is the producer side. The collected
+    /// burns for a batch are surfaced as
+    /// [`BatchOutput::withdrawals`] in canonical (insertion) order
+    /// and committed via [`BatchOutput::withdrawals_root`].
+    ///
+    /// Replay-defended by `from`'s account nonce just like
+    /// `Transfer`; balance underflow rejects.
+    Burn {
+        /// L2 sender address (debited).
+        from: Address,
+        /// L1 address that will be credited when this burn is
+        /// later claimed via `Intent::L2BurnProven`.
+        l1_recipient: Address,
+        /// Amount being burned on L2 / unlocked on L1.
+        amount: Balance,
+        /// Asset selector. `None` = native GSX, `Some(asset_id)`
+        /// = a registered bridge asset (matches the L1-side
+        /// `L2BurnProven::asset_id` semantics).
+        #[serde(default)]
+        asset_id: Option<[u8; 32]>,
+        /// Expected nonce for `from`. Must equal the account's
+        /// stored nonce or the tx rejects.
+        nonce: u64,
+    },
+}
+
+/// One withdrawal claim produced by a successful `Burn` tx. The
+/// per-batch withdrawals tree is built from these entries in
+/// canonical (insertion) order; off-chain bridge UIs reconstruct
+/// the same tree from this list + `BatchInput.l2_chain_id_hash` +
+/// `BatchInput.batch_id` to produce L1-side `L2BurnProven` proofs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BurnEntry {
+    /// L1 address to credit on the eventual withdrawal claim.
+    pub l1_recipient: Address,
+    /// Amount being unlocked on L1.
+    pub amount: Balance,
+    /// Asset selector. `None` = native GSX.
+    pub asset_id: Option<[u8; 32]>,
 }
 
 impl BatchTransaction {
@@ -121,9 +168,16 @@ impl BatchTransaction {
     /// per-tx slot of the DA blob. Stable across the
     /// host / sequencer / STM-guest surfaces.
     ///
-    /// Encoding for `Transfer` (variant tag = `0x01`):
+    /// Encoding for `Transfer` (variant tag = `0x01`, 65 bytes):
     /// ```text
-    /// 0x01 || from (20) || to (20) || amount (u128::BE, 16) || nonce (u64::BE, 8)  = 65 bytes
+    /// 0x01 || from (20) || to (20) || amount (u128::BE, 16) || nonce (u64::BE, 8)
+    /// ```
+    ///
+    /// Encoding for `Burn` (variant tag = `0x02`, 66 or 98 bytes):
+    /// ```text
+    /// 0x02 || from (20) || l1_recipient (20) || amount (u128::BE, 16) ||
+    ///   nonce (u64::BE, 8) || asset_present (u8, 1) ||
+    ///   asset_id (32 bytes, only when asset_present == 1)
     /// ```
     pub fn encode(&self) -> Vec<u8> {
         match self {
@@ -139,6 +193,25 @@ impl BatchTransaction {
                 buf.extend_from_slice(to);
                 buf.extend_from_slice(&amount.to_be_bytes());
                 buf.extend_from_slice(&nonce.to_be_bytes());
+                buf
+            }
+            BatchTransaction::Burn {
+                from,
+                l1_recipient,
+                amount,
+                asset_id,
+                nonce,
+            } => {
+                let mut buf = Vec::with_capacity(if asset_id.is_some() { 98 } else { 66 });
+                buf.push(0x02);
+                buf.extend_from_slice(from);
+                buf.extend_from_slice(l1_recipient);
+                buf.extend_from_slice(&amount.to_be_bytes());
+                buf.extend_from_slice(&nonce.to_be_bytes());
+                buf.push(u8::from(asset_id.is_some()));
+                if let Some(id) = asset_id {
+                    buf.extend_from_slice(id);
+                }
                 buf
             }
         }
@@ -167,6 +240,54 @@ impl BatchTransaction {
                     from,
                     to,
                     amount,
+                    nonce,
+                })
+            }
+            0x02 => {
+                // Burn: variable length depending on asset_present flag.
+                // Minimum 66 B (no asset); with asset, 98 B.
+                if bytes.len() < 66 {
+                    return Err(StmError::MalformedTx(
+                        "Burn tx is at least 66 bytes (1 tag + 20 from + 20 recipient + 16 amount + 8 nonce + 1 asset-flag)",
+                    ));
+                }
+                let mut from = [0u8; 20];
+                from.copy_from_slice(&bytes[1..21]);
+                let mut l1_recipient = [0u8; 20];
+                l1_recipient.copy_from_slice(&bytes[21..41]);
+                let amount = u128::from_be_bytes(bytes[41..57].try_into().unwrap());
+                let nonce = u64::from_be_bytes(bytes[57..65].try_into().unwrap());
+                let asset_present = bytes[65];
+                let asset_id = match asset_present {
+                    0 => {
+                        if bytes.len() != 66 {
+                            return Err(StmError::MalformedTx(
+                                "Burn tx with asset_present=0 must be exactly 66 bytes",
+                            ));
+                        }
+                        None
+                    }
+                    1 => {
+                        if bytes.len() != 98 {
+                            return Err(StmError::MalformedTx(
+                                "Burn tx with asset_present=1 must be exactly 98 bytes",
+                            ));
+                        }
+                        let mut id = [0u8; 32];
+                        id.copy_from_slice(&bytes[66..98]);
+                        Some(id)
+                    }
+                    _ => {
+                        return Err(StmError::MalformedTx(
+                            "Burn tx asset_present byte must be 0 or 1",
+                        ));
+                    }
+                };
+                Ok(BatchTransaction::Burn {
+                    from,
+                    l1_recipient,
+                    amount,
+                    asset_id,
                     nonce,
                 })
             }
@@ -232,6 +353,17 @@ pub struct BatchInput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BatchOutput {
     /// L2 state root AFTER applying this batch.
+    ///
+    /// **Pre-burn-variant:** the BLAKE3 commitment over the post-
+    /// batch ledger ([`compute_state_root`]).
+    ///
+    /// **Post-burn-variant (this PR):** unchanged on the
+    /// `new_l2_state_root` field — the field still carries the
+    /// ledger state root. Burns produce a SEPARATE
+    /// [`Self::withdrawals_root`] published below; binding that
+    /// into the consensus state root (i.e. making the burn
+    /// gate at `Intent::L2BurnProven` actually accept real
+    /// proofs) is the next PR — see IQ-008's cutover criterion.
     pub new_l2_state_root: Hash32,
     /// `BLAKE3(da_blob)`. Binds the public-input commitment
     /// to the exact DA payload the prover saw.
@@ -239,6 +371,22 @@ pub struct BatchOutput {
     /// Confidential nullifier-set commitment (Track H).
     /// `[0u8; 32]` when no confidential txs in the batch.
     pub confidential_root: Hash32,
+    /// Withdrawals collected from successful `Burn` txs in this
+    /// batch, in canonical (insertion) order. Off-chain bridge
+    /// UIs reconstruct the per-batch withdrawals tree from this
+    /// list (plus `BatchInput.l2_chain_id_hash` + batch_id) and
+    /// use the merkle proof at the matching index to populate
+    /// `Intent::L2BurnProven`. Host-side only — the SP1 guest
+    /// commits only the root (via [`Self::withdrawals_root`]).
+    #[serde(default)]
+    pub withdrawals: Vec<BurnEntry>,
+    /// Merkle root of [`Self::withdrawals`] per IQ-008. Equals
+    /// [`EMPTY_WITHDRAWALS_ROOT`] when this batch contained no
+    /// successful burns. Once bound into `new_l2_state_root`
+    /// (next PR), this is what `Intent::L2BurnProven` verifies
+    /// inclusion against.
+    #[serde(default)]
+    pub withdrawals_root: Hash32,
     /// Post-batch ledger. Carried in the host-side BatchOutput
     /// for sequencer-side bookkeeping; the SP1 guest does NOT
     /// commit this (only its hash, via `new_l2_state_root`).
@@ -352,10 +500,14 @@ pub fn execute_batch(input: &BatchInput) -> Result<BatchOutput, StmError> {
     let txs = decode_da_blob(&input.da_blob, input.batch_id)?;
 
     // 2. Snapshot + mutate the ledger. Clone so the input arg
-    // stays untouched (the STM is a pure function).
+    // stays untouched (the STM is a pure function). Successful
+    // `Burn` txs append a `BurnEntry` to `withdrawals` (in
+    // canonical insertion order) for the per-batch withdrawals
+    // tree built below.
     let mut ledger = input.ledger.clone();
+    let mut withdrawals: Vec<BurnEntry> = Vec::new();
     for tx in &txs {
-        apply_tx(&mut ledger, tx)?;
+        apply_tx(&mut ledger, &mut withdrawals, tx)?;
     }
 
     // 3. Compute the new state root + commitments.
@@ -364,11 +516,15 @@ pub fn execute_batch(input: &BatchInput) -> Result<BatchOutput, StmError> {
     // Track H confidential support is plumbed but not yet wired —
     // see lib-level doc.
     let confidential_root = [0u8; 32];
+    let withdrawals_root =
+        compute_withdrawals_root(&withdrawals, &input.l2_chain_id_hash, input.batch_id);
 
     Ok(BatchOutput {
         new_l2_state_root,
         da_commitment,
         confidential_root,
+        withdrawals,
+        withdrawals_root,
         ledger,
     })
 }
@@ -432,9 +588,13 @@ fn decode_da_blob(blob: &[u8], expected_batch_id: u64) -> Result<Vec<BatchTransa
 }
 
 /// Apply one tx to the ledger. Mutates in place; the caller has
-/// snapshotted before calling.
+/// snapshotted before calling. For `Burn` txs, also pushes a
+/// `BurnEntry` into `withdrawals` on success — so the caller's
+/// withdrawals tree includes every successfully-applied burn in
+/// canonical (insertion) order.
 fn apply_tx(
     ledger: &mut BTreeMap<Address, Account>,
+    withdrawals: &mut Vec<BurnEntry>,
     tx: &BatchTransaction,
 ) -> Result<(), StmError> {
     match tx {
@@ -481,7 +641,225 @@ fn apply_tx(
                 .ok_or(StmError::CreditOverflow { to: *to })?;
             Ok(())
         }
+        BatchTransaction::Burn {
+            from,
+            l1_recipient,
+            amount,
+            asset_id,
+            nonce,
+        } => {
+            // Same atomicity discipline as Transfer: validate
+            // nonce + balance before any state writes. Burn has
+            // no recipient on L2 — the credit lands on L1 via a
+            // later `L2BurnProven` claim against the withdrawals
+            // tree built below.
+            let from_account = ledger.entry(*from).or_default();
+            if from_account.nonce != *nonce {
+                return Err(StmError::NonceMismatch {
+                    from: *from,
+                    expected: from_account.nonce,
+                    got: *nonce,
+                });
+            }
+            if from_account.balance < *amount {
+                return Err(StmError::InsufficientBalance {
+                    from: *from,
+                    have: from_account.balance,
+                    need: *amount,
+                });
+            }
+            from_account.balance -= *amount;
+            from_account.nonce += 1;
+
+            // Record the withdrawal claim. The L1 substrate's
+            // `Intent::L2BurnProven` apply arm verifies a merkle
+            // proof against the per-batch withdrawals tree built
+            // from this list (IQ-008 leaf scheme).
+            withdrawals.push(BurnEntry {
+                l1_recipient: *l1_recipient,
+                amount: *amount,
+                asset_id: *asset_id,
+            });
+            Ok(())
+        }
     }
+}
+
+/// Canonical root of an empty withdrawals tree. The STM emits
+/// this on batches that contain no successful `Burn` txs;
+/// off-chain consumers compare against it to detect "no burns
+/// claimable from this batch" without re-running the builder.
+///
+/// Concretely: `BLAKE3("gsx-l2-empty-withdrawals-v1")`. The
+/// domain tag is length-distinguished from the leaf / inner-node
+/// tags in `gsx-l2-bridge` so a degenerate tree (e.g. an
+/// adversarially-crafted single-leaf hash) can never collide
+/// with the empty root.
+pub fn empty_withdrawals_root() -> Hash32 {
+    let mut h = blake3::Hasher::new();
+    h.update(b"gsx-l2-empty-withdrawals-v1");
+    *h.finalize().as_bytes()
+}
+
+/// Build the per-batch withdrawals merkle tree and return its
+/// root, per IQ-008. Empty `burns` → [`empty_withdrawals_root`].
+/// Otherwise: leaves in insertion order, padded to the next
+/// power of two with a sentinel padding leaf (so the tree shape
+/// is deterministic for the proof builder + the substrate
+/// verifier).
+///
+/// Leaf encoding (matches `gsx-l2-bridge::BurnLeaf::hash`):
+/// `BLAKE3("gsx-l2-burn-leaf-v1" || l2_chain_id_hash (32) ||
+/// u64_BE(batch_id) || recipient (20) || u128_BE(amount) ||
+/// u8(asset_id.is_some()) || asset_id (32 if present))`.
+///
+/// Inner-node encoding (matches `gsx-l2-bridge::hash_inner_node`):
+/// `BLAKE3("gsx-l2-burn-node-v1" || left (32) || right (32))`.
+///
+/// Padding-leaf encoding: `BLAKE3("gsx-l2-burn-pad-v1")`. A
+/// dedicated length-distinguished tag — a padding leaf MUST NOT
+/// collide with any real burn leaf nor with an inner-node hash,
+/// so an attacker cannot smuggle a padding sentinel into the
+/// real-leaf prefix and forge a proof.
+pub fn compute_withdrawals_root(
+    burns: &[BurnEntry],
+    l2_chain_id_hash: &Hash32,
+    batch_id: u64,
+) -> Hash32 {
+    if burns.is_empty() {
+        return empty_withdrawals_root();
+    }
+    let mut layer: Vec<Hash32> = burns
+        .iter()
+        .map(|b| burn_entry_leaf_hash(b, l2_chain_id_hash, batch_id))
+        .collect();
+    // Pad to the next power of two with the canonical padding
+    // leaf so the tree shape is deterministic. A 1-leaf tree
+    // gets paired with one padding leaf to form depth 1; a
+    // 3-leaf tree gets one padding leaf to reach 4; a 5-leaf
+    // tree gets three padding leaves to reach 8; etc.
+    let target = layer.len().next_power_of_two();
+    let pad = padding_leaf_hash();
+    while layer.len() < target {
+        layer.push(pad);
+    }
+    // Pairwise hash up the tree until one root remains.
+    while layer.len() > 1 {
+        let mut next = Vec::with_capacity(layer.len() / 2);
+        for chunk in layer.chunks(2) {
+            next.push(gsx_l2_bridge::hash_inner_node(&chunk[0], &chunk[1]));
+        }
+        layer = next;
+    }
+    layer[0]
+}
+
+/// Construct the merkle proof binding the `index`-th burn in
+/// `burns` to the same withdrawals root [`compute_withdrawals_root`]
+/// produces. Returns `(merkle_path, path_directions)` ready to
+/// pass to `gsx-l2-bridge::verify_burn_inclusion` or to populate
+/// `Intent::L2BurnProven`.
+///
+/// `path_directions` packs one direction bit per level
+/// LSB-first, matching IQ-008's verification rule: bit `0` means
+/// the sibling is on the RIGHT (running hash is the LEFT child);
+/// bit `1` means the sibling is on the LEFT.
+///
+/// # Errors
+///
+/// Returns `Err(WithdrawalsProofError::IndexOutOfRange)` if
+/// `index >= burns.len()`. Empty `burns` returns this error
+/// regardless of `index` (there's no burn to prove inclusion of).
+pub fn merkle_proof_for_burn(
+    burns: &[BurnEntry],
+    index: usize,
+    l2_chain_id_hash: &Hash32,
+    batch_id: u64,
+) -> Result<(Vec<u8>, Vec<u8>), WithdrawalsProofError> {
+    if index >= burns.len() {
+        return Err(WithdrawalsProofError::IndexOutOfRange {
+            index,
+            len: burns.len(),
+        });
+    }
+    // Build the leaf layer + pad to the next power of two.
+    let mut layer: Vec<Hash32> = burns
+        .iter()
+        .map(|b| burn_entry_leaf_hash(b, l2_chain_id_hash, batch_id))
+        .collect();
+    let target = layer.len().next_power_of_two();
+    let pad = padding_leaf_hash();
+    while layer.len() < target {
+        layer.push(pad);
+    }
+    // Walk up, capturing the sibling at the running position
+    // each step. The direction bit is the LSB of the index at
+    // that level — if even, the running hash is the LEFT child
+    // (sibling on the RIGHT, direction bit = 0); if odd, the
+    // running hash is the RIGHT child (sibling on the LEFT,
+    // direction bit = 1).
+    let mut path = Vec::new();
+    let mut directions = Vec::new();
+    let mut pos = index;
+    let mut level = 0usize;
+    while layer.len() > 1 {
+        let sibling_index = pos ^ 1; // flip the LSB
+        path.extend_from_slice(&layer[sibling_index]);
+        let direction_bit: u8 = u8::from(pos & 1 == 1);
+        // Lazily extend `directions` by one byte every 8 levels.
+        if level % 8 == 0 {
+            directions.push(0);
+        }
+        let dir_byte_index = level / 8;
+        directions[dir_byte_index] |= direction_bit << (level % 8);
+        // Advance one level: collapse the layer to parents, halve pos.
+        let mut next = Vec::with_capacity(layer.len() / 2);
+        for chunk in layer.chunks(2) {
+            next.push(gsx_l2_bridge::hash_inner_node(&chunk[0], &chunk[1]));
+        }
+        layer = next;
+        pos /= 2;
+        level += 1;
+    }
+    Ok((path, directions))
+}
+
+/// Errors produced by [`merkle_proof_for_burn`].
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum WithdrawalsProofError {
+    /// Asked for a proof at an `index` that doesn't exist in the
+    /// batch's withdrawals. Hits both the empty-batch case
+    /// (`len == 0`) and the past-end case.
+    #[error("burn index {index} out of range (batch has {len} withdrawals)")]
+    IndexOutOfRange {
+        /// Caller-supplied index.
+        index: usize,
+        /// Number of burns in the batch.
+        len: usize,
+    },
+}
+
+/// Hash of one [`BurnEntry`] under IQ-008's leaf scheme. Wraps
+/// `gsx-l2-bridge::BurnLeaf::hash` so the STM + the L1 substrate
+/// share a single source of truth.
+fn burn_entry_leaf_hash(entry: &BurnEntry, chain_id_hash: &Hash32, batch_id: u64) -> Hash32 {
+    let leaf = gsx_l2_bridge::BurnLeaf {
+        l2_chain_id_hash: chain_id_hash,
+        batch_id,
+        recipient: &entry.l1_recipient,
+        amount: entry.amount,
+        asset_id: entry.asset_id.as_ref(),
+    };
+    leaf.hash()
+}
+
+/// Canonical padding-leaf hash. Used to round the withdrawals
+/// tree to a power of two without colliding with real leaves
+/// (length-distinguished domain tag).
+fn padding_leaf_hash() -> Hash32 {
+    let mut h = blake3::Hasher::new();
+    h.update(b"gsx-l2-burn-pad-v1");
+    *h.finalize().as_bytes()
 }
 
 /// Canonical state-root computation. BLAKE3 over a deterministic
@@ -867,6 +1245,8 @@ mod tests {
             new_l2_state_root: [0x55u8; 32],
             da_commitment: [0x66u8; 32],
             confidential_root: [0x77u8; 32],
+            withdrawals: vec![],
+            withdrawals_root: empty_withdrawals_root(),
             ledger: BTreeMap::new(),
         };
         let pi = to_public_inputs(&input, &output);
@@ -918,5 +1298,373 @@ mod tests {
             &pi[pi_offsets::CONFIDENTIAL_ROOT_OFFSET..pi_offsets::CONFIDENTIAL_ROOT_OFFSET + 32],
             &[0x77u8; 32]
         );
+    }
+
+    // ----- Burn variant + withdrawals tree (IQ-008 follow-up) -----
+
+    fn build_input(
+        ledger: BTreeMap<Address, Account>,
+        txs: Vec<BatchTransaction>,
+        batch_id: u64,
+        chain_id_hash: Hash32,
+    ) -> BatchInput {
+        let prev = compute_state_root(&ledger);
+        BatchInput {
+            prev_l2_state_root: prev,
+            batch_id,
+            da_blob: encode_da_blob(batch_id, &txs),
+            prev_l1_state_root: [0u8; 32],
+            l2_chain_id_hash: chain_id_hash,
+            l1_anchor_height: 0,
+            range_vk_commitment: [0u8; 32],
+            ledger,
+        }
+    }
+
+    #[test]
+    fn burn_tx_encode_decode_roundtrip_no_asset() {
+        let tx = BatchTransaction::Burn {
+            from: addr(1),
+            l1_recipient: addr(2),
+            amount: 12345,
+            asset_id: None,
+            nonce: 7,
+        };
+        let bytes = tx.encode();
+        assert_eq!(bytes.len(), 66);
+        let decoded = BatchTransaction::decode(&bytes).unwrap();
+        assert_eq!(tx, decoded);
+    }
+
+    #[test]
+    fn burn_tx_encode_decode_roundtrip_with_asset() {
+        let tx = BatchTransaction::Burn {
+            from: addr(1),
+            l1_recipient: addr(2),
+            amount: 12345,
+            asset_id: Some([0xabu8; 32]),
+            nonce: 7,
+        };
+        let bytes = tx.encode();
+        assert_eq!(bytes.len(), 98);
+        let decoded = BatchTransaction::decode(&bytes).unwrap();
+        assert_eq!(tx, decoded);
+    }
+
+    #[test]
+    fn burn_tx_decode_rejects_invalid_asset_flag() {
+        let mut bytes = vec![0u8; 66];
+        bytes[0] = 0x02;
+        bytes[65] = 0xff; // asset_present must be 0 or 1
+        assert!(matches!(
+            BatchTransaction::decode(&bytes),
+            Err(StmError::MalformedTx(_))
+        ));
+    }
+
+    /// `execute_batch` applies a burn: sender debited, nonce
+    /// advances, the burn entry shows up in `withdrawals`, and the
+    /// withdrawals root is no longer the empty-tree sentinel.
+    #[test]
+    fn execute_batch_records_burn_in_withdrawals() {
+        let mut ledger = BTreeMap::new();
+        ledger.insert(
+            addr(1),
+            Account {
+                balance: 1_000,
+                nonce: 0,
+            },
+        );
+        let chain = [0u8; 32];
+        let burn = BatchTransaction::Burn {
+            from: addr(1),
+            l1_recipient: addr(99),
+            amount: 250,
+            asset_id: None,
+            nonce: 0,
+        };
+        let input = build_input(ledger, vec![burn], 5, chain);
+
+        let output = execute_batch(&input).expect("burn must apply");
+        assert_eq!(output.withdrawals.len(), 1);
+        assert_eq!(output.withdrawals[0].l1_recipient, addr(99));
+        assert_eq!(output.withdrawals[0].amount, 250);
+        assert!(output.withdrawals[0].asset_id.is_none());
+
+        // Sender debited + nonce advanced.
+        let from_acct = output.ledger.get(&addr(1)).unwrap();
+        assert_eq!(from_acct.balance, 750);
+        assert_eq!(from_acct.nonce, 1);
+
+        // Withdrawals root is no longer the empty-tree sentinel.
+        assert_ne!(output.withdrawals_root, empty_withdrawals_root());
+    }
+
+    /// Burn with insufficient balance rejects atomically — no
+    /// state mutation, no withdrawals entry.
+    #[test]
+    fn execute_batch_burn_underflow_rejects() {
+        let mut ledger = BTreeMap::new();
+        ledger.insert(
+            addr(1),
+            Account {
+                balance: 10,
+                nonce: 0,
+            },
+        );
+        let chain = [0u8; 32];
+        let burn = BatchTransaction::Burn {
+            from: addr(1),
+            l1_recipient: addr(99),
+            amount: 100,
+            asset_id: None,
+            nonce: 0,
+        };
+        let input = build_input(ledger, vec![burn], 5, chain);
+
+        let err = execute_batch(&input).expect_err("underflow must reject");
+        assert!(matches!(err, StmError::InsufficientBalance { .. }));
+    }
+
+    /// Empty-batch withdrawals root is the canonical sentinel.
+    /// Used by off-chain consumers to detect "no burns claimable
+    /// from this batch" without running the builder.
+    #[test]
+    fn empty_batch_has_canonical_empty_withdrawals_root() {
+        let ledger = BTreeMap::new();
+        let chain = [0u8; 32];
+        let input = build_input(ledger, vec![], 5, chain);
+
+        let output = execute_batch(&input).expect("empty batch applies");
+        assert!(output.withdrawals.is_empty());
+        assert_eq!(output.withdrawals_root, empty_withdrawals_root());
+    }
+
+    /// Withdrawals root is deterministic across two STM runs with
+    /// the same burn list — load-bearing for the SP1 guest's
+    /// proof-vs-witness equivalence.
+    #[test]
+    fn withdrawals_root_is_deterministic() {
+        let burns = vec![
+            BurnEntry {
+                l1_recipient: addr(10),
+                amount: 100,
+                asset_id: None,
+            },
+            BurnEntry {
+                l1_recipient: addr(11),
+                amount: 200,
+                asset_id: Some([0xcdu8; 32]),
+            },
+        ];
+        let chain = [0u8; 32];
+        let r1 = compute_withdrawals_root(&burns, &chain, 7);
+        let r2 = compute_withdrawals_root(&burns, &chain, 7);
+        assert_eq!(r1, r2);
+    }
+
+    /// Asset selector participates in the root: same recipients +
+    /// amounts but different asset_ids produce different roots.
+    /// Mirrors the leaf-disambiguation test in `gsx-l2-bridge`.
+    #[test]
+    fn withdrawals_root_disambiguates_asset() {
+        let chain = [0u8; 32];
+        let burns_native = vec![BurnEntry {
+            l1_recipient: addr(10),
+            amount: 100,
+            asset_id: None,
+        }];
+        let burns_asset = vec![BurnEntry {
+            l1_recipient: addr(10),
+            amount: 100,
+            asset_id: Some([0xcdu8; 32]),
+        }];
+        assert_ne!(
+            compute_withdrawals_root(&burns_native, &chain, 7),
+            compute_withdrawals_root(&burns_asset, &chain, 7),
+        );
+    }
+
+    /// Batch_id participates in the root: same burn list under
+    /// different `batch_id` values produces different roots.
+    /// (The leaf hash binds batch_id per IQ-008.)
+    #[test]
+    fn withdrawals_root_disambiguates_batch_id() {
+        let chain = [0u8; 32];
+        let burns = vec![BurnEntry {
+            l1_recipient: addr(10),
+            amount: 100,
+            asset_id: None,
+        }];
+        assert_ne!(
+            compute_withdrawals_root(&burns, &chain, 5),
+            compute_withdrawals_root(&burns, &chain, 6),
+        );
+    }
+
+    /// **Round-trip with the L1 substrate verifier.** Build a
+    /// real burn batch via the STM; for every burn in the batch,
+    /// construct its merkle proof via `merkle_proof_for_burn` and
+    /// verify it against `withdrawals_root` via
+    /// `gsx-l2-bridge::verify_burn_inclusion`. This proves the
+    /// STM (producer) and the substrate (consumer) agree
+    /// byte-for-byte on the IQ-008 scheme.
+    #[test]
+    fn merkle_proof_roundtrips_against_bridge_verifier() {
+        let mut ledger = BTreeMap::new();
+        ledger.insert(
+            addr(1),
+            Account {
+                balance: 10_000,
+                nonce: 0,
+            },
+        );
+        ledger.insert(
+            addr(2),
+            Account {
+                balance: 10_000,
+                nonce: 0,
+            },
+        );
+        ledger.insert(
+            addr(3),
+            Account {
+                balance: 10_000,
+                nonce: 0,
+            },
+        );
+        let chain = [0xaau8; 32];
+        let txs = vec![
+            BatchTransaction::Burn {
+                from: addr(1),
+                l1_recipient: addr(91),
+                amount: 100,
+                asset_id: None,
+                nonce: 0,
+            },
+            BatchTransaction::Burn {
+                from: addr(2),
+                l1_recipient: addr(92),
+                amount: 200,
+                asset_id: Some([0xcdu8; 32]),
+                nonce: 0,
+            },
+            BatchTransaction::Burn {
+                from: addr(3),
+                l1_recipient: addr(93),
+                amount: 300,
+                asset_id: None,
+                nonce: 0,
+            },
+        ];
+        let input = build_input(ledger, txs, 42, chain);
+        let output = execute_batch(&input).expect("batch applies");
+        assert_eq!(output.withdrawals.len(), 3);
+
+        for (idx, entry) in output.withdrawals.iter().enumerate() {
+            let (path, directions) =
+                merkle_proof_for_burn(&output.withdrawals, idx, &chain, 42).expect("proof builds");
+            let leaf = gsx_l2_bridge::BurnLeaf {
+                l2_chain_id_hash: &chain,
+                batch_id: 42,
+                recipient: &entry.l1_recipient,
+                amount: entry.amount,
+                asset_id: entry.asset_id.as_ref(),
+            };
+            gsx_l2_bridge::verify_burn_inclusion(
+                &leaf,
+                &path,
+                &directions,
+                &output.withdrawals_root,
+            )
+            .unwrap_or_else(|e| {
+                panic!("burn {idx} inclusion failed under withdrawals_root: {e:?}")
+            });
+        }
+    }
+
+    /// A proof produced for burn N must NOT verify when claiming
+    /// burn M (N != M) — the leaf encoding binds the recipient +
+    /// amount, so swapping leaves a path that doesn't match the
+    /// claimed `BurnLeaf`.
+    #[test]
+    fn merkle_proof_is_specific_to_its_burn() {
+        let mut ledger = BTreeMap::new();
+        ledger.insert(
+            addr(1),
+            Account {
+                balance: 10_000,
+                nonce: 0,
+            },
+        );
+        ledger.insert(
+            addr(2),
+            Account {
+                balance: 10_000,
+                nonce: 0,
+            },
+        );
+        let chain = [0u8; 32];
+        let txs = vec![
+            BatchTransaction::Burn {
+                from: addr(1),
+                l1_recipient: addr(91),
+                amount: 100,
+                asset_id: None,
+                nonce: 0,
+            },
+            BatchTransaction::Burn {
+                from: addr(2),
+                l1_recipient: addr(92),
+                amount: 200,
+                asset_id: None,
+                nonce: 0,
+            },
+        ];
+        let input = build_input(ledger, txs, 5, chain);
+        let output = execute_batch(&input).expect("batch applies");
+
+        // Construct burn-0's proof, but use burn-1's leaf fields.
+        let (path, dirs) = merkle_proof_for_burn(&output.withdrawals, 0, &chain, 5).unwrap();
+        let wrong_leaf = gsx_l2_bridge::BurnLeaf {
+            l2_chain_id_hash: &chain,
+            batch_id: 5,
+            recipient: &output.withdrawals[1].l1_recipient,
+            amount: output.withdrawals[1].amount,
+            asset_id: None,
+        };
+        let result = gsx_l2_bridge::verify_burn_inclusion(
+            &wrong_leaf,
+            &path,
+            &dirs,
+            &output.withdrawals_root,
+        );
+        assert!(matches!(
+            result,
+            Err(gsx_l2_bridge::MerkleError::RootMismatch { .. })
+        ));
+    }
+
+    /// `merkle_proof_for_burn` rejects an index past the end +
+    /// the empty-batch case.
+    #[test]
+    fn merkle_proof_for_burn_index_out_of_range() {
+        let chain = [0u8; 32];
+        let r = merkle_proof_for_burn(&[], 0, &chain, 5);
+        assert!(matches!(
+            r,
+            Err(WithdrawalsProofError::IndexOutOfRange { index: 0, len: 0 })
+        ));
+
+        let burns = vec![BurnEntry {
+            l1_recipient: addr(10),
+            amount: 1,
+            asset_id: None,
+        }];
+        let r = merkle_proof_for_burn(&burns, 7, &chain, 5);
+        assert!(matches!(
+            r,
+            Err(WithdrawalsProofError::IndexOutOfRange { index: 7, len: 1 })
+        ));
     }
 }

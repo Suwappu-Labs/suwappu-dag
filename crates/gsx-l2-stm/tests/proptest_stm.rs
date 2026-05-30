@@ -249,6 +249,8 @@ proptest! {
             new_l2_state_root: new_l2,
             da_commitment: da_commit,
             confidential_root: conf_root,
+            withdrawals: vec![],
+            withdrawals_root: gsx_l2_stm::empty_withdrawals_root(),
             ledger: BTreeMap::new(),
         };
         let pi = to_public_inputs(&input, &output);

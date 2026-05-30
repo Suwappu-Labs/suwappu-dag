@@ -83,6 +83,19 @@ pub enum ExecutionError {
         reason: String,
     },
 
+    /// `Intent::L2BurnProven` carried a merkle proof that does not
+    /// bind the claimed `(recipient, amount, asset_id)` leaf to the
+    /// committed L2 state root for `(l2_chain_id_hash, batch_id)`.
+    /// Wraps `gsx_l2_bridge::MerkleError`'s display for diagnostics.
+    /// Fires after the batch-commit gate + nullifier check; without
+    /// this gate any caller knowing a committed batch_id could drain
+    /// bridge escrow with a fabricated path (IQ-008).
+    #[error("l2 burn merkle proof rejected: {reason}")]
+    L2BurnMerkleProofRejected {
+        /// Human-readable reason from the bridge verifier.
+        reason: String,
+    },
+
     /// A bytes-state record stored at `addr` is malformed and
     /// cannot be decoded. Indicates either a state-corruption
     /// regression or an encoder/decoder version drift; either

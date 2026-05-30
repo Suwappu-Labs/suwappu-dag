@@ -13,6 +13,10 @@ description = "DAG block executor — wires the gsx-db state substrate into the 
 gsx-authority.workspace = true
 gsx-consensus.workspace = true
 gsx-crypto.workspace = true
+# `verify_burn_inclusion` + `BurnLeaf` for the L2BurnProven merkle
+# inclusion gate (IQ-008). Off-chain validation types are also
+# re-exported for callers via this dep.
+gsx-l2-bridge.workspace = true
 gsx-l2-verifier-precompile.workspace = true
 gsxdb-bridge.workspace = true
 gsxdb-state.workspace = true

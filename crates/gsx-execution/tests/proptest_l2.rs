@@ -186,6 +186,7 @@ proptest! {
                 recipient,
                 amount: burn_amt,
                 merkle_path,
+                path_directions: vec![],
                 asset_id: None,
                 l2_chain_id_hash: chain_id_hash,
             })

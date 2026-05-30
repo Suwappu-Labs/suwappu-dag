@@ -15,6 +15,14 @@ description = "GSX DAG L2 state transition function — native reference impleme
 # expected public-input format — this crate's `to_public_inputs`
 # round-trips through the same offsets.
 gsx-l2-verifier-precompile.workspace = true
+# `BurnLeaf::hash` + `hash_inner_node` per IQ-008. The STM is the
+# producer of L2 burn proofs; reusing the same leaf + inner-node
+# hash primitives the substrate (`Intent::L2BurnProven`) verifies
+# against keeps a single source of truth for the burn-tree
+# scheme. Adds no host-side cost; the SP1 guest is also fine with
+# bridge's `serde`/`thiserror`/`blake3` set (matches STM's existing
+# deps).
+gsx-l2-bridge.workspace = true
 
 blake3.workspace = true
 serde.workspace = true

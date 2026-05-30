@@ -428,7 +428,22 @@ pub enum Intent {
         /// Amount being unlocked.
         amount: Balance,
         /// Merkle proof binding the burn to the proven L2 state.
+        /// One 32-byte sibling per level, ordered from the leaf
+        /// upward. Paired with `path_directions` below to verify
+        /// inclusion under the committed L2 state root per IQ-008.
         merkle_path: Vec<u8>,
+        /// Sibling-side direction bits for `merkle_path`, packed
+        /// LSB-first one bit per level. Bit at position `i` is `0`
+        /// when the sibling at level `i` is the RIGHT child (the
+        /// running hash is the LEFT child) and `1` when reversed.
+        /// `length = ceil(levels / 8)`; padding bits past
+        /// `levels = merkle_path.len() / 32` MUST be zero. Added
+        /// in IQ-008; `#[serde(default)]` means callers using the
+        /// pre-IQ-008 wire shape pass an empty vec, which fails
+        /// verification deterministically (the safe pre-feature
+        /// posture per IQ-008's cutover criterion).
+        #[serde(default)]
+        path_directions: Vec<u8>,
         /// Asset being unlocked. Same semantics as
         /// `L1Lock::asset_id`. `None` = native GSX,
         /// `Some(asset_id)` = registered + Active asset.
@@ -1040,6 +1055,18 @@ pub struct InMemorySubstrate {
     /// this; verifier-format-gate tests do not. See issue #232.
     #[cfg(test)]
     test_bypass_l2_verifier: bool,
+    /// Test-only: when set, `Intent::L2BurnProven` skips the
+    /// IQ-008 merkle inclusion gate and treats the proof as
+    /// accepted. Existing happy-path tests (the
+    /// `l2_burn_proven_*` family) hand-rolled placeholder
+    /// `merkle_path` bytes that no longer verify against a
+    /// committed state root. Tests that exercise downstream
+    /// state-machine consumers (asset registry, reserved-
+    /// recipient guard, escrow accounting, nullifier dedup)
+    /// enable this; the new `l2_burn_proven_merkle_*` tests do
+    /// not — they exist to assert the gate fires.
+    #[cfg(test)]
+    test_bypass_l2_burn_merkle: bool,
 }
 
 impl InMemorySubstrate {
@@ -1071,6 +1098,23 @@ impl InMemorySubstrate {
     #[cfg(test)]
     pub(crate) fn bypass_l2_verifier_for_test(&mut self) {
         self.test_bypass_l2_verifier = true;
+    }
+
+    /// Test-only: bypass the IQ-008 merkle inclusion gate for
+    /// `Intent::L2BurnProven`. Use in substrate state-machine
+    /// tests whose placeholder `merkle_path` bytes are not real
+    /// inclusion proofs. Tests that assert the gate fires (the
+    /// `l2_burn_proven_merkle_*` family) MUST NOT enable this.
+    ///
+    /// Most callers reach this implicitly via
+    /// [`pin_l2_state_root_for_test`] (which uses a sentinel root
+    /// no real proof could match against, so it sets the bypass
+    /// flag too). The explicit method exists for future tests that
+    /// pin a real root but want to skip the merkle gate.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn bypass_l2_burn_merkle_for_test(&mut self) {
+        self.test_bypass_l2_burn_merkle = true;
     }
 
     /// Total supply across all addresses (sum of balances).
@@ -1345,6 +1389,33 @@ impl InMemorySubstrate {
     /// dispatch path for tests that exercise downstream
     /// consumers (like the L2BurnProven batch-commit gate).
     pub fn pin_l2_state_root_for_test(&mut self, l2_chain_id_hash: [u8; 32], batch_id: u64) {
+        self.pin_l2_state_root_for_test_with_root(l2_chain_id_hash, batch_id, [0xab; 32]);
+        // The sentinel root is by definition not the merkle root of
+        // any real burn tree, so callers using this helper cannot
+        // construct a passing inclusion proof. Flip the bypass so
+        // every downstream `L2BurnProven` test that pins via this
+        // helper continues to exercise the state-machine arm rather
+        // than failing at the IQ-008 gate. Tests that DO want the
+        // merkle gate active (`l2_burn_proven_merkle_*` family)
+        // use `pin_l2_state_root_for_test_with_root` directly and
+        // build a real proof against the supplied root.
+        #[cfg(test)]
+        {
+            self.test_bypass_l2_burn_merkle = true;
+        }
+    }
+
+    /// Like [`pin_l2_state_root_for_test`] but with a caller-chosen
+    /// `state_root`. Tests of the IQ-008 merkle inclusion gate need
+    /// to pin a root that matches a hand-rolled tree's root; tests
+    /// that use the merkle bypass flag don't care and use the
+    /// fixed-sentinel variant above.
+    pub fn pin_l2_state_root_for_test_with_root(
+        &mut self,
+        l2_chain_id_hash: [u8; 32],
+        batch_id: u64,
+        state_root: [u8; 32],
+    ) {
         use crate::l2_state::{encode, L2BatchKey, L2StateRootRecord};
         let registry_addr = reserved::l2_registry_address();
         let existing_bytes = self.read_bytes(&registry_addr).unwrap_or_default();
@@ -1355,7 +1426,7 @@ impl InMemorySubstrate {
                 batch_id,
             },
             L2StateRootRecord {
-                state_root: [0xab; 32],
+                state_root,
                 committed_at_l1_height: 0,
                 vk_hash: [0xcd; 32],
                 da_commitment: [0xef; 32],
@@ -2511,6 +2582,7 @@ impl Substrate for InMemorySubstrate {
                 recipient,
                 amount,
                 merkle_path,
+                path_directions,
                 asset_id,
                 l2_chain_id_hash,
             } => {
@@ -2529,17 +2601,61 @@ impl Substrate for InMemorySubstrate {
                 }
                 // Batch-commit gate. The L2 registry stores
                 // state roots keyed by (l2_chain_id_hash,
-                // batch_id) per IQ-006.
+                // batch_id) per IQ-006. We need the FULL record
+                // (not just `is_some`) so the merkle gate below
+                // can verify the inclusion proof against the
+                // committed state root.
                 let key = crate::l2_state::L2BatchKey {
                     l2_chain_id_hash: *l2_chain_id_hash,
                     batch_id: *batch_id,
                 };
-                if self.l2_state_root_record(&key).is_none() {
-                    return Err(ExecutionError::L2BatchNotCommitted {
-                        l2_chain_id_hash: *l2_chain_id_hash,
+                let record =
+                    self.l2_state_root_record(&key)
+                        .ok_or(ExecutionError::L2BatchNotCommitted {
+                            l2_chain_id_hash: *l2_chain_id_hash,
+                            batch_id: *batch_id,
+                        })?;
+
+                // IQ-008 — merkle inclusion gate. The leaf binds
+                // (chain, batch, recipient, amount, asset_id);
+                // the proof walks `merkle_path` with
+                // `path_directions` and must hash to the
+                // committed L2 state root. Without this gate any
+                // caller with a committed `batch_id` could drain
+                // bridge escrow with a fabricated `merkle_path`.
+                //
+                // Test-only bypass mirrors `test_bypass_l2_verifier`
+                // for the `CommitL2StateRoot` arm above: tests that
+                // exercise downstream consumers (asset registry,
+                // reserved-recipient guard, nullifier dedup) need
+                // to land without rolling a real merkle proof each
+                // time. Production paths cannot set this flag —
+                // `#[cfg(test)]` gating + crate-private mutator.
+                #[cfg(test)]
+                let skip_merkle = self.test_bypass_l2_burn_merkle;
+                #[cfg(not(test))]
+                let skip_merkle = false;
+                if !skip_merkle {
+                    let leaf = gsx_l2_bridge::BurnLeaf {
+                        l2_chain_id_hash,
                         batch_id: *batch_id,
-                    });
+                        recipient: &recipient,
+                        amount,
+                        asset_id: asset_id.as_ref(),
+                    };
+                    gsx_l2_bridge::verify_burn_inclusion(
+                        &leaf,
+                        merkle_path,
+                        path_directions,
+                        &record.state_root,
+                    )
+                    .map_err(|e| {
+                        ExecutionError::L2BurnMerkleProofRejected {
+                            reason: e.to_string(),
+                        }
+                    })?;
                 }
+
                 // Double-spend defense (Track G G3.2
                 // hardening): compute the canonical burn_id
                 // over every disambiguating field, reject
@@ -4343,6 +4459,7 @@ mod tests {
             recipient: addr(1),
             amount: 25,
             merkle_path: vec![0xab; 256],
+            path_directions: vec![],
             asset_id: None,
             l2_chain_id_hash: [0u8; 32],
         })
@@ -4362,6 +4479,7 @@ mod tests {
             recipient: addr(1),
             amount: 25,
             merkle_path: vec![0xab; 256],
+            path_directions: vec![],
             asset_id: None,
             l2_chain_id_hash: [0u8; 32],
         };
@@ -4390,6 +4508,7 @@ mod tests {
             recipient: reserved::treasury_address(),
             amount: 25,
             merkle_path: vec![0xab; 256],
+            path_directions: vec![],
             asset_id: None,
             l2_chain_id_hash: [0u8; 32],
         };
@@ -4430,6 +4549,7 @@ mod tests {
             recipient: addr(5),
             amount: 70,
             merkle_path: vec![0xab; 32],
+            path_directions: vec![],
             asset_id: None,
             l2_chain_id_hash: [0u8; 32],
         })
@@ -4442,6 +4562,7 @@ mod tests {
             recipient: addr(6),
             amount: 80,
             merkle_path: vec![0xab; 32],
+            path_directions: vec![],
             asset_id: None,
             l2_chain_id_hash: [0u8; 32],
         })
@@ -5462,6 +5583,7 @@ mod tests {
             recipient: addr(3),
             amount: 100,
             merkle_path: vec![0xab; 32],
+            path_directions: vec![],
             asset_id: Some([0xde; 32]),
             l2_chain_id_hash: [0u8; 32],
         });
@@ -5495,6 +5617,7 @@ mod tests {
             recipient: addr(3),
             amount: 100,
             merkle_path: vec![0xab; 32],
+            path_directions: vec![],
             asset_id: Some(id),
             l2_chain_id_hash: [0u8; 32],
         });
@@ -5525,6 +5648,7 @@ mod tests {
             recipient: addr(3),
             amount: 400,
             merkle_path: vec![0xab; 32],
+            path_directions: vec![],
             asset_id: Some(id),
             l2_chain_id_hash: [0u8; 32],
         })
@@ -6097,6 +6221,7 @@ mod tests {
             recipient: addr(3),
             amount: 100,
             merkle_path: vec![0xab; 32],
+            path_directions: vec![],
             asset_id: None,
             l2_chain_id_hash: [0u8; 32],
         });
@@ -6127,6 +6252,7 @@ mod tests {
             recipient: addr(3),
             amount: 100,
             merkle_path: vec![0xab; 32],
+            path_directions: vec![],
             asset_id: None,
             l2_chain_id_hash: [0u8; 32],
         })
@@ -6161,6 +6287,7 @@ mod tests {
             recipient: addr(3),
             amount: 100,
             merkle_path: vec![0xab; 32],
+            path_directions: vec![],
             asset_id: None,
             l2_chain_id_hash: chain_b,
         });
@@ -6175,6 +6302,7 @@ mod tests {
             recipient: addr(3),
             amount: 100,
             merkle_path: vec![0xab; 32],
+            path_directions: vec![],
             asset_id: None,
             l2_chain_id_hash: chain_a,
         })
@@ -6195,6 +6323,7 @@ mod tests {
             recipient: addr(3),
             amount: 100,
             merkle_path: vec![],
+            path_directions: vec![],
             asset_id: None,
             l2_chain_id_hash: [0u8; 32],
         });
@@ -6218,6 +6347,7 @@ mod tests {
             recipient: addr(1),
             amount: 0,
             merkle_path: vec![],
+            path_directions: vec![],
             asset_id: None,
             l2_chain_id_hash: [0u8; 32],
         })
@@ -6445,6 +6575,7 @@ mod tests {
             recipient: addr(3),
             amount: 100,
             merkle_path: vec![0xab; 32],
+            path_directions: vec![],
             asset_id: None,
             l2_chain_id_hash: [0u8; 32],
         })
@@ -6476,6 +6607,7 @@ mod tests {
             recipient: addr(3),
             amount: 100,
             merkle_path: vec![0xab; 32],
+            path_directions: vec![],
             asset_id: None,
             l2_chain_id_hash: [0u8; 32],
         };
@@ -6518,6 +6650,7 @@ mod tests {
             recipient: addr(3),
             amount: 100,
             merkle_path: vec![0xab; 32],
+            path_directions: vec![],
             asset_id: None,
             l2_chain_id_hash: [0u8; 32],
         })
@@ -6528,6 +6661,7 @@ mod tests {
             recipient: addr(4),
             amount: 200,
             merkle_path: vec![0xcd; 32],
+            path_directions: vec![],
             asset_id: None,
             l2_chain_id_hash: [0u8; 32],
         })
@@ -6556,6 +6690,7 @@ mod tests {
             recipient: addr(3),
             amount: 100,
             merkle_path: vec![0xab; 32],
+            path_directions: vec![],
             asset_id: None,
             l2_chain_id_hash: [0u8; 32],
         });
@@ -6586,6 +6721,7 @@ mod tests {
             recipient: addr(3),
             amount: 100,
             merkle_path: vec![0xab; 32],
+            path_directions: vec![],
             asset_id: None,
             l2_chain_id_hash: [0u8; 32],
         });
@@ -6627,6 +6763,7 @@ mod tests {
             recipient: addr(3),
             amount: 100,
             merkle_path: vec![0xab; 32],
+            path_directions: vec![],
             asset_id: None,
             l2_chain_id_hash: chain,
         };
@@ -6648,6 +6785,342 @@ mod tests {
         assert_eq!(s1.burn_nullifier_count(), 0);
         assert_eq!(s2.burn_nullifier_count(), 0);
         let _ = (&mut s1, &mut s2);
+    }
+
+    // ===== IQ-008 merkle inclusion gate =====
+    //
+    // These tests exercise the real merkle gate (not the test
+    // bypass). Pin the L2 state root to the hash of a hand-rolled
+    // burn tree's root; submit the matching path → accept; perturb
+    // any field → reject with L2BurnMerkleProofRejected. The
+    // pre-fix bridge-drain vector (any forged merkle_path with a
+    // unique burn_id) is fenced off by these tests.
+
+    /// Helper: build a depth-1 burn tree where `leaf` is paired
+    /// with `sibling` (leaf is the LEFT child, sibling is the
+    /// RIGHT child). Returns `(root, path, directions)`.
+    fn depth_one_tree(leaf_hash: [u8; 32], sibling: [u8; 32]) -> ([u8; 32], Vec<u8>, Vec<u8>) {
+        let root = gsx_l2_bridge::hash_inner_node(&leaf_hash, &sibling);
+        (root, sibling.to_vec(), vec![0u8])
+    }
+
+    /// Depth-0 burn (the leaf IS the root) → escrow drains, the
+    /// real merkle gate fires and accepts. Pre-fix this test
+    /// would have succeeded for any `merkle_path` bytes; the gate
+    /// now binds the claim to the actual recipient/amount/asset.
+    #[test]
+    fn l2_burn_proven_merkle_depth_zero_accepts() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 1_000)]);
+        s.apply_intent(&Intent::L1Lock {
+            user_address: addr(1),
+            l2_recipient: addr(2),
+            amount: 100,
+            asset_id: None,
+        })
+        .unwrap();
+
+        let recipient = addr(3);
+        let leaf = gsx_l2_bridge::BurnLeaf {
+            l2_chain_id_hash: &[0u8; 32],
+            batch_id: 7,
+            recipient: &recipient,
+            amount: 100,
+            asset_id: None,
+        };
+        let root = leaf.hash();
+        // Pin THIS root (not the sentinel), so the merkle gate is
+        // ACTIVE for this test — pin_l2_state_root_for_test_with_root
+        // does NOT enable the bypass.
+        s.pin_l2_state_root_for_test_with_root([0u8; 32], 7, root);
+
+        s.apply_intent(&Intent::L2BurnProven {
+            batch_id: 7,
+            recipient,
+            amount: 100,
+            merkle_path: vec![],
+            path_directions: vec![],
+            asset_id: None,
+            l2_chain_id_hash: [0u8; 32],
+        })
+        .expect("depth-0 burn against the leaf-hash root must commit");
+
+        assert_eq!(s.bridge_escrow_balance(), 0);
+        assert_eq!(s.balance(&recipient), 100);
+    }
+
+    /// Depth-1 burn — verifies the sibling/direction encoding
+    /// goes through the substrate apply arm correctly.
+    #[test]
+    fn l2_burn_proven_merkle_depth_one_accepts() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 1_000)]);
+        s.apply_intent(&Intent::L1Lock {
+            user_address: addr(1),
+            l2_recipient: addr(2),
+            amount: 100,
+            asset_id: None,
+        })
+        .unwrap();
+
+        let recipient = addr(3);
+        let leaf = gsx_l2_bridge::BurnLeaf {
+            l2_chain_id_hash: &[0u8; 32],
+            batch_id: 7,
+            recipient: &recipient,
+            amount: 100,
+            asset_id: None,
+        };
+        let sibling = [0xa5u8; 32];
+        let (root, path, directions) = depth_one_tree(leaf.hash(), sibling);
+        s.pin_l2_state_root_for_test_with_root([0u8; 32], 7, root);
+
+        s.apply_intent(&Intent::L2BurnProven {
+            batch_id: 7,
+            recipient,
+            amount: 100,
+            merkle_path: path,
+            path_directions: directions,
+            asset_id: None,
+            l2_chain_id_hash: [0u8; 32],
+        })
+        .expect("depth-1 burn with the matching path must commit");
+
+        assert_eq!(s.bridge_escrow_balance(), 0);
+        assert_eq!(s.balance(&recipient), 100);
+    }
+
+    /// Fabricated merkle path (the pre-fix bridge-drain vector):
+    /// caller knows a committed batch_id, submits forged path
+    /// bytes that DON'T correspond to any real leaf in the tree.
+    /// Post-fix, the gate rejects with L2BurnMerkleProofRejected
+    /// and the escrow is NOT debited.
+    #[test]
+    fn l2_burn_proven_merkle_forged_path_rejects() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 1_000)]);
+        s.apply_intent(&Intent::L1Lock {
+            user_address: addr(1),
+            l2_recipient: addr(2),
+            amount: 100,
+            asset_id: None,
+        })
+        .unwrap();
+
+        let recipient = addr(3);
+        let real_leaf = gsx_l2_bridge::BurnLeaf {
+            l2_chain_id_hash: &[0u8; 32],
+            batch_id: 7,
+            recipient: &recipient,
+            amount: 100,
+            asset_id: None,
+        };
+        let sibling = [0xa5u8; 32];
+        let (root, _real_path, _real_dirs) = depth_one_tree(real_leaf.hash(), sibling);
+        s.pin_l2_state_root_for_test_with_root([0u8; 32], 7, root);
+
+        // Submit with FORGED merkle bytes (the pre-fix exploit).
+        let forged_path = vec![0xffu8; 32];
+        let err = s
+            .apply_intent(&Intent::L2BurnProven {
+                batch_id: 7,
+                recipient,
+                amount: 100,
+                merkle_path: forged_path,
+                path_directions: vec![0u8],
+                asset_id: None,
+                l2_chain_id_hash: [0u8; 32],
+            })
+            .expect_err("forged merkle path must reject");
+        assert!(
+            matches!(err, ExecutionError::L2BurnMerkleProofRejected { .. }),
+            "wrong reject variant: {err:?}"
+        );
+        // Escrow untouched — the bridge-drain vector is closed.
+        assert_eq!(s.bridge_escrow_balance(), 100);
+        assert_eq!(s.balance(&recipient), 0);
+    }
+
+    /// Perturbing the recipient (same batch + amount + sibling +
+    /// directions, but DIFFERENT recipient than the leaf the root
+    /// was computed against) rejects. The leaf hash binds the
+    /// recipient, so any swap fails verification.
+    #[test]
+    fn l2_burn_proven_merkle_wrong_recipient_rejects() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 1_000)]);
+        s.apply_intent(&Intent::L1Lock {
+            user_address: addr(1),
+            l2_recipient: addr(2),
+            amount: 100,
+            asset_id: None,
+        })
+        .unwrap();
+
+        let real_recipient = addr(3);
+        let attacker_recipient = addr(99);
+        let leaf = gsx_l2_bridge::BurnLeaf {
+            l2_chain_id_hash: &[0u8; 32],
+            batch_id: 7,
+            recipient: &real_recipient,
+            amount: 100,
+            asset_id: None,
+        };
+        let sibling = [0xa5u8; 32];
+        let (root, path, directions) = depth_one_tree(leaf.hash(), sibling);
+        s.pin_l2_state_root_for_test_with_root([0u8; 32], 7, root);
+
+        let err = s
+            .apply_intent(&Intent::L2BurnProven {
+                batch_id: 7,
+                recipient: attacker_recipient,
+                amount: 100,
+                merkle_path: path,
+                path_directions: directions,
+                asset_id: None,
+                l2_chain_id_hash: [0u8; 32],
+            })
+            .expect_err("recipient swap must reject");
+        assert!(matches!(
+            err,
+            ExecutionError::L2BurnMerkleProofRejected { .. }
+        ));
+        assert_eq!(s.bridge_escrow_balance(), 100);
+        assert_eq!(s.balance(&attacker_recipient), 0);
+    }
+
+    /// Perturbing the amount (real leaf was for 100, claim is
+    /// for 200) rejects. The leaf hash binds the amount.
+    #[test]
+    fn l2_burn_proven_merkle_wrong_amount_rejects() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 1_000)]);
+        s.apply_intent(&Intent::L1Lock {
+            user_address: addr(1),
+            l2_recipient: addr(2),
+            amount: 500,
+            asset_id: None,
+        })
+        .unwrap();
+
+        let recipient = addr(3);
+        let leaf = gsx_l2_bridge::BurnLeaf {
+            l2_chain_id_hash: &[0u8; 32],
+            batch_id: 7,
+            recipient: &recipient,
+            amount: 100,
+            asset_id: None,
+        };
+        let sibling = [0xa5u8; 32];
+        let (root, path, directions) = depth_one_tree(leaf.hash(), sibling);
+        s.pin_l2_state_root_for_test_with_root([0u8; 32], 7, root);
+
+        let err = s
+            .apply_intent(&Intent::L2BurnProven {
+                batch_id: 7,
+                recipient,
+                // Real leaf was 100; claim 200 — must reject.
+                amount: 200,
+                merkle_path: path,
+                path_directions: directions,
+                asset_id: None,
+                l2_chain_id_hash: [0u8; 32],
+            })
+            .expect_err("amount swap must reject");
+        assert!(matches!(
+            err,
+            ExecutionError::L2BurnMerkleProofRejected { .. }
+        ));
+        assert_eq!(s.bridge_escrow_balance(), 500);
+        assert_eq!(s.balance(&recipient), 0);
+    }
+
+    /// Flipping the direction bit (claiming the leaf was the
+    /// LEFT child when it was actually RIGHT) rejects. The
+    /// inner-node hash is asymmetric in its two arguments.
+    #[test]
+    fn l2_burn_proven_merkle_flipped_direction_rejects() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 1_000)]);
+        s.apply_intent(&Intent::L1Lock {
+            user_address: addr(1),
+            l2_recipient: addr(2),
+            amount: 100,
+            asset_id: None,
+        })
+        .unwrap();
+
+        let recipient = addr(3);
+        let leaf = gsx_l2_bridge::BurnLeaf {
+            l2_chain_id_hash: &[0u8; 32],
+            batch_id: 7,
+            recipient: &recipient,
+            amount: 100,
+            asset_id: None,
+        };
+        let sibling = [0xa5u8; 32];
+        let (root, path, _directions_left) = depth_one_tree(leaf.hash(), sibling);
+        s.pin_l2_state_root_for_test_with_root([0u8; 32], 7, root);
+
+        // Real direction was 0 (leaf LEFT); claim 1 (leaf RIGHT).
+        let err = s
+            .apply_intent(&Intent::L2BurnProven {
+                batch_id: 7,
+                recipient,
+                amount: 100,
+                merkle_path: path,
+                path_directions: vec![0b0000_0001],
+                asset_id: None,
+                l2_chain_id_hash: [0u8; 32],
+            })
+            .expect_err("flipped direction bit must reject");
+        assert!(matches!(
+            err,
+            ExecutionError::L2BurnMerkleProofRejected { .. }
+        ));
+        assert_eq!(s.bridge_escrow_balance(), 100);
+        assert_eq!(s.balance(&recipient), 0);
+    }
+
+    /// Two `L2BurnProven` intents with the SAME real (recipient,
+    /// amount, asset_id, batch_id, chain_id_hash, merkle_path,
+    /// path_directions) collide on `burn_id` — only the first
+    /// commits, the second rejects with
+    /// `L2BurnAlreadyClaimed`. Confirms the nullifier set still
+    /// dedupes correctly under the new merkle gate (the gate
+    /// fires first; both txs pass it; second hits the dedup).
+    #[test]
+    fn l2_burn_proven_merkle_replay_after_real_proof_still_dedupes() {
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 1_000)]);
+        s.apply_intent(&Intent::L1Lock {
+            user_address: addr(1),
+            l2_recipient: addr(2),
+            amount: 200,
+            asset_id: None,
+        })
+        .unwrap();
+
+        let recipient = addr(3);
+        let leaf = gsx_l2_bridge::BurnLeaf {
+            l2_chain_id_hash: &[0u8; 32],
+            batch_id: 7,
+            recipient: &recipient,
+            amount: 100,
+            asset_id: None,
+        };
+        let sibling = [0xa5u8; 32];
+        let (root, path, directions) = depth_one_tree(leaf.hash(), sibling);
+        s.pin_l2_state_root_for_test_with_root([0u8; 32], 7, root);
+
+        let intent = Intent::L2BurnProven {
+            batch_id: 7,
+            recipient,
+            amount: 100,
+            merkle_path: path,
+            path_directions: directions,
+            asset_id: None,
+            l2_chain_id_hash: [0u8; 32],
+        };
+        s.apply_intent(&intent).expect("first commit");
+        let err = s.apply_intent(&intent).expect_err("replay must reject");
+        assert!(matches!(err, ExecutionError::L2BurnAlreadyClaimed { .. }));
+        // Only ONE debit landed despite two submissions.
+        assert_eq!(s.bridge_escrow_balance(), 100);
+        assert_eq!(s.balance(&recipient), 100);
     }
 
     // ===== Treasury disbursement (Track C / §3.2) =====
