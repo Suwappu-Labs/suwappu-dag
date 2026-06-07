@@ -1,0 +1,11 @@
+[package]
+name = "gsx-mldsa-precompile"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+description = "On-chain ML-DSA-65 (FIPS 204) signature-verification precompile core for the GSX bridge. PQ-sound; wraps the NIST PQC reference verifier with EVM-friendly I/O."
+
+[dependencies]
+pqcrypto-mldsa = "0.1"
+pqcrypto-traits = "0.3"
