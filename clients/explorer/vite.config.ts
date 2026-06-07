@@ -1,7 +1,7 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
-// gsx-devnet explorer build config.
+// suwappu-devnet explorer build config.
 //
 // Single-page app, hash-routed (no server-side routing needed —
 // CloudFront serves index.html for any path; the hash decides
@@ -13,7 +13,7 @@ export default defineConfig({
   define: {
     __DEFAULT_RPC_URL__: JSON.stringify(
       process.env.VITE_RPC_URL ??
-        "https://rpc.devnet.gsx.globalsettlement.com",
+        "https://rpc.devnet.suwappu.globalsettlement.com",
     ),
   },
   build: {

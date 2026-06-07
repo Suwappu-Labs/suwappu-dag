@@ -2,14 +2,14 @@
 # per `~/.claude/plans/validated-prancing-curry.md`.
 #
 # Flow:
-#   1. Operator submits the Typeform at apply.testnet.gsx.* (apply.tf).
+#   1. Operator submits the Typeform at apply.testnet.suwappu.* (apply.tf).
 #   2. Typeform's embedded Persona inquiry widget runs the
 #      government-ID + selfie capture inline.
 #   3. Persona POSTs an inquiry-completed webhook to the API
 #      Gateway HTTP endpoint provisioned here.
 #   4. Lambda validates Persona's HMAC signature, extracts
 #      (operator_email, inquiry_id, status, candidate ML-DSA pubkey
-#      hash), upserts into the `gsx_testnet_applications`
+#      hash), upserts into the `suwappu_testnet_applications`
 #      DynamoDB table.
 #   5. Foundation engineer reviews `#testnet-operator-applications`
 #      Slack channel (Persona's standard Slack integration handles
@@ -19,12 +19,12 @@
 #      before submitting the Intent::AdmitAuthority.
 #
 # Persona secrets (API key, HMAC webhook secret) live in AWS
-# Secrets Manager at gsx-testnet/kyc/persona — set out of band
+# Secrets Manager at suwappu-testnet/kyc/persona — set out of band
 # when the foundation creates the Persona account. The Lambda
 # reads them at boot (via the IAM role attached below).
 
 variable "kyc_webhook_path" {
-  description = "URL path the Persona webhook posts to. Persona's webhook config in their dashboard MUST be configured to hit `https://kyc.testnet.gsx.globalsettlement.com/<this-path>`."
+  description = "URL path the Persona webhook posts to. Persona's webhook config in their dashboard MUST be configured to hit `https://kyc.testnet.suwappu.globalsettlement.com/<this-path>`."
   type        = string
   default     = "/persona-webhook"
 }
@@ -35,7 +35,7 @@ variable "kyc_webhook_path" {
 # can query without round-tripping through Persona's API).
 resource "aws_dynamodb_table" "applications" {
   provider     = aws.us_east_1
-  name         = "gsx_testnet_applications"
+  name         = "suwappu_testnet_applications"
   billing_mode = "PAY_PER_REQUEST"
   hash_key     = "candidate_pubkey_hash"
 
@@ -64,28 +64,28 @@ resource "aws_dynamodb_table" "applications" {
     enabled = true # AWS-managed key; per AWS recs for PII
   }
 
-  tags = { Name = "gsx-testnet-applications" }
+  tags = { Name = "suwappu-testnet-applications" }
 }
 
 # Secrets Manager entry for Persona API + webhook HMAC secret.
 # Populate via:
 #   AWS_PROFILE=gsn aws secretsmanager put-secret-value \
 #     --region us-east-1 \
-#     --secret-id gsx-testnet/kyc/persona \
+#     --secret-id suwappu-testnet/kyc/persona \
 #     --secret-string '{"api_key":"...","webhook_secret":"..."}'
 # Foundation operator does this after creating the Persona account.
 resource "aws_secretsmanager_secret" "persona" {
   provider                = aws.us_east_1
-  name                    = "gsx-testnet/kyc/persona"
+  name                    = "suwappu-testnet/kyc/persona"
   description             = "Persona API key + webhook HMAC secret. Populate via secretsmanager put-secret-value after creating the Persona account."
   recovery_window_in_days = 7
-  tags                    = { Name = "gsx-testnet-kyc-persona" }
+  tags                    = { Name = "suwappu-testnet-kyc-persona" }
 }
 
 # Lambda IAM role.
 resource "aws_iam_role" "persona_webhook" {
   provider = aws.us_east_1
-  name     = "gsx-testnet-persona-webhook"
+  name     = "suwappu-testnet-persona-webhook"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -148,7 +148,7 @@ data "archive_file" "persona_webhook" {
 
 resource "aws_lambda_function" "persona_webhook" {
   provider         = aws.us_east_1
-  function_name    = "gsx-testnet-persona-webhook"
+  function_name    = "suwappu-testnet-persona-webhook"
   role             = aws_iam_role.persona_webhook.arn
   handler          = "index.handler"
   runtime          = "nodejs20.x"
@@ -164,7 +164,7 @@ resource "aws_lambda_function" "persona_webhook" {
     }
   }
 
-  tags = { Name = "gsx-testnet-persona-webhook" }
+  tags = { Name = "suwappu-testnet-persona-webhook" }
 }
 
 # API Gateway HTTP API in front of the Lambda. HTTP API (v2) is
@@ -173,9 +173,9 @@ resource "aws_lambda_function" "persona_webhook" {
 # anyway.
 resource "aws_apigatewayv2_api" "kyc" {
   provider      = aws.us_east_1
-  name          = "gsx-testnet-kyc"
+  name          = "suwappu-testnet-kyc"
   protocol_type = "HTTP"
-  description   = "Persona webhook ingress for the gsx-testnet operator program"
+  description   = "Persona webhook ingress for the suwappu-testnet operator program"
 }
 
 resource "aws_apigatewayv2_integration" "persona_webhook" {
@@ -210,7 +210,7 @@ resource "aws_lambda_permission" "kyc_invoke" {
   source_arn    = "${aws_apigatewayv2_api.kyc.execution_arn}/*/*"
 }
 
-# Custom domain on the wildcard cert. kyc.testnet.gsx.* is the
+# Custom domain on the wildcard cert. kyc.testnet.suwappu.* is the
 # public URL Persona's dashboard is configured to post to.
 resource "aws_apigatewayv2_domain_name" "kyc" {
   provider    = aws.us_east_1
@@ -244,7 +244,7 @@ resource "aws_route53_record" "kyc" {
 }
 
 output "kyc_webhook_url" {
-  description = "Public URL Persona's dashboard MUST be configured to POST to. The HMAC secret in the gsx-testnet/kyc/persona Secrets Manager entry must match the one Persona is configured with."
+  description = "Public URL Persona's dashboard MUST be configured to POST to. The HMAC secret in the suwappu-testnet/kyc/persona Secrets Manager entry must match the one Persona is configured with."
   value       = "https://${aws_apigatewayv2_domain_name.kyc.domain_name}${var.kyc_webhook_path}"
 }
 

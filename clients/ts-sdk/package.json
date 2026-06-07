@@ -1,7 +1,7 @@
 {
-  "name": "@gsx/client",
+  "name": "@suwappu/client",
   "version": "0.2.0",
-  "description": "TypeScript client SDK for the gsx-dag JSON-RPC query API.",
+  "description": "TypeScript client SDK for the suwappu-dag JSON-RPC query API.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -24,17 +24,17 @@
     "clean": "rm -rf dist docs-out"
   },
   "keywords": [
-    "gsx",
+    "suwappu",
     "blockchain",
     "json-rpc",
     "client",
     "sdk"
   ],
-  "author": "Global Settlement Network <eng@globalsettlement.com>",
+  "author": "Suwappu <eng@globalsettlement.com>",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/GlobalSettlementNetwork/gsx-dag.git",
+    "url": "https://github.com/suwappu/suwappu-dag.git",
     "directory": "clients/ts-sdk"
   },
   "engines": {

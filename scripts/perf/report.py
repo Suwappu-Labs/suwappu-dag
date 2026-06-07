@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """DAG-S26.5: bank-compliance campaign report generator.
 
-Consumes the four CSV outputs emitted by `gsx-metrics --mode {cert,e2e,pair,tps,recovery}`
+Consumes the four CSV outputs emitted by `suwappu-metrics --mode {cert,e2e,pair,tps,recovery}`
 and produces two artifacts suitable for regulator review:
 
   1. report.json — structured, machine-readable. Stable schema versioned
@@ -44,7 +44,7 @@ SLA_TARGETS = {
 
 def parse_args():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--input-dir", required=True, help="dir containing gsx-metrics CSV outputs")
+    ap.add_argument("--input-dir", required=True, help="dir containing suwappu-metrics CSV outputs")
     ap.add_argument("--output-dir", required=True, help="dir to write report.json + report.html")
     ap.add_argument("--campaign-id", default=None, help="override campaign id (default: from meta.json)")
     return ap.parse_args()
@@ -211,7 +211,7 @@ def render_html(report):
     ) or "<tr><td colspan='4'>(no outage windows detected)</td></tr>"
 
     return f"""<!doctype html>
-<html><head><meta charset='utf-8'><title>GSX DAG compliance campaign — {report['campaign']['id']}</title>
+<html><head><meta charset='utf-8'><title>Suwappu DAG compliance campaign — {report['campaign']['id']}</title>
 <style>
 body{{font-family:system-ui,Segoe UI,sans-serif;max-width:900px;margin:2em auto;padding:0 1em;color:#222}}
 h1{{border-bottom:2px solid #333}}
@@ -224,7 +224,7 @@ tr.no_data td:nth-child(3){{color:#777}}
 .kpi{{display:inline-block;margin:0.5em 1em 0.5em 0;padding:0.4em 0.8em;background:#f4f4f4;border-radius:6px}}
 .kpi strong{{font-size:1.4em}}
 </style></head><body>
-<h1>GSX DAG L1 — Compliance Campaign Report</h1>
+<h1>Suwappu DAG L1 — Compliance Campaign Report</h1>
 <p><strong>Campaign:</strong> {report['campaign']['id']}<br>
 <strong>Period:</strong> {report['campaign']['start_iso']} → {report['campaign']['end_iso']} ({report['campaign']['duration_s']}s)<br>
 <strong>Regions:</strong> {', '.join(report['campaign']['regions'])}<br>

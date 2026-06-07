@@ -23,7 +23,7 @@
 
 use libfuzzer_sys::fuzz_target;
 
-use gsx_consensus::{Certificate, DagStore};
+use suwappu_consensus::{Certificate, DagStore};
 
 fuzz_target!(|bytes: &[u8]| {
     let mut dag = DagStore::new();

@@ -1,4 +1,4 @@
-# CloudFront distribution fronting `rpc.testnet.gsx.globalsettlement.com`
+# CloudFront distribution fronting `rpc.testnet.suwappu.globalsettlement.com`
 # (and the `wss://ws.testnet.*` path for event subscriptions).
 #
 # Phase 1 fronting per
@@ -15,7 +15,7 @@
 #     the edge.
 #
 #   * Cache TTLs are pinned to zero. JSON-RPC responses are
-#     stateful (every `gsx_getBalance` call returns the address's
+#     stateful (every `suwappu_getBalance` call returns the address's
 #     current balance) and MUST NOT be cached at the edge. We still
 #     send through CloudFront because the value here is TLS
 #     termination + WAF + DDoS shielding + automatic origin
@@ -43,7 +43,7 @@ resource "aws_cloudfront_distribution" "rpc" {
   provider        = aws.us_east_1
   enabled         = true
   is_ipv6_enabled = true
-  comment         = "gsx-testnet JSON-RPC + WebSocket fronting (Phase 1)"
+  comment         = "suwappu-testnet JSON-RPC + WebSocket fronting (Phase 1)"
   aliases = [
     "rpc.${var.testnet_subdomain}.${var.apex_domain}",
     "ws.${var.testnet_subdomain}.${var.apex_domain}",
@@ -168,7 +168,7 @@ resource "aws_cloudfront_distribution" "rpc" {
   # ----- WebSocket cache behavior for /ws -----
   #
   # Subscribe path is `ws://<host>/ws` (per
-  # `crates/gsx-node/src/rpc/server.rs`); the same TCP port (9092)
+  # `crates/suwappu-node/src/rpc/server.rs`); the same TCP port (9092)
   # serves both HTTP JSON-RPC and the WebSocket upgrade. CloudFront
   # handles WebSocket transparently when the cache behavior allows
   # GET/HEAD/OPTIONS and forwards the Upgrade/Connection headers
@@ -195,7 +195,7 @@ resource "aws_cloudfront_distribution" "rpc" {
     minimum_protocol_version = "TLSv1.2_2021"
   }
 
-  tags = { Name = "gsx-testnet-rpc-cf" }
+  tags = { Name = "suwappu-testnet-rpc-cf" }
 }
 
 output "cf_rpc_distribution_id" {

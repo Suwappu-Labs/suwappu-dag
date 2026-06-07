@@ -1,7 +1,7 @@
 # Fast path — single-owner lane + K-binding cross-check
 
-**Paper §**: 6.4 — FastPay-style single-owner fast-path ([`gsx-papers/papers/dag-l1`](https://github.com/GlobalSettlementNetwork/gsx-papers))
-**Code**: `crates/gsx-fastpath/src/` (lane, slashing) · `crates/gsx-node/src/daemon.rs` (handler at `handle_fastpath_cert`, ~lines 499-820)
+**Paper §**: 6.4 — FastPay-style single-owner fast-path ([`suwappu-papers/papers/dag-l1`](https://github.com/suwappu/suwappu-papers))
+**Code**: `crates/suwappu-fastpath/src/` (lane, slashing) · `crates/suwappu-node/src/daemon.rs` (handler at `handle_fastpath_cert`, ~lines 499-820)
 **IQs**: [IQ-003 — Fast-path lane architecture](../iq/IQ-003-fast-path-architecture.md)
 **Visuals**: [`docs/visuals/mermaid/fast-path-and-slashing.md`](../visuals/mermaid/fast-path-and-slashing.md) *(coming with PR-2)*
 **Sprint**: DAG-S8 (lane + K-binding) ✅ Closed · DAG-S9 (equivocation slashing) ✅ Closed
@@ -31,9 +31,9 @@ without leaving a publishable proof.
 
 ## Cross-references
 
-- **Engineering:** `crates/gsx-fastpath/src/lib.rs` (lane state machine),
-  `crates/gsx-fastpath/src/slashing.rs` (proof construction),
-  `crates/gsx-node/src/daemon.rs::handle_fastpath_cert` (handler wiring),
+- **Engineering:** `crates/suwappu-fastpath/src/lib.rs` (lane state machine),
+  `crates/suwappu-fastpath/src/slashing.rs` (proof construction),
+  `crates/suwappu-node/src/daemon.rs::handle_fastpath_cert` (handler wiring),
   the `inner.main_lane_index` populated by `try_commit` for the binding
   cross-check.
 - **Spec:** Paper §6.4 + IQ-003 for the architecture choice (parallel-lane

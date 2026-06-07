@@ -1,4 +1,4 @@
-//! Error taxonomy for the `gsx-client` SDK.
+//! Error taxonomy for the `suwappu-client` SDK.
 
 use thiserror::Error;
 
@@ -13,7 +13,7 @@ pub enum Error {
     Transport(String),
 
     /// JSON-RPC application-level error response from the server. The
-    /// `code` matches the JSON-RPC 2.0 reserved range plus gsx-rpc's
+    /// `code` matches the JSON-RPC 2.0 reserved range plus suwappu-rpc's
     /// application codes (currently just -32000 NotFound).
     #[error("rpc error {code}: {message}")]
     Rpc {

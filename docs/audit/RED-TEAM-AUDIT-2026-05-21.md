@@ -1,4 +1,4 @@
-# Red-Team Audit Report — gsx-dag
+# Red-Team Audit Report — suwappu-dag
 
 **Date:** 2026-05-21 (Phase 1), 2026-05-22 (Phase 2 — full coverage)  
 **Scope:** Full repository audit — all crates, infrastructure, CI/CD, scripts, config, fuzz, IQ decisions  
@@ -26,7 +26,7 @@
 
 ## 1. Executive Summary
 
-The gsx-dag codebase implements a Mysticeti-style certificate-DAG settlement chain with a dual-ring validator set, co-resident dual VM, and post-quantum cross-chain attestation. The architecture maps faithfully to the reference paper (gsx-papers/papers/dag-l1), and the type-level structure is well-designed.
+The suwappu-dag codebase implements a Mysticeti-style certificate-DAG settlement chain with a dual-ring validator set, co-resident dual VM, and post-quantum cross-chain attestation. The architecture maps faithfully to the reference paper (suwappu-papers/papers/dag-l1), and the type-level structure is well-designed.
 
 However, this audit reveals **12 critical**, **24 high**, **30+ medium**, and **20+ low** severity findings across all 19 crates, CI/CD pipelines, Terraform infrastructure, and auxiliary tooling. The findings cluster into three systemic anti-patterns:
 
@@ -44,30 +44,30 @@ The most dangerous characteristic of this codebase is that **it looks correct at
 
 | Crate | Source Lines | Test Lines | Review Status |
 |---|---|---|---|
-| `gsx-crypto` | 698 | 146 | Full audit |
-| `gsx-consensus` | 1,580 | 1,433 | Full audit |
-| `gsx-execution` | 13,841 | 325 | Full audit |
-| `gsx-fastpath` | 653 | 376 | Full audit |
-| `gsx-ltp` | 1,084 | 485 | Full audit |
-| `gsx-precompiles` | 1,499 | 473 | Full audit |
-| `gsx-transport` | 878 | 450 | Full audit |
-| `gsx-node` | 7,676 | 178 | Full audit |
-| `gsx-mempool` | 682 | 0 | Full audit |
-| `gsx-rpc` | 1,295 | 1,009 | Full audit |
+| `suwappu-crypto` | 698 | 146 | Full audit |
+| `suwappu-consensus` | 1,580 | 1,433 | Full audit |
+| `suwappu-execution` | 13,841 | 325 | Full audit |
+| `suwappu-fastpath` | 653 | 376 | Full audit |
+| `suwappu-ltp` | 1,084 | 485 | Full audit |
+| `suwappu-precompiles` | 1,499 | 473 | Full audit |
+| `suwappu-transport` | 878 | 450 | Full audit |
+| `suwappu-node` | 7,676 | 178 | Full audit |
+| `suwappu-mempool` | 682 | 0 | Full audit |
+| `suwappu-rpc` | 1,295 | 1,009 | Full audit |
 
 ### Phase 2 — Completed
 
 | Crate / Area | Lines | Review Status |
 |---|---|---|
-| `gsx-authority` | 387 | Full audit |
-| `gsx-validator` | 403 | Full audit |
-| `gsx-validator-program` | 1,055 | Full audit |
-| `gsx-indexer` | 1,055 | Full audit |
-| `gsx-faucet` | 620 | Full audit |
-| `gsx-l2-bridge` | 338 | Full audit |
-| `gsx-l2-confidential` | 481 | Full audit |
-| `gsx-l2-sequencer` | 616 | Full audit |
-| `gsx-l2-verifier-precompile` | 285 | Full audit |
+| `suwappu-authority` | 387 | Full audit |
+| `suwappu-validator` | 403 | Full audit |
+| `suwappu-validator-program` | 1,055 | Full audit |
+| `suwappu-indexer` | 1,055 | Full audit |
+| `suwappu-faucet` | 620 | Full audit |
+| `suwappu-l2-bridge` | 338 | Full audit |
+| `suwappu-l2-confidential` | 481 | Full audit |
+| `suwappu-l2-sequencer` | 616 | Full audit |
+| `suwappu-l2-verifier-precompile` | 285 | Full audit |
 | `clients/rust-sdk` | 297 | Full audit |
 | `terraform/` | ~2,000 | Full audit (devnet, testnet, perf, bootstrap) |
 | `.github/workflows/` | 10 files | Full audit |
@@ -83,7 +83,7 @@ The most dangerous characteristic of this codebase is that **it looks correct at
 
 ### C1. L2 Burn Merkle Proof Is a Byte-Shape Stub
 
-**Location:** `crates/gsx-execution/src/substrate.rs:2203`  
+**Location:** `crates/suwappu-execution/src/substrate.rs:2203`  
 **Invariant violated:** Bridge withdrawal path security  
 **Impact:** Bridge escrow drainable without actual L2 burn
 
@@ -98,7 +98,7 @@ The code comment is explicit:
 
 ### C2. L2 Batch Verifier Is a No-Op
 
-**Location:** `crates/gsx-l2-verifier-precompile/src/lib.rs:168-173`  
+**Location:** `crates/suwappu-l2-verifier-precompile/src/lib.rs:168-173`  
 **Invariant violated:** L1 verification of L2 state transitions  
 **Impact:** Any payload accepted as valid L2 batch proof
 
@@ -111,19 +111,19 @@ Any caller who can construct a 260-byte buffer and 240-byte public input buffer 
 
 ### C3. Production Substrate Is a Near-Total Stub
 
-**Location:** `crates/gsx-execution/src/gsx_db_substrate.rs:197-237`  
-**Invariant violated:** State mutation integrity on gsx-db backend  
+**Location:** `crates/suwappu-execution/src/suwappu_db_substrate.rs:197-237`  
+**Invariant violated:** State mutation integrity on suwappu-db backend  
 **Impact:** 27 of 29 intent types produce zero state change on the production substrate
 
-The `GsxDbSubstrate` implementation of `apply_intent` returns `Ok(())` silently for: all staking deposits/withdrawals, all slashing, all bridge operations, all L2 operations, all governance, treasury disbursements, insurance claims, asset whitelisting, and more. Only `Transfer` and `CommitL2StateRoot` have real behavior.
+The `SuwappuDbSubstrate` implementation of `apply_intent` returns `Ok(())` silently for: all staking deposits/withdrawals, all slashing, all bridge operations, all L2 operations, all governance, treasury disbursements, insurance claims, asset whitelisting, and more. Only `Transfer` and `CommitL2StateRoot` have real behavior.
 
-The live daemon currently uses `InMemorySubstrate` (which implements everything), so this is not exploitable on today's testnet. But any future migration to the production `GsxDbSubstrate` path silently disables 93% of the protocol.
+The live daemon currently uses `InMemorySubstrate` (which implements everything), so this is not exploitable on today's testnet. But any future migration to the production `SuwappuDbSubstrate` path silently disables 93% of the protocol.
 
 ---
 
 ### C4. Certificate Signatures Are Never Verified
 
-**Location:** `crates/gsx-consensus/src/cert.rs:9`, `crates/gsx-node/src/daemon.rs:461`  
+**Location:** `crates/suwappu-consensus/src/cert.rs:9`, `crates/suwappu-node/src/daemon.rs:461`  
 **Invariant violated:** Author authentication for DAG certificates  
 **Impact:** Remote slashing griefing; consensus poisoning
 
@@ -140,7 +140,7 @@ Certificates carry no signatures. The `ingest_cert` path in the daemon accepts a
 
 ### C5. Vote Authentication Is Absent
 
-**Location:** `crates/gsx-consensus/src/joint.rs:106-107`  
+**Location:** `crates/suwappu-consensus/src/joint.rs:106-107`  
 **Invariant violated:** Joint-quorum AND-gate safety (Paper Theorem 2)  
 **Impact:** Validator Ring leg of the safety gate can be bypassed
 
@@ -155,7 +155,7 @@ DAG-S6 is marked `✅ Closed` in the sprint backlog, but the vote authentication
 
 ### C6. No Constant-Time Equality for Secret Types
 
-**Location:** `crates/gsx-crypto/src/mldsa.rs`, `mlkem.rs`  
+**Location:** `crates/suwappu-crypto/src/mldsa.rs`, `mlkem.rs`  
 **Invariant violated:** PQ-conservative crypto surface (side-channel resistance)  
 **Impact:** Timing oracle on secret key comparisons
 
@@ -170,7 +170,7 @@ This claim is false for equality comparisons.
 
 ### C7. BLS Aggregate API Vulnerable to Rogue Key Attacks
 
-**Location:** `crates/gsx-crypto/src/bls.rs`  
+**Location:** `crates/suwappu-crypto/src/bls.rs`  
 **Invariant violated:** BLS signature aggregation security  
 **Impact:** Rogue key attack on aggregated signatures
 
@@ -184,7 +184,7 @@ A rogue key attack allows an adversary to register a carefully crafted public ke
 
 ### C8. `finalize_burn` Attestation Is Not Verified
 
-**Location:** `crates/gsx-precompiles/src/issuer.rs`  
+**Location:** `crates/suwappu-precompiles/src/issuer.rs`  
 **Invariant violated:** Payment receipt authenticity in burn cycle  
 **Impact:** Burns finalized without proof of underlying settlement
 
@@ -194,7 +194,7 @@ The `finalize_burn` function accepts a `PaymentReceiptAttestation` parameter but
 
 ### C9. Validator Quorum Threshold Overflows u128
 
-**Location:** `crates/gsx-validator/src/registry.rs:134-137`  
+**Location:** `crates/suwappu-validator/src/registry.rs:134-137`  
 **Invariant violated:** Joint-quorum AND-gate integrity  
 **Impact:** Quorum threshold collapses to near-zero, bypassing the Validator Ring
 
@@ -205,13 +205,13 @@ pub fn quorum_threshold_stake(&self) -> Stake {
 }
 ```
 
-`2 * total` uses unchecked multiplication on `u128`. No per-member stake ceiling exists — `admit()` accepts any `stake_gsx` value. If a single validator is admitted with `stake_gsx = u128::MAX / 2 + 1`, the expression wraps to a small number in release builds (no `overflow-checks`), and the quorum threshold becomes ~1. An attacker with minimal stake meets quorum alone, collapsing the Validator Ring of the AND-gate.
+`2 * total` uses unchecked multiplication on `u128`. No per-member stake ceiling exists — `admit()` accepts any `stake_suwappu` value. If a single validator is admitted with `stake_suwappu = u128::MAX / 2 + 1`, the expression wraps to a small number in release builds (no `overflow-checks`), and the quorum threshold becomes ~1. An attacker with minimal stake meets quorum alone, collapsing the Validator Ring of the AND-gate.
 
 ---
 
 ### C10. Bearer Token Comparison Is Not Constant-Time (Validator Program)
 
-**Location:** `crates/gsx-validator-program/src/admin.rs:38-53`  
+**Location:** `crates/suwappu-validator-program/src/admin.rs:38-53`  
 **Impact:** Admin token recoverable via timing side-channel
 
 ```rust
@@ -226,7 +226,7 @@ Standard `PartialEq` on `&str` short-circuits on first mismatch. An attacker mea
 
 ### C11. Unbounded Point Injection (Validator Program)
 
-**Location:** `crates/gsx-validator-program/src/admin.rs:163-170`  
+**Location:** `crates/suwappu-validator-program/src/admin.rs:163-170`  
 **Impact:** Leaderboard corruption, integer overflow in scoring
 
 The only validation on `handle_award` is `points > 0`. No upper bound exists. An authenticated caller can POST `points: 9_223_372_036_854_775_807` (i64::MAX). The leaderboard computation (`total_points: uptime + cert + bug + hack` in `lib.rs:161`) uses unchecked i64 addition. If any component reaches i64::MAX, the sum wraps to negative in release builds, placing the victim at the bottom of the leaderboard. The POINTS.md bands (`bug_bounty in {5000, 15000, 50000}`) are "soft validation only" — no hard enforcement exists.
@@ -236,7 +236,7 @@ The only validation on `handle_award` is `points > 0`. No upper bound exists. An
 ### C12. CI Actions Pinned by Floating Tags — Supply Chain Attack Vector
 
 **Location:** All 10 `.github/workflows/*.yml` files  
-**Impact:** Code execution with access to `GSX_DB_DEPLOY_KEY` and OIDC AWS credentials
+**Impact:** Code execution with access to `SUWAPPU_DB_DEPLOY_KEY` and OIDC AWS credentials
 
 Every external GitHub Action is pinned by floating version tag (`@v4`, `@v5`, `@stable`), not by commit SHA. This includes `actions/checkout`, `dtolnay/rust-toolchain`, `Swatinem/rust-cache`, `webfactory/ssh-agent`, `aws-actions/configure-aws-credentials`, and others. A tag hijack on any of these repositories yields arbitrary code execution in every CI run with access to the SSH deploy key, OIDC-assumed AWS role, and NPM publish token.
 
@@ -246,7 +246,7 @@ Every external GitHub Action is pinned by floating version tag (`@v4`, `@v5`, `@
 
 ### H1. `execute_block` Result Silently Discarded
 
-**Location:** `crates/gsx-node/src/daemon.rs:1232`  
+**Location:** `crates/suwappu-node/src/daemon.rs:1232`  
 **Impact:** Execution failures are invisible in the commit pipeline
 
 ```rust
@@ -259,7 +259,7 @@ The execution report (including `first_error`) is silently discarded at every co
 
 ### H2. Fast-Path Equivocation Slashing Never Called
 
-**Location:** `crates/gsx-node/src/daemon.rs` (handle_fastpath_cert)  
+**Location:** `crates/suwappu-node/src/daemon.rs` (handle_fastpath_cert)  
 **Invariant violated:** Load-bearing invariant #5 (100% slashing)  
 **Impact:** Equivocation detected but stake forfeiture never happens
 
@@ -271,7 +271,7 @@ Additionally, `propose_fastpath_tx` in `daemon.rs` is marked `#[allow(dead_code)
 
 ### H3. Reserve Coverage Circuit Breaker Is Inert
 
-**Location:** `crates/gsx-precompiles/src/issuer.rs` and `reserve.rs`  
+**Location:** `crates/suwappu-precompiles/src/issuer.rs` and `reserve.rs`  
 **Impact:** Minting proceeds without reserve coverage checks
 
 `ReserveCoverageChecker::can_mint` is correctly implemented — it checks par ratios, NAV strikes, jurisdiction rules, and attestation freshness. But it is never called from `IssuerRegistry::mint`. The circuit breaker is dead code.
@@ -280,7 +280,7 @@ Additionally, `propose_fastpath_tx` in `daemon.rs` is marked `#[allow(dead_code)
 
 ### H4. Joint-Quorum Safety Proptest Is Vacuously True
 
-**Location:** `crates/gsx-consensus/tests/proptest_joint_quorum.rs:155-204`  
+**Location:** `crates/suwappu-consensus/tests/proptest_joint_quorum.rs:155-204`  
 **Impact:** False sense of security — Theorem 2 safety is untested
 
 The test models two candidates from different authors (0 and 1). Leader election is round-robin: `leader(0, n) = 0` for all `n >= 1`. Therefore `committed_b` is structurally always `false`. The assertion `if committed_a && committed_b { ... }` never fires across any of the 10,000 test cases. The test name says "safety" but it proves nothing.
@@ -289,7 +289,7 @@ The test models two candidates from different authors (0 and 1). Leader election
 
 ### H5. Unbounded DAG Memory Growth
 
-**Location:** `crates/gsx-consensus/src/dag.rs`  
+**Location:** `crates/suwappu-consensus/src/dag.rs`  
 **Impact:** DoS via memory exhaustion
 
 `DagStore` is a `BTreeMap` with no eviction, compaction, or pruning. No bound exists on `Certificate::parents` size. A single cert with 1,000,000 parent hashes (all valid) allocates 32 MB for the parent vector alone. The orphan buffer (`MAX_ORPHAN_CERTS = 4096`) is bounded, but the main DAG is not.
@@ -298,7 +298,7 @@ The test models two candidates from different authors (0 and 1). Leader election
 
 ### H6. SecretKey Derives Debug — Key Material in Logs
 
-**Location:** `crates/gsx-crypto/src/mldsa.rs`, `mlkem.rs`  
+**Location:** `crates/suwappu-crypto/src/mldsa.rs`, `mlkem.rs`  
 **Impact:** Key material exposure in logs, panics, test output
 
 Both `mldsa::SecretKey(Vec<u8>)` and `mlkem::SecretKey(Vec<u8>)` derive `Debug`. Rust's `Debug` for `Vec<u8>` prints raw bytes as decimal integers. Any `{:?}` formatting exposes key material. ML-DSA-65 secret keys are 4,032 bytes; ML-KEM-768 secret keys are 2,400 bytes.
@@ -309,7 +309,7 @@ No `Zeroize`/`Drop` implementation exists. Keys persist in heap memory after the
 
 ### H7. Peer-to-Peer Wire Has No Connection Cap
 
-**Location:** `crates/gsx-node/src/wire.rs`  
+**Location:** `crates/suwappu-node/src/wire.rs`  
 **Impact:** File descriptor exhaustion, tokio task memory exhaustion
 
 The `accept_loop` spawns one task per inbound TCP connection with no concurrency semaphore, no per-IP limit, and no authentication before the hello frame. The client listener has both (`max_client_connections = 256`, `client_per_ip_limit = 8`), but the peer wire does not.
@@ -320,7 +320,7 @@ An attacker can open thousands of TCP connections, each consuming an FD and a to
 
 ### H8. No Transport Encryption
 
-**Location:** `crates/gsx-node/src/wire.rs`  
+**Location:** `crates/suwappu-node/src/wire.rs`  
 **Impact:** All traffic visible to on-path attackers
 
 All inter-validator and client-to-validator traffic is plaintext TCP. Application-layer signatures prevent forgery but not eavesdropping. The wire.rs comment is explicit:
@@ -332,7 +332,7 @@ The RPC JSON endpoint is also plain HTTP.
 
 ### H9. Single-Signature Governance
 
-**Location:** `crates/gsx-node/src/client.rs`  
+**Location:** `crates/suwappu-node/src/client.rs`  
 **Impact:** Single compromised Authority can unilaterally modify the ring
 
 `AdmitAuthority`, `ExitAuthority`, and `EjectAuthority` intents accept any one seated Authority's signature without the candidate's co-signature. The comment acknowledges: "The fully-correct dual-signature design is deferred to a follow-up."
@@ -341,7 +341,7 @@ The RPC JSON endpoint is also plain HTTP.
 
 ### H10. `hkdf_sha3_256` Panics on Oversized Output in Release
 
-**Location:** `crates/gsx-crypto/src/hash.rs`  
+**Location:** `crates/suwappu-crypto/src/hash.rs`  
 **Impact:** DoS if `out_len` is attacker-influenced
 
 The only guard is `debug_assert!` (no-op in release builds). The subsequent `.expect()` converts the HKDF library error into a process-aborting panic. Should return `Result`.
@@ -350,7 +350,7 @@ The only guard is `debug_assert!` (no-op in release builds). The subsequent `.ex
 
 ### H11. Bincode NoLimit Allows OOM Attempts
 
-**Location:** `crates/gsx-node/src/codec.rs`  
+**Location:** `crates/suwappu-node/src/codec.rs`  
 **Impact:** Memory exhaustion via crafted wire messages
 
 `bincode::config::NoLimit` is explicitly configured. The 1 MiB outer frame cap bounds raw bytes, but a length-tagged `Vec<T>` field inside the frame can claim millions of elements, causing bincode to attempt multi-GB allocations before erroring. The `enforce_compact_variant_cap` check runs post-decode — after the allocation.
@@ -359,7 +359,7 @@ The only guard is `debug_assert!` (no-op in release builds). The subsequent `.ex
 
 ### H12. EjectAuthority proof_ref Is Discarded
 
-**Location:** `crates/gsx-node/src/daemon.rs:1474`  
+**Location:** `crates/suwappu-node/src/daemon.rs:1474`  
 **Impact:** Ejection applied without validating evidence
 
 ```rust
@@ -372,7 +372,7 @@ The daemon applies authority ejection without verifying that the referenced equi
 
 ### H13. Duplicate Public Key Admitted Under Different Authority ID
 
-**Location:** `crates/gsx-authority/src/registry.rs:80-97`  
+**Location:** `crates/suwappu-authority/src/registry.rs:80-97`  
 **Impact:** One key controls two quorum votes, reducing effective BFT tolerance
 
 `admit()` checks for duplicate `AuthorityId` but NOT for duplicate `public_key_bytes`. An entity that holds one seat can gain a second seat with the same ML-DSA-65 key and a different ID, silently reducing Byzantine fault tolerance. With n=30 and threshold=21, gaining an extra vote shifts the safety boundary.
@@ -381,7 +381,7 @@ The daemon applies authority ejection without verifying that the referenced equi
 
 ### H14. `remove()` Is Unauthenticated — No Exit/Slash/Eject Distinction
 
-**Location:** `crates/gsx-authority/src/registry.rs:102-104`  
+**Location:** `crates/suwappu-authority/src/registry.rs:102-104`  
 **Impact:** Any code with `&mut AuthorityRegistry` can silently evict any authority
 
 `remove()` takes only an ID. No guard, no caller check, no governance proof. Voluntary exit, slash-eviction, and accidental removal via a bug all produce identical silent removal with no audit event. The slashing pipeline (`slash_authority`) delegates entirely to this single unauthenticated method.
@@ -390,25 +390,25 @@ The daemon applies authority ejection without verifying that the referenced equi
 
 ### H15. Below-Floor Slash Silently Expels Validator (Contradicts Documentation)
 
-**Location:** `crates/gsx-validator/src/slashing.rs:66-73`  
+**Location:** `crates/suwappu-validator/src/slashing.rs:66-73`  
 **Impact:** Validators permanently removed when stake drops below floor; docstring says "NOT expelled"
 
-After a 30% slash, if `remaining < VALIDATOR_STAKE_THRESHOLD_GSX`, `admit()` returns `Err(StakeBelowFloor)` and `let _ =` discards the error. The validator is permanently gone. The docstring says "the validator is NOT expelled" — the documentation contradicts the implementation. Creates a slashing cascade risk: each expelled validator reduces total stake and quorum threshold.
+After a 30% slash, if `remaining < VALIDATOR_STAKE_THRESHOLD_SUWAPPU`, `admit()` returns `Err(StakeBelowFloor)` and `let _ =` discards the error. The validator is permanently gone. The docstring says "the validator is NOT expelled" — the documentation contradicts the implementation. Creates a slashing cascade risk: each expelled validator reduces total stake and quorum threshold.
 
 ---
 
 ### H16. No Public-Key Field on ValidatorMember — Identity Is ID Only
 
-**Location:** `crates/gsx-validator/src/registry.rs:53-60`  
+**Location:** `crates/suwappu-validator/src/registry.rs:53-60`  
 **Impact:** Validator Ring has zero cryptographic identity anchor
 
-Unlike `AuthorityMember`, `ValidatorMember` has no `public_key_bytes` field. Identity is entirely the `ValidatorId` integer. Any code that constructs `ValidatorMember { id: 0, stake_gsx: 25_000 }` claims to be validator 0 with no proof. All slashing, admission, and quorum logic operates against unauthenticated IDs.
+Unlike `AuthorityMember`, `ValidatorMember` has no `public_key_bytes` field. Identity is entirely the `ValidatorId` integer. Any code that constructs `ValidatorMember { id: 0, stake_suwappu: 25_000 }` claims to be validator 0 with no proof. All slashing, admission, and quorum logic operates against unauthenticated IDs.
 
 ---
 
 ### H17. Leaderboard `total_points` Arithmetic Overflows i64
 
-**Location:** `crates/gsx-validator-program/src/lib.rs:152-166`  
+**Location:** `crates/suwappu-validator-program/src/lib.rs:152-166`  
 **Impact:** Leaderboard sorting corruption; legitimate operators appear with negative scores
 
 `total_points: uptime + cert + bug + hack` uses unchecked i64 addition. All four values are `i64` from PostgreSQL. Reachable given C11 (unbounded point injection). Wrapped negative totals corrupt the leaderboard sort order.
@@ -417,7 +417,7 @@ Unlike `AuthorityMember`, `ValidatorMember` has no `public_key_bytes` field. Ide
 
 ### H18. UPSERT Silently Flips `is_seed` Flag on Operator Registration
 
-**Location:** `crates/gsx-validator-program/src/admin.rs:83-95`  
+**Location:** `crates/suwappu-validator-program/src/admin.rs:83-95`  
 **Impact:** Seed operators' points become TGE-eligible; non-seed operators' points become excluded
 
 Re-registering an existing operator updates `is_seed`. A compromised admin or insider can demote a seed validator to non-seed, making accumulated points eligible for TGE conversion — a direct financial exploit.
@@ -426,7 +426,7 @@ Re-registering an existing operator updates `is_seed`. A compromised admin or in
 
 ### H19. Faucet Rate Limit Is 720x More Permissive Than Configured
 
-**Location:** `crates/gsx-faucet/src/main.rs:134-144`  
+**Location:** `crates/suwappu-faucet/src/main.rs:134-144`  
 **Impact:** Faucet drainable at ~86,400 drips/day per IP instead of 5/day
 
 `refill_per_sec = ceil(bucket_refill_per_hour / 3600)`. For the default `5/hour`, this computes `ceil(0.00138) = 1`. The bucket refills at 1 token/second = 3,600/hour. The operator configured 5 drips/hour but the actual rate is 720x higher.
@@ -435,7 +435,7 @@ Re-registering an existing operator updates `is_seed`. A compromised admin or in
 
 ### H20. Faucet Address Derivation Uses Wrong Hash Function
 
-**Location:** `crates/gsx-faucet/src/lib.rs:87-108`  
+**Location:** `crates/suwappu-faucet/src/lib.rs:87-108`  
 **Impact:** Faucet non-functional on default config
 
 `address_from_pubkey` uses BLAKE3, but the genesis script uses BLAKE2b. These produce different addresses. The faucet will see zero balance and fail silently on every drip unless `--faucet-address` is explicitly passed.
@@ -471,7 +471,7 @@ A leader cert arriving after round R+1 proposers freeze their parent sets causes
 
 ### H24. `proptest_block_execution.rs` Self-Comparison Tautology
 
-**Location:** `crates/gsx-execution/tests/proptest_block_execution.rs:94`  
+**Location:** `crates/suwappu-execution/tests/proptest_block_execution.rs:94`  
 **Impact:** Determinism check on `report_b.applied` is silently missing
 
 ```rust
@@ -492,36 +492,36 @@ This compares `report_b.applied` to itself — always true. The intended check w
 | M4 | No TCP keepalive configured — dead connections on cross-region links undetected | `wire.rs` |
 | M5 | No dial timeout on `TcpStream::connect` — black-holing remote blocks dialer indefinitely | `wire.rs` |
 | M6 | Slow-read attack: within-body `read_exact` has no timeout after the 4-byte length prefix arrives | `wire.rs` |
-| M7 | No view-change or network-partition recovery protocol exists | `gsx-consensus` |
+| M7 | No view-change or network-partition recovery protocol exists | `suwappu-consensus` |
 | M8 | DID STARK proof is a placeholder — ML-DSA-65 signature where a STARK should be, `fri_proof_bytes` always empty | `did_stark.rs` |
 | M9 | Reserve attestation ZK proof is a placeholder — "Phase-1 placeholder; production uses Plonky3 / SP1" | `reserve.rs:103` |
 | M10 | All JSON-RPC mempool errors collapse to `EnqueueFull` — callers cannot distinguish rate-limiting from dedup | `rpc_adapter.rs` |
-| M11 | `GsxDbSubstrate::from_balances` is a no-op — discards all provided balances silently | `gsx_db_substrate.rs` |
+| M11 | `SuwappuDbSubstrate::from_balances` is a no-op — discards all provided balances silently | `suwappu_db_substrate.rs` |
 | M12 | Git dependencies pinned by mutable tag (`v0.1.0`), not commit hash — supply-chain risk | Root `Cargo.toml` |
 | M13 | BLS keys decoded at genesis are silently discarded (`let _bls_bytes = ...`) | `daemon.rs:274` |
 | M14 | Indexer `/address/:addr/txs` always returns empty JSON array | `api.rs:89` |
 | M15 | `2 * stake_table.total()` can overflow in release builds (no `overflow-checks = true`) — collapses quorum threshold | `joint.rs:120` |
-| M16 | No alert when Authority Ring drops below 30-member floor after slashing cascade | `gsx-authority/registry.rs` |
-| M17 | `readmit_authority` is `pub` with no cooldown — slashed member can re-enter in same tick | `gsx-authority/slashing.rs:49-60` |
-| M18 | Get-then-remove TOCTOU in `slash_validator` — concurrent slashes corrupt accounting | `gsx-validator/slashing.rs:58-67` |
-| M19 | Minor-severity slash path (5%) is defined but dead code — never called anywhere | `gsx-validator/slashing.rs:21-27` |
-| M20 | Uptime scoring: `ok_samples * 100` can overflow i64 at pathological sample counts | `gsx-validator-program/score.rs:165` |
-| M21 | Unknown `authority_id` on cert/award returns HTTP 500 with raw schema in error body | `gsx-validator-program/admin.rs:270-280` |
-| M22 | All operators share one uptime probe signal — per-node health is invisible | `gsx-validator-program/probe.rs:60-77` |
-| M23 | `awarded_by` / `reason` fields have no length limit — DB storage abuse vector | `gsx-validator-program/admin.rs:171` |
-| M24 | Cert `epoch` accepts arbitrary past/future values — time-delayed point injection | `gsx-validator-program/admin.rs:262-268` |
-| M25 | L2 confidential note `position` not in commitment preimage — deviation from Sapling, STARK circuit risk | `gsx-l2-confidential/lib.rs:148-162` |
-| M26 | L2 confidential randomness `r` reuse not enforced — breaks commitment hiding property | `gsx-l2-confidential/lib.rs:109-110` |
-| M27 | Sequencer `batch_id` monotonicity entirely caller-enforced — no defense-in-depth | `gsx-l2-sequencer/lib.rs:331-388` |
-| M28 | No L2 force-inclusion mechanism — censored users have no recourse | `gsx-l2-sequencer` (entire) |
-| M29 | Indexer tx_hash format inconsistency between live-path (`0x`-prefixed) and backfill-path (bare hex) | `gsx-indexer/backfill.rs:130` |
-| M30 | Indexer InMemoryStore unbounded growth — no LRU eviction or size cap | `gsx-indexer/store.rs:70-124` |
-| M31 | Faucet per-IP bucket HashMap has no GC — unbounded memory growth under unique-IP traffic | `gsx-faucet/lib.rs:130,159` |
+| M16 | No alert when Authority Ring drops below 30-member floor after slashing cascade | `suwappu-authority/registry.rs` |
+| M17 | `readmit_authority` is `pub` with no cooldown — slashed member can re-enter in same tick | `suwappu-authority/slashing.rs:49-60` |
+| M18 | Get-then-remove TOCTOU in `slash_validator` — concurrent slashes corrupt accounting | `suwappu-validator/slashing.rs:58-67` |
+| M19 | Minor-severity slash path (5%) is defined but dead code — never called anywhere | `suwappu-validator/slashing.rs:21-27` |
+| M20 | Uptime scoring: `ok_samples * 100` can overflow i64 at pathological sample counts | `suwappu-validator-program/score.rs:165` |
+| M21 | Unknown `authority_id` on cert/award returns HTTP 500 with raw schema in error body | `suwappu-validator-program/admin.rs:270-280` |
+| M22 | All operators share one uptime probe signal — per-node health is invisible | `suwappu-validator-program/probe.rs:60-77` |
+| M23 | `awarded_by` / `reason` fields have no length limit — DB storage abuse vector | `suwappu-validator-program/admin.rs:171` |
+| M24 | Cert `epoch` accepts arbitrary past/future values — time-delayed point injection | `suwappu-validator-program/admin.rs:262-268` |
+| M25 | L2 confidential note `position` not in commitment preimage — deviation from Sapling, STARK circuit risk | `suwappu-l2-confidential/lib.rs:148-162` |
+| M26 | L2 confidential randomness `r` reuse not enforced — breaks commitment hiding property | `suwappu-l2-confidential/lib.rs:109-110` |
+| M27 | Sequencer `batch_id` monotonicity entirely caller-enforced — no defense-in-depth | `suwappu-l2-sequencer/lib.rs:331-388` |
+| M28 | No L2 force-inclusion mechanism — censored users have no recourse | `suwappu-l2-sequencer` (entire) |
+| M29 | Indexer tx_hash format inconsistency between live-path (`0x`-prefixed) and backfill-path (bare hex) | `suwappu-indexer/backfill.rs:130` |
+| M30 | Indexer InMemoryStore unbounded growth — no LRU eviction or size cap | `suwappu-indexer/store.rs:70-124` |
+| M31 | Faucet per-IP bucket HashMap has no GC — unbounded memory growth under unique-IP traffic | `suwappu-faucet/lib.rs:130,159` |
 | M32 | Consensus/client ports (9090, 9091) open to `0.0.0.0/0` in all Terraform security groups | `terraform/devnet/modules/validator/main.tf:107-126` |
 | M33 | CodeBuild IAM role has `kms:Decrypt` on resource `"*"` — cross-resource KMS access | `terraform/perf/codebuild.tf:67-70` |
 | M34 | Program EC2 port 8090 exposed without ALB/WAF/TLS (testnet) | `terraform/testnet/validator-program.tf:102-112` |
-| M35 | Deterministic placeholder keys derivable from published seed `gsx-devnet-2026` | `scripts/gen-devnet-genesis.py:43-49` |
-| M36 | No fuzz target for `gsx-rpc` JSON-RPC deserializer — primary external attack surface unfuzzed | `fuzz/` |
+| M35 | Deterministic placeholder keys derivable from published seed `suwappu-devnet-2026` | `scripts/gen-devnet-genesis.py:43-49` |
+| M36 | No fuzz target for `suwappu-rpc` JSON-RPC deserializer — primary external attack surface unfuzzed | `fuzz/` |
 | M37 | `workflow_dispatch` on 5 deploy workflows without environment-level approval gate | `.github/workflows/` |
 | M38 | No TLS enforcement on RDS PostgreSQL connection from program EC2 | `terraform/testnet/validator-program.tf:66-90` |
 | M39 | `cross_validator_state_root_agrees` proptest is vacuous — only checks liveness, never compares roots | `proptest_genesis_flow.rs` |
@@ -533,30 +533,30 @@ This compares `report_b.applied` to itself — always true. The intended check w
 
 | ID | Finding | Location |
 |----|---------|----------|
-| L1 | `SizeMismatch` CryptoError variant defined but never emitted | `gsx-crypto/src/error.rs` |
-| L2 | `rand_chacha` dependency in gsx-crypto Cargo.toml but never imported | `gsx-crypto/Cargo.toml` |
+| L1 | `SizeMismatch` CryptoError variant defined but never emitted | `suwappu-crypto/src/error.rs` |
+| L2 | `rand_chacha` dependency in suwappu-crypto Cargo.toml but never imported | `suwappu-crypto/Cargo.toml` |
 | L3 | `propose_fastpath_tx` is `#[allow(dead_code)]` — fast-path TX submission not wired to daemon | `daemon.rs:763` |
 | L4 | `run_genesis_flow` marked `#[allow(dead_code)]` | `validator.rs:147` |
 | L5 | Fixed test ports (18801–18813) cause flaky CI under parallel execution | `wire.rs` tests |
 | L6 | `parents.len() as u32` truncation in `cert.hash()` — semantically incorrect cast | `cert.rs` |
 | L7 | `sha3_256` docstring claims "constant-time-safe" — misleading for `[u8; 32]` comparisons with `==` | `hash.rs` |
 | L8 | SCION `path_seed_mac` uses unkeyed BLAKE3 — two paths with same ISD+round share seed MAC | `scion.rs` |
-| L9 | `substrate.rs` is 8,802 lines — monolithic God Object | `gsx-execution` |
-| L10 | Genesis allocation pipeline incomplete — requires manual post-genesis intent submission | `gsx-node` |
+| L9 | `substrate.rs` is 8,802 lines — monolithic God Object | `suwappu-execution` |
+| L10 | Genesis allocation pipeline incomplete — requires manual post-genesis intent submission | `suwappu-node` |
 | L11 | `_shape_hint()` exists solely to suppress a dead-code warning on an import | `client.rs:718` |
 | L12 | `leader()` panics on `n = 0` via `assert!` in production code (process abort in release) | `commit.rs:70` |
-| L13 | Authority and validator lib tests are tautological constant-to-constant comparisons | `gsx-authority/lib.rs:44-53` |
-| L14 | `public_key_bytes` accepts zero-length and malformed keys at admission | `gsx-authority/registry.rs:63` |
-| L15 | `total_stake()` uses unchecked `.sum()` — feeds into V-1 overflow | `gsx-validator/registry.rs:126-128` |
-| L16 | Dead columns `bug_bounty_points`/`hackathon_points` always written as 0 in `epoch_points` | `gsx-validator-program/migrations/0001_init.sql` |
-| L17 | No rate limiting on public `GET /leaderboard` — generates multi-table JOIN per request | `gsx-validator-program/main.rs:100-116` |
-| L18 | `UnknownAuthority` error variant defined but never used | `gsx-validator-program/lib.rs:60` |
-| L19 | L2 bridge zero-address (`[0u8; 20]`) recipient accepted — funds burned with no recourse | `gsx-l2-bridge/lib.rs:157-196` |
-| L20 | L2 confidential `NullifierKey` derives `Serialize/Deserialize` — accidental serialization risk | `gsx-l2-confidential/lib.rs:98-99` |
-| L21 | Sequencer `drain` does not return drained txs to mempool on failure — transactions lost | `gsx-l2-sequencer/lib.rs:195-205` |
-| L22 | Sequencer `bytes_total` uses `saturating_sub` masking potential underflow bugs | `gsx-l2-sequencer/lib.rs:200` |
+| L13 | Authority and validator lib tests are tautological constant-to-constant comparisons | `suwappu-authority/lib.rs:44-53` |
+| L14 | `public_key_bytes` accepts zero-length and malformed keys at admission | `suwappu-authority/registry.rs:63` |
+| L15 | `total_stake()` uses unchecked `.sum()` — feeds into V-1 overflow | `suwappu-validator/registry.rs:126-128` |
+| L16 | Dead columns `bug_bounty_points`/`hackathon_points` always written as 0 in `epoch_points` | `suwappu-validator-program/migrations/0001_init.sql` |
+| L17 | No rate limiting on public `GET /leaderboard` — generates multi-table JOIN per request | `suwappu-validator-program/main.rs:100-116` |
+| L18 | `UnknownAuthority` error variant defined but never used | `suwappu-validator-program/lib.rs:60` |
+| L19 | L2 bridge zero-address (`[0u8; 20]`) recipient accepted — funds burned with no recourse | `suwappu-l2-bridge/lib.rs:157-196` |
+| L20 | L2 confidential `NullifierKey` derives `Serialize/Deserialize` — accidental serialization risk | `suwappu-l2-confidential/lib.rs:98-99` |
+| L21 | Sequencer `drain` does not return drained txs to mempool on failure — transactions lost | `suwappu-l2-sequencer/lib.rs:195-205` |
+| L22 | Sequencer `bytes_total` uses `saturating_sub` masking potential underflow bugs | `suwappu-l2-sequencer/lib.rs:200` |
 | L23 | Rust-SDK has no HTTP request timeout — server can hang client indefinitely | `clients/rust-sdk/lib.rs:94-106` |
-| L24 | Rust-SDK `StakeEntry.stake_gsx` is `String` — no validation it's a valid decimal u128 | `clients/rust-sdk/lib.rs:274-282` |
+| L24 | Rust-SDK `StakeEntry.stake_suwappu` is `String` — no validation it's a valid decimal u128 | `clients/rust-sdk/lib.rs:274-282` |
 | L25 | SSH deploy key written to disk file in `release.yml`/`fuzz.yml` instead of ssh-agent | `.github/workflows/release.yml:73-79` |
 | L26 | Fuzz duration 5 min/target/week is too short for production consensus code | `.github/workflows/fuzz.yml` |
 | L27 | No arm64 Linux CI coverage despite production on `t4g` Graviton instances | `.github/workflows/release.yml` |
@@ -602,7 +602,7 @@ Correct building blocks that are never connected in the integration layer.
 
 ## 8. Crate-by-Crate Detail
 
-### gsx-crypto (698 src lines)
+### suwappu-crypto (698 src lines)
 
 | Area | Assessment |
 |---|---|
@@ -615,7 +615,7 @@ Correct building blocks that are never connected in the integration layer.
 | Side channels | No `subtle` crate. No `Zeroize`. `Debug` derived on `SecretKey`. Timing oracle on comparisons. |
 | Error handling | Well-typed `CryptoError` enum. All library errors discarded with `\|_\|`. `SizeMismatch` variant never emitted. |
 
-### gsx-consensus (1,580 src lines)
+### suwappu-consensus (1,580 src lines)
 
 | Area | Assessment |
 |---|---|
@@ -628,13 +628,13 @@ Correct building blocks that are never connected in the integration layer.
 | Performance | `finalize()` is O(R^4 · N^2). `cert_at()` and `supporters()` are O(N·R) per call. No caching. |
 | Memory | Unbounded growth. No parent-set size limit. Orphan buffer bounded (4096). |
 
-### gsx-execution (13,841 src lines)
+### suwappu-execution (13,841 src lines)
 
 | Area | Assessment |
 |---|---|
 | Block executor | Genuine sequential intent processor. Correct stop-on-error. Result discarded at commit. |
 | InMemorySubstrate | Fully implemented for all 29 intent types. Correct balance accounting. |
-| GsxDbSubstrate | 27/29 intent types are `Ok(())` stubs. Only Transfer and CommitL2StateRoot work. |
+| SuwappuDbSubstrate | 27/29 intent types are `Ok(())` stubs. Only Transfer and CommitL2StateRoot work. |
 | State root | BLAKE3 of sorted (address, balance). Deterministic. No Merkle proof API. |
 | L2 bridge | Merkle proof is byte-shape stub. Nullifier set is the only defense. |
 | Checkpoints | Hash-chained, ML-DSA-65 co-signed. Ratification verifies signatures. |
@@ -642,7 +642,7 @@ Correct building blocks that are never connected in the integration layer.
 | Inflation/Rewards | Implemented in InMemorySubstrate. Epoch monotonicity enforced. |
 | God Object | `substrate.rs` is 8,802 lines — ~3,100 production + ~5,700 inline tests. |
 
-### gsx-fastpath (653 src lines)
+### suwappu-fastpath (653 src lines)
 
 | Area | Assessment |
 |---|---|
@@ -652,7 +652,7 @@ Correct building blocks that are never connected in the integration layer.
 | Slashing library | Correct — iterates signers, calls `slash_authority`. Idempotent. |
 | Daemon wiring | **Not connected.** Detection happens, slashing does not. `propose_fastpath_tx` is dead code. |
 
-### gsx-transport (878 src lines)
+### suwappu-transport (878 src lines)
 
 | Area | Assessment |
 |---|---|
@@ -662,7 +662,7 @@ Correct building blocks that are never connected in the integration layer.
 | Wire codec | 1 MiB frame cap. Version byte check. Bincode `NoLimit` allows OOM attempts from length-tagged collections. |
 | DoS surface | Client listener well-protected. Peer listener has no connection cap. |
 
-### gsx-node (7,676 src lines)
+### suwappu-node (7,676 src lines)
 
 | Area | Assessment |
 |---|---|
@@ -672,9 +672,9 @@ Correct building blocks that are never connected in the integration layer.
 | RPC adapter | Minimal methods. No authentication on reads. Mempool errors collapsed. |
 | Genesis | Correct for testnet. Empty genesis block. No embedded initial allocation. |
 | Configuration | TOML-based. Some critical values hardcoded (exit cooldown, slash BPS, bounty caps). |
-| State wiring | Uses InMemorySubstrate, not GsxDbSubstrate. BLS keys discarded at genesis. |
+| State wiring | Uses InMemorySubstrate, not SuwappuDbSubstrate. BLS keys discarded at genesis. |
 
-### gsx-mempool (682 src lines)
+### suwappu-mempool (682 src lines)
 
 | Area | Assessment |
 |---|---|
@@ -684,7 +684,7 @@ Correct building blocks that are never connected in the integration layer.
 | Rate limiting | Per-peer leaky bucket. JSON-RPC submissions bypass per-peer limits (handled one layer up). |
 | Priority | `priority: u64` field exists but all submissions use `DEFAULT_INTENT_PRIORITY = 0`. No fee market. |
 
-### gsx-ltp (1,084 src lines)
+### suwappu-ltp (1,084 src lines)
 
 | Area | Assessment |
 |---|---|
@@ -693,7 +693,7 @@ Correct building blocks that are never connected in the integration layer.
 | DID STARK | Placeholder. ML-DSA-65 signature, not a STARK. `fri_proof_bytes` always empty. |
 | Commitment size | `ON_CHAIN_COMMITMENT_BYTES = 1,600`. Matches paper §10.2. |
 
-### gsx-precompiles (1,499 src lines)
+### suwappu-precompiles (1,499 src lines)
 
 | Area | Assessment |
 |---|---|
@@ -701,7 +701,7 @@ Correct building blocks that are never connected in the integration layer.
 | Issuer | Full two-phase burn cycle. Delegation caps. `finalize_burn` attestation not verified. |
 | Reserve checker | Predicate logic correct. TTL freshness correct. **Not wired into mint path.** |
 
-### gsx-authority (387 src lines)
+### suwappu-authority (387 src lines)
 
 | Area | Assessment |
 |---|---|
@@ -711,7 +711,7 @@ Correct building blocks that are never connected in the integration layer.
 | Slashing | `slash_authority` delegates to `remove()`. `readmit_authority` is `pub` with no cooldown (M17). |
 | Tests | Inline only. Lib tests are tautological constant comparisons (L13). No external proptests. |
 
-### gsx-validator (403 src lines)
+### suwappu-validator (403 src lines)
 
 | Area | Assessment |
 |---|---|
@@ -721,7 +721,7 @@ Correct building blocks that are never connected in the integration layer.
 | TOCTOU | Get-then-remove pattern in slash_validator — concurrent slashes corrupt accounting (M18). |
 | Tests | External proptest has 2 dead branches (`DuplicateMember`, `RingFull`) and misleading idempotency test. |
 
-### gsx-validator-program (1,055 src lines)
+### suwappu-validator-program (1,055 src lines)
 
 | Area | Assessment |
 |---|---|
@@ -732,7 +732,7 @@ Correct building blocks that are never connected in the integration layer.
 | DB safety | Parameterized queries (no SQL injection). But no length limits on text fields (M23). |
 | Rate limiting | None on public `/leaderboard` endpoint (L17). |
 
-### gsx-l2-bridge (338 src lines)
+### suwappu-l2-bridge (338 src lines)
 
 | Area | Assessment |
 |---|---|
@@ -741,17 +741,17 @@ Correct building blocks that are never connected in the integration layer.
 | Zero-address | `recipient = [0u8; 20]` accepted — funds burned irrecoverably (L19). |
 | `batch_id` | No existence check — any value including 0 or u64::MAX accepted. |
 
-### gsx-l2-confidential (481 src lines)
+### suwappu-l2-confidential (481 src lines)
 
 | Area | Assessment |
 |---|---|
-| Commitments | Real SHA3-256 domain-separated hashing via `gsx_crypto`. Not a stub. |
+| Commitments | Real SHA3-256 domain-separated hashing via `suwappu_crypto`. Not a stub. |
 | Position binding | Note `position` NOT in commitment preimage — deviation from Sapling (M25). |
 | Randomness | Reuse not enforced — breaks hiding property (M26). |
 | ZK circuit | Not present. Phase 3 STARK-of-ML-DSA deferred. |
 | Tests | Proptest `r_byte: u8` generates only 256 distinct randomness values — severely collapsed space. |
 
-### gsx-l2-sequencer (616 src lines)
+### suwappu-l2-sequencer (616 src lines)
 
 | Area | Assessment |
 |---|---|
@@ -761,7 +761,7 @@ Correct building blocks that are never connected in the integration layer.
 | Force-inclusion | Not implemented — censorship-resistance gap (M28). |
 | Bond/slashing | No sequencer bond or slashing logic — any caller can build batches. |
 
-### gsx-indexer (1,055 src lines)
+### suwappu-indexer (1,055 src lines)
 
 | Area | Assessment |
 |---|---|
@@ -771,7 +771,7 @@ Correct building blocks that are never connected in the integration layer.
 | Memory | InMemoryStore unbounded — no eviction (M30). |
 | Auth | None on read API (intentional for public read). |
 
-### gsx-faucet (620 src lines)
+### suwappu-faucet (620 src lines)
 
 | Area | Assessment |
 |---|---|
@@ -787,7 +787,7 @@ Correct building blocks that are never connected in the integration layer.
 |---|---|
 | HTTP client | No request timeout configured — server can hang client (L23). |
 | Error handling | `error_for_status()` discards response body on 4xx/5xx. |
-| Type safety | `call<T>` is fully public — bypasses typed method surface. `StakeEntry.stake_gsx` is unvalidated `String` (L24). |
+| Type safety | `call<T>` is fully public — bypasses typed method surface. `StakeEntry.stake_suwappu` is unvalidated `String` (L24). |
 | TLS | Default `reqwest` settings (verification enabled). No warning on plain HTTP URLs. |
 
 ---
@@ -833,13 +833,13 @@ Correct building blocks that are never connected in the integration layer.
 
 ### Crates With Zero External Tests
 
-- `gsx-authority` — inline tests only
-- `gsx-mempool` — inline tests only
-- `gsx-faucet` — inline tests only
-- `gsx-validator-program` — inline tests only, zero external tests, security-critical
-- `gsx-l2-bridge` — inline tests only
-- `gsx-l2-confidential` — inline tests only
-- `gsx-l2-sequencer` — inline tests only
+- `suwappu-authority` — inline tests only
+- `suwappu-mempool` — inline tests only
+- `suwappu-faucet` — inline tests only
+- `suwappu-validator-program` — inline tests only, zero external tests, security-critical
+- `suwappu-l2-bridge` — inline tests only
+- `suwappu-l2-confidential` — inline tests only
+- `suwappu-l2-sequencer` — inline tests only
 
 ### Missing Adversarial Test Categories
 
@@ -871,7 +871,7 @@ Git tags are mutable pointers. A compromised or retagged upstream silently chang
 
 ### Unused Dependencies
 
-- `rand_chacha` declared in `gsx-crypto/Cargo.toml` but never imported
+- `rand_chacha` declared in `suwappu-crypto/Cargo.toml` but never imported
 
 ### Notable Dependency Versions (Spot Check)
 
@@ -920,7 +920,7 @@ This means every `unwrap()`, `expect()`, `assert!()`, and `panic!()` in producti
 
 - `deploy-aws.sh` hard-codes expected AWS account (security control — correct).
 - Operator CIDR auto-detection via `checkip.amazonaws.com` has no response format validation (L29).
-- `gen-devnet-genesis.py` uses deterministic placeholder keys from public seed `gsx-devnet-2026` (M35). No runtime guard prevents deployment of these keys behind a public-facing port.
+- `gen-devnet-genesis.py` uses deterministic placeholder keys from public seed `suwappu-devnet-2026` (M35). No runtime guard prevents deployment of these keys behind a public-facing port.
 - `onboard-operator.sh` prints `AWS_SECRET_ACCESS_KEY` unmasked to stdout (operational hygiene issue).
 
 ### `claude-code/settings.json`
@@ -937,7 +937,7 @@ This means every `unwrap()`, `expect()`, `assert!()`, and `panic!()` in producti
 ### Fuzz Targets
 
 - 3 targets (`wire_decode`, `dag_insert`, `decide_slot`) — structurally sound.
-- Missing: `gsx-rpc` JSON-RPC deserializer (M36), fast-path quorum aggregation, RaptorQ reconstruct, `apply_intent`.
+- Missing: `suwappu-rpc` JSON-RPC deserializer (M36), fast-path quorum aggregation, RaptorQ reconstruct, `apply_intent`.
 - Weekly runs at 5 min/target — too light for production consensus code (L26).
 
 ---
@@ -982,10 +982,10 @@ This means every `unwrap()`, `expect()`, `assert!()`, and `panic!()` in producti
 ### Tier 3 — Ongoing Hardening
 
 30. Fix the remaining 9 weak property tests — add missing adversarial branches and dead-code coverage.
-31. Add fuzz targets for `gsx-rpc` JSON-RPC, `shred_reconstruct`, `apply_intent`, `verify_attestation` (M36).
+31. Add fuzz targets for `suwappu-rpc` JSON-RPC, `shred_reconstruct`, `apply_intent`, `verify_attestation` (M36).
 32. Decompose `substrate.rs` (8,802 lines) into focused modules (L9).
 33. Add persistence layer for `DagStore` with eviction policy (H5).
-34. Complete the `GsxDbSubstrate` implementation before migrating off `InMemorySubstrate` (C3).
+34. Complete the `SuwappuDbSubstrate` implementation before migrating off `InMemorySubstrate` (C3).
 35. Add environment-level required-reviewer gates on deploy workflows (M37).
 36. Add GC/eviction to indexer InMemoryStore and faucet per-IP bucket map (M30, M31).
 37. Implement force-inclusion mechanism for L2 sequencer (M28).
@@ -1002,7 +1002,7 @@ This means every `unwrap()`, `expect()`, `assert!()`, and `panic!()` in producti
 | `EXIT_COOLDOWN_BLOCKS` | `substrate.rs:45` | 2,419,200 (~14d) | Hardcoded |
 | `LIVENESS_SLASH_BPS` | `substrate.rs:30` | 500 (5%) | Hardcoded |
 | `SNITCH_BOUNTY_BPS` | `substrate.rs:60` | 1,000 (10%) | Hardcoded |
-| `SNITCH_BOUNTY_CAP` | `substrate.rs:66` | 1,000,000 GSX | Hardcoded |
+| `SNITCH_BOUNTY_CAP` | `substrate.rs:66` | 1,000,000 SUWAPPU | Hardcoded |
 | `DEFAULT_BURN_SLA_ROUNDS` | `issuer.rs:51` | 1,000 | No governance hook |
 | `DEFAULT_ATTESTATION_TTL_ROUNDS` | `reserve.rs:183` | 10,000 | No governance hook |
 | `LTP_ATTESTATION_QUORUM_THRESHOLD` | `ltp/src/lib.rs:41` | 7 | Compile-time constant |
@@ -1056,7 +1056,7 @@ This means every `unwrap()`, `expect()`, `assert!()`, and `panic!()` in producti
 |----|-----------------|
 | C1 | L2 burn Merkle proof is byte-shape stub — bridge drainable |
 | C2 | L2 batch verifier is a no-op — Groth16 check missing |
-| C3 | Production substrate (GsxDbSubstrate) is 93% stub |
+| C3 | Production substrate (SuwappuDbSubstrate) is 93% stub |
 | C4 | Certificate signatures never verified — remote slashing griefing |
 | C5 | Vote authentication absent — Validator Ring bypassed |
 | C6 | No constant-time equality for secret types |

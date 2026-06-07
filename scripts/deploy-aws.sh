@@ -94,7 +94,7 @@ if [[ ( "${STACK}" == "perf" || "${STACK}" == "devnet" || "${STACK}" == "testnet
     SSH_PUB="${SSH_PUB:-$HOME/.ssh/id_ed25519.pub}"
     if [[ ! -f "${SSH_PUB}" ]]; then
         echo "error: SSH public key not found at ${SSH_PUB}" >&2
-        echo "  generate one with: ssh-keygen -t ed25519 -f \$HOME/.ssh/gsx-perf -N \"\"" >&2
+        echo "  generate one with: ssh-keygen -t ed25519 -f \$HOME/.ssh/suwappu-perf -N \"\"" >&2
         exit 1
     fi
     TF_VARS+=(-var "operator_ip_cidrs=${CIDR_LIST}")

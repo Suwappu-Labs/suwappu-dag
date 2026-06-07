@@ -1,7 +1,7 @@
 # Safety + liveness — joint-quorum AND-gate (Theorem 2)
 
-**Paper §**: 11 — Safety + liveness ([`gsx-papers/papers/dag-l1`](https://github.com/GlobalSettlementNetwork/gsx-papers))
-**Code**: `crates/gsx-consensus/src/joint.rs` · `crates/gsx-consensus/src/commit.rs`
+**Paper §**: 11 — Safety + liveness ([`suwappu-papers/papers/dag-l1`](https://github.com/suwappu/suwappu-papers))
+**Code**: `crates/suwappu-consensus/src/joint.rs` · `crates/suwappu-consensus/src/commit.rs`
 **IQs**: [IQ-001 quorum formula](../iq/IQ-001-quorum-formula.md) · [IQ-002 indirect commit](../iq/IQ-002-indirect-commit.md) · [IQ-004 decide_slot orphan window](../iq/IQ-004-decide-slot-orphan-window.md)
 **Visuals**: [`docs/visuals/mermaid/commit-rule.md`](../visuals/mermaid/commit-rule.md) *(coming with PR-2)*
 **Sprint**: DAG-S5 (joint-quorum AND-gate) ✅ Closed · DAG-S21.2 (indirect commit) ✅ Closed
@@ -23,7 +23,7 @@ the `decide_slot` single-cert orphan window documented in IQ-004 — a
 one-shot intent can be skipped if its leader cert arrives at peers
 after they've already proposed at round R+1; mitigation is
 [client-side resubmit + bigger deadline](../iq/IQ-004-decide-slot-orphan-window.md);
-real fix tracked in [#45](https://github.com/GlobalSettlementNetwork/gsx-dag/issues/45).
+real fix tracked in [#45](https://github.com/suwappu/suwappu-dag/issues/45).
 
 ## Key invariants
 
@@ -32,7 +32,7 @@ real fix tracked in [#45](https://github.com/GlobalSettlementNetwork/gsx-dag/iss
   finalized unless both `commit_leader` (Authority direct/indirect) and
   `validator_quorum_met` (Validator stake-weighted) agree.
 - **Quorum integer-encoding (IQ-001):** `quorum_threshold(n) = n − ⌊(n−1)/3⌋`
-  i.e. `2f+1` for `n=3f+1` — see `crates/gsx-consensus/src/commit.rs:61-66`.
+  i.e. `2f+1` for `n=3f+1` — see `crates/suwappu-consensus/src/commit.rs:61-66`.
   The paper's `⌈2n/3⌉+1` collapses to unanimity for `n ∈ {1,4,7,…}` so the
   production formula diverges per IQ-001. Theorem 2's safety proof remains
   valid under this integer encoding.
@@ -42,13 +42,13 @@ real fix tracked in [#45](https://github.com/GlobalSettlementNetwork/gsx-dag/iss
 
 ## Cross-references
 
-- **Engineering:** `crates/gsx-consensus/src/commit.rs` (quorum_threshold,
+- **Engineering:** `crates/suwappu-consensus/src/commit.rs` (quorum_threshold,
   try_direct_decide, try_indirect_decide, decide_slot, causal_history);
-  `crates/gsx-consensus/src/joint.rs` (validator_quorum_threshold,
+  `crates/suwappu-consensus/src/joint.rs` (validator_quorum_threshold,
   validator_quorum_met).
 - **Spec:** Paper §11 + Definition 2 + Theorem 2.
 - **Design decisions:** IQ-001 + IQ-002 ratified 2026-05-14 via
-  [gsx-papers#1](https://github.com/GlobalSettlementNetwork/gsx-papers/pull/1).
+  [suwappu-papers#1](https://github.com/suwappu/suwappu-papers/pull/1).
   IQ-004 pending.
 - **Visual:** [commit-rule](../visuals/mermaid/commit-rule.md) *(coming
   with PR-2)* will show the direct → indirect → joint path including

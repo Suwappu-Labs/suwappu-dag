@@ -5,7 +5,7 @@
 # that left the old single-region target group empty → 503).
 
 variable "name_prefix" {
-  description = "Resource name prefix, ending in a hyphen (e.g. gsx-testnet-)."
+  description = "Resource name prefix, ending in a hyphen (e.g. suwappu-testnet-)."
   type        = string
 }
 

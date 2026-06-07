@@ -11,8 +11,8 @@ created somehow." It runs once, then nothing in here should change.
 
 | Resource | Name | Purpose |
 |---|---|---|
-| `aws_s3_bucket` | `gsx-dag-tf-state` | Remote state for all sibling configs |
-| `aws_dynamodb_table` | `gsx-dag-tf-locks` | State-lock coordination, PITR on |
+| `aws_s3_bucket` | `suwappu-dag-tf-state` | Remote state for all sibling configs |
+| `aws_dynamodb_table` | `suwappu-dag-tf-locks` | State-lock coordination, PITR on |
 
 Both have `prevent_destroy = true`. Losing this state would orphan every
 resource in the gsn account.
@@ -49,6 +49,6 @@ rm terraform/perf/terraform.tfstate terraform/perf/terraform.tfstate.backup
 
 | Config | Backend key |
 |---|---|
-| `terraform/` | `gsx-dag/terraform.tfstate` (existing in `backend.tf`) |
-| `terraform/perf/` | `gsx-dag/perf/terraform.tfstate` |
+| `terraform/` | `suwappu-dag/terraform.tfstate` (existing in `backend.tf`) |
+| `terraform/perf/` | `suwappu-dag/perf/terraform.tfstate` |
 | `terraform/bootstrap/` | LOCAL — never moves to S3 |

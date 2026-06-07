@@ -1,7 +1,7 @@
 # Fast path + equivocation slashing
 
-Covers `crates/gsx-fastpath/` and the daemon-side handler at
-`crates/gsx-node/src/daemon.rs::handle_fastpath_cert` (~lines 499-820).
+Covers `crates/suwappu-fastpath/` and the daemon-side handler at
+`crates/suwappu-node/src/daemon.rs::handle_fastpath_cert` (~lines 499-820).
 Paper §6.4. Sprint exit gates: DAG-S8 (lane), DAG-S9 (slashing).
 
 ```mermaid
@@ -33,7 +33,7 @@ flowchart LR
 - Slashing (S9): the proof is non-interactive and publishable; any
   honest validator can submit it. Slashing is total (100% bonded
   stake) plus immediate Authority Ring expulsion. Paper Invariant 5,
-  GSXHELPER.md.
+  SUWAPPUHELPER.md.
 - The IQ-003 implementation status: handler + proposer wired,
   K-binding cross-check defined in `binding.rs` but not yet exercised
   outside unit tests at the daemon level. See

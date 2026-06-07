@@ -17,9 +17,9 @@ variable "ssh_public_key" {
 }
 
 variable "artifact_bucket" {
-  description = "S3 bucket holding gsx-node musl binary + genesis manifest. Created in this stack. Separate bucket from perf so the two environments can't accidentally pull each other's genesis."
+  description = "S3 bucket holding suwappu-node musl binary + genesis manifest. Created in this stack. Separate bucket from perf so the two environments can't accidentally pull each other's genesis."
   type        = string
-  default     = "gsx-dag-devnet-artifacts"
+  default     = "suwappu-dag-devnet-artifacts"
 }
 
 variable "consensus_port" {
@@ -49,7 +49,7 @@ variable "metrics_port" {
 variable "network_id" {
   description = "Cluster identifier baked into the genesis manifest. SDKs hard-code this so they reject responses from the wrong network."
   type        = string
-  default     = "gsx-devnet"
+  default     = "suwappu-devnet"
 }
 
 variable "chain_id" {
@@ -59,7 +59,7 @@ variable "chain_id" {
 }
 
 variable "state_volume_gb" {
-  description = "Per-validator persistent EBS volume size (gp3) mounted at /var/lib/gsx. Survives instance replacement so consensus state + events.ndjson aren't lost when an instance is rebuilt. 50 GB covers ~6 months of event log at projected devnet TPS."
+  description = "Per-validator persistent EBS volume size (gp3) mounted at /var/lib/suwappu. Survives instance replacement so consensus state + events.ndjson aren't lost when an instance is rebuilt. 50 GB covers ~6 months of event log at projected devnet TPS."
   type        = number
   default     = 50
 }

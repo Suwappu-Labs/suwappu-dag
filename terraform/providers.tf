@@ -15,9 +15,9 @@ provider "aws" {
 
   default_tags {
     tags = {
-      Project     = "gsx-dag"
+      Project     = "suwappu-dag"
       ManagedBy   = "terraform"
-      Repository  = "GlobalSettlementNetwork/gsx-dag"
+      Repository  = "suwappu/suwappu-dag"
       Environment = var.environment
     }
   }

@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to **gsx-dag** are documented here. Format follows
+All notable changes to **suwappu-dag** are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The
 release workflow (`.github/workflows/release.yml`) extracts each
@@ -15,16 +15,16 @@ will coincide with mainnet genesis.
 ### Planned (G-track devnet hosting program → public testnet rollout)
 
 - **G2** — public RPC endpoint with DNS + TLS + ALB + WAF.
-- **G3** — `gsx-faucet` service.
+- **G3** — `suwappu-faucet` service.
 - **G5** — `OPERATIONS.md` runbook hardening (devnet + testnet sections).
-- **G6** — Prometheus `/metrics` on `gsx-node` + CloudWatch dashboard + alarms.
+- **G6** — Prometheus `/metrics` on `suwappu-node` + CloudWatch dashboard + alarms.
 - **G7** — block explorer SPA.
 - **G8** — status page.
 - L2 sequencer + prover wire-up (Track G follow-up; see `terraform/testnet/l2.tf`
   placeholder).
 - Two-phase Undelegate (`UndelegateBegin` → cooldown → `UndelegateClaim`)
   + per-slot delegator slashing on `EjectValidator`.
-- `gsx-validator-program` points-accumulator daemon.
+- `suwappu-validator-program` points-accumulator daemon.
 
 ---
 
@@ -68,7 +68,7 @@ and the validator-economic model (Tokenomics §3 / §4 / §8).
   in the substrate is now all-or-nothing on overflow, via three new
   helpers (`transfer_internal`, `credit_many_atomic`,
   `drain_and_credit_atomic`). (#217)
-- **20 reserved registry addresses** in `crates/gsx-execution/src/reserved.rs`,
+- **20 reserved registry addresses** in `crates/suwappu-execution/src/reserved.rs`,
   covering the full lifecycle of stake / rewards / inflation /
   delegation pools and their replay-defense registries.
 
@@ -84,7 +84,7 @@ and the validator-economic model (Tokenomics §3 / §4 / §8).
 - Each new Intent ships with happy-path + every rejection-path test,
   plus state-root atomicity assertions for the rollback paths in
   #217. ~80 new tests added on top of the existing ~265 in
-  `gsx-execution`.
+  `suwappu-execution`.
 
 ---
 
@@ -112,7 +112,7 @@ substrate layer. Companion to the v0.1.0 consensus surface.
   `OffenseKind` so re-slashing after a safety-bond refill rejects.
 - Insurance / treasury disbursement Intents (`DisburseTreasury`,
   `ClaimInsurance`).
-- Snitch bounty (10% of slash, capped 1M GSX) paid from treasury on
+- Snitch bounty (10% of slash, capped 1M SUWAPPU) paid from treasury on
   successful `SlashSequencer`.
 - Authority Ring + Validator Ring registry modules
   (`authority_registry`, `validator_registry`).
@@ -132,43 +132,43 @@ substrate layer. Companion to the v0.1.0 consensus surface.
 **Mainnet-track consensus + crypto + transport stack.** Sprints
 DAG-S1 through DAG-S20 plus the F (F1–F4) and C (C1–C4) hardening
 tracks. Every sprint shipped its 4 properties × 10k proptest cases
-exit gate; see [GSXHELPER.md](./GSXHELPER.md) sprint backlog table for
+exit gate; see [SUWAPPUHELPER.md](./SUWAPPUHELPER.md) sprint backlog table for
 per-sprint scope.
 
 ### Added
 
-- **DAG-S1** `gsx-crypto`: ML-DSA-65 (FIPS 204), ML-KEM-768
+- **DAG-S1** `suwappu-crypto`: ML-DSA-65 (FIPS 204), ML-KEM-768
   (FIPS 203), BLS12-381, SHA3-256.
-- **DAG-S2** `gsx-transport`: RaptorQ shred / reconstruct (in-mem).
-- **DAG-S3** `gsx-consensus`: DAG store, certificate types, vote
+- **DAG-S2** `suwappu-transport`: RaptorQ shred / reconstruct (in-mem).
+- **DAG-S3** `suwappu-consensus`: DAG store, certificate types, vote
   aggregation.
 - **DAG-S4** Mysticeti-C commit rule.
 - **DAG-S5** Joint-quorum AND-gate (paper Theorem 2 — Authority Ring
   AND Validator Ring must both ratify).
 - **DAG-S6** Authority + Validator registry types + quorum threshold.
 - **DAG-S7** Equivocation detection + slashing surface.
-- **DAG-S8** `gsx-fastpath`: single-owner lane + K=4 binding.
+- **DAG-S8** `suwappu-fastpath`: single-owner lane + K=4 binding.
 - **DAG-S9** Fast-path equivocation slashing (paper §6.4 — 100%
   bond forfeiture).
-- **DAG-S10** `gsx-execution`: block executor adapter + `Substrate`
+- **DAG-S10** `suwappu-execution`: block executor adapter + `Substrate`
   trait.
 - **DAG-S11** Checkpoint cadence + Authority joint co-signature.
-- **DAG-S12** `gsx-precompiles`: DID resolver.
+- **DAG-S12** `suwappu-precompiles`: DID resolver.
 - **DAG-S13** Registered-issuer precompile (mint / burn).
 - **DAG-S14** Reserve-coverage circuit-breaker predicate.
-- **DAG-S15** `gsx-ltp`: super-node 7-of-9 attestation.
+- **DAG-S15** `suwappu-ltp`: super-node 7-of-9 attestation.
 - **DAG-S16** LTP Commitment Node DA SLA.
 - **DAG-S17** Cross-chain DID STARK pipeline (SP1 / Plonky3).
 - **DAG-S18** SCION path-authenticated routing.
 - **DAG-S19** SCION-IP-Gateway fallback.
-- **DAG-S20** `gsx-node`: full validator composition (E2E).
-- **F1** Per-IP rate-limit (`crates/gsx-rpc/src/per_ip.rs`).
-- **F2** Streaming indexer (`crates/gsx-indexer/`) with Postgres
+- **DAG-S20** `suwappu-node`: full validator composition (E2E).
+- **F1** Per-IP rate-limit (`crates/suwappu-rpc/src/per_ip.rs`).
+- **F2** Streaming indexer (`crates/suwappu-indexer/`) with Postgres
   backend + startup catch-up backfill.
-- **F3** JSON-RPC + WebSocket API (`crates/gsx-rpc/`) — 8 read
+- **F3** JSON-RPC + WebSocket API (`crates/suwappu-rpc/`) — 8 read
   methods + `submit_intent` + `subscribe_events`.
 - **F4** bincode 2.x + 1-byte wire-frame version marker
-  (`crates/gsx-node/src/codec.rs`).
+  (`crates/suwappu-node/src/codec.rs`).
 - **C1** Local 4-node docker-compose devnet (`DEVNET.md`).
 - **C2** 4 Rust + 3 TS starter examples.
 - **C3** `CONTRIBUTING.md` + initial `SECURITY.md` (partial).
@@ -190,7 +190,7 @@ for the security + ops posture at this milestone.
 
 ---
 
-[Unreleased]: https://github.com/GlobalSettlementNetwork/gsx-dag/compare/v0.3.0...HEAD
-[0.3.0]: https://github.com/GlobalSettlementNetwork/gsx-dag/releases/tag/v0.3.0
-[0.2.0]: https://github.com/GlobalSettlementNetwork/gsx-dag/releases/tag/v0.2.0
-[0.1.0]: https://github.com/GlobalSettlementNetwork/gsx-dag/releases/tag/v0.1.0
+[Unreleased]: https://github.com/suwappu/suwappu-dag/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/suwappu/suwappu-dag/releases/tag/v0.3.0
+[0.2.0]: https://github.com/suwappu/suwappu-dag/releases/tag/v0.2.0
+[0.1.0]: https://github.com/suwappu/suwappu-dag/releases/tag/v0.1.0

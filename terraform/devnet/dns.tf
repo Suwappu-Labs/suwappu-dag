@@ -1,11 +1,11 @@
 # G2 — DNS records for the public devnet.
 #
-# Subdomain layout (all under devnet.gsx.globalsettlement.com):
+# Subdomain layout (all under devnet.suwappu.globalsettlement.com):
 #
-#   rpc.devnet.gsx        → ALB fronting the 4 validators (JSON-RPC + WS)
-#   faucet.devnet.gsx     → ALB fronting the faucet EC2
-#   explorer.devnet.gsx   → CloudFront distribution serving the SPA   (G7)
-#   status.devnet.gsx     → CloudFront distribution serving the status page (G8)
+#   rpc.devnet.suwappu        → ALB fronting the 4 validators (JSON-RPC + WS)
+#   faucet.devnet.suwappu     → ALB fronting the faucet EC2
+#   explorer.devnet.suwappu   → CloudFront distribution serving the SPA   (G7)
+#   status.devnet.suwappu     → CloudFront distribution serving the status page (G8)
 #
 # All DNS records use ALIAS to the underlying AWS endpoints
 # (cheaper than A records + faster + no TTL gotchas).
@@ -25,7 +25,7 @@ variable "apex_domain" {
 variable "devnet_subdomain" {
   description = "Subdomain under which all devnet records live."
   type        = string
-  default     = "devnet.gsx"
+  default     = "devnet.suwappu"
 }
 
 # Hosted zone for the devnet subdomain. The team has two options:
@@ -44,7 +44,7 @@ resource "aws_route53_zone" "devnet" {
   provider = aws.us_east_1
   name     = "${var.devnet_subdomain}.${var.apex_domain}"
   tags = {
-    Name = "gsx-devnet-zone"
+    Name = "suwappu-devnet-zone"
   }
 
   # Devnet DNS lives forever; force_destroy is a footgun.
@@ -120,7 +120,7 @@ resource "aws_route53_record" "faucet" {
 # the devnet, but that's a runtime concern, not an
 # infrastructure-create blocker.
 
-# explorer.devnet.gsx + status.devnet.gsx records live with their
+# explorer.devnet.suwappu + status.devnet.suwappu records live with their
 # CloudFront distributions (explorer.tf / status.tf).
 
 # Output the NS records so an operator can paste them into the apex

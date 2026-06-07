@@ -8,12 +8,12 @@
 //!
 //! Run:
 //!     cd examples/rust && cargo run --bin admit_authority -- \
-//!         --rpc-url https://rpc.testnet.gsx.globalsettlement.com \
-//!         --network-id gsx-testnet-v1 \
+//!         --rpc-url https://rpc.testnet.suwappu.globalsettlement.com \
+//!         --network-id suwappu-testnet-v1 \
 //!         --signer-sk /path/to/foundation/mldsa.sk \
 //!         --signer-pk /path/to/foundation/mldsa.pk \
 //!         --authority-id 8 \
-//!         --stake-gsx 100000 \
+//!         --stake-suwappu 100000 \
 //!         --candidate-mldsa-pk-hex f515ad3a... \
 //!         --candidate-bls-pk-hex   050b11c0...
 //!
@@ -26,21 +26,21 @@
 //! 2. Builds the `Intent::AdmitAuthority` for the new candidate.
 //! 3. Bincode-serializes the intent, computes the
 //!    `intent_signing_digest`, and signs it.
-//! 4. Submits via JSON-RPC `gsx_submitIntent`.
-//! 5. Polls `gsx_getAuthorityRegistry` until the new authority_id
+//! 4. Submits via JSON-RPC `suwappu_submitIntent`.
+//! 5. Polls `suwappu_getAuthorityRegistry` until the new authority_id
 //!    appears (or times out at ~5 min).
 //!
 //! ## Why a separate binary?
 //!
 //! Bash can shell out to `aws secretsmanager get-secret-value` and
-//! `curl https://rpc.testnet.gsx.*/`, but cannot bincode-serialize
+//! `curl https://rpc.testnet.suwappu.*/`, but cannot bincode-serialize
 //! a Rust enum. Keeping the construct-sign-submit logic in Rust
 //! ensures the bash wrapper never drifts from the on-chain
 //! representation.
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
-use gsx_execution::Intent;
+use suwappu_execution::Intent;
 use std::fs;
 use std::time::{Duration, Instant};
 
@@ -50,16 +50,16 @@ struct Args {
     /// JSON-RPC URL of any seated testnet validator. Defaults to the
     /// public wildcard; pass an EIP directly if the wildcard isn't
     /// resolving yet (DNS delegation in flight).
-    #[arg(long, default_value = "https://rpc.testnet.gsx.globalsettlement.com")]
+    #[arg(long, default_value = "https://rpc.testnet.suwappu.globalsettlement.com")]
     rpc_url: String,
 
-    /// Network id (e.g. `gsx-testnet-v1`). Baked into the
+    /// Network id (e.g. `suwappu-testnet-v1`). Baked into the
     /// `intent_signing_digest` along with `INTENT_DOMAIN_TAG`.
     #[arg(long)]
     network_id: String,
 
     /// Path to the foundation signer's ML-DSA-65 secret key (4032 B
-    /// raw bytes — same format `gsx-keygen` emits). Must correspond
+    /// raw bytes — same format `suwappu-keygen` emits). Must correspond
     /// to a key already in the Authority Ring.
     #[arg(long)]
     signer_sk: String,
@@ -75,13 +75,13 @@ struct Args {
     #[arg(long)]
     authority_id: u32,
 
-    /// Candidate's stake in whole GSX. Must clear
-    /// AUTHORITY_STAKE_THRESHOLD_GSX (100,000). For the testnet
+    /// Candidate's stake in whole SUWAPPU. Must clear
+    /// AUTHORITY_STAKE_THRESHOLD_SUWAPPU (100,000). For the testnet
     /// where external operators don't actually post stake (Track B
     /// is points-based), pass 100000 as a nominal floor-clearing
     /// value.
     #[arg(long, default_value_t = 100_000)]
-    stake_gsx: u64,
+    stake_suwappu: u64,
 
     /// Candidate's ML-DSA-65 public key as a hex string (no `0x`
     /// prefix required; 3904 hex chars = 1952 bytes). The operator
@@ -100,7 +100,7 @@ struct Args {
     skip_poll: bool,
 }
 
-const INTENT_DOMAIN_TAG: &[u8] = b"GSX_INTENT_V1";
+const INTENT_DOMAIN_TAG: &[u8] = b"SUWAPPU_INTENT_V1";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -111,9 +111,9 @@ async fn main() -> Result<()> {
         .with_context(|| format!("read signer sk {}", args.signer_sk))?;
     let signer_pk_bytes = fs::read(&args.signer_pk)
         .with_context(|| format!("read signer pk {}", args.signer_pk))?;
-    let signer_sk = gsx_crypto::mldsa::SecretKey::from_bytes(&signer_sk_bytes)
+    let signer_sk = suwappu_crypto::mldsa::SecretKey::from_bytes(&signer_sk_bytes)
         .map_err(|e| anyhow!("signer sk parse: {:?}", e))?;
-    let signer_pk = gsx_crypto::mldsa::PublicKey::from_bytes(&signer_pk_bytes)
+    let signer_pk = suwappu_crypto::mldsa::PublicKey::from_bytes(&signer_pk_bytes)
         .map_err(|e| anyhow!("signer pk parse: {:?}", e))?;
     eprintln!(
         "[admit_authority] signer pubkey_hash = 0x{}",
@@ -143,7 +143,7 @@ async fn main() -> Result<()> {
     // 3. Build the intent.
     let intent = Intent::AdmitAuthority {
         authority_id: args.authority_id,
-        stake_gsx: args.stake_gsx,
+        stake_suwappu: args.stake_suwappu,
         mldsa_public_key: candidate_mldsa,
         bls_public_key: candidate_bls,
     };
@@ -159,21 +159,21 @@ async fn main() -> Result<()> {
     hasher.update(args.network_id.as_bytes());
     hasher.update(&intent_bincode);
     let digest = *hasher.finalize().as_bytes();
-    let signature = gsx_crypto::mldsa::sign(&digest, &signer_sk)
+    let signature = suwappu_crypto::mldsa::sign(&digest, &signer_sk)
         .map_err(|e| anyhow!("sign: {:?}", e))?;
     let signer_pubkey_hash: [u8; 32] = *blake3::hash(signer_pk.as_bytes()).as_bytes();
 
     // 5. Submit via SDK.
-    let client = gsx_client::Client::new(args.rpc_url.clone());
+    let client = suwappu_client::Client::new(args.rpc_url.clone());
     let tx_hash = client
         .submit_intent_raw(&intent_bincode, signature.as_bytes(), signer_pubkey_hash)
         .await
         .with_context(|| format!("submit_intent_raw @ {}", args.rpc_url))?;
     println!(
-        "{{\"tx_hash\":\"0x{}\",\"authority_id\":{},\"stake_gsx\":{}}}",
+        "{{\"tx_hash\":\"0x{}\",\"authority_id\":{},\"stake_suwappu\":{}}}",
         hex::encode(tx_hash),
         args.authority_id,
-        args.stake_gsx
+        args.stake_suwappu
     );
 
     if args.skip_poll {

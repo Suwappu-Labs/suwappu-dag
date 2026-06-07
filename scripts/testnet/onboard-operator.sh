@@ -14,8 +14,8 @@ if [[ $# -lt 2 ]]; then
     cat <<EOF
 usage: $(basename "$0") <authority_id> <operator_label>
 
-Creates an IAM user gsx-testnet-operator-<label> with write access
-to s3://gsx-dag-testnet-validator-uploads/uploads/<authority_id>/.
+Creates an IAM user suwappu-testnet-operator-<label> with write access
+to s3://suwappu-dag-testnet-validator-uploads/uploads/<authority_id>/.
 
 The operator runs their validator on their own hardware, configures
 it to upload rotated events.ndjson to that prefix every hour, and
@@ -42,9 +42,9 @@ if ! [[ "$LABEL" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
     exit 1
 fi
 
-USER_NAME="gsx-testnet-operator-${LABEL}"
-POLICY_NAME="gsx-testnet-operator-${LABEL}-upload"
-BUCKET="gsx-dag-testnet-validator-uploads"
+USER_NAME="suwappu-testnet-operator-${LABEL}"
+POLICY_NAME="suwappu-testnet-operator-${LABEL}-upload"
+BUCKET="suwappu-dag-testnet-validator-uploads"
 
 # Verify the authority_id is actually admitted on-chain before minting
 # IAM credentials. Without this check, a foundation operator can mint
@@ -52,15 +52,15 @@ BUCKET="gsx-dag-testnet-validator-uploads"
 # stale credentials lying around in IAM. The RPC endpoint is the
 # CloudFront wildcard once Phase 1 fronting is live; falls back to the
 # us-east-1 validator EIP if the wildcard isn't resolving yet.
-RPC_URL="${GSX_TESTNET_RPC_URL:-https://rpc.testnet.gsx.globalsettlement.com}"
+RPC_URL="${SUWAPPU_TESTNET_RPC_URL:-https://rpc.testnet.suwappu.globalsettlement.com}"
 echo "[onboard-operator] verifying authority_id=${AUTHORITY_ID} is in the Authority Ring (rpc=${RPC_URL})"
 REGISTRY_JSON=$(curl -fsS --max-time 10 -X POST -H 'Content-Type: application/json' \
-    -d '{"jsonrpc":"2.0","id":1,"method":"gsx_getAuthorityRegistry"}' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"suwappu_getAuthorityRegistry"}' \
     "$RPC_URL" 2>&1) || {
-    echo "error: failed to reach $RPC_URL — set GSX_TESTNET_RPC_URL if the wildcard isn't live yet (e.g. http://52.5.240.86:9092)" >&2
+    echo "error: failed to reach $RPC_URL — set SUWAPPU_TESTNET_RPC_URL if the wildcard isn't live yet (e.g. http://52.5.240.86:9092)" >&2
     exit 1
 }
-# `gsx_getAuthorityRegistry` returns the authority array directly in
+# `suwappu_getAuthorityRegistry` returns the authority array directly in
 # `.result`, not nested under `.result.members`. The prior path
 # always evaluated to null and made `jq -e` fail, so this script
 # rejected every authority_id as "NOT in the Authority Ring" even
@@ -120,7 +120,7 @@ let us read it back.
 
   Next steps for the operator:
     1. Read docs/testnet/VALIDATOR-OPERATORS.md
-    2. Configure their gsx-node to rotate events.ndjson hourly
+    2. Configure their suwappu-node to rotate events.ndjson hourly
     3. Configure the upload sidecar with the credentials above
 ================================================================
 EOF

@@ -1,4 +1,4 @@
-# Multi-region provider aliases for the gsx-devnet.
+# Multi-region provider aliases for the suwappu-devnet.
 #
 # Forked from terraform/perf/providers.tf. Differences vs. perf:
 #   - 4 regions only (us-east-1, eu-west-1, ap-southeast-1, sa-east-1)
@@ -18,10 +18,10 @@ terraform {
 
 locals {
   common_tags = {
-    Project    = "gsx-dag"
+    Project    = "suwappu-dag"
     Component  = "devnet"
     ManagedBy  = "terraform"
-    Repository = "GlobalSettlementNetwork/gsx-dag"
+    Repository = "suwappu/suwappu-dag"
   }
 }
 

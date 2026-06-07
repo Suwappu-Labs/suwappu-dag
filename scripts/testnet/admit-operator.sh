@@ -26,10 +26,10 @@
 # Pre-reqs:
 #   - AWS_PROFILE=gsn resolves to account 492042618949.
 #   - Foundation faucet ML-DSA secret already in Secrets Manager at
-#     gsx-testnet/faucet/mldsa-secret-key (populated during the
+#     suwappu-testnet/faucet/mldsa-secret-key (populated during the
 #     testnet bringup; see OPERATIONS.md § 10.1 step 4).
 #   - The points-accumulator daemon admin bearer token is in
-#     Secrets Manager at gsx-testnet/program/admin-token (set
+#     Secrets Manager at suwappu-testnet/program/admin-token (set
 #     during § 10.3 deploy).
 #   - examples/rust workspace builds (one-time:
 #     `cd examples/rust && cargo build --release --bin admit_authority`).
@@ -43,13 +43,13 @@
 set -euo pipefail
 
 # Defaults pulled from the testnet stack.
-RPC_URL_DEFAULT="https://rpc.testnet.gsx.globalsettlement.com"
-PROGRAM_URL_DEFAULT="https://program.testnet.gsx.globalsettlement.com"
-NETWORK_ID="gsx-testnet-v1"
-FAUCET_SECRET_ID="gsx-testnet/faucet/mldsa-secret-key"
-PROGRAM_ADMIN_SECRET_ID="gsx-testnet/program/admin-token"
-DEFAULT_STAKE_GSX=100000
-KYC_APPLICATIONS_TABLE="gsx_testnet_applications"
+RPC_URL_DEFAULT="https://rpc.testnet.suwappu.globalsettlement.com"
+PROGRAM_URL_DEFAULT="https://program.testnet.suwappu.globalsettlement.com"
+NETWORK_ID="suwappu-testnet-v1"
+FAUCET_SECRET_ID="suwappu-testnet/faucet/mldsa-secret-key"
+PROGRAM_ADMIN_SECRET_ID="suwappu-testnet/program/admin-token"
+DEFAULT_STAKE_SUWAPPU=100000
+KYC_APPLICATIONS_TABLE="suwappu_testnet_applications"
 
 usage() {
     cat <<EOF
@@ -58,7 +58,7 @@ usage: $(basename "$0") \\
     --label <slug> \\
     --mldsa-pk-hex <3904 hex chars> \\
     --bls-pk-hex <96 hex chars> \\
-    [--stake-gsx <amount>]   default=${DEFAULT_STAKE_GSX} (floor: 100,000) \\
+    [--stake-suwappu <amount>]   default=${DEFAULT_STAKE_SUWAPPU} (floor: 100,000) \\
     [--rpc-url <url>]        default=${RPC_URL_DEFAULT} \\
     [--program-url <url>]    default=${PROGRAM_URL_DEFAULT} \\
     [--skip-program-register]  don't POST to /admin/operators \\
@@ -80,7 +80,7 @@ AUTHORITY_ID=""
 LABEL=""
 MLDSA_PK_HEX=""
 BLS_PK_HEX=""
-STAKE_GSX="$DEFAULT_STAKE_GSX"
+STAKE_SUWAPPU="$DEFAULT_STAKE_SUWAPPU"
 RPC_URL="$RPC_URL_DEFAULT"
 PROGRAM_URL="$PROGRAM_URL_DEFAULT"
 SKIP_PROGRAM_REGISTER="0"
@@ -93,7 +93,7 @@ while [[ $# -gt 0 ]]; do
         --label)                LABEL="$2"; shift 2 ;;
         --mldsa-pk-hex)         MLDSA_PK_HEX="$2"; shift 2 ;;
         --bls-pk-hex)           BLS_PK_HEX="$2"; shift 2 ;;
-        --stake-gsx)            STAKE_GSX="$2"; shift 2 ;;
+        --stake-suwappu)            STAKE_SUWAPPU="$2"; shift 2 ;;
         --rpc-url)              RPC_URL="$2"; shift 2 ;;
         --program-url)          PROGRAM_URL="$2"; shift 2 ;;
         --skip-program-register) SKIP_PROGRAM_REGISTER="1"; shift ;;
@@ -218,7 +218,7 @@ NEWLY_ADMITTED=0
 # operator's points data. (Codex #228 P1 — admit-operator.sh:168.)
 echo "[admit-operator] checking registry for authority_id=${AUTHORITY_ID} (rpc=${RPC_URL})"
 REGISTRY_JSON=$(curl -fsS --max-time 10 -X POST -H 'Content-Type: application/json' \
-    -d '{"jsonrpc":"2.0","id":1,"method":"gsx_getAuthorityRegistry"}' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"suwappu_getAuthorityRegistry"}' \
     "$RPC_URL")
 EXISTING_MEMBER_JSON=$(echo "$REGISTRY_JSON" | jq -c --argjson aid "$AUTHORITY_ID" '.result[] | select(.id == $aid)' 2>/dev/null || true)
 if [[ -n "$EXISTING_MEMBER_JSON" ]]; then
@@ -249,7 +249,7 @@ else
         | base64 -d > "$SIGNER_SK"
     chmod 600 "$SIGNER_SK"
     # The matching pubkey lives in S3 (uploaded during bringup).
-    AWS_PROFILE=gsn aws s3 cp "s3://gsx-dag-testnet-artifacts/keys/faucet/mldsa.pk" "$SIGNER_PK" >/dev/null
+    AWS_PROFILE=gsn aws s3 cp "s3://suwappu-dag-testnet-artifacts/keys/faucet/mldsa.pk" "$SIGNER_PK" >/dev/null
 
     # Submit via the Rust example binary.
     echo "[admit-operator] building examples/rust/admit_authority (release)"
@@ -268,7 +268,7 @@ else
         --signer-sk "$SIGNER_SK" \
         --signer-pk "$SIGNER_PK" \
         --authority-id "$AUTHORITY_ID" \
-        --stake-gsx "$STAKE_GSX" \
+        --stake-suwappu "$STAKE_SUWAPPU" \
         --candidate-mldsa-pk-hex "$MLDSA_PK_HEX" \
         --candidate-bls-pk-hex "$BLS_PK_HEX")
     TX_HASH=$(echo "$SUBMIT_OUT" | jq -r '.tx_hash')
@@ -314,8 +314,8 @@ cat <<EOF
 Admit + onboard complete: authority_id=${AUTHORITY_ID} label=${LABEL}
 ================================================================
 The operator now has:
-  - An Authority Ring slot (verified via gsx_getAuthorityRegistry).
-  - IAM credentials scoped to s3://gsx-dag-testnet-validator-uploads/uploads/${AUTHORITY_ID}/
+  - An Authority Ring slot (verified via suwappu_getAuthorityRegistry).
+  - IAM credentials scoped to s3://suwappu-dag-testnet-validator-uploads/uploads/${AUTHORITY_ID}/
   - A row in the validator-program daemon's operators table.
 
 Send the operator the credentials block printed by

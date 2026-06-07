@@ -1,6 +1,6 @@
-# GSX Intent Signing Specification
+# SUWAPPU Intent Signing Specification
 
-This document defines the canonical signing format for GSX intents.
+This document defines the canonical signing format for SUWAPPU intents.
 External SDK consumers, wallets, and Solidity verifiers MUST reproduce
 this exact recipe for signature verification to succeed.
 
@@ -15,11 +15,11 @@ digest = BLAKE3( domain_tag || network_id_bytes || intent_bincode )
 
 | Field | Value | Encoding |
 |---|---|---|
-| `domain_tag` | `"GSX_INTENT_V1"` (14 bytes, ASCII, no null terminator) | Raw UTF-8 bytes |
-| `network_id_bytes` | The network's `network_id` string (e.g. `"gsx-devnet"`, `"gsx-testnet-v1"`) | Raw UTF-8 bytes |
+| `domain_tag` | `"SUWAPPU_INTENT_V1"` (14 bytes, ASCII, no null terminator) | Raw UTF-8 bytes |
+| `network_id_bytes` | The network's `network_id` string (e.g. `"suwappu-devnet"`, `"suwappu-testnet-v1"`) | Raw UTF-8 bytes |
 | `intent_bincode` | The `Intent` enum, bincode-serialized with legacy config | `bincode::serde::encode_to_vec(&intent, bincode::config::legacy())` |
 
-**Reference implementation:** `gsx-execution/src/lib.rs`, function
+**Reference implementation:** `suwappu-execution/src/lib.rs`, function
 `intent_signing_digest(network_id, intent_bytes)`.
 
 ### Bincode Legacy Config
@@ -44,7 +44,7 @@ bincode 1.x wire format.
 signature = ML-DSA-65.Sign(secret_key, digest)
 ```
 
-**Reference implementation:** `gsx-crypto/src/mldsa.rs`, function
+**Reference implementation:** `suwappu-crypto/src/mldsa.rs`, function
 `sign(digest, secret_key)`.
 
 ## 3. Signer Identity
@@ -82,19 +82,19 @@ as `Transfer`, `Delegate`, `UndelegateBegin`, `UndelegateClaim`,
 the Authority or Validator Ring. Open signers submitting governance
 intents receive `UnknownSigner`.
 
-**Reference implementation:** `gsx-node/src/client.rs`, functions
+**Reference implementation:** `suwappu-node/src/client.rs`, functions
 `signer_pubkey_hash(pk_bytes)`, `intent_requires_ring_membership`,
 `verify_signed_intent`.
 
 ## 4. JSON-RPC Submission
 
-Submit a signed intent via the `gsx_submitIntent` JSON-RPC method:
+Submit a signed intent via the `suwappu_submitIntent` JSON-RPC method:
 
 ```json
 {
   "jsonrpc": "2.0",
   "id": 1,
-  "method": "gsx_submitIntent",
+  "method": "suwappu_submitIntent",
   "params": {
     "intent": "0x<bincode_hex>",
     "signature": "0x<ml_dsa_signature_hex>",
@@ -134,10 +134,10 @@ The `tx_hash` is `BLAKE3(intent_bincode)` — no domain tag.
 
 1. Construct the typed `Intent` (e.g. `Intent::Transfer { from, to, amount }`).
 2. Serialize with bincode legacy: `intent_bytes = bincode::serde::encode_to_vec(&intent, bincode::config::legacy())`.
-3. Compute the digest: `digest = BLAKE3("GSX_INTENT_V1" || network_id || intent_bytes)`.
+3. Compute the digest: `digest = BLAKE3("SUWAPPU_INTENT_V1" || network_id || intent_bytes)`.
 4. Sign: `signature = ML-DSA-65.Sign(sk, digest)`.
 5. Compute signer identity: `pkh = BLAKE3(pk.as_bytes())`.
-6. Submit via `gsx_submitIntent` with `intent = hex(intent_bytes)`,
+6. Submit via `suwappu_submitIntent` with `intent = hex(intent_bytes)`,
    `signature = hex(signature)`, `signer_pubkey_hash = hex(pkh)`.
    - **Ring members** (Authority or Validator): omit `signer_pubkey`.
    - **Open signers** (ordinary users): include
@@ -149,12 +149,12 @@ The `tx_hash` is `BLAKE3(intent_bincode)` — no domain tag.
 ### 6.1 L2 Chain ID Hash
 
 ```
-input:  "gsx-l2-chain-" || "test-chain"
-recipe: BLAKE3("gsx-l2-chain-test-chain")
+input:  "suwappu-l2-chain-" || "test-chain"
+recipe: BLAKE3("suwappu-l2-chain-test-chain")
 output: 46d743898b7c863a8fea1938f261f52134882771b3dd016999964cad793924af
 ```
 
-Source: `gsx-l2-sequencer-daemon/src/batch_builder_task.rs`,
+Source: `suwappu-l2-sequencer-daemon/src/batch_builder_task.rs`,
 test `l2_chain_id_hash_pinned_vector`.
 
 ### 6.2 DA Commitment
@@ -170,13 +170,13 @@ the DA blob bytes. Source: `batch_builder_task.rs`, test
 ### 6.3 Certificate Hash
 
 ```
-recipe: BLAKE3("GSX-CERT-V1" || network_id || author_4BE || round_8BE || parent_count_4BE || parents[0..n] || payload_digest)
+recipe: BLAKE3("SUWAPPU-CERT-V1" || network_id || author_4BE || round_8BE || parent_count_4BE || parents[0..n] || payload_digest)
 ```
 
 `network_id` prevents cross-network replay: the same certificate content
 on devnet and testnet produces different hashes.
 
-Source: `gsx-consensus/src/cert.rs`, method `Certificate::hash(network_id)`.
+Source: `suwappu-consensus/src/cert.rs`, method `Certificate::hash(network_id)`.
 
 ### 6.4 BatchHeader Public Inputs
 
@@ -193,4 +193,4 @@ address = BLAKE3(public_key_bytes)[0..20]
 ```
 
 The first 20 bytes of the BLAKE3 hash, matching EVM-style address
-width. Source: `gsx-faucet/src/lib.rs`, function `address_from_pubkey`.
+width. Source: `suwappu-faucet/src/lib.rs`, function `address_from_pubkey`.

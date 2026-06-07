@@ -1,0 +1,25 @@
+[package]
+name = "suwappu-top"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+description = "Live terminal dashboard (top-style TUI) for the suwappu-dag local baremetal devnet. One sync thread per data source (RPC poller, events.ndjson tailer, suwappu-loadgen subprocess) feeds a single AppState over an mpsc channel; the UI thread renders with ratatui. Supports a non-interactive --snapshot mode."
+
+[[bin]]
+name = "suwappu-top"
+path = "src/main.rs"
+
+[dependencies]
+ratatui = "0.28"
+crossterm = "0.28"
+ureq = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+hex = { workspace = true }
+tracing = { workspace = true }

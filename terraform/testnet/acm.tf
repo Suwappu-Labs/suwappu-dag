@@ -1,6 +1,6 @@
 # ACM certificate for the testnet subdomain.
 #
-# Wildcard cert: `*.testnet.gsx.globalsettlement.com` covers
+# Wildcard cert: `*.testnet.suwappu.globalsettlement.com` covers
 # rpc / ws / faucet / explorer / status / program. Same shape as
 # terraform/devnet/acm.tf.
 
@@ -13,7 +13,7 @@ resource "aws_acm_certificate" "wildcard" {
   validation_method = "DNS"
 
   tags = {
-    Name = "gsx-testnet-wildcard"
+    Name = "suwappu-testnet-wildcard"
   }
 
   lifecycle {
@@ -45,6 +45,6 @@ resource "aws_acm_certificate_validation" "wildcard" {
 }
 
 output "wildcard_cert_arn" {
-  description = "ACM certificate ARN covering *.testnet.gsx.globalsettlement.com."
+  description = "ACM certificate ARN covering *.testnet.suwappu.globalsettlement.com."
   value       = aws_acm_certificate_validation.wildcard.certificate_arn
 }

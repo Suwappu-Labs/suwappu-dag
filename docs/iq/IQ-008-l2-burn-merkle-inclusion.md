@@ -9,7 +9,7 @@
 
 `Intent::CommitL2StateRoot` writes per-batch state roots into the
 reserved L2 registry account (per IQ-006), and the verifier-precompile
-(`gsx-l2-verifier-precompile::verify_l2_batch`) confirms the SP1
+(`suwappu-l2-verifier-precompile::verify_l2_batch`) confirms the SP1
 Groth16 BN254 proof binds them to a pinned VK before persistence. The
 substrate-side accounting then trusts the state root.
 
@@ -19,11 +19,11 @@ balance to escrow." The substrate must verify the burn against the
 committed L2 state root before releasing the L1 bridge escrow.
 
 **On `main` today** the apply arm at
-`crates/gsx-execution/src/substrate.rs:2497` does THREE checks: the
+`crates/suwappu-execution/src/substrate.rs:2497` does THREE checks: the
 batch is committed, the asset is active, and the `burn_id` (a hash
 that includes `merkle_path` bytes) isn't already in the nullifier set.
 It does **NOT** verify the `merkle_path` proves anything about the
-committed L2 state root. The wire-format gates in `gsx-l2-bridge`
+committed L2 state root. The wire-format gates in `suwappu-l2-bridge`
 (`merkle_path` non-empty, `% 32 == 0`, `≤ MAX_MERKLE_PATH_BYTES`) are
 byte-shape only — a fabricated 32-byte string clears every gate.
 
@@ -45,7 +45,7 @@ merkle path with explicit sibling-direction bits.** Concretely:
 
 ```text
 leaf_hash = BLAKE3(
-    "gsx-l2-burn-leaf-v1" ||
+    "suwappu-l2-burn-leaf-v1" ||
     l2_chain_id_hash (32) ||
     u64_BE(batch_id) ||
     recipient (20) ||
@@ -57,7 +57,7 @@ leaf_hash = BLAKE3(
 
 Every disambiguating field of the burn participates in the leaf:
 chain id, batch id, recipient, amount, asset selector. Two different
-burns produce two different leaves. The domain tag (`"gsx-l2-burn-leaf-v1"`,
+burns produce two different leaves. The domain tag (`"suwappu-l2-burn-leaf-v1"`,
 18 bytes) is fixed-length so a future variant (`-v2`) is
 length-distinguished, not just byte-distinguished.
 
@@ -68,7 +68,7 @@ equivalent-to-no-asset.
 ### Inner node
 
 ```text
-parent = BLAKE3("gsx-l2-burn-node-v1" || left (32) || right (32))
+parent = BLAKE3("suwappu-l2-burn-node-v1" || left (32) || right (32))
 ```
 
 Symmetric, length-distinguished domain tag. Identical to the burn-leaf
@@ -78,7 +78,7 @@ inner node and vice versa.
 ### Path encoding
 
 `Intent::L2BurnProven` already carries `merkle_path: Vec<u8>`
-(multiple of 32 bytes per the byte-shape gate in `gsx-l2-bridge`).
+(multiple of 32 bytes per the byte-shape gate in `suwappu-l2-bridge`).
 **Add a new sibling-side `Vec<u8>` field, `path_directions`**, packing
 direction bits LSB-first into bytes. Path level `i` consults bit `i`
 of `path_directions`: 0 = sibling is on the RIGHT of the running
@@ -100,7 +100,7 @@ empty `Vec<u8>`, which fails verification deterministically.
 ### Tree shape
 
 - Bounded height: 32 levels. Already implied by
-  `MAX_MERKLE_PATH_BYTES = 4096` in `gsx-l2-bridge` (4096 / 32 = 128
+  `MAX_MERKLE_PATH_BYTES = 4096` in `suwappu-l2-bridge` (4096 / 32 = 128
   levels max, capped at 32 here for sanity).
 - Sparse vs dense: not specified by this IQ. The verifier doesn't care
   how the STM builds the tree, only that the leaf-to-root path with
@@ -141,7 +141,7 @@ The workspace's hash primitive everywhere else (state-tree commitment
 per IQ-6, burn-nullifier domain hashes, anchor `(LtpAnchorRegistry`
 parity tests for ECDSA via `sha3` are a separate surface) is BLAKE3.
 Mixing BLAKE3 for state and SHA3 here is asymmetric for no benefit;
-the L2 STM uses BLAKE3 too (`gsx-l2-stm::compute_state_root`).
+the L2 STM uses BLAKE3 too (`suwappu-l2-stm::compute_state_root`).
 
 ### Verify against a `withdrawals_root` extracted from the public
 inputs rather than the state root
@@ -157,7 +157,7 @@ withdrawals subtree whose root is then committed into `state_root`).
 
 ## Cutover criterion
 
-Once the L2 STM (`crates/gsx-l2-stm`) grows a `BatchTransaction::Burn`
+Once the L2 STM (`crates/suwappu-l2-stm`) grows a `BatchTransaction::Burn`
 variant + commits burns into `new_l2_state_root`, the verifier in
 this IQ becomes the consensus gate. Until then, every `L2BurnProven`
 fails inclusion verification (because no burn leaves are in any
@@ -169,7 +169,7 @@ committed state tree), which is exactly the safe pre-feature posture.
   field with `#[serde(default)]`. Bincode-positional means callers
   using the prior shape have an empty directions vector and the
   verifier rejects (the conservative pre-feature posture).
-- Off-chain tooling (`gsx-l2-bridge::L2BurnProvenPayload`) mirrors the
+- Off-chain tooling (`suwappu-l2-bridge::L2BurnProvenPayload`) mirrors the
   field; its byte-shape gate validates `path_directions.len() ==
   ceil(levels / 8)`.
 - No L2StateRootRecord change. The existing `state_root` IS the
@@ -177,11 +177,11 @@ committed state tree), which is exactly the safe pre-feature posture.
 
 ## Implementation pointers
 
-- `crates/gsx-l2-bridge/src/lib.rs`: new pure helper
+- `crates/suwappu-l2-bridge/src/lib.rs`: new pure helper
   `verify_burn_inclusion(leaf_fields, merkle_path, path_directions,
   state_root) -> Result<(), MerkleError>`. Implements the rule above
   with BLAKE3. Unit-tested at 256 cases default + 10k at sprint close.
-- `crates/gsx-execution/src/substrate.rs:~2497`: `Intent::L2BurnProven`
+- `crates/suwappu-execution/src/substrate.rs:~2497`: `Intent::L2BurnProven`
   apply arm calls `verify_burn_inclusion` after the batch-commit gate
   (line 2525), before the escrow → recipient payout (line 2554). New
   `ExecutionError::L2BurnMerkleProofRejected` variant.

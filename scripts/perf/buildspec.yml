@@ -28,41 +28,41 @@ phases:
   pre_build:
     commands:
       - export PATH="$HOME/.cargo/bin:$PATH"
-      # Pull the gsx-db deploy key from SSM SecureString. If missing, bail.
+      # Pull the suwappu-db deploy key from SSM SecureString. If missing, bail.
       - |
-        if ! aws ssm get-parameter --name /gsx-perf/gsx-db-deploy-key --with-decryption --query Parameter.Value --output text > /tmp/gsx-db.key 2>/tmp/ssm-err; then
-          echo "ERROR: SSM /gsx-perf/gsx-db-deploy-key not found." >&2
+        if ! aws ssm get-parameter --name /suwappu-perf/suwappu-db-deploy-key --with-decryption --query Parameter.Value --output text > /tmp/suwappu-db.key 2>/tmp/ssm-err; then
+          echo "ERROR: SSM /suwappu-perf/suwappu-db-deploy-key not found." >&2
           cat /tmp/ssm-err >&2
           exit 1
         fi
-      - chmod 600 /tmp/gsx-db.key
+      - chmod 600 /tmp/suwappu-db.key
       - mkdir -p ~/.ssh
       - ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
       - eval "$(ssh-agent -s)"
-      - ssh-add /tmp/gsx-db.key
+      - ssh-add /tmp/suwappu-db.key
       - git config --global url."git@github.com:".insteadOf "https://github.com/"
 
   build:
     commands:
       - export PATH="$HOME/.cargo/bin:$PATH"
       - cd $CODEBUILD_SRC_DIR
-      - cargo build --release --target x86_64-unknown-linux-gnu --bin gsx-node --bin gsx-loadgen --bin gsx-metrics
+      - cargo build --release --target x86_64-unknown-linux-gnu --bin suwappu-node --bin suwappu-loadgen --bin suwappu-metrics
 
   post_build:
     commands:
       - mkdir -p $CODEBUILD_SRC_DIR/out
-      - cp target/x86_64-unknown-linux-gnu/release/gsx-node $CODEBUILD_SRC_DIR/out/
-      - cp target/x86_64-unknown-linux-gnu/release/gsx-loadgen $CODEBUILD_SRC_DIR/out/
-      - cp target/x86_64-unknown-linux-gnu/release/gsx-metrics $CODEBUILD_SRC_DIR/out/
+      - cp target/x86_64-unknown-linux-gnu/release/suwappu-node $CODEBUILD_SRC_DIR/out/
+      - cp target/x86_64-unknown-linux-gnu/release/suwappu-loadgen $CODEBUILD_SRC_DIR/out/
+      - cp target/x86_64-unknown-linux-gnu/release/suwappu-metrics $CODEBUILD_SRC_DIR/out/
       - strip $CODEBUILD_SRC_DIR/out/* || true
       - ls -lh $CODEBUILD_SRC_DIR/out/
-      - file $CODEBUILD_SRC_DIR/out/gsx-node
+      - file $CODEBUILD_SRC_DIR/out/suwappu-node
 
 artifacts:
   files:
-    - out/gsx-node
-    - out/gsx-loadgen
-    - out/gsx-metrics
+    - out/suwappu-node
+    - out/suwappu-loadgen
+    - out/suwappu-metrics
   discard-paths: yes
 
 cache:

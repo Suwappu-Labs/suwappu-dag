@@ -1,8 +1,8 @@
 /**
- * View types served by the `gsx-rpc` server, mirrored on the TS side.
+ * View types served by the `suwappu-rpc` server, mirrored on the TS side.
  *
  * These shapes MUST stay byte-compatible with the Rust definitions in
- * `crates/gsx-rpc/src/context.rs`. Any field added/removed there needs
+ * `crates/suwappu-rpc/src/context.rs`. Any field added/removed there needs
  * a matching update here.
  */
 
@@ -31,8 +31,8 @@ export interface EpochView {
 export interface AuthorityMemberView {
   /** Authority id (zero-indexed slot in the published set). */
   id: number;
-  /** Posted stake in GSX (u64 — fits in `number` for stakes ≤ 2^53). */
-  stake_gsx: number;
+  /** Posted stake in SUWAPPU (u64 — fits in `number` for stakes ≤ 2^53). */
+  stake_suwappu: number;
   /** ML-DSA-65 public key bytes, hex-encoded (1952 B canonical → 3904 hex chars). */
   public_key_hex: string;
 }
@@ -42,23 +42,23 @@ export interface AuthorityMemberView {
  *
  * Stake is encoded as a decimal string to survive JSON's 53-bit integer
  * ceiling (Validator stakes use u128 on the Rust side — see
- * `gsx_consensus::Stake`). Parse with `BigInt(stake_gsx)` if you need
+ * `suwappu_consensus::Stake`). Parse with `BigInt(stake_suwappu)` if you need
  * to do arithmetic.
  */
 export interface ValidatorMemberView {
   id: number;
-  stake_gsx: string;
+  stake_suwappu: string;
 }
 
 /**
  * Return shape for {@link Client.getStake}.
  *
- * `stake_gsx` is a decimal string (same rationale as
- * `ValidatorMemberView.stake_gsx`).
+ * `stake_suwappu` is a decimal string (same rationale as
+ * `ValidatorMemberView.stake_suwappu`).
  */
 export interface StakeEntry {
   id: number;
-  stake_gsx: string;
+  stake_suwappu: string;
 }
 
 /**
@@ -81,7 +81,7 @@ export interface BalanceView {
  * Polymorphic intent shape. The `kind` discriminant tells you which
  * variant you got; switch on it to access variant-specific fields.
  * Hex fields are `0x`-prefixed lowercase. u128 fields are decimal
- * strings (same convention as `ValidatorMemberView.stake_gsx`).
+ * strings (same convention as `ValidatorMemberView.stake_suwappu`).
  */
 export type IntentView =
   | {
@@ -97,7 +97,7 @@ export type IntentView =
       kind: "admit_authority";
       authority_id: number;
       /** Stake as a decimal string. */
-      stake_gsx: string;
+      stake_suwappu: string;
       /** ML-DSA-65 public key, hex-encoded (no `0x` prefix). */
       mldsa_public_key_hex: string;
       /** BLS12-381 G1 public key, hex-encoded (no `0x` prefix). */
@@ -143,7 +143,7 @@ export interface BlockView {
    * `blake3(bincode(intent))`) in commit order. Aligned 1:1 with
    * `intents` — `tx_hashes[i]` is the hash of `intents[i]`. Empty
    * when the block has no intents. Added with F2 so the explorer
-   * doesn't need a follow-up `gsx_getTransaction` per intent to
+   * doesn't need a follow-up `suwappu_getTransaction` per intent to
    * enumerate the block. Pre-F2 daemons omit this field; the SDK
    * defaults it to `[]`.
    */
@@ -169,8 +169,8 @@ export interface TransactionView {
 /**
  * JSON-safe projection of a single event from the daemon's NDJSON
  * event log. One per WebSocket text message emitted by the daemon's
- * `gsx_subscribeEvents` endpoint (`GET /ws`). Mirrors
- * `gsx_rpc::context::EventView` on the server side.
+ * `suwappu_subscribeEvents` endpoint (`GET /ws`). Mirrors
+ * `suwappu_rpc::context::EventView` on the server side.
  *
  * Optional fields follow `serde(skip_serializing_if = "Option::is_none")`
  * on the Rust side — they're omitted from the JSON envelope, so the

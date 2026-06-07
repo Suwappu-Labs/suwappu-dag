@@ -1,9 +1,9 @@
 {
-  "name": "@gsx/explorer",
+  "name": "@suwappu/explorer",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "gsx-devnet block explorer. Static SPA backed by the @gsx/client SDK; deployed to S3 + CloudFront as explorer.devnet.gsx.globalsettlement.com.",
+  "description": "suwappu-devnet block explorer. Static SPA backed by the @suwappu/client SDK; deployed to S3 + CloudFront as explorer.devnet.suwappu.globalsettlement.com.",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
@@ -11,7 +11,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@gsx/client": "file:../ts-sdk",
+    "@suwappu/client": "file:../ts-sdk",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

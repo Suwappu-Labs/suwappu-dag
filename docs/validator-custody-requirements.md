@@ -1,6 +1,6 @@
 # Validator self-stake custody requirements
 
-**Status:** Spec ratified from `gsx-strategy/docs/mainnet-plan.md`
+**Status:** Spec ratified from `suwappu-strategy/docs/mainnet-plan.md`
 Track E §custody + sale-model Risk Factor §26 ("Custody of
 self-stake — key compromise = total stake loss"). Referenced
 verbatim by Tier A + Tier B subscription agreements (Track C
@@ -29,7 +29,7 @@ used to:
 - Sign LTP attestation fraud → **100% safety bond forfeiture**.
 - Produce certificate fraud → **100% safety bond forfeiture**.
 
-At Tier A self-stake of 15 M GSX (≈ $1.5 M at $0.10 TGE / $3.3 M
+At Tier A self-stake of 15 M SUWAPPU (≈ $1.5 M at $0.10 TGE / $3.3 M
 at $0.22 Y3 base) per slot, a single key compromise costs the
 operator the full bond. The custody requirements below are
 designed so that "key compromise = total stake loss" is a
@@ -62,7 +62,7 @@ The requirements are graduated by tier:
 | Incident response | Documented runbook + foundation-board-approved escalation chain | Reduces MTTR on suspected compromise |
 | Compliance attestation | **Quarterly review** by foundation + buyer's internal compliance | Ongoing verification, not point-in-time |
 
-**Total self-stake at risk: 15 M GSX per slot.** Custody
+**Total self-stake at risk: 15 M SUWAPPU per slot.** Custody
 hardening is proportional to the stake size; FIPS 140-3 L3 +
 multi-sig 3-of-5 + certified partner gets the probability of
 loss low enough that the residual risk is acceptable.
@@ -81,7 +81,7 @@ loss low enough that the residual risk is acceptable.
 | Incident response | Documented runbook | Foundation provides template |
 | Compliance attestation | **Annual** | Less frequent than Tier A |
 
-**Total self-stake at risk: 3 M GSX per slot** (≈ $150 k TGE /
+**Total self-stake at risk: 3 M SUWAPPU per slot** (≈ $150 k TGE /
 $660 k Y3 base).
 
 ### 2.3 Standard Validator (post-TGE permissionless)
@@ -111,7 +111,7 @@ purposes; mixing them across roles weakens the security posture.
 | **Foundation-admin key** (if granted) | Operate `/admin/*` endpoints on validator-program / faucet / etc. | None (operational role; no on-chain stake) | Warm (HSM but not consensus-tier hot) |
 
 Operators **MUST NOT** reuse the same keypair across classes.
-The substrate's reserved-address gate (per `crates/gsx-execution/src/reserved.rs`)
+The substrate's reserved-address gate (per `crates/suwappu-execution/src/reserved.rs`)
 + the slashing dispatch's per-key-class adjudication assumes
 distinct keys.
 
@@ -176,7 +176,7 @@ three certified partners (per Track D D.7 certification work).
 
 ### 5.1 Fireblocks
 
-- Add gsx-dag as a supported network in Fireblocks' Network
+- Add suwappu-dag as a supported network in Fireblocks' Network
   Connector (foundation engagement, M+0 to M+3)
 - Consensus signing key + LTP attestation key + self-stake
   custody key all custodied via Fireblocks vault accounts
@@ -186,7 +186,7 @@ three certified partners (per Track D D.7 certification work).
 
 ### 5.2 BitGo
 
-- BitGo Connect partnership; gsx-dag as supported network
+- BitGo Connect partnership; suwappu-dag as supported network
 - Cold-storage HSM for self-stake custody
 - Multi-user signing policies match Tier A 3-of-5 quorum
 - Insurance coverage available (rider-pricing per stake size)
@@ -268,7 +268,7 @@ insurance evidence as part of onboarding attestation (§4.1).
   Fireblocks / BitGo / Anchorage certification work
 - **SOC 2 attestation**: Track D D.8 (#139) — foundation-level
   SOC 2 Type II covering this doc's compliance attestations
-- **Reserved-address gate**: `crates/gsx-execution/src/reserved.rs`
+- **Reserved-address gate**: `crates/suwappu-execution/src/reserved.rs`
   (PR #177) — substrate-level enforcement of key-class
   separation
 
@@ -278,4 +278,4 @@ insurance evidence as part of onboarding attestation (§4.1).
 
 | Date | Change | Source |
 |---|---|---|
-| 2026-05-17 | Initial draft | E.2 (issue #143); drafted from `gsx-strategy/docs/mainnet-plan.md` Track E + sale-model Risk Factor §26 |
+| 2026-05-17 | Initial draft | E.2 (issue #143); drafted from `suwappu-strategy/docs/mainnet-plan.md` Track E + sale-model Risk Factor §26 |

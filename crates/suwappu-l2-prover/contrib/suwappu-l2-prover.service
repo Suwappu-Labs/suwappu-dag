@@ -1,0 +1,39 @@
+[Unit]
+# suwappu-l2-prover — long-running L2 prover daemon (Track G G4.1, #104).
+# Pulls unproven batches from the sequencer, proves them, and submits
+# the proof. SCAFFOLD: the shipped StubProver is gated on #88/#94, so
+# this unit currently runs a no-proof daemon that logs the gate.
+# Rendered + installed by the L2 deploy pipeline (terraform/testnet/l2.tf,
+# a follow-up per #104). AWS deployment recipe is out of scope for the
+# scaffold PR.
+Description=SUWAPPU L2 prover daemon (Track G G4.1)
+Documentation=https://github.com/suwappu/suwappu-dag/issues/104
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=suwappu
+Group=suwappu
+WorkingDirectory=/opt/suwappu
+# RUST_LOG controls verbosity; default to info if the env file omits it.
+Environment=RUST_LOG=info,suwappu_l2_prover=debug
+# --config points at the TOML written by cloud-init / render-configs.sh.
+ExecStart=/opt/suwappu/suwappu-l2-prover --config /etc/suwappu/prover.toml
+Restart=always
+RestartSec=5
+# Graceful shutdown — the binary installs a SIGTERM/Ctrl-C handler that
+# signals the poll loop to drain and exit.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Hardening: the prover needs no privileges beyond reading its config
+# and talking to the sequencer + metrics socket.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/log/suwappu
+
+[Install]
+WantedBy=multi-user.target

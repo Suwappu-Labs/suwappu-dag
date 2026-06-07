@@ -1,4 +1,4 @@
-# cargo-deny config for gsx-dag
+# cargo-deny config for suwappu-dag
 # Enforces dependency hygiene at the workspace level.
 
 [graph]
@@ -22,10 +22,10 @@ ignore = [
     "RUSTSEC-2024-0436",
     # `rustls-pemfile` is unmaintained; pulled in transitively by
     # `reqwest 0.11` via `gsxdb-bridge`. No known vulnerabilities.
-    # Gate: gsx-db's gsxdb-bridge bumps to reqwest 0.12 (which uses
+    # Gate: suwappu-db's gsxdb-bridge bumps to reqwest 0.12 (which uses
     # rustls-pki-types instead). Tracked at
     # https://github.com/rustls/pemfile/issues/61.
-    # Re-check: when gsx-db releases v0.2.0.
+    # Re-check: when suwappu-db releases v0.2.0.
     "RUSTSEC-2025-0134",
     # `bincode` (the entire crate, all versions) is unmaintained. The
     # advisory was filed against bincode 1.x and ALSO covers 2.x — F4
@@ -87,7 +87,7 @@ unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = [
-    # gsx-db state substrate (paper §7.4). Consumed at v0.1.0 by
-    # gsx-execution's GsxDbSubstrate adapter.
-    "https://github.com/GlobalSettlementNetwork/gsx-db",
+    # suwappu-db state substrate (paper §7.4). Consumed at v0.1.0 by
+    # suwappu-execution's SuwappuDbSubstrate adapter.
+    "https://github.com/suwappu/suwappu-db",
 ]

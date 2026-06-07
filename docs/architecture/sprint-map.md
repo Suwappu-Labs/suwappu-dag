@@ -1,22 +1,22 @@
 # Sprint map
 
-Implementation sprints for `gsx-dag`. Each sprint closes a load-bearing
+Implementation sprints for `suwappu-dag`. Each sprint closes a load-bearing
 invariant via a 10,000-case property test.
 
 ## Dependency graph
 
 ```mermaid
 flowchart TB
-    S1[DAG-S1 — gsx-crypto<br/>ML-DSA-65, ML-KEM-768,<br/>BLS, SHA3-256]
-    S2[DAG-S2 — gsx-transport<br/>RaptorQ in-memory]
-    S3[DAG-S3 — gsx-consensus<br/>DAG store + voting]
-    S4[DAG-S4 — gsx-consensus<br/>Mysticeti-C commit rule]
+    S1[DAG-S1 — suwappu-crypto<br/>ML-DSA-65, ML-KEM-768,<br/>BLS, SHA3-256]
+    S2[DAG-S2 — suwappu-transport<br/>RaptorQ in-memory]
+    S3[DAG-S3 — suwappu-consensus<br/>DAG store + voting]
+    S4[DAG-S4 — suwappu-consensus<br/>Mysticeti-C commit rule]
     S5[DAG-S5 — joint-quorum<br/>AND-gate Theorem 2]
     S6[DAG-S6 — authority +<br/>validator registries]
     S7[DAG-S7 — equivocation<br/>+ slashing]
-    S8[DAG-S8 — gsx-fastpath<br/>single-owner lane]
+    S8[DAG-S8 — suwappu-fastpath<br/>single-owner lane]
     S9[DAG-S9 — fast-path<br/>equivocation slashing]
-    S10[DAG-S10 — gsx-execution<br/>wire gsx-db]
+    S10[DAG-S10 — suwappu-execution<br/>wire suwappu-db]
     S11[DAG-S11 — checkpoint<br/>joint co-signature]
     S12[DAG-S12 — DID resolver]
     S13[DAG-S13 — issuer mint/burn]
@@ -55,7 +55,7 @@ flowchart TB
 
 **Status:** S1 through S20 ✅ closed; each through its 10,000-case property
 test exit gate. Post-S20 work continues in named sub-sprints (S21–S33+);
-see [Post-S20 backlog](#post-s20-backlog) below. GSXHELPER.md's sprint-backlog
+see [Post-S20 backlog](#post-s20-backlog) below. SUWAPPUHELPER.md's sprint-backlog
 table is the day-to-day source of truth — this file is the dependency
 diagram + exit-gate registry.
 
@@ -63,45 +63,45 @@ diagram + exit-gate registry.
 
 | Sprint | Crate | Module | Exit-gate property |
 |---|---|---|---|
-| DAG-S1 ✅ | gsx-crypto | (lib) | 7 properties × 10k cases (sign/verify, encap/decap, aggregate, domain-sep) |
-| DAG-S2 | gsx-transport | `raptorq` | `raptorq_reconstructs_under_loss` |
-| DAG-S3 | gsx-consensus | `dag`, `cert` | `dag_topological_order_unique` |
-| DAG-S4 | gsx-consensus | `commit_rule` | `mysticeti_c_finality` |
-| DAG-S5 | gsx-consensus | `joint_quorum` | `joint_quorum_safety` (Theorem 2) |
-| DAG-S6 | gsx-authority, gsx-validator | `registry`, `quorum` | `quorum_math_matches_paper` |
-| DAG-S7 | gsx-authority, gsx-validator | `slashing` | `equivocation_proof_slashes` |
-| DAG-S8 | gsx-fastpath | `cert`, `binding` | `fast_path_main_lane_consistency` |
-| DAG-S9 | gsx-fastpath | `slashing` | `fast_path_equivocation_full_slash` |
-| DAG-S10 | gsx-execution | (lib) | `block_execution_matches_substrate` |
-| DAG-S11 | gsx-execution | `checkpoint` | `joint_state_commitment_signed` |
-| DAG-S12 | gsx-precompiles | `did` | `did_document_validates` |
-| DAG-S13 | gsx-precompiles | `issuer` | `issuer_mint_burn_atomic` |
-| DAG-S14 | gsx-precompiles | `reserve` | `reserve_coverage_predicate` |
-| DAG-S15 | gsx-ltp | `attestation` | `seven_of_nine_attestation` |
-| DAG-S16 | gsx-ltp | `da_sla` | `da_sla_enforced` |
-| DAG-S17 | gsx-ltp | `did_stark` | `did_stark_round_trip` |
-| DAG-S18 | gsx-transport | `scion` | `scion_path_auth` |
-| DAG-S19 | gsx-transport | `scion_ip_gw` | `gateway_fallback_correctness` |
-| DAG-S20 | gsx-node | (binary) | `node_runs_genesis_block` (E2E) |
+| DAG-S1 ✅ | suwappu-crypto | (lib) | 7 properties × 10k cases (sign/verify, encap/decap, aggregate, domain-sep) |
+| DAG-S2 | suwappu-transport | `raptorq` | `raptorq_reconstructs_under_loss` |
+| DAG-S3 | suwappu-consensus | `dag`, `cert` | `dag_topological_order_unique` |
+| DAG-S4 | suwappu-consensus | `commit_rule` | `mysticeti_c_finality` |
+| DAG-S5 | suwappu-consensus | `joint_quorum` | `joint_quorum_safety` (Theorem 2) |
+| DAG-S6 | suwappu-authority, suwappu-validator | `registry`, `quorum` | `quorum_math_matches_paper` |
+| DAG-S7 | suwappu-authority, suwappu-validator | `slashing` | `equivocation_proof_slashes` |
+| DAG-S8 | suwappu-fastpath | `cert`, `binding` | `fast_path_main_lane_consistency` |
+| DAG-S9 | suwappu-fastpath | `slashing` | `fast_path_equivocation_full_slash` |
+| DAG-S10 | suwappu-execution | (lib) | `block_execution_matches_substrate` |
+| DAG-S11 | suwappu-execution | `checkpoint` | `joint_state_commitment_signed` |
+| DAG-S12 | suwappu-precompiles | `did` | `did_document_validates` |
+| DAG-S13 | suwappu-precompiles | `issuer` | `issuer_mint_burn_atomic` |
+| DAG-S14 | suwappu-precompiles | `reserve` | `reserve_coverage_predicate` |
+| DAG-S15 | suwappu-ltp | `attestation` | `seven_of_nine_attestation` |
+| DAG-S16 | suwappu-ltp | `da_sla` | `da_sla_enforced` |
+| DAG-S17 | suwappu-ltp | `did_stark` | `did_stark_round_trip` |
+| DAG-S18 | suwappu-transport | `scion` | `scion_path_auth` |
+| DAG-S19 | suwappu-transport | `scion_ip_gw` | `gateway_fallback_correctness` |
+| DAG-S20 | suwappu-node | (binary) | `node_runs_genesis_block` (E2E) |
 
 ## Post-S20 backlog
 
 Sprints since the full-node E2E gate closed. Many close hot-fixes,
-ratifications, or perf campaigns rather than new invariants; see GSXHELPER.md
+ratifications, or perf campaigns rather than new invariants; see SUWAPPUHELPER.md
 for the canonical day-to-day status.
 
 | Sprint | Crate / scope | Closes |
 |---|---|---|
-| DAG-S21.1 ✅ | gsx-consensus | IQ-001 quorum-formula ratification ([gsx-papers#1](https://github.com/GlobalSettlementNetwork/gsx-papers/pull/1)) |
-| DAG-S21.2 ✅ | gsx-consensus | IQ-002 indirect commit rule ([gsx-papers#1](https://github.com/GlobalSettlementNetwork/gsx-papers/pull/1)) |
-| DAG-S25 ✅ | gsx-node | Validator governance Phase G2 — `AdmitAuthority` / `ExitAuthority` / `EjectAuthority` |
-| DAG-S25.1 ✅ | gsx-node | Epoch-boundary application (#18) |
-| DAG-S25.2 ✅ | gsx-node | ML-DSA-65 signed governance intents (#28) |
-| DAG-S25.3 ✅ | gsx-node | Deferred-activation (#32, [skill](https://github.com/GlobalSettlementNetwork/gsx-dag/issues/35)) |
+| DAG-S21.1 ✅ | suwappu-consensus | IQ-001 quorum-formula ratification ([suwappu-papers#1](https://github.com/suwappu/suwappu-papers/pull/1)) |
+| DAG-S21.2 ✅ | suwappu-consensus | IQ-002 indirect commit rule ([suwappu-papers#1](https://github.com/suwappu/suwappu-papers/pull/1)) |
+| DAG-S25 ✅ | suwappu-node | Validator governance Phase G2 — `AdmitAuthority` / `ExitAuthority` / `EjectAuthority` |
+| DAG-S25.1 ✅ | suwappu-node | Epoch-boundary application (#18) |
+| DAG-S25.2 ✅ | suwappu-node | ML-DSA-65 signed governance intents (#28) |
+| DAG-S25.3 ✅ | suwappu-node | Deferred-activation (#32, [skill](https://github.com/suwappu/suwappu-dag/issues/35)) |
 | DAG-S26 ✅ | (workspace) | Compliance harness |
-| DAG-S27 ✅ | gsx-node | Throughput + governance — perf-testnet baseline |
-| DAG-S28–S33 ✅ | gsx-node, gsx-mempool, gsx-rpc, scripts/perf | Perf campaigns, mempool, JSON-RPC MVP, indexer, WS subscriptions, cert-finality metric |
-| (open) | gsx-consensus | IQ-004 `decide_slot` orphan window — tracked in [#45](https://github.com/GlobalSettlementNetwork/gsx-dag/issues/45) |
+| DAG-S27 ✅ | suwappu-node | Throughput + governance — perf-testnet baseline |
+| DAG-S28–S33 ✅ | suwappu-node, suwappu-mempool, suwappu-rpc, scripts/perf | Perf campaigns, mempool, JSON-RPC MVP, indexer, WS subscriptions, cert-finality metric |
+| (open) | suwappu-consensus | IQ-004 `decide_slot` orphan window — tracked in [#45](https://github.com/suwappu/suwappu-dag/issues/45) |
 
 ## Phase gates
 
@@ -109,7 +109,7 @@ for the canonical day-to-day status.
 |---|---|---|
 | Phase A: foundations | DAG-S1, S2 | Crypto + transport primitives sealed |
 | Phase B: consensus | DAG-S3 → S9 | Mysticeti-C + dual-ring + fast-path with slashing |
-| Phase C: execution | DAG-S10, S11 | gsx-db wired in; checkpoint co-signature live |
+| Phase C: execution | DAG-S10, S11 | suwappu-db wired in; checkpoint co-signature live |
 | Phase D: application | DAG-S12 → S14 | Precompiles for identity + issuance + reserve |
 | Phase E: cross-chain | DAG-S15 → S17 | LTP attestation + DA SLA + DID STARK |
 | Phase F: transport hardening | DAG-S18, S19 | SCION integration |
@@ -125,7 +125,7 @@ The chain enforces these at every Mysticeti round:
    surfaces use NIST PQC primitives.
 3. **Constant-size LTP commitment** (DAG-S15) — every LTP attestation commits
    ≈1,600 B regardless of payload.
-4. **Substrate invariants** (DAG-S10) — `gsx-db` invariants inherited
+4. **Substrate invariants** (DAG-S10) — `suwappu-db` invariants inherited
    bit-for-bit through the block executor.
 5. **Fast-path equivocation slashing** (DAG-S9) — 100% bonded stake +
    expulsion on any fast-path equivocation by an Authority Node.

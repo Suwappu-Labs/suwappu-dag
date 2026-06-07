@@ -1,6 +1,6 @@
 # Security surface
 
-Operator-facing catalog of the gsx-dag security defenses + how to
+Operator-facing catalog of the suwappu-dag security defenses + how to
 exercise / extend them. Paired with
 [`cryptographic-posture.md`](cryptographic-posture.md) (which covers
 the PQ cryptographic primitives) and [`safety-liveness.md`](safety-liveness.md)
@@ -8,7 +8,7 @@ the PQ cryptographic primitives) and [`safety-liveness.md`](safety-liveness.md)
 
 ## Ingress hardening
 
-### Client TCP wire (`crates/gsx-node/src/client.rs`)
+### Client TCP wire (`crates/suwappu-node/src/client.rs`)
 
 | Defense | Default | Source of truth |
 |---|---|---|
@@ -16,9 +16,9 @@ the PQ cryptographic primitives) and [`safety-liveness.md`](safety-liveness.md)
 | Per-source-IP concurrent-connection cap | 8 | `NodeConfig::client_per_ip_limit` |
 | Idle-frame timeout | 30 s | `NodeConfig::client_idle_timeout_ms` |
 | ML-DSA-65 signature gate on every intent | always on | `verify_signed_intent` (Issue #28) |
-| Per-peer leaky-bucket rate limit via mempool | 100 burst / 50 tokens/s | `gsx_mempool::MempoolConfig` |
+| Per-peer leaky-bucket rate limit via mempool | 100 burst / 50 tokens/s | `suwappu_mempool::MempoolConfig` |
 
-### Validator peer wire (`crates/gsx-node/src/wire.rs`)
+### Validator peer wire (`crates/suwappu-node/src/wire.rs`)
 
 | Defense | Default | Source |
 |---|---|---|
@@ -28,7 +28,7 @@ the PQ cryptographic primitives) and [`safety-liveness.md`](safety-liveness.md)
 | Orphan-cert buffer cap | 4096 entries | `MAX_ORPHAN_CERTS` |
 | Per-orphan exponential backoff | 500 ms → 5 s cap | `orphan_pull_backoff_ms` (DAG-S32) |
 
-### JSON-RPC ingress (`crates/gsx-rpc/src/router.rs`)
+### JSON-RPC ingress (`crates/suwappu-rpc/src/router.rs`)
 
 | Defense | Default | Source |
 |---|---|---|
@@ -37,7 +37,7 @@ the PQ cryptographic primitives) and [`safety-liveness.md`](safety-liveness.md)
 | `RateLimited` JSON-RPC error code | -32099 | `RpcError::RateLimited` (B2) |
 | Per-IP token bucket — burst | 60 | `NodeConfig::rpc_per_ip_capacity` / `RouterLimits::per_ip_capacity` (B2.1) |
 | Per-IP token bucket — refill rate | 10 req/s | `NodeConfig::rpc_per_ip_refill_per_sec` / `RouterLimits::per_ip_refill_per_sec` (B2.1) |
-| Per-IP bucket idle GC | 300 s TTL, 60 s sweep | `BUCKET_IDLE_TTL_MS` / `BUCKET_GC_INTERVAL` in `crates/gsx-rpc/src/per_ip.rs` (B2.1) |
+| Per-IP bucket idle GC | 300 s TTL, 60 s sweep | `BUCKET_IDLE_TTL_MS` / `BUCKET_GC_INTERVAL` in `crates/suwappu-rpc/src/per_ip.rs` (B2.1) |
 
 ## Fuzz targets
 
@@ -47,7 +47,7 @@ the PQ cryptographic primitives) and [`safety-liveness.md`](safety-liveness.md)
 |---|---|---|
 | `wire_decode` | `bincode::deserialize::<{WireMessage,ClientMessage}>` | Bincode decode of attacker-controlled bytes — total over `&[u8]` |
 | `dag_insert` | `DagStore::insert` | Total over decoded `Certificate` |
-| `decide_slot` | `gsx_consensus::decide_slot` | Total over `(DagStore, Round, CommitteeSize)`; covers IQ-004 multi-anchor scan |
+| `decide_slot` | `suwappu_consensus::decide_slot` | Total over `(DagStore, Round, CommitteeSize)`; covers IQ-004 multi-anchor scan |
 
 ### Running locally
 

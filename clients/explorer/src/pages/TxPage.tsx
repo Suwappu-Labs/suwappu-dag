@@ -1,7 +1,7 @@
-// Transaction detail — looks up via gsx_getTransaction.
+// Transaction detail — looks up via suwappu_getTransaction.
 
 import { useEffect, useState } from "react";
-import type { Client, TransactionView } from "@gsx/client";
+import type { Client, TransactionView } from "@suwappu/client";
 
 export function TxPage({ client, hash }: { client: Client; hash: string }) {
   const [tx, setTx] = useState<TransactionView | null>(null);

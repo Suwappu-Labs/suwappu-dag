@@ -24,7 +24,7 @@
 
 use libfuzzer_sys::fuzz_target;
 
-use gsx_consensus::{decide_slot, Certificate, DagStore};
+use suwappu_consensus::{decide_slot, Certificate, DagStore};
 
 fuzz_target!(|bytes: &[u8]| {
     if bytes.len() < 2 {

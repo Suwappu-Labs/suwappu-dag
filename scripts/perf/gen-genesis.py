@@ -11,9 +11,9 @@ Output layout (in --out-dir, default ./target/perf/keys):
     us-west-2/mldsa.sk
     ...
 
-Real ML-DSA-65 + BLS12-381 keys would normally be produced by gsx-crypto
+Real ML-DSA-65 + BLS12-381 keys would normally be produced by suwappu-crypto
 itself. Since this script is host-side and must work without compiling the
-Rust crate, we use an external tool (gsx-keygen) if available, otherwise we
+Rust crate, we use an external tool (suwappu-keygen) if available, otherwise we
 fall back to deterministic placeholder bytes — *only* acceptable for a
 private perf testnet where the cluster isn't exposed to the public.
 
@@ -54,18 +54,18 @@ def placeholder_key(seed: bytes, length: int) -> bytes:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out-dir", type=Path, default=Path("./target/perf/keys"))
-    ap.add_argument("--network-id", default="gsx-perf-7r")
+    ap.add_argument("--network-id", default="suwappu-perf-7r")
     ap.add_argument(
-        "--validator-stake-gsx",
+        "--validator-stake-suwappu",
         type=int,
         default=1_000_000,
-        help="Per-validator stake in GSX (paper Definition 1). u64 in the manifest.",
+        help="Per-validator stake in SUWAPPU (paper Definition 1). u64 in the manifest.",
     )
     ap.add_argument(
-        "--authority-stake-gsx",
+        "--authority-stake-suwappu",
         type=int,
         default=1_000_000,
-        help="Per-validator Authority Ring stake in GSX. u64 in the manifest.",
+        help="Per-validator Authority Ring stake in SUWAPPU. u64 in the manifest.",
     )
     args = ap.parse_args()
 
@@ -73,7 +73,7 @@ def main() -> int:
 
     # ML-DSA-65 secret key is 4032 bytes; BLS12-381 secret scalar is 32 bytes.
     # We write the placeholder bytes for now; replace with real keys produced
-    # by `cargo run --bin gsx-keygen` once that binary lands.
+    # by `cargo run --bin suwappu-keygen` once that binary lands.
     MLDSA_SK_LEN = 4032
     BLS_SK_LEN = 32
 
@@ -112,8 +112,8 @@ def main() -> int:
             f.write(f'label = "{region}"\n')
             f.write(f'mldsa_public_key_hex = "{mldsa_pk}"\n')
             f.write(f'bls_public_key_hex = "{bls_pk}"\n')
-            f.write(f"validator_stake_gsx = {args.validator_stake_gsx}\n")
-            f.write(f"authority_stake_gsx = {args.authority_stake_gsx}\n\n")
+            f.write(f"validator_stake_suwappu = {args.validator_stake_suwappu}\n")
+            f.write(f"authority_stake_suwappu = {args.authority_stake_suwappu}\n\n")
 
     print(f"wrote {genesis}", file=sys.stderr)
     for aid, region, _, _ in entries:

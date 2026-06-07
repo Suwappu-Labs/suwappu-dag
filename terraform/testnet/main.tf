@@ -1,4 +1,4 @@
-# 7-region GSX testnet seed cluster.
+# 7-region SUWAPPU testnet seed cluster.
 #
 # Foundation operates these 7 nodes; external validators (Track B
 # points program) bring their own hardware and connect via the
@@ -92,7 +92,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "artifacts" {
 # seed set + the validator-program EC2 + RDS.
 resource "aws_sns_topic" "billing_alarm" {
   provider = aws.us_east_1
-  name     = "gsx-testnet-billing-alarm"
+  name     = "suwappu-testnet-billing-alarm"
 }
 
 resource "aws_sns_topic_subscription" "billing_alarm_email" {
@@ -104,7 +104,7 @@ resource "aws_sns_topic_subscription" "billing_alarm_email" {
 
 resource "aws_cloudwatch_metric_alarm" "monthly_billing_cap" {
   provider            = aws.us_east_1
-  alarm_name          = "gsx-testnet-monthly-billing-cap"
+  alarm_name          = "suwappu-testnet-monthly-billing-cap"
   alarm_description   = "Projected/actual monthly spend on the testnet exceeded ${var.monthly_billing_cap_usd} USD. Investigate via Cost Explorer + the validator-program traffic charts."
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 1
@@ -140,14 +140,14 @@ module "us_east_1" {
   artifact_bucket   = aws_s3_bucket.artifacts.id
   state_volume_gb   = var.state_volume_gb
   with_alb_subnets  = true # in-region RPC ALB (regional_alb.tf + ga.tf)
-  # Historical: the testnet went live with `gsx-devnet-*` Name tags
+  # Historical: the testnet went live with `suwappu-devnet-*` Name tags
   # because the validator module hardcoded that prefix. Those names
   # are baked into AWS state (key_pair, IAM role, SG names — all
-  # immutable), so flipping to `gsx-testnet-*` would force
+  # immutable), so flipping to `suwappu-testnet-*` would force
   # destroy+recreate of every seed. The rename is deferred to the
   # next clean window. Until then, devnet (when applied) must use a
   # non-colliding prefix — see terraform/devnet/main.tf.
-  name_prefix = "gsx-devnet-"
+  name_prefix = "suwappu-devnet-"
 }
 
 module "us_west_2" {
@@ -165,14 +165,14 @@ module "us_west_2" {
   artifact_bucket   = aws_s3_bucket.artifacts.id
   state_volume_gb   = var.state_volume_gb
   with_alb_subnets  = true # in-region RPC ALB (regional_alb.tf + ga.tf)
-  # Historical: the testnet went live with `gsx-devnet-*` Name tags
+  # Historical: the testnet went live with `suwappu-devnet-*` Name tags
   # because the validator module hardcoded that prefix. Those names
   # are baked into AWS state (key_pair, IAM role, SG names — all
-  # immutable), so flipping to `gsx-testnet-*` would force
+  # immutable), so flipping to `suwappu-testnet-*` would force
   # destroy+recreate of every seed. The rename is deferred to the
   # next clean window. Until then, devnet (when applied) must use a
   # non-colliding prefix — see terraform/devnet/main.tf.
-  name_prefix = "gsx-devnet-"
+  name_prefix = "suwappu-devnet-"
 }
 
 module "eu_west_1" {
@@ -190,14 +190,14 @@ module "eu_west_1" {
   artifact_bucket   = aws_s3_bucket.artifacts.id
   state_volume_gb   = var.state_volume_gb
   with_alb_subnets  = true # in-region RPC ALB (regional_alb.tf + ga.tf)
-  # Historical: the testnet went live with `gsx-devnet-*` Name tags
+  # Historical: the testnet went live with `suwappu-devnet-*` Name tags
   # because the validator module hardcoded that prefix. Those names
   # are baked into AWS state (key_pair, IAM role, SG names — all
-  # immutable), so flipping to `gsx-testnet-*` would force
+  # immutable), so flipping to `suwappu-testnet-*` would force
   # destroy+recreate of every seed. The rename is deferred to the
   # next clean window. Until then, devnet (when applied) must use a
   # non-colliding prefix — see terraform/devnet/main.tf.
-  name_prefix = "gsx-devnet-"
+  name_prefix = "suwappu-devnet-"
 }
 
 module "eu_central_1" {
@@ -215,14 +215,14 @@ module "eu_central_1" {
   artifact_bucket   = aws_s3_bucket.artifacts.id
   state_volume_gb   = var.state_volume_gb
   with_alb_subnets  = true # in-region RPC ALB (regional_alb.tf + ga.tf)
-  # Historical: the testnet went live with `gsx-devnet-*` Name tags
+  # Historical: the testnet went live with `suwappu-devnet-*` Name tags
   # because the validator module hardcoded that prefix. Those names
   # are baked into AWS state (key_pair, IAM role, SG names — all
-  # immutable), so flipping to `gsx-testnet-*` would force
+  # immutable), so flipping to `suwappu-testnet-*` would force
   # destroy+recreate of every seed. The rename is deferred to the
   # next clean window. Until then, devnet (when applied) must use a
   # non-colliding prefix — see terraform/devnet/main.tf.
-  name_prefix = "gsx-devnet-"
+  name_prefix = "suwappu-devnet-"
 }
 
 module "ap_southeast_1" {
@@ -240,14 +240,14 @@ module "ap_southeast_1" {
   artifact_bucket   = aws_s3_bucket.artifacts.id
   state_volume_gb   = var.state_volume_gb
   with_alb_subnets  = true # in-region RPC ALB (regional_alb.tf + ga.tf)
-  # Historical: the testnet went live with `gsx-devnet-*` Name tags
+  # Historical: the testnet went live with `suwappu-devnet-*` Name tags
   # because the validator module hardcoded that prefix. Those names
   # are baked into AWS state (key_pair, IAM role, SG names — all
-  # immutable), so flipping to `gsx-testnet-*` would force
+  # immutable), so flipping to `suwappu-testnet-*` would force
   # destroy+recreate of every seed. The rename is deferred to the
   # next clean window. Until then, devnet (when applied) must use a
   # non-colliding prefix — see terraform/devnet/main.tf.
-  name_prefix = "gsx-devnet-"
+  name_prefix = "suwappu-devnet-"
 }
 
 module "ap_northeast_1" {
@@ -265,14 +265,14 @@ module "ap_northeast_1" {
   artifact_bucket   = aws_s3_bucket.artifacts.id
   state_volume_gb   = var.state_volume_gb
   with_alb_subnets  = true # in-region RPC ALB (regional_alb.tf + ga.tf)
-  # Historical: the testnet went live with `gsx-devnet-*` Name tags
+  # Historical: the testnet went live with `suwappu-devnet-*` Name tags
   # because the validator module hardcoded that prefix. Those names
   # are baked into AWS state (key_pair, IAM role, SG names — all
-  # immutable), so flipping to `gsx-testnet-*` would force
+  # immutable), so flipping to `suwappu-testnet-*` would force
   # destroy+recreate of every seed. The rename is deferred to the
   # next clean window. Until then, devnet (when applied) must use a
   # non-colliding prefix — see terraform/devnet/main.tf.
-  name_prefix = "gsx-devnet-"
+  name_prefix = "suwappu-devnet-"
 }
 
 module "sa_east_1" {
@@ -290,12 +290,12 @@ module "sa_east_1" {
   artifact_bucket   = aws_s3_bucket.artifacts.id
   state_volume_gb   = var.state_volume_gb
   with_alb_subnets  = true # in-region RPC ALB (regional_alb.tf + ga.tf)
-  # Historical: the testnet went live with `gsx-devnet-*` Name tags
+  # Historical: the testnet went live with `suwappu-devnet-*` Name tags
   # because the validator module hardcoded that prefix. Those names
   # are baked into AWS state (key_pair, IAM role, SG names — all
-  # immutable), so flipping to `gsx-testnet-*` would force
+  # immutable), so flipping to `suwappu-testnet-*` would force
   # destroy+recreate of every seed. The rename is deferred to the
   # next clean window. Until then, devnet (when applied) must use a
   # non-colliding prefix — see terraform/devnet/main.tf.
-  name_prefix = "gsx-devnet-"
+  name_prefix = "suwappu-devnet-"
 }

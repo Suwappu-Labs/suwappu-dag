@@ -1,7 +1,7 @@
 # Governance phasing — Phase G2 → G3 → G4
 
-**Paper §**: 14 — Governance ([`gsx-papers/papers/dag-l1`](https://github.com/GlobalSettlementNetwork/gsx-papers))
-**Code**: `crates/gsx-node/src/daemon.rs::apply_governance_intent` (Phase G `Intent::AdmitAuthority` / `ExitAuthority` / `EjectAuthority`)
+**Paper §**: 14 — Governance ([`suwappu-papers/papers/dag-l1`](https://github.com/suwappu/suwappu-papers))
+**Code**: `crates/suwappu-node/src/daemon.rs::apply_governance_intent` (Phase G `Intent::AdmitAuthority` / `ExitAuthority` / `EjectAuthority`)
 **IQs**: [IQ-004 decide_slot orphan window](../iq/IQ-004-decide-slot-orphan-window.md) (interaction with epoch-boundary application)
 **Visuals**: [`docs/visuals/mermaid/governance-flow.md`](../visuals/mermaid/governance-flow.md) *(coming with PR-2)*
 **Sprint**: DAG-S25 (validator governance) ✅ Closed · post-S25 hot-fixes #18 (epoch-boundary), #28 (signed intents), #32 (deferred activation)
@@ -41,7 +41,7 @@ Governance evolves through three published phases:
 
 ## Cross-references
 
-- **Engineering:** `crates/gsx-node/src/daemon.rs::apply_governance_intent`
+- **Engineering:** `crates/suwappu-node/src/daemon.rs::apply_governance_intent`
   (~line 1353), `pending_governance: Vec<Intent>` (~line 131), the
   epoch-boundary drain block in `try_commit` (~line 1252), and the
   pending_stake promotion site in `ingest_cert` (~line 619).
@@ -50,7 +50,7 @@ Governance evolves through three published phases:
   with governance application; a one-shot governance intent that lands
   in a single cert is exposed to the `decide_slot` skip path. Current
   test-side mitigation: client resubmit every 5s — see
-  [PR #44](https://github.com/GlobalSettlementNetwork/gsx-dag/pull/44).
+  [PR #44](https://github.com/suwappu/suwappu-dag/pull/44).
 - **Visual:** [governance-flow](../visuals/mermaid/governance-flow.md)
   *(coming with PR-2)* — diagrams the submit → commit → queue → boundary
   drain → activate pipeline.

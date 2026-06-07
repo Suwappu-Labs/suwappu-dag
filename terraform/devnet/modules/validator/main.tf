@@ -1,7 +1,7 @@
 # Per-region devnet validator.
 #
 # Diff vs. terraform/perf/modules/region/main.tf:
-#   * Persistent gp3 EBS attached at /dev/sdf and mounted at /var/lib/gsx
+#   * Persistent gp3 EBS attached at /dev/sdf and mounted at /var/lib/suwappu
 #     so consensus state + events.ndjson survive an instance replacement.
 #   * RPC port (9092) open to 0.0.0.0/0 in the security group.
 #   * Metrics port (9093) NOT exposed externally — security group does
@@ -108,7 +108,7 @@ resource "aws_route_table_association" "public_b" {
 # Security group:
 # - SSH from operator IPs only (fallback path; SSM is primary).
 # - Consensus + client + RPC ports open to 0.0.0.0/0. Auth is at the
-#   message layer; the per-IP rate limit in gsx-rpc keeps abuse bounded.
+#   message layer; the per-IP rate limit in suwappu-rpc keeps abuse bounded.
 # - Metrics port (9093) intentionally NOT in this list — only the local
 #   CloudWatch agent reads it.
 #
@@ -122,7 +122,7 @@ resource "aws_route_table_association" "public_b" {
 # rpc_listen to 127.0.0.1 so only the ALB can reach the validator.
 resource "aws_security_group" "this" {
   name        = "${var.name_prefix}${var.region_label}-sg"
-  description = "GSX devnet - validator ingress"
+  description = "SUWAPPU devnet - validator ingress"
   vpc_id      = aws_vpc.this.id
 
   ingress {
@@ -226,7 +226,7 @@ resource "aws_iam_instance_profile" "this" {
 }
 
 # Persistent state volume — separate gp3 EBS attached at /dev/sdf,
-# mounted at /var/lib/gsx by cloud-init. Surviving instance replacement
+# mounted at /var/lib/suwappu by cloud-init. Surviving instance replacement
 # is the whole point of a long-lived devnet; without this, every AMI
 # refresh or instance type change would wipe consensus state.
 resource "aws_ebs_volume" "state" {

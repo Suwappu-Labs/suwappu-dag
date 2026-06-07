@@ -1,6 +1,6 @@
 # Cryptographic posture
 
-Paper §3.3 + §12. Implemented in [`gsx-crypto`](../../crates/gsx-crypto).
+Paper §3.3 + §12. Implemented in [`suwappu-crypto`](../../crates/suwappu-crypto).
 
 ## Post-quantum-conservative surfaces
 
@@ -78,7 +78,7 @@ SHA3-256 payload root   =    32 B
 Total                   ≈ 1,600 B
 ```
 
-Implementation: [`gsx-ltp::ON_CHAIN_COMMITMENT_BYTES`](../../crates/gsx-ltp/src/lib.rs).
+Implementation: [`suwappu-ltp::ON_CHAIN_COMMITMENT_BYTES`](../../crates/suwappu-ltp/src/lib.rs).
 Property tested at the sprint exit gate (DAG-S15).
 
 ## Migration sequencing

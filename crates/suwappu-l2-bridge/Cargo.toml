@@ -1,0 +1,21 @@
+[package]
+name = "suwappu-l2-bridge"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+description = "SUWAPPU L1↔L2 bridge — off-chain validation library for L1Lock / L2BurnProven Intent construction + payload validation. Substrate-side accounting in suwappu-execution (G3.2 #101)."
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+# BLAKE3 hash primitive — matches the workspace's existing burn-nullifier /
+# state-tree commitment usage. See IQ-008 for the rationale on hash choice.
+blake3.workspace = true
+
+[dev-dependencies]
+hex.workspace = true
+proptest.workspace = true

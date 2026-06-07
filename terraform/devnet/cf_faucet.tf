@@ -1,4 +1,4 @@
-# CloudFront distribution fronting `faucet.devnet.gsx.globalsettlement.com`.
+# CloudFront distribution fronting `faucet.devnet.suwappu.globalsettlement.com`.
 #
 # Ported from terraform/testnet/cf_faucet.tf. Single origin (the faucet
 # EC2's EIP) since the faucet is a singleton — no origin group; if the
@@ -21,7 +21,7 @@ resource "aws_cloudfront_distribution" "faucet" {
   provider        = aws.us_east_1
   enabled         = true
   is_ipv6_enabled = true
-  comment         = "gsx-devnet faucet fronting"
+  comment         = "suwappu-devnet faucet fronting"
   aliases         = ["faucet.${var.devnet_subdomain}.${var.apex_domain}"]
   price_class     = "PriceClass_100"
 
@@ -59,7 +59,7 @@ resource "aws_cloudfront_distribution" "faucet" {
     minimum_protocol_version = "TLSv1.2_2021"
   }
 
-  tags = { Name = "gsx-devnet-faucet-cf" }
+  tags = { Name = "suwappu-devnet-faucet-cf" }
 }
 
 output "cf_faucet_distribution_id" {

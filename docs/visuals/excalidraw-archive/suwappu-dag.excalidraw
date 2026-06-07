@@ -1,0 +1,459 @@
+{
+  "type": "excalidraw",
+  "version": 2,
+  "source": "hermes-agent",
+  "elements": [
+    {
+      "type": "rectangle",
+      "id": "darkbg-dag",
+      "x": -4000,
+      "y": -3000,
+      "width": 10000,
+      "height": 8000,
+      "backgroundColor": "#0f172a",
+      "fillStyle": "solid",
+      "strokeColor": "transparent",
+      "strokeWidth": 0,
+      "roughness": 0,
+      "opacity": 100
+    },
+    {
+      "type": "rectangle",
+      "id": "67aa72a1",
+      "x": 80,
+      "y": 100,
+      "width": 240,
+      "height": 90,
+      "backgroundColor": "#1e3a5f",
+      "fillStyle": "solid",
+      "strokeColor": "#22d3ee",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "opacity": 100,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "5cd3d061",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "type": "text",
+      "id": "5cd3d061",
+      "x": 88,
+      "y": 133.0,
+      "width": 224,
+      "height": 24,
+      "text": "suwappu-dag",
+      "fontSize": 22,
+      "fontFamily": 1,
+      "strokeColor": "#e5e5e5",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 1,
+      "roughness": 1,
+      "opacity": 100,
+      "originalText": "suwappu-dag",
+      "autoResize": true,
+      "containerId": "67aa72a1",
+      "verticalAlign": "middle",
+      "textAlign": "center"
+    },
+    {
+      "type": "rectangle",
+      "id": "10b5d09e",
+      "x": 380,
+      "y": 100,
+      "width": 260,
+      "height": 90,
+      "backgroundColor": "#1a4d2e",
+      "fillStyle": "solid",
+      "strokeColor": "#34d399",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "opacity": 100,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "4ae64e84",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "type": "text",
+      "id": "4ae64e84",
+      "x": 388,
+      "y": 133.0,
+      "width": 244,
+      "height": 24,
+      "text": "Mysticeti-C DAG",
+      "fontSize": 18,
+      "fontFamily": 1,
+      "strokeColor": "#e5e5e5",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 1,
+      "roughness": 1,
+      "opacity": 100,
+      "originalText": "Mysticeti-C DAG",
+      "autoResize": true,
+      "containerId": "10b5d09e",
+      "verticalAlign": "middle",
+      "textAlign": "center"
+    },
+    {
+      "type": "rectangle",
+      "id": "43bb87cf",
+      "x": 700,
+      "y": 100,
+      "width": 230,
+      "height": 90,
+      "backgroundColor": "#2d1b69",
+      "fillStyle": "solid",
+      "strokeColor": "#a78bfa",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "opacity": 100,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "50c0917f",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "type": "text",
+      "id": "50c0917f",
+      "x": 708,
+      "y": 133.0,
+      "width": 214,
+      "height": 24,
+      "text": "Dual VM",
+      "fontSize": 18,
+      "fontFamily": 1,
+      "strokeColor": "#e5e5e5",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 1,
+      "roughness": 1,
+      "opacity": 100,
+      "originalText": "Dual VM",
+      "autoResize": true,
+      "containerId": "43bb87cf",
+      "verticalAlign": "middle",
+      "textAlign": "center"
+    },
+    {
+      "type": "rectangle",
+      "id": "e9664fe9",
+      "x": 980,
+      "y": 100,
+      "width": 200,
+      "height": 90,
+      "backgroundColor": "#5c3d1a",
+      "fillStyle": "solid",
+      "strokeColor": "#fbbf24",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "opacity": 100,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "b46bfb7e",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "type": "text",
+      "id": "b46bfb7e",
+      "x": 988,
+      "y": 133.0,
+      "width": 184,
+      "height": 24,
+      "text": "LTP",
+      "fontSize": 18,
+      "fontFamily": 1,
+      "strokeColor": "#e5e5e5",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 1,
+      "roughness": 1,
+      "opacity": 100,
+      "originalText": "LTP",
+      "autoResize": true,
+      "containerId": "e9664fe9",
+      "verticalAlign": "middle",
+      "textAlign": "center"
+    },
+    {
+      "type": "arrow",
+      "id": "132db5d8",
+      "x": 320,
+      "y": 145,
+      "width": 60,
+      "height": 0,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          60,
+          0
+        ]
+      ],
+      "strokeColor": "#22d3ee",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "opacity": 100,
+      "endArrowhead": "arrow"
+    },
+    {
+      "type": "arrow",
+      "id": "c68eeb67",
+      "x": 640,
+      "y": 145,
+      "width": 60,
+      "height": 0,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          60,
+          0
+        ]
+      ],
+      "strokeColor": "#34d399",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "opacity": 100,
+      "endArrowhead": "arrow"
+    },
+    {
+      "type": "arrow",
+      "id": "248c2bb4",
+      "x": 930,
+      "y": 145,
+      "width": 48,
+      "height": 0,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          48,
+          0
+        ]
+      ],
+      "strokeColor": "#a78bfa",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "opacity": 100,
+      "endArrowhead": "arrow"
+    },
+    {
+      "type": "rectangle",
+      "id": "61ad4677",
+      "x": 120,
+      "y": 270,
+      "width": 260,
+      "height": 100,
+      "backgroundColor": "#5c1a1a",
+      "fillStyle": "solid",
+      "strokeColor": "#fb7185",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "opacity": 100,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "638aa1a0",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "type": "text",
+      "id": "638aa1a0",
+      "x": 128,
+      "y": 308.0,
+      "width": 244,
+      "height": 24,
+      "text": "Authority Ring\n30\u201350 institutions",
+      "fontSize": 18,
+      "fontFamily": 1,
+      "strokeColor": "#e5e5e5",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 1,
+      "roughness": 1,
+      "opacity": 100,
+      "originalText": "Authority Ring\n30\u201350 institutions",
+      "autoResize": true,
+      "containerId": "61ad4677",
+      "verticalAlign": "middle",
+      "textAlign": "center"
+    },
+    {
+      "type": "rectangle",
+      "id": "3acded40",
+      "x": 420,
+      "y": 270,
+      "width": 260,
+      "height": 100,
+      "backgroundColor": "#5c1a1a",
+      "fillStyle": "solid",
+      "strokeColor": "#fb7185",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "opacity": 100,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "3baae4e9",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "type": "text",
+      "id": "3baae4e9",
+      "x": 428,
+      "y": 308.0,
+      "width": 244,
+      "height": 24,
+      "text": "Validator Ring\n100\u2013500 participants",
+      "fontSize": 18,
+      "fontFamily": 1,
+      "strokeColor": "#e5e5e5",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 1,
+      "roughness": 1,
+      "opacity": 100,
+      "originalText": "Validator Ring\n100\u2013500 participants",
+      "autoResize": true,
+      "containerId": "3acded40",
+      "verticalAlign": "middle",
+      "textAlign": "center"
+    },
+    {
+      "type": "rectangle",
+      "id": "8c9e8f9c",
+      "x": 760,
+      "y": 270,
+      "width": 260,
+      "height": 100,
+      "backgroundColor": "#1e3a5f",
+      "fillStyle": "solid",
+      "strokeColor": "#22d3ee",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "opacity": 100,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "6a9fe86c",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "type": "text",
+      "id": "6a9fe86c",
+      "x": 768,
+      "y": 308.0,
+      "width": 244,
+      "height": 24,
+      "text": "suwappu-db\ncanonical substrate",
+      "fontSize": 18,
+      "fontFamily": 1,
+      "strokeColor": "#e5e5e5",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 1,
+      "roughness": 1,
+      "opacity": 100,
+      "originalText": "suwappu-db\ncanonical substrate",
+      "autoResize": true,
+      "containerId": "8c9e8f9c",
+      "verticalAlign": "middle",
+      "textAlign": "center"
+    },
+    {
+      "type": "rectangle",
+      "id": "94e87000",
+      "x": 80,
+      "y": 430,
+      "width": 1080,
+      "height": 90,
+      "backgroundColor": "#111827",
+      "fillStyle": "solid",
+      "strokeColor": "#94a3b8",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "opacity": 100,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "2c0440b0",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "type": "text",
+      "id": "2c0440b0",
+      "x": 88,
+      "y": 463.0,
+      "width": 1064,
+      "height": 24,
+      "text": "Presentation-style summary: single chain, dual-ring security, dual VM, and cross-chain attestation",
+      "fontSize": 18,
+      "fontFamily": 1,
+      "strokeColor": "#e5e5e5",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 1,
+      "roughness": 1,
+      "opacity": 100,
+      "originalText": "Presentation-style summary: single chain, dual-ring security, dual VM, and cross-chain attestation",
+      "autoResize": true,
+      "containerId": "94e87000",
+      "verticalAlign": "middle",
+      "textAlign": "center"
+    }
+  ],
+  "appState": {
+    "viewBackgroundColor": "#0f172a"
+  }
+}

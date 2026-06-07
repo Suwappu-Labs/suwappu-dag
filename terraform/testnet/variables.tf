@@ -17,15 +17,15 @@ variable "ssh_public_key" {
 }
 
 variable "artifact_bucket" {
-  description = "S3 bucket holding gsx-node musl binary + genesis manifest. Created in this stack. Separate from devnet + perf so a testnet binary rollout doesn't touch other environments."
+  description = "S3 bucket holding suwappu-node musl binary + genesis manifest. Created in this stack. Separate from devnet + perf so a testnet binary rollout doesn't touch other environments."
   type        = string
-  default     = "gsx-dag-testnet-artifacts"
+  default     = "suwappu-dag-testnet-artifacts"
 }
 
 variable "external_uploads_bucket" {
   description = "S3 bucket where external validator operators upload their events.ndjson snapshots for the points program. Public-WRITE (with per-IAM-role scoping) so operators don't need foundation-side credentials; public-READ blocked."
   type        = string
-  default     = "gsx-dag-testnet-validator-uploads"
+  default     = "suwappu-dag-testnet-validator-uploads"
 }
 
 variable "consensus_port" {
@@ -55,7 +55,7 @@ variable "metrics_port" {
 variable "network_id" {
   description = "Cluster identifier baked into the genesis manifest. SDKs hard-code this to reject responses from the wrong network."
   type        = string
-  default     = "gsx-testnet-v1"
+  default     = "suwappu-testnet-v1"
 }
 
 variable "chain_id" {
@@ -82,9 +82,9 @@ variable "billing_alarm_email" {
 }
 
 variable "testnet_subdomain" {
-  description = "Subdomain under globalsettlement.com for testnet endpoints. Mirror of devnet.gsx.globalsettlement.com but on testnet.gsx.globalsettlement.com."
+  description = "Subdomain under globalsettlement.com for testnet endpoints. Mirror of devnet.suwappu.globalsettlement.com but on testnet.suwappu.globalsettlement.com."
   type        = string
-  default     = "testnet.gsx"
+  default     = "testnet.suwappu"
 }
 
 variable "apex_domain" {

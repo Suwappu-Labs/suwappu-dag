@@ -1,11 +1,11 @@
 name: status-page-testnet
 
-# Deploy the gsx-testnet status page. Fork of status.yml (devnet)
+# Deploy the suwappu-testnet status page. Fork of status.yml (devnet)
 # with two key differences:
-#   * Targets `gsx-dag-testnet-status` bucket + the testnet
+#   * Targets `suwappu-dag-testnet-status` bucket + the testnet
 #     CloudFront distribution.
-#   * sed-rewrites the `*.devnet.gsx` URLs in app.js to
-#     `*.testnet.gsx` at upload time so a single status-page
+#   * sed-rewrites the `*.devnet.suwappu` URLs in app.js to
+#     `*.testnet.suwappu` at upload time so a single status-page
 #     source tree can power both environments without code
 #     duplication.
 #
@@ -44,21 +44,21 @@ jobs:
         run: |
           mkdir -p ./build/status
           cp ./clients/status-page/index.html ./build/status/
-          # sed-rewrite: every `*.devnet.gsx.globalsettlement.com`
-          # becomes `*.testnet.gsx.globalsettlement.com`. The
+          # sed-rewrite: every `*.devnet.suwappu.globalsettlement.com`
+          # becomes `*.testnet.suwappu.globalsettlement.com`. The
           # status page logic itself is environment-agnostic; only
           # the polling URLs differ.
-          sed 's/devnet\.gsx\.globalsettlement\.com/testnet.gsx.globalsettlement.com/g' \
+          sed 's/devnet\.suwappu\.globalsettlement\.com/testnet.suwappu.globalsettlement.com/g' \
               ./clients/status-page/app.js > ./build/status/app.js
           # Also flip the page title.
-          sed -i.bak 's/gsx-devnet/gsx-testnet/g; s/devnet\.gsx\.globalsettlement\.com/testnet.gsx.globalsettlement.com/g' \
+          sed -i.bak 's/suwappu-devnet/suwappu-testnet/g; s/devnet\.suwappu\.globalsettlement\.com/testnet.suwappu.globalsettlement.com/g' \
               ./build/status/index.html
           rm -f ./build/status/index.html.bak
 
           # Sanity: confirm no devnet refs remain in the testnet build.
-          if grep -q "devnet.gsx" ./build/status/app.js ./build/status/index.html; then
-            echo "ERROR: devnet.gsx references survived the rewrite; aborting deploy" >&2
-            grep -n "devnet.gsx" ./build/status/app.js ./build/status/index.html
+          if grep -q "devnet.suwappu" ./build/status/app.js ./build/status/index.html; then
+            echo "ERROR: devnet.suwappu references survived the rewrite; aborting deploy" >&2
+            grep -n "devnet.suwappu" ./build/status/app.js ./build/status/index.html
             exit 1
           fi
 
@@ -76,12 +76,12 @@ jobs:
         env:
           STATUS_TESTNET_DEPLOY_ROLE: ${{ secrets.STATUS_TESTNET_DEPLOY_ROLE }}
         run: |
-          aws s3 sync ./build/status/ s3://gsx-dag-testnet-status/ \
+          aws s3 sync ./build/status/ s3://suwappu-dag-testnet-status/ \
               --delete \
               --cache-control "public, max-age=60, must-revalidate"
-          aws s3 cp ./build/status/index.html s3://gsx-dag-testnet-status/index.html \
+          aws s3 cp ./build/status/index.html s3://suwappu-dag-testnet-status/index.html \
               --cache-control "no-cache, no-store, must-revalidate"
-          aws s3 cp ./build/status/app.js s3://gsx-dag-testnet-status/app.js \
+          aws s3 cp ./build/status/app.js s3://suwappu-dag-testnet-status/app.js \
               --cache-control "no-cache, no-store, must-revalidate"
 
       - name: Invalidate CloudFront
@@ -90,7 +90,7 @@ jobs:
           STATUS_TESTNET_DEPLOY_ROLE: ${{ secrets.STATUS_TESTNET_DEPLOY_ROLE }}
         run: |
           DIST_ID=$(aws cloudfront list-distributions \
-              --query "DistributionList.Items[?Aliases.Items[?contains(@, 'status.testnet.gsx')]].Id | [0]" \
+              --query "DistributionList.Items[?Aliases.Items[?contains(@, 'status.testnet.suwappu')]].Id | [0]" \
               --output text)
           aws cloudfront create-invalidation \
               --distribution-id "$DIST_ID" \

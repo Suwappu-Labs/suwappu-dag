@@ -1,4 +1,4 @@
-# gsx-dag mainnet-readiness audit (2026-05-14)
+# suwappu-dag mainnet-readiness audit (2026-05-14)
 
 ## Context
 
@@ -22,7 +22,7 @@ This audit is grounded in two passes:
 **Verdict in one line.** Consensus core is sound and the *combined*
 post-quantum surface is still a real differentiator (ML-DSA-65 +
 ML-KEM-768 + BLS aggregate + SHA3-256 — Algorand and QRL each ship only
-parts of this), but `gsx-dag` is still a research artifact, not a chain
+parts of this), but `suwappu-dag` is still a research artifact, not a chain
 a user can interact with: no query RPC, no SDK, no explorer, no
 mempool/fee market, no deployed bridge, deterministic placeholder
 validator keys, and one real consensus bug under `#[ignore]` (Issue #18).
@@ -37,7 +37,7 @@ Mainnet is **9–14 months** of focused work away.
 | # | Type | Title | Action |
 |---|---|---|---|
 | PR #15 | PR | `DAG-S33: cert-finality metric + global campaign-window filter` | **Close.** Perf campaigns paused; re-open later if/when needed. |
-| Issue #18 | Bug | `phase_g eject path: transitional quorum-threshold asymmetry stalls commits` | **Real consensus bug**; mainnet blocker. Three candidate fixes in the issue: (a) apply governance at epoch boundary; (b) gate `quorum_threshold` on highest committed `n`; (c) explicit barrier round. Recommend (a). Rationale at `crates/gsx-node/src/daemon.rs:1650-1680`. |
+| Issue #18 | Bug | `phase_g eject path: transitional quorum-threshold asymmetry stalls commits` | **Real consensus bug**; mainnet blocker. Three candidate fixes in the issue: (a) apply governance at epoch boundary; (b) gate `quorum_threshold` on highest committed `n`; (c) explicit barrier round. Recommend (a). Rationale at `crates/suwappu-node/src/daemon.rs:1650-1680`. |
 
 Stale remote branches (`consensus/dag-s27-...`, `s28`, `s29`, `s30`,
 `orphan-cert-pull`) are merged into `main` — delete via
@@ -66,7 +66,7 @@ of correctness work, not 4–6 weeks.
 
 | Chain | Architecture | Demonstrated TPS | Finality | Mainnet status |
 |---|---|---:|---:|---|
-| **gsx-dag (this repo, 4-region t3.small)** | Mysticeti-C + dual-ring + ML-DSA | **4,300 submit / 0.125 commit** | (no finality; stalls) | Pre-testnet |
+| **suwappu-dag (this repo, 4-region t3.small)** | Mysticeti-C + dual-ring + ML-DSA | **4,300 submit / 0.125 commit** | (no finality; stalls) | Pre-testnet |
 | Solana (Firedancer + Alpenglow) | Sealevel BPF + TowerBFT→Votor | 3k–5k real, 100k peak (Aug 2025) | 400–800ms today → ~150ms (Alpenglow, late 2026) | Mainnet 2020; Firedancer Dec 2025 |
 | Sui (Mysticeti v2) | Move + DAG-BFT + FPC built-in | ~15k real | ~390ms (35% latency cut on Asia) | Mainnet May 2023; v2 Nov 2025 |
 | Aptos (Baby Raptr → Raptr → Velociraptr) | Move + Block-STM + Quorum Store | 250k bench, ~10k real | 100–150ms faster than 2024 | Mainnet Oct 2022; Baby Raptr 2025 |
@@ -78,7 +78,7 @@ of correctness work, not 4–6 weeks.
 | Ethereum (Fusaka, Dec 2025) | EVM + PBS + PeerDAS | 60M gas/block, ~50 TPS L1 | 12-min full finality | Long-established |
 
 **Implication.** A 2026 settlement-chain mainnet floor is roughly
-**≥5k real TPS with sub-second finality**. gsx-dag's current commit
+**≥5k real TPS with sub-second finality**. suwappu-dag's current commit
 cadence of 0.125 TPS (the May-13 perf stall, caused by older code paths
 since superseded by IQ-001 + IQ-002 in `main`) is three orders of magnitude
 below this floor. Once IQ-001 + IQ-002 land in `main` (they have), Issue
@@ -89,9 +89,9 @@ it has not yet been validated against the post-IQ commit rule.
 
 ### 2.3 Production-L1 capability matrix (gaps)
 
-| Capability | Sui | Aptos | Solana | Monad | MegaETH | Hyperliquid | **gsx-dag** | Verdict |
+| Capability | Sui | Aptos | Solana | Monad | MegaETH | Hyperliquid | **suwappu-dag** | Verdict |
 |---|---|---|---|---|---|---|---|---|
-| Query RPC | JSON-RPC + GraphQL + gRPC + archival store | REST + Indexer API | JSON-RPC (+Helius) | JSON-RPC | JSON-RPC + Flashblocks WSS | REST + WebSocket | **Write-only TCP bincode** (`gsx-node/src/client.rs:38-75`) | **Critical** |
+| Query RPC | JSON-RPC + GraphQL + gRPC + archival store | REST + Indexer API | JSON-RPC (+Helius) | JSON-RPC | JSON-RPC + Flashblocks WSS | REST + WebSocket | **Write-only TCP bincode** (`suwappu-node/src/client.rs:38-75`) | **Critical** |
 | Client SDK | TS, Rust, Python, Go, Swift, Kotlin | TS, Python, Rust | Web3.js, @solana/web3.js v2, Rust | viem/ethers + Rust | viem/ethers + WSS | Python, TS | **None** | **Critical** |
 | Block explorer | Suiscan, Suivision | Aptos Explorer | Solana FM, SolanaBeach | MonadScan | MegaScan | Hyperliquid Stats | **NDJSON event log per node only** | **High** |
 | Indexer | Sui indexer + archival | Aptos indexer | Helius, Triton | Custom | Self-hosted | Self-hosted | **None** | **High** |
@@ -110,16 +110,16 @@ it has not yet been validated against the post-IQ commit rule.
    (~30 LOC plus one integration test).
 2. Build a real query RPC (recommend JSON-RPC over HTTP, with an
    eventual gRPC/GraphQL upgrade path matching Sui's Transaction Driver
-   pattern). New crate `gsx-rpc`. Methods: `getBlock`,
+   pattern). New crate `suwappu-rpc`. Methods: `getBlock`,
    `getTransaction`, `getBalance`, `getAuthorityRegistry`,
    `getEpoch`, `getStake`, `submitIntent` (mirror of
    `ClientMessage::Submit`), `subscribeEvents` (WS tail of NDJSON).
 3. Client SDK — Rust + TypeScript. Single crate `clients/rust-sdk`
-   and single npm package `@gsx/client`. Pattern after `viem` for TS.
+   and single npm package `@suwappu/client`. Pattern after `viem` for TS.
 4. Indexer (NDJSON tail → Postgres or ClickHouse) + minimal Next.js
-   explorer. New crate `gsx-indexer`.
+   explorer. New crate `suwappu-indexer`.
 5. Mempool with priority queue, fee model, per-peer rate limit on
-   `client.rs::run`, and intent expiry. New crate `gsx-mempool`.
+   `client.rs::run`, and intent expiry. New crate `suwappu-mempool`.
 
 ---
 
@@ -161,21 +161,21 @@ A practical 2026 mainnet lands into a market where:
   mainnet (Nov 2025) — *first* major L1 with deployed PQ. QRL Zond
   shipping ML-DSA-87 EVM-compatible L1 in 2026. Naoris went live April
   2026. Ethereum Foundation formed a PQ team Jan 2026; full PQ infra
-  targeted ~2029. **gsx-dag is no longer alone in the PQ space**; the
+  targeted ~2029. **suwappu-dag is no longer alone in the PQ space**; the
   differentiator is the *combined* surface (ML-DSA-65 + ML-KEM-768 +
   BLS12-381 aggregate + SHA3-256) and the *constant-size ≈1.6 kB LTP
   attestation* (paper §10.2) — neither Algorand nor QRL ships both.
 - **Account abstraction (2026):** ERC-4337 + EIP-7702 is the dominant
-  UX pattern, 40M+ smart accounts. gsx-dag's paper §3.3 mandates
+  UX pattern, 40M+ smart accounts. suwappu-dag's paper §3.3 mandates
   ML-DSA-signed intents but the wire (`client.rs:21-23`) accepts
   unsigned intents — must close before mainnet.
 - **Data availability (2026):** Celestia 21 MB/s sustained (mamo-1),
   EigenDA 100 MB/s. Modular L2 ecosystem normalizes external DA. If
-  gsx-dag ever needs DA scaling, EigenDA is the path of least
+  suwappu-dag ever needs DA scaling, EigenDA is the path of least
   resistance (Ethereum-aligned, restaking-backed).
 - **Shared security:** EigenLayer $18B restaked across 1,900
   operators. Symbiotic + Karak round out the multi-protocol landscape.
-  **Optionality for gsx-dag:** post-mainnet, register the LTP
+  **Optionality for suwappu-dag:** post-mainnet, register the LTP
   attestation service as an AVS — restaking-backed economic security
   for the cross-chain corridor without bootstrapping a separate set of
   validators.
@@ -189,9 +189,9 @@ In the `gsn` account (492042618949, us-east-1):
 | Resource | Source | State |
 |---|---|---|
 | 4 perf t3.small validators (4 regions) | `terraform/perf/` | All stopped. |
-| S3 `gsx-dag-tf-state` + DDB `gsx-dag-tf-locks` | `terraform/bootstrap/` | Created today. |
-| S3 `gsx-dag-perf-artifacts` | `terraform/perf/main.tf` | ~2.9 GB, versioned, 5 lifecycle rules. |
-| CodeBuild `gsx-perf-musl-build` | `terraform/perf/codebuild.tf` | Active. |
+| S3 `suwappu-dag-tf-state` + DDB `suwappu-dag-tf-locks` | `terraform/bootstrap/` | Created today. |
+| S3 `suwappu-dag-perf-artifacts` | `terraform/perf/main.tf` | ~2.9 GB, versioned, 5 lifecycle rules. |
+| CodeBuild `suwappu-perf-musl-build` | `terraform/perf/codebuild.tf` | Active. |
 | `terraform plan` | — | Clean. |
 
 Validator keys are deterministic placeholders generated by
@@ -237,10 +237,10 @@ Three categories:
 
 **Phase 1 — Consensus correctness + throughput baseline (≈ 4 weeks).**
 
-1. Ratify IQ-001 + IQ-002 (sign-off + `gsx-papers` PR).
+1. Ratify IQ-001 + IQ-002 (sign-off + `suwappu-papers` PR).
 2. Land IQ-003 K-binding cross-check in
    `daemon.rs::handle_fastpath_cert` (call
-   `gsx_fastpath::binding::is_main_lane_consistent` against a snapshot
+   `suwappu_fastpath::binding::is_main_lane_consistent` against a snapshot
    of the last 4 committed rounds; emit `slashed` on inconsistency).
    New 4-node integration test
    `fastpath_main_lane_equivocation_slashes_within_1_epoch`.
@@ -250,26 +250,26 @@ Three categories:
 
 **Phase 2 — User-facing surface (≈ 8–12 weeks, parallel).**
 
-1. `gsx-rpc` crate — JSON-RPC over HTTP, mirrored on Sui's RPC schema
+1. `suwappu-rpc` crate — JSON-RPC over HTTP, mirrored on Sui's RPC schema
    for compatibility. Methods: `getBlock`, `getTransaction`,
    `getBalance`, `getAuthorityRegistry`, `getEpoch`, `getStake`,
    `submitIntent`, `subscribeEvents`. Bind from `Daemon::start`.
-2. `clients/rust-sdk` + `clients/ts-sdk` (npm `@gsx/client`,
+2. `clients/rust-sdk` + `clients/ts-sdk` (npm `@suwappu/client`,
    viem-style API).
-3. `gsx-indexer` — NDJSON event-log tail → Postgres or ClickHouse;
+3. `suwappu-indexer` — NDJSON event-log tail → Postgres or ClickHouse;
    GraphQL query API to follow Sui's pattern (gRPC is a P2 upgrade).
 4. Next.js explorer hitting the indexer.
-5. `gsx-mempool` — priority queue, fee model, per-peer rate limits on
+5. `suwappu-mempool` — priority queue, fee model, per-peer rate limits on
    `client.rs::run`, intent expiry. Wire into `Daemon` ingress between
    `client.rs` and the round driver's `pending_intents` drain.
 6. Account abstraction: enforce ML-DSA signature verification on every
    `Intent::Transfer` in `client.rs::handle_connection` against the
-   sender's registered key in `gsx-authority`. Currently `client.rs:21-23`
+   sender's registered key in `suwappu-authority`. Currently `client.rs:21-23`
    documents this as a mainnet gate but does not enforce it.
 
 **Phase 3 — Bridge + governance (≈ 4–8 weeks, can overlap Phase 2).**
 
-1. Deploy one ETH ↔ gsx-dag LTP corridor (broadest ecosystem reach;
+1. Deploy one ETH ↔ suwappu-dag LTP corridor (broadest ecosystem reach;
    ETH/Eureka + LayerZero v2 DVN compatibility is the easiest
    integration story).
 2. Phase G extension: parameter-change governance + on-chain voting.
@@ -278,13 +278,13 @@ Three categories:
 **Phase 4 — Mainnet ops (≈ 4–6 weeks).**
 
 1. Real ML-DSA + BLS keygen in Secrets Manager (or YubiHSM2).
-2. Public DNS `*.mainnet.gsx.network` + ACM wildcard.
+2. Public DNS `*.mainnet.suwappu.network` + ACM wildcard.
 3. CloudFront + WAF + Shield Advanced.
 4. CloudWatch dashboards, SNS → PagerDuty, GuardDuty, MFA, IAM trimming.
 5. Cross-region EBS snapshot replication; runbooks (validator
    onboarding, key rotation, emergency stop).
-6. **Independent security audit** of `gsx-consensus`, `gsx-crypto`,
-   `gsx-fastpath`, `gsx-ltp`. Vendor shortlist: Trail of Bits
+6. **Independent security audit** of `suwappu-consensus`, `suwappu-crypto`,
+   `suwappu-fastpath`, `suwappu-ltp`. Vendor shortlist: Trail of Bits
    (consensus + crypto track record), Certora (formal verification
    for joint-quorum invariants), Zellic (PQ crypto track record). Bug
    bounty (Immunefi, $250k–$1M cap).
@@ -313,11 +313,11 @@ gh issue list --state open
 ls docs/iq/
 
 # Spot-check the three corrected claims
-sed -n '61,66p' crates/gsx-consensus/src/commit.rs        # canonical 2f+1
-sed -n '126,202p' crates/gsx-consensus/src/commit.rs       # direct+indirect
-sed -n '499,505p' crates/gsx-node/src/daemon.rs            # FastPath wired
-grep -n is_main_lane_consistent crates/gsx-node/src/*.rs   # expect: 0 hits
-grep -n 'mldsa\|ML-DSA\|signature' crates/gsx-node/src/client.rs
+sed -n '61,66p' crates/suwappu-consensus/src/commit.rs        # canonical 2f+1
+sed -n '126,202p' crates/suwappu-consensus/src/commit.rs       # direct+indirect
+sed -n '499,505p' crates/suwappu-node/src/daemon.rs            # FastPath wired
+grep -n is_main_lane_consistent crates/suwappu-node/src/*.rs   # expect: 0 hits
+grep -n 'mldsa\|ML-DSA\|signature' crates/suwappu-node/src/client.rs
                                                             # expect: 0 enforcement
 
 # AWS drift
@@ -327,9 +327,9 @@ AWS_PROFILE=gsn terraform plan \
   -var "ssh_public_key=$(cat ~/.ssh/id_ed25519.pub)"
 
 # Key storage today
-AWS_PROFILE=gsn aws s3 ls s3://gsx-dag-perf-artifacts/keys/ --recursive
+AWS_PROFILE=gsn aws s3 ls s3://suwappu-dag-perf-artifacts/keys/ --recursive
 AWS_PROFILE=gsn aws secretsmanager list-secrets \
-  --query 'SecretList[?contains(Name, `gsx`)]'
+  --query 'SecretList[?contains(Name, `suwappu`)]'
 ```
 
 ---
@@ -359,28 +359,28 @@ AWS_PROFILE=gsn aws secretsmanager list-secrets \
 
 **Internal:**
 
-- `GSXHELPER.md` — sprint backlog table, load-bearing invariants.
+- `SUWAPPUHELPER.md` — sprint backlog table, load-bearing invariants.
 - `docs/architecture/sprint-map.md`.
-- `docs/iq/IQ-001-quorum-formula.md` — ratified 2026-05-14 ([gsx-papers#1](https://github.com/GlobalSettlementNetwork/gsx-papers/pull/1)).
-- `docs/iq/IQ-002-indirect-commit.md` — ratified 2026-05-14 ([gsx-papers#1](https://github.com/GlobalSettlementNetwork/gsx-papers/pull/1)).
+- `docs/iq/IQ-001-quorum-formula.md` — ratified 2026-05-14 ([suwappu-papers#1](https://github.com/suwappu/suwappu-papers/pull/1)).
+- `docs/iq/IQ-002-indirect-commit.md` — ratified 2026-05-14 ([suwappu-papers#1](https://github.com/suwappu/suwappu-papers/pull/1)).
 - `docs/iq/IQ-003-fast-path-architecture.md` — handler wired; K-binding gap.
-- `docs/iq/IQ-004-decide-slot-orphan-window.md` — pending sign-off; tracking [#45](https://github.com/GlobalSettlementNetwork/gsx-dag/issues/45).
+- `docs/iq/IQ-004-decide-slot-orphan-window.md` — pending sign-off; tracking [#45](https://github.com/suwappu/suwappu-dag/issues/45).
 
 **Perf history (this repo):**
 
 - `docs/perf-run-2026-05-12/README.md` — 6-region perf-testnet snapshot, pre-S29 RPC batch.
 - `docs/perf-run-2026-05-13/README.md` — extended campaign with S29 batch submit + S30 round-driver lock split; the throughput numbers cited in §2.2 of this audit derive from this run.
-- `crates/gsx-consensus/src/commit.rs:61-66` — canonical `2f+1`.
-- `crates/gsx-consensus/src/commit.rs:126-202` — `try_direct_decide`,
+- `crates/suwappu-consensus/src/commit.rs:61-66` — canonical `2f+1`.
+- `crates/suwappu-consensus/src/commit.rs:126-202` — `try_direct_decide`,
   `try_indirect_decide`, `decide_slot`, `finalize`.
-- `crates/gsx-fastpath/src/quorum.rs:38-43` — fast-path quorum.
-- `crates/gsx-fastpath/src/binding.rs:51-63` — `is_main_lane_consistent`
+- `crates/suwappu-fastpath/src/quorum.rs:38-43` — fast-path quorum.
+- `crates/suwappu-fastpath/src/binding.rs:51-63` — `is_main_lane_consistent`
   (defined but unused outside tests).
-- `crates/gsx-node/src/daemon.rs:499-820` — fast-path lane handler +
+- `crates/suwappu-node/src/daemon.rs:499-820` — fast-path lane handler +
   proposer.
-- `crates/gsx-node/src/daemon.rs:1650-1680` — `phase_g_admit_and_eject`
+- `crates/suwappu-node/src/daemon.rs:1650-1680` — `phase_g_admit_and_eject`
   `#[ignore]` rationale.
-- `crates/gsx-node/src/client.rs:21-23,38-75` — write-only client wire
+- `crates/suwappu-node/src/client.rs:21-23,38-75` — write-only client wire
   protocol; auth-deferred-to-mainnet comment.
 - `terraform/perf/main.tf` + `modules/region/cloud-init.yaml:64-66`.
 - `scripts/perf/gen-genesis.py:17` — placeholder-key disclaimer.

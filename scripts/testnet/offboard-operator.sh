@@ -32,7 +32,7 @@ if [[ $# -lt 1 ]]; then
     cat <<EOF
 usage: $(basename "$0") <operator_label>
 
-Removes IAM user gsx-testnet-operator-<label>, all its access
+Removes IAM user suwappu-testnet-operator-<label>, all its access
 keys, and the inline upload policy.
 
 Idempotent — running twice is safe.
@@ -46,8 +46,8 @@ if ! [[ "$LABEL" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
     exit 1
 fi
 
-USER_NAME="gsx-testnet-operator-${LABEL}"
-POLICY_NAME="gsx-testnet-operator-${LABEL}-upload"
+USER_NAME="suwappu-testnet-operator-${LABEL}"
+POLICY_NAME="suwappu-testnet-operator-${LABEL}-upload"
 
 # Helper: only run `aws iam ...` and treat NoSuchEntity as a no-op.
 # Other errors (permission denied, throttle) still propagate.

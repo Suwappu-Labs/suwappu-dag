@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Apply to run a gsx-testnet validator</title>
-  <meta name="description" content="Apply to operate a validator on the GSX DAG L1 incentivized public testnet. Points earned during testnet convert to mainnet token at TGE.">
+  <title>Apply to run a suwappu-testnet validator</title>
+  <meta name="description" content="Apply to operate a validator on the Suwappu DAG L1 incentivized public testnet. Points earned during testnet convert to mainnet token at TGE.">
   <style>
     * { box-sizing: border-box; }
     body {
@@ -57,19 +57,19 @@
 </head>
 <body>
   <header>
-    <h1>gsx-testnet — validator operator program</h1>
+    <h1>suwappu-testnet — validator operator program</h1>
     <span class="tag">Apply</span>
   </header>
   <main>
     <div class="intro">
       <p>
-        External validator operators run gsx-node on their own hardware,
+        External validator operators run suwappu-node on their own hardware,
         peer with the foundation's 7 seed regions, and earn points that
         convert to mainnet token at TGE (capped at <strong>5–8% of mainnet
         supply</strong>; allocation pro-rata to total points). Before
         applying, review the hardware spec and the points formula in
-        <a href="https://github.com/GlobalSettlementNetwork/gsx-dag/blob/main/docs/testnet/VALIDATOR-OPERATORS.md">VALIDATOR-OPERATORS.md</a>
-        and <a href="https://github.com/GlobalSettlementNetwork/gsx-dag/blob/main/docs/testnet/POINTS.md">POINTS.md</a>.
+        <a href="https://github.com/suwappu/suwappu-dag/blob/main/docs/testnet/VALIDATOR-OPERATORS.md">VALIDATOR-OPERATORS.md</a>
+        and <a href="https://github.com/suwappu/suwappu-dag/blob/main/docs/testnet/POINTS.md">POINTS.md</a>.
       </p>
       <p>
         The form below includes an in-line KYC step (powered by Persona)
@@ -82,7 +82,7 @@
     <div class="form-wrap">
       <iframe
         src="${typeform_url}"
-        title="gsx-testnet operator application"
+        title="suwappu-testnet operator application"
         loading="lazy"
         referrerpolicy="strict-origin-when-cross-origin"
         allow="camera; microphone; clipboard-write"
@@ -90,10 +90,10 @@
     </div>
   </main>
   <footer>
-    <a href="https://github.com/GlobalSettlementNetwork/gsx-dag">gsx-dag</a>
-    · <a href="https://github.com/GlobalSettlementNetwork/gsx-dag/blob/main/docs/testnet/VALIDATOR-OPERATORS.md">operator guide</a>
-    · <a href="https://github.com/GlobalSettlementNetwork/gsx-dag/blob/main/docs/testnet/POINTS.md">points formula</a>
-    · <a href="https://github.com/GlobalSettlementNetwork/gsx-dag/blob/main/SECURITY.md">security</a>
+    <a href="https://github.com/suwappu/suwappu-dag">suwappu-dag</a>
+    · <a href="https://github.com/suwappu/suwappu-dag/blob/main/docs/testnet/VALIDATOR-OPERATORS.md">operator guide</a>
+    · <a href="https://github.com/suwappu/suwappu-dag/blob/main/docs/testnet/POINTS.md">points formula</a>
+    · <a href="https://github.com/suwappu/suwappu-dag/blob/main/SECURITY.md">security</a>
   </footer>
 </body>
 </html>

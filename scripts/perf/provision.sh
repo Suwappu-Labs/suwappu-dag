@@ -5,13 +5,13 @@
 #   1. Generate placeholder keys + genesis manifest locally.
 #   2. terraform apply via scripts/deploy-aws.sh — creates S3 bucket,
 #      CodeBuild project, and 7 region VPCs/EC2s/EIPs.
-#   3. Ensure the gsx-db SSH deploy key is in SSM (CodeBuild needs it for
+#   3. Ensure the suwappu-db SSH deploy key is in SSM (CodeBuild needs it for
 #      the private cargo dep).
-#   4. CodeBuild compiles gsx-node binaries on AWS.
+#   4. CodeBuild compiles suwappu-node binaries on AWS.
 #   5. Render per-region node.toml using the now-known EIPs.
 #   6. Upload binaries / configs / keys to S3.
-#   7. SSH-restart each validator's gsx-bootstrap.service so cloud-init
-#      pulls the just-uploaded config and starts gsx-node.
+#   7. SSH-restart each validator's suwappu-bootstrap.service so cloud-init
+#      pulls the just-uploaded config and starts suwappu-node.
 #
 # This script is idempotent — rerun if anything fails.
 set -euo pipefail
@@ -30,21 +30,21 @@ echo "[provision] 2/7 — terraform apply via deploy-aws.sh"
 BUCKET="$(cd "$TF" && terraform output -raw artifact_bucket)"
 echo "[provision] artifact bucket: $BUCKET"
 
-echo "[provision] 3/7 — ensure gsx-db deploy key in SSM"
-if ! aws ssm get-parameter --name /gsx-perf/gsx-db-deploy-key --region us-east-1 >/dev/null 2>&1; then
-  KEY_PATH="${GSX_DB_DEPLOY_KEY:-$HOME/.ssh/gsx-db-deploy}"
+echo "[provision] 3/7 — ensure suwappu-db deploy key in SSM"
+if ! aws ssm get-parameter --name /suwappu-perf/suwappu-db-deploy-key --region us-east-1 >/dev/null 2>&1; then
+  KEY_PATH="${SUWAPPU_DB_DEPLOY_KEY:-$HOME/.ssh/suwappu-db-deploy}"
   if [ ! -f "$KEY_PATH" ]; then
-    echo "error: SSM parameter /gsx-perf/gsx-db-deploy-key not present and" >&2
+    echo "error: SSM parameter /suwappu-perf/suwappu-db-deploy-key not present and" >&2
     echo "       no key file at $KEY_PATH to upload. Either set" >&2
-    echo "       GSX_DB_DEPLOY_KEY=/path/to/private-key, or upload manually:" >&2
-    echo "  aws ssm put-parameter --name /gsx-perf/gsx-db-deploy-key \\" >&2
-    echo "    --type SecureString --value \"\$(cat ~/.ssh/gsx-db-deploy)\" \\" >&2
+    echo "       SUWAPPU_DB_DEPLOY_KEY=/path/to/private-key, or upload manually:" >&2
+    echo "  aws ssm put-parameter --name /suwappu-perf/suwappu-db-deploy-key \\" >&2
+    echo "    --type SecureString --value \"\$(cat ~/.ssh/suwappu-db-deploy)\" \\" >&2
     echo "    --profile gsn --region us-east-1" >&2
     exit 1
   fi
   echo "[provision]   uploading deploy key from $KEY_PATH"
   aws ssm put-parameter \
-    --name /gsx-perf/gsx-db-deploy-key \
+    --name /suwappu-perf/suwappu-db-deploy-key \
     --type SecureString \
     --value "$(cat "$KEY_PATH")" \
     --region us-east-1 \
@@ -65,7 +65,7 @@ for region in us-east-1 us-west-2 eu-west-1 ap-northeast-1 ap-southeast-2 sa-eas
   aws s3 cp "$ROOT/target/perf/keys/$region/bls.sk" "s3://$BUCKET/keys/$region/bls.sk" --region us-east-1
 done
 
-echo "[provision] 7/7 — kick gsx-bootstrap.service on every validator"
+echo "[provision] 7/7 — kick suwappu-bootstrap.service on every validator"
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_ed25519}"
 VAL_JSON="$(cd "$TF" && terraform output -json validators)"
 for region in $(echo "$VAL_JSON" | jq -r 'keys[]'); do
@@ -73,11 +73,11 @@ for region in $(echo "$VAL_JSON" | jq -r 'keys[]'); do
   echo "[provision]   $region @ $ip"
   ssh -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 \
     "ubuntu@$ip" \
-    "sudo systemctl restart gsx-bootstrap && sudo systemctl restart gsx-node" \
+    "sudo systemctl restart suwappu-bootstrap && sudo systemctl restart suwappu-node" \
     || echo "[provision]   WARN: ssh to $region failed; retry after cloud-init finishes"
 done
 
-echo "[provision] 8/8 — install gsx-loadgen.service on us-east-1 (DAG-S27.6)"
+echo "[provision] 8/8 — install suwappu-loadgen.service on us-east-1 (DAG-S27.6)"
 # Render loadgen.env from terraform validator outputs. TARGETS is the
 # comma-joined list of every validator's `public_ip:client_port`.
 LOADGEN_ENV="$ROOT/target/perf/loadgen.env"
@@ -103,32 +103,32 @@ EOF
 echo "[provision]   rendered $LOADGEN_ENV (TARGETS=$TARGETS_LIST RATE=$LOADGEN_RATE)"
 
 # us-east-1 hosts the loadgen — it's the deepest into the mesh and its
-# binary is already on disk from the gsx-node deploy.
+# binary is already on disk from the suwappu-node deploy.
 LOADGEN_HOST=$(echo "$VAL_JSON" | jq -r '."us-east-1".public_ip')
 echo "[provision]   installing on us-east-1 @ $LOADGEN_HOST"
 scp -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 \
-  "$ROOT/scripts/perf/gsx-loadgen.service" \
+  "$ROOT/scripts/perf/suwappu-loadgen.service" \
   "$LOADGEN_ENV" \
   "ubuntu@$LOADGEN_HOST:/tmp/" \
   || { echo "[provision]   WARN: scp to us-east-1 failed; skipping loadgen install" ; LOADGEN_HOST=""; }
 if [ -n "$LOADGEN_HOST" ]; then
   ssh -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 \
     "ubuntu@$LOADGEN_HOST" \
-    'sudo install -d -m 0755 -o root -g root /etc/gsx && \
-     sudo install -d -m 0755 -o gsx -g gsx /var/log/gsx && \
-     sudo mv /tmp/loadgen.env /etc/gsx/loadgen.env && \
-     sudo chown root:root /etc/gsx/loadgen.env && \
-     sudo chmod 0644 /etc/gsx/loadgen.env && \
-     sudo mv /tmp/gsx-loadgen.service /etc/systemd/system/gsx-loadgen.service && \
-     sudo chown root:root /etc/systemd/system/gsx-loadgen.service && \
-     sudo chmod 0644 /etc/systemd/system/gsx-loadgen.service && \
+    'sudo install -d -m 0755 -o root -g root /etc/suwappu && \
+     sudo install -d -m 0755 -o suwappu -g suwappu /var/log/suwappu && \
+     sudo mv /tmp/loadgen.env /etc/suwappu/loadgen.env && \
+     sudo chown root:root /etc/suwappu/loadgen.env && \
+     sudo chmod 0644 /etc/suwappu/loadgen.env && \
+     sudo mv /tmp/suwappu-loadgen.service /etc/systemd/system/suwappu-loadgen.service && \
+     sudo chown root:root /etc/systemd/system/suwappu-loadgen.service && \
+     sudo chmod 0644 /etc/systemd/system/suwappu-loadgen.service && \
      sudo systemctl daemon-reload && \
-     sudo systemctl enable gsx-loadgen.service && \
-     sudo systemctl restart gsx-loadgen.service && \
-     sudo systemctl --no-pager --full status gsx-loadgen.service || true' \
+     sudo systemctl enable suwappu-loadgen.service && \
+     sudo systemctl restart suwappu-loadgen.service && \
+     sudo systemctl --no-pager --full status suwappu-loadgen.service || true' \
     || echo "[provision]   WARN: ssh install on us-east-1 failed; rerun provision after cloud-init"
 fi
 
 echo "[provision] done. SSH check:"
-echo "  ssh -i $SSH_KEY ubuntu@\$(scripts/deploy-aws.sh output perf -json validators | jq -r '.\"us-east-1\".public_ip') sudo journalctl -u gsx-node -n 50"
-echo "  ssh -i $SSH_KEY ubuntu@\$(scripts/deploy-aws.sh output perf -json validators | jq -r '.\"us-east-1\".public_ip') sudo journalctl -u gsx-loadgen -n 50"
+echo "  ssh -i $SSH_KEY ubuntu@\$(scripts/deploy-aws.sh output perf -json validators | jq -r '.\"us-east-1\".public_ip') sudo journalctl -u suwappu-node -n 50"
+echo "  ssh -i $SSH_KEY ubuntu@\$(scripts/deploy-aws.sh output perf -json validators | jq -r '.\"us-east-1\".public_ip') sudo journalctl -u suwappu-loadgen -n 50"

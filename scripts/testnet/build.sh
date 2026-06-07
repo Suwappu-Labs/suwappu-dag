@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Native-compile gsx-node / gsx-loadgen / gsx-metrics to
+# Native-compile suwappu-node / suwappu-loadgen / suwappu-metrics to
 # aarch64-unknown-linux-gnu via AWS CodeBuild (ARM image).
 #
 # Why CodeBuild and not `cross`? Repo convention is to avoid Docker Desktop
@@ -9,10 +9,10 @@
 #
 # Prereqs (one-time):
 #   1. terraform/testnet applied (creates the artifact bucket + codebuild project)
-#   2. The gsx-db deploy key already lives in /gsx-perf/gsx-db-deploy-key
-#      (testnet reuses it — same gsx-db repo, same key).
+#   2. The suwappu-db deploy key already lives in /suwappu-perf/suwappu-db-deploy-key
+#      (testnet reuses it — same suwappu-db repo, same key).
 #
-# Output: target/testnet/{gsx-node,gsx-loadgen,gsx-metrics}, pulled from S3.
+# Output: target/testnet/{suwappu-node,suwappu-loadgen,suwappu-metrics}, pulled from S3.
 
 set -euo pipefail
 
@@ -42,14 +42,14 @@ echo "[build] artifact bucket: $BUCKET"
 echo "[build] codebuild project: $PROJECT"
 
 mkdir -p "$OUT"
-SOURCE_ZIP="$OUT/gsx-dag.zip"
+SOURCE_ZIP="$OUT/suwappu-dag.zip"
 echo "[build] packaging source -> $SOURCE_ZIP"
 cd "$ROOT"
 rm -f "$SOURCE_ZIP"
 git archive --format=zip --prefix= -o "$SOURCE_ZIP" HEAD
 
-echo "[build] uploading source to s3://$BUCKET/sources/gsx-dag.zip"
-aws s3 cp "$SOURCE_ZIP" "s3://$BUCKET/sources/gsx-dag.zip" --region us-east-1
+echo "[build] uploading source to s3://$BUCKET/sources/suwappu-dag.zip"
+aws s3 cp "$SOURCE_ZIP" "s3://$BUCKET/sources/suwappu-dag.zip" --region us-east-1
 
 echo "[build] starting CodeBuild project $PROJECT"
 BUILD_ID="$(aws codebuild start-build \
@@ -78,7 +78,7 @@ while true; do
 done
 
 echo "[build] pulling binaries from s3://$BUCKET/bin/"
-for bin in gsx-node gsx-loadgen gsx-metrics; do
+for bin in suwappu-node suwappu-loadgen suwappu-metrics; do
   aws s3 cp "s3://$BUCKET/bin/$bin" "$OUT/$bin" --region us-east-1
   chmod +x "$OUT/$bin"
 done

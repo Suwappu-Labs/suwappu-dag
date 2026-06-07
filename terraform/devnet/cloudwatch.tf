@@ -2,38 +2,38 @@
 #
 # The cloud-init scripts in modules/validator/cloud-init.yaml +
 # faucet-cloud-init.yaml install amazon-cloudwatch-agent and point
-# it at the local Prometheus exporter (gsx-node:9093, gsx-faucet has
+# it at the local Prometheus exporter (suwappu-node:9093, suwappu-faucet has
 # no exporter v0.1 — its /health endpoint is the liveness signal
-# the alarm scrapes via HTTP). Metrics land in the `gsx-devnet`
+# the alarm scrapes via HTTP). Metrics land in the `suwappu-devnet`
 # CloudWatch namespace under the `region` + `authority_id` dimensions
 # the agent's emf_processor declares.
 #
 # Alarms:
 #
-#  - **gsx-devnet-halt** (cluster-wide).
-#    Fires when `gsx_last_committed_round` is FLAT across all 4
+#  - **suwappu-devnet-halt** (cluster-wide).
+#    Fires when `suwappu_last_committed_round` is FLAT across all 4
 #    validators for >5 min. CloudWatch math expression compares the
 #    current value to a 5-min-old sample (delta). Pages ops via SNS.
 #
-#  - **gsx-devnet-silent-peer-<region>** (one per validator).
-#    Fires when this validator's `gsx_metrics_scrapes_total` stops
+#  - **suwappu-devnet-silent-peer-<region>** (one per validator).
+#    Fires when this validator's `suwappu_metrics_scrapes_total` stops
 #    incrementing for >2 min — proxy for "this validator stopped
 #    serving" without us needing per-peer inbound counters.
 #    Emails ops (not paging — a single silent validator with the
 #    cluster still committing is degraded, not halted).
 #
-#  - **gsx-devnet-faucet-down** (faucet).
+#  - **suwappu-devnet-faucet-down** (faucet).
 #    Fires when the faucet's HTTP /health returns non-200 for >5 min.
 #    Implementation: CloudWatch Synthetics canary OR a simple
 #    Route53 health check probing the faucet ALB. For v0.1 we use
 #    a Route53 health check that scrapes /health every 30s, which
 #    is then surfaced as a CloudWatch metric (HealthCheckStatus).
-#    G2 adds the actual canary endpoint (`faucet.devnet.gsx.*`);
+#    G2 adds the actual canary endpoint (`faucet.devnet.suwappu.*`);
 #    pre-G2 the canary URL points at the faucet's EIP.
 
 resource "aws_sns_topic" "ops_pages" {
   provider = aws.us_east_1
-  name     = "gsx-devnet-ops-pages"
+  name     = "suwappu-devnet-ops-pages"
 }
 
 resource "aws_sns_topic_subscription" "ops_pages_email" {
@@ -50,8 +50,8 @@ resource "aws_sns_topic_subscription" "ops_pages_email" {
 # regions and compare against a lagged sample.
 resource "aws_cloudwatch_metric_alarm" "halt" {
   provider            = aws.us_east_1
-  alarm_name          = "gsx-devnet-halt"
-  alarm_description   = "Devnet has stopped progressing: `gsx_last_committed_round` MAX across all validators didn't advance in the last 5 minutes. Investigate via OPERATIONS.md § 'Diagnose stuck commits'."
+  alarm_name          = "suwappu-devnet-halt"
+  alarm_description   = "Devnet has stopped progressing: `suwappu_last_committed_round` MAX across all validators didn't advance in the last 5 minutes. Investigate via OPERATIONS.md § 'Diagnose stuck commits'."
   comparison_operator = "LessThanOrEqualToThreshold"
   evaluation_periods  = 2 # 2 consecutive 1-min windows of no progress
   threshold           = 0
@@ -61,8 +61,8 @@ resource "aws_cloudwatch_metric_alarm" "halt" {
     id          = "current_max"
     return_data = false
     metric {
-      metric_name = "gsx_last_committed_round"
-      namespace   = "gsx-devnet"
+      metric_name = "suwappu_last_committed_round"
+      namespace   = "suwappu-devnet"
       period      = 60
       stat        = "Maximum"
     }
@@ -87,7 +87,7 @@ resource "aws_cloudwatch_metric_alarm" "halt" {
 }
 
 # Silent-peer alarm: one per validator. The per-region region
-# label is picked from `gsx_node_info`. We don't have a way to
+# label is picked from `suwappu_node_info`. We don't have a way to
 # loop over the 4 regions in pure HCL without a `for_each` and
 # a static list, so the list is mirrored from main.tf.
 locals {
@@ -102,12 +102,12 @@ locals {
 resource "aws_cloudwatch_metric_alarm" "silent_peer" {
   for_each            = toset(local.validator_regions)
   provider            = aws.us_east_1
-  alarm_name          = "gsx-devnet-silent-peer-${each.key}"
+  alarm_name          = "suwappu-devnet-silent-peer-${each.key}"
   alarm_description   = "Validator ${each.key} stopped serving /metrics scrapes — likely crashed, locked up, or unreachable from CloudWatch agent. Cluster may still commit if joint quorum survives with the remaining 3."
   comparison_operator = "LessThanThreshold"
   evaluation_periods  = 2
-  metric_name         = "gsx_metrics_scrapes_total"
-  namespace           = "gsx-devnet"
+  metric_name         = "suwappu_metrics_scrapes_total"
+  namespace           = "suwappu-devnet"
   period              = 60
   statistic           = "Sum"
   threshold           = 1
@@ -132,13 +132,13 @@ resource "aws_route53_health_check" "faucet" {
   request_interval  = 30
   failure_threshold = 3
   tags = {
-    Name = "gsx-devnet-faucet-health"
+    Name = "suwappu-devnet-faucet-health"
   }
 }
 
 resource "aws_cloudwatch_metric_alarm" "faucet_down" {
   provider            = aws.us_east_1
-  alarm_name          = "gsx-devnet-faucet-down"
+  alarm_name          = "suwappu-devnet-faucet-down"
   alarm_description   = "Faucet /health is failing — devs can't acquire test tokens. Investigate via OPERATIONS.md § 'Restart the faucet service'."
   comparison_operator = "LessThanThreshold"
   evaluation_periods  = 2
@@ -158,7 +158,7 @@ resource "aws_cloudwatch_metric_alarm" "faucet_down" {
 # region, mempool size per region, faucet health.
 resource "aws_cloudwatch_dashboard" "devnet" {
   provider       = aws.us_east_1
-  dashboard_name = "gsx-devnet"
+  dashboard_name = "suwappu-devnet"
   dashboard_body = jsonencode({
     widgets = [
       {
@@ -171,7 +171,7 @@ resource "aws_cloudwatch_dashboard" "devnet" {
           title  = "Last committed round (per region)"
           region = "us-east-1"
           metrics = [
-            ["gsx-devnet", "gsx_last_committed_round", "region", "us-east-1"],
+            ["suwappu-devnet", "suwappu_last_committed_round", "region", "us-east-1"],
             ["...", "eu-west-1"],
             ["...", "ap-southeast-1"],
             ["...", "sa-east-1"],
@@ -191,7 +191,7 @@ resource "aws_cloudwatch_dashboard" "devnet" {
           title  = "Mempool size (per region)"
           region = "us-east-1"
           metrics = [
-            ["gsx-devnet", "gsx_mempool_size", "region", "us-east-1"],
+            ["suwappu-devnet", "suwappu_mempool_size", "region", "us-east-1"],
             ["...", "eu-west-1"],
             ["...", "ap-southeast-1"],
             ["...", "sa-east-1"],

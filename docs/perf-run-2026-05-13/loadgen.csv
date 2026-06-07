@@ -1,4 +1,4 @@
-gsx-loadgen: connected to 127.0.0.1:9091 — 100 intents/sec for 90s
+suwappu-loadgen: connected to 127.0.0.1:9091 — 100 intents/sec for 90s
 client_submitted_ms,tx_hash
 1778646752081,a027f48a911b88444603ce39ffedde3b8cbb6bc38f59c5a5a8e9563b8a981362
 1778646752092,2a43ef547316764361f1dff1bd22e6d91d9827bf03e651e8d59b711af8ed4da9

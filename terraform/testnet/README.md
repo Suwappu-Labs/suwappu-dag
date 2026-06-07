@@ -1,6 +1,6 @@
 # `terraform/testnet/` — incentivized public testnet
 
-7-region foundation-operated seed cluster for the gsx-testnet
+7-region foundation-operated seed cluster for the suwappu-testnet
 public-L1 program (Track B of the M18–M24 mainnet plan).
 External validators connect from their own hardware and earn
 points convertible to mainnet token at TGE.
@@ -8,17 +8,17 @@ points convertible to mainnet token at TGE.
 This stack is the **L1 testnet only**. The L2 sequencer + prover
 land in a separate follow-up under `terraform/testnet/l2.tf` (Track
 G). The points-accumulator daemon lands in
-`crates/gsx-validator-program/` (Track B follow-up).
+`crates/suwappu-validator-program/` (Track B follow-up).
 
 ## Status (2026-05-18)
 
 | | |
 |---|---|
-| Network id | `gsx-testnet-v1` |
-| Genesis | minted by `scripts/testnet/gen-genesis.py` with a real ML-DSA-65 faucet key via `gsx-keygen`. |
+| Network id | `suwappu-testnet-v1` |
+| Genesis | minted by `scripts/testnet/gen-genesis.py` with a real ML-DSA-65 faucet key via `suwappu-keygen`. |
 | Seed validators | **7/7 running**, committing rounds (cross-region; ~500 ms/round measured). |
 | Public RPC endpoint | `rpc`/`ws.testnet.*` front via **Global Accelerator → per-region ALB** (`ga.tf`, `regional_alb.tf`, `rpc_certs.tf`) — anycast, <1 min cross-region failover, handles POST (unlike CloudFront, #237). Faucet still via **CloudFront** (`cf_faucet.tf`). See [§ Known limitations](#known-limitations). |
-| Faucet binary | live on the faucet EC2, dispensing 100 GSX per drip. |
+| Faucet binary | live on the faucet EC2, dispensing 100 SUWAPPU per drip. |
 | Points-accumulator daemon | not yet deployed (crate forthcoming). |
 
 Direct-EIP endpoints (port 9092, JSON-RPC):
@@ -42,40 +42,40 @@ Live values are also in `./scripts/testnet/deploy.sh output -json validators`.
   `c7g.xlarge` arm64. 200 GB persistent EBS each. Instantiates the
   `terraform/devnet/modules/validator/` module — same module,
   more regions, larger volumes. Passes
-  `name_prefix = "gsx-devnet-"`, which is historical: the testnet
+  `name_prefix = "suwappu-devnet-"`, which is historical: the testnet
   went live before the module took a prefix variable, so all
   key_pair / SG / IAM-role / EIP / instance Name fields under
-  this stack read `gsx-devnet-<region>` rather than the more
-  obvious `gsx-testnet-<region>`. Resources are still scoped to
+  this stack read `suwappu-devnet-<region>` rather than the more
+  obvious `suwappu-testnet-<region>`. Resources are still scoped to
   this stack via the `Component = testnet` tag from
   `providers.tf`. The rename is deferred to the next testnet
   rebuild (most likely the mainnet cutover) because key_pair / SG
   names are immutable — flipping the prefix would destroy and
   recreate every seed. **Consequence for devnet:** the devnet
-  stack uses `gsx-dev-*` instead of `gsx-devnet-*` to avoid
+  stack uses `suwappu-dev-*` instead of `suwappu-devnet-*` to avoid
   name collisions in the same AWS account.
-- **Artifact bucket** `gsx-dag-testnet-artifacts` (private; same
-  S3 lifecycle as devnet's). Stores the gsx-node binary, genesis,
+- **Artifact bucket** `suwappu-dag-testnet-artifacts` (private; same
+  S3 lifecycle as devnet's). Stores the suwappu-node binary, genesis,
   per-region node.toml, and per-region validator keys.
-- **External uploads bucket** `gsx-dag-testnet-validator-uploads`
+- **External uploads bucket** `suwappu-dag-testnet-validator-uploads`
   (public-WRITE per scoped IAM, public-READ blocked). External
   operators upload rotated `events.ndjson` here every hour;
   the points-accumulator daemon reads + scores.
-- **CodeBuild project** `gsx-testnet-build`. Native-compiles
-  `gsx-node` / `gsx-loadgen` / `gsx-metrics` to
+- **CodeBuild project** `suwappu-testnet-build`. Native-compiles
+  `suwappu-node` / `suwappu-loadgen` / `suwappu-metrics` to
   `aarch64-unknown-linux-gnu` (the testnet's c7g target) on
   `aws/codebuild/amazonlinux2-aarch64-standard:3.0`. Reuses the
-  perf stack's `/gsx-perf/gsx-db-deploy-key` SSM SecureString.
+  perf stack's `/suwappu-perf/suwappu-db-deploy-key` SSM SecureString.
 - **Points-accumulator infra**: `t4g.medium` EC2 in its own VPC
   + a `db.t4g.small` Postgres RDS in private subnets. Idle for
-  now; daemon binary deploys via SSM once `crates/gsx-validator-
+  now; daemon binary deploys via SSM once `crates/suwappu-validator-
   program/` lands.
-- **DNS + ACM + WAF + ALBs** for `*.testnet.gsx.globalsettlement.com`
+- **DNS + ACM + WAF + ALBs** for `*.testnet.suwappu.globalsettlement.com`
   (RPC ALB + faucet ALB; HTTPS listener uses the wildcard ACM
   cert validated via Route53). Target groups exist but carry no
   attachments today — see [§ Known limitations](#known-limitations).
 - **CloudWatch dashboard + halt alarm + 7 silent-peer alarms**.
-  Halt alarm uses `DIFF(MAX(gsx_last_committed_round))` as a
+  Halt alarm uses `DIFF(MAX(suwappu_last_committed_round))` as a
   TimeSeries; fires when MAX did not advance for two consecutive
   1-min windows.
 - **Billing alarm**: $2000/mo cap (4× devnet's $500 because the
@@ -94,7 +94,7 @@ nobody noticed.) That left the old single-region RPC ALB target
 group empty → 503, with CloudFront as a Phase-1 stopgap.
 
 **Current design** (`regional_alb.tf` + `ga.tf` + `rpc_certs.tf`):
-`rpc.testnet.gsx.globalsettlement.com` and `ws.testnet.*` are
+`rpc.testnet.suwappu.globalsettlement.com` and `ws.testnet.*` are
 served by **AWS Global Accelerator** fronting **one ALB per seed
 region**. Each ALB lives *in its validator's own VPC* and targets
 the instance in-region (`target_type = "instance"`), which sidesteps
@@ -125,9 +125,9 @@ Original Phase-1/Phase-2 sketch:
 `terraform/devnet/modules/validator/cloud-init.yaml` lists
 `awscli` under `packages:`. On Ubuntu 24.04 noble the
 `awscli` apt package is no longer published; cloud-init logs
-`Package awscli is not available`. Consequence: `gsx-bootstrap.sh`
+`Package awscli is not available`. Consequence: `suwappu-bootstrap.sh`
 fails on first boot with `aws: command not found`, which leaves
-both `gsx-bootstrap.service` and `gsx-node.service` inactive.
+both `suwappu-bootstrap.service` and `suwappu-node.service` inactive.
 
 Workaround applied to all 7 seeds during the 2026-05-18
 bootstrap (and documented in `OPERATIONS.md § 10.1`): SSM-run
@@ -153,17 +153,17 @@ next greenfield bring-up.
 #    on any other account.
 aws sts get-caller-identity --profile gsn
 
-# 2. The gsx-db deploy key must already live in SSM:
-aws ssm put-parameter --name /gsx-perf/gsx-db-deploy-key \
+# 2. The suwappu-db deploy key must already live in SSM:
+aws ssm put-parameter --name /suwappu-perf/suwappu-db-deploy-key \
     --type SecureString \
-    --value "$(cat ~/.ssh/gsx-db-deploy)" \
+    --value "$(cat ~/.ssh/suwappu-db-deploy)" \
     --profile gsn --region us-east-1
 # (Both terraform/perf and terraform/testnet codebuild jobs read
-#  this same parameter — same gsx-db repo, same key.)
+#  this same parameter — same suwappu-db repo, same key.)
 
 # 3. Mint genesis + per-region validator keys + the real ML-DSA-65
-#    faucet authority key. gsx-keygen must be on PATH.
-cargo build --release -p gsx-crypto --bin gsx-keygen
+#    faucet authority key. suwappu-keygen must be on PATH.
+cargo build --release -p suwappu-crypto --bin suwappu-keygen
 export PATH="$PWD/target/release:$PATH"
 python3 ./scripts/testnet/gen-genesis.py --out-dir ./target/testnet/keys
 ```
@@ -182,15 +182,15 @@ Notable resources you can verify after step 4:
 
 | Resource | Verify |
 |---|---|
-| Artifact bucket | `aws s3 ls s3://gsx-dag-testnet-artifacts/` |
-| CodeBuild project | `aws codebuild list-projects ‖ grep gsx-testnet-build` |
+| Artifact bucket | `aws s3 ls s3://suwappu-dag-testnet-artifacts/` |
+| CodeBuild project | `aws codebuild list-projects ‖ grep suwappu-testnet-build` |
 | Validator EC2s | `terraform output validators` |
-| Halt alarm | `aws cloudwatch describe-alarms --alarm-names gsx-testnet-halt` |
+| Halt alarm | `aws cloudwatch describe-alarms --alarm-names suwappu-testnet-halt` |
 
 ### Upload artifacts to S3
 
 ```sh
-BUCKET=gsx-dag-testnet-artifacts
+BUCKET=suwappu-dag-testnet-artifacts
 
 # 5. Push genesis + prebalances + per-region validator keys.
 aws s3 cp ./target/testnet/keys/genesis.toml \
@@ -207,7 +207,7 @@ done
 
 # 6. Land the faucet secret key in Secrets Manager (NOT the bucket).
 aws secretsmanager put-secret-value \
-    --secret-id gsx-testnet/faucet/mldsa-secret-key \
+    --secret-id suwappu-testnet/faucet/mldsa-secret-key \
     --secret-binary fileb://./target/testnet/keys/faucet/mldsa.sk \
     --profile gsn --region us-east-1
 ```
@@ -219,7 +219,7 @@ aws secretsmanager put-secret-value \
 #    Rust cache; subsequent runs ~3–5 min.
 ./scripts/testnet/build.sh
 # Drops aarch64-unknown-linux-gnu binaries at
-#   s3://$BUCKET/bin/{gsx-node,gsx-loadgen,gsx-metrics}
+#   s3://$BUCKET/bin/{suwappu-node,suwappu-loadgen,suwappu-metrics}
 # and pulls a local copy to ./target/testnet/.
 ```
 
@@ -248,10 +248,10 @@ if ! command -v aws >/dev/null 2>&1; then
   unzip -q -o /tmp/awscli.zip -d /tmp/
   /tmp/aws/install --update
 fi
-systemctl reset-failed gsx-bootstrap.service gsx-node.service || true
-systemctl restart gsx-bootstrap.service
+systemctl reset-failed suwappu-bootstrap.service suwappu-node.service || true
+systemctl restart suwappu-bootstrap.service
 sleep 2
-systemctl restart gsx-node.service
+systemctl restart suwappu-node.service
 EOF
 )
 
@@ -275,14 +275,14 @@ done
 #     rounds at steady state.
 for ip in $(terraform output -json validators | jq -r '.[].public_ip'); do
   echo "$ip $(curl -fsS --max-time 5 -X POST -H 'Content-Type: application/json' \
-       -d '{"jsonrpc":"2.0","id":1,"method":"gsx_getEpoch"}' \
+       -d '{"jsonrpc":"2.0","id":1,"method":"suwappu_getEpoch"}' \
        "http://$ip:9092/" | jq -r '.result.latest_committed_round')"
 done
 ```
 
 ### Post-apply one-time DNS step
 
-The testnet zone `testnet.gsx.globalsettlement.com` is in the gsn
+The testnet zone `testnet.suwappu.globalsettlement.com` is in the gsn
 account. If `globalsettlement.com`'s apex zone lives in a
 different account, paste the `testnet_nameservers` output as NS
 records under the apex zone. See `terraform/testnet/dns.tf`.
@@ -296,7 +296,7 @@ records under the apex zone. See `terraform/testnet/dns.tf`.
 ```
 
 This creates a scoped IAM user with `s3:PutObject` rights to
-exactly `s3://gsx-dag-testnet-validator-uploads/uploads/8/*` —
+exactly `s3://suwappu-dag-testnet-validator-uploads/uploads/8/*` —
 no other AWS access. The script prints the access key + secret
 once; send them to the operator out-of-band.
 

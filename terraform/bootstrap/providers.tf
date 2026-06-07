@@ -14,10 +14,10 @@ provider "aws" {
 
   default_tags {
     tags = {
-      Project    = "gsx-dag"
+      Project    = "suwappu-dag"
       Component  = "tf-state-bootstrap"
       ManagedBy  = "terraform"
-      Repository = "GlobalSettlementNetwork/gsx-dag"
+      Repository = "suwappu/suwappu-dag"
     }
   }
 }

@@ -1,16 +1,16 @@
 # Visuals — source-of-truth policy
 
 A small subset of `docs/visuals/` is intentionally bit-identically mirrored
-between [`gsx-dag`](https://github.com/GlobalSettlementNetwork/gsx-dag)
+between [`suwappu-dag`](https://github.com/suwappu/suwappu-dag)
 and
-[`gsx-lattice-protocol`](https://github.com/GlobalSettlementNetwork/gsx-lattice-protocol).
+[`suwappu-lattice-protocol`](https://github.com/suwappu/suwappu-lattice-protocol).
 This lets the LTP repo render the core stack diagrams offline without a
 cross-repo include or relative path that breaks on a shallow checkout.
 
 ## Canonical home
 
-**`gsx-dag/docs/visuals/`** owns these files. Edit here first. The matching
-copies in `gsx-lattice-protocol/docs/visuals/` are mirrors — propagate
+**`suwappu-dag/docs/visuals/`** owns these files. Edit here first. The matching
+copies in `suwappu-lattice-protocol/docs/visuals/` are mirrors — propagate
 your changes there in the same session (or a follow-up PR) and let the
 drift-check CI job catch any oversight.
 
@@ -18,13 +18,13 @@ drift-check CI job catch any oversight.
 
 Bit-identical across both repos:
 
-- `mermaid/gsx-dag.md` — chain stack flow
-- `mermaid/gsx-db.md` — substrate lattice + mutation pipeline
+- `mermaid/suwappu-dag.md` — chain stack flow
+- `mermaid/suwappu-db.md` — substrate lattice + mutation pipeline
 - `mermaid/ltp.md` — LTP lifecycle + security stack
-- `gsx-dag.html` — DAG layer presentation
-- `gsx-db.html` — DB layer presentation
+- `suwappu-dag.html` — DAG layer presentation
+- `suwappu-db.html` — DB layer presentation
 - `ltp.html` — LTP layer presentation
-- `gsx-ecosystem-atlas.html` — single-page ecosystem atlas
+- `suwappu-ecosystem-atlas.html` — single-page ecosystem atlas
 - `index.html` — landing page (mirrored verbatim including the LTP-specific
   link section; both repos point readers at the same cards)
 
@@ -34,10 +34,10 @@ The drift-check script's allow-list is the authoritative copy of this list.
 
 Each repo also carries its own diagrams that are repo-specific:
 
-- **gsx-dag-only:** consensus deep-dives (`commit-rule.md` /
+- **suwappu-dag-only:** consensus deep-dives (`commit-rule.md` /
   `fast-path-and-slashing.md` / `governance-flow.md` / `dual-vm.md` /
   `scion-transport.md`), the `auth-dispatch.md` draft, the inline-Mermaid
-  `README.md` (gsx-dag's entrypoint), and `excalidraw-archive/`.
+  `README.md` (suwappu-dag's entrypoint), and `excalidraw-archive/`.
 - **LTP-only:** corridor/handshake/anchor-registry/dkg-ceremony Mermaid
   sources, its own `README.md` and `SUMMARY.md`.
 
@@ -61,9 +61,9 @@ sometimes need to ship a quick fix to one repo and mirror in a follow-up.
 
 Add when a diagram is referenced from both repos' docs *and* you want
 LTP-side readers to be able to render it without resolving back to
-gsx-dag. Examples of when NOT to share:
+suwappu-dag. Examples of when NOT to share:
 
-- A diagram that's gsx-dag-internal (e.g., a daemon-state-machine detail
+- A diagram that's suwappu-dag-internal (e.g., a daemon-state-machine detail
   that LTP doesn't need to know about).
 - A diagram that's LTP-internal (e.g., DKG ceremony, which is LTP runtime,
   not the on-chain LTP attestation surface).
@@ -75,4 +75,4 @@ needs it.
 
 - [`scripts/check-visuals-parity.sh`](../../scripts/check-visuals-parity.sh) — drift detection
 - [`.github/workflows/visuals-parity.yml`](../../.github/workflows/visuals-parity.yml) — CI wiring
-- Linear: [GLO-762](https://linear.app/globalsettlement/issue/GLO-762/) (LTP-side visuals refresh) + the gsx-dag-side mirror issue tracked separately
+- Linear: [GLO-762](https://linear.app/globalsettlement/issue/GLO-762/) (LTP-side visuals refresh) + the suwappu-dag-side mirror issue tracked separately

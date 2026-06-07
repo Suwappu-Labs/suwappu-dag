@@ -1,6 +1,6 @@
 # IQ-001 — Commit-rule quorum formula
 
-**Status:** Ratified 2026-05-14 via [gsx-papers#1](https://github.com/GlobalSettlementNetwork/gsx-papers/pull/1)
+**Status:** Ratified 2026-05-14 via [suwappu-papers#1](https://github.com/suwappu/suwappu-papers/pull/1)
 **Owner:** consensus
 **Date:** 2026-05-13 (ratified 2026-05-14)
 **Sprint:** DAG-S21.1 ✅
@@ -63,8 +63,8 @@ tolerance, despite Definition 2 only requiring strict-majority-of-2/3.
 
 ## Recommendation
 
-**Option 1.** Replace `crates/gsx-consensus/src/commit.rs:52-55` and
-`crates/gsx-fastpath/src/quorum.rs:39` with the canonical
+**Option 1.** Replace `crates/suwappu-consensus/src/commit.rs:52-55` and
+`crates/suwappu-fastpath/src/quorum.rs:39` with the canonical
 `n − ⌊(n−1)/3⌋` form. Update paper §6.4 + Definition 2 to read
 `q = 2f+1` with `n = 3f+1`, and explicitly state that the strict-majority
 inequality in Definition 2 is *implied by* (not equivalent to) `2f+1` for
@@ -76,23 +76,23 @@ safety regression.
 
 ## Decision
 
-- [x] Approved by: tomagsx (operator)
+- [x] Approved by: tomasuwappu (operator)
 - [x] Date: 2026-05-14
-- [x] Paper §6.4 + Definition 2 amendment landed in gsx-papers PR: [GlobalSettlementNetwork/gsx-papers#1](https://github.com/GlobalSettlementNetwork/gsx-papers/pull/1)
+- [x] Paper §6.4 + Definition 2 amendment landed in suwappu-papers PR: [suwappu/suwappu-papers#1](https://github.com/suwappu/suwappu-papers/pull/1)
 
-**Ratification context.** Code shipped at `crates/gsx-consensus/src/commit.rs:61-66`
+**Ratification context.** Code shipped at `crates/suwappu-consensus/src/commit.rs:61-66`
 (`quorum_threshold(n) = n - (n-1)/3`) with unit test at lines 293-310.
 Paper amendments append a paragraph to Definition 2 and replace the §6.4
 fast-path quorum formula with the canonical `2f_A + 1`. Ratified
-alongside IQ-002 in the same gsx-papers PR. Tracked at
-[GlobalSettlementNetwork/gsx-dag#23](https://github.com/GlobalSettlementNetwork/gsx-dag/issues/23).
+alongside IQ-002 in the same suwappu-papers PR. Tracked at
+[suwappu/suwappu-dag#23](https://github.com/suwappu/suwappu-dag/issues/23).
 
 ## Implementation
 
-- `gsx-consensus/src/commit.rs::quorum_threshold` rewrite
-- `gsx-fastpath/src/quorum.rs` mirror change
+- `suwappu-consensus/src/commit.rs::quorum_threshold` rewrite
+- `suwappu-fastpath/src/quorum.rs` mirror change
 - Proptest `quorum_threshold_matches_paper` → renamed
   `quorum_matches_canonical_bft`, asserts `q == n − (n−1)/3` for
   n ∈ [1, 50].
-- Joint-quorum stake-weighted side (`gsx-consensus/src/joint.rs:110-114`)
+- Joint-quorum stake-weighted side (`suwappu-consensus/src/joint.rs:110-114`)
   unchanged — already uses real-valued `(2·total)/3 + 1`.

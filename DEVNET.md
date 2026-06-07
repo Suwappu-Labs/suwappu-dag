@@ -33,7 +33,7 @@ reproduce incidents without touching the live testnet.
 
 - **Not always-on.** When the stack is down, none of the URLs
   below resolve. Check `terraform/devnet` state before assuming
-  it's up: `aws s3 ls s3://gsx-dag-tf-state/gsx-dag/devnet/`.
+  it's up: `aws s3 ls s3://suwappu-dag-tf-state/suwappu-dag/devnet/`.
 - **State is disposable.** Every fresh apply mints a new genesis
   unless you explicitly carry the EBS volumes over. Don't keep
   long-running dApp work pointed at this network.
@@ -43,22 +43,22 @@ reproduce incidents without touching the live testnet.
 
 When the devnet is up, it provisions four `t4g.medium` validators
 across us-east-1 / eu-west-1 / ap-southeast-1 / sa-east-1 under
-the `gsx-dev-*` AWS-name prefix (not `gsx-devnet-*` — the testnet
+the `suwappu-dev-*` AWS-name prefix (not `suwappu-devnet-*` — the testnet
 owns that namespace; see
 [`terraform/devnet/README.md`](terraform/devnet/README.md)).
 
 | Network | |
 |---|---|
-| `network_id` | `gsx-devnet` |
+| `network_id` | `suwappu-devnet` |
 | `chain_id` | `2025` |
 | Validators | 4 (us-east-1, eu-west-1, ap-southeast-1, sa-east-1) |
-| Faucet drip | 100 GSX, max 5 drips/hour per IP |
+| Faucet drip | 100 SUWAPPU, max 5 drips/hour per IP |
 | Wipe policy | Stack is torn down and re-applied as needed; assume any state can disappear. |
 
 Bring-up runbook lives in
 [`OPERATIONS.md § 1`](OPERATIONS.md#1-bootstrap-a-fresh-devnet).
 Endpoints (when up) follow the same pattern as testnet
-(`rpc.devnet.gsx.*`, `faucet.devnet.gsx.*`, etc.), with the same
+(`rpc.devnet.suwappu.*`, `faucet.devnet.suwappu.*`, etc.), with the same
 ALB-fronting gap called out in
 [`terraform/testnet/README.md § Known limitations`](terraform/testnet/README.md#known-limitations).
 Until the per-region NLB + Global Accelerator follow-up lands,
@@ -76,11 +76,11 @@ mainnet cutover.
 
 | Network | |
 |---|---|
-| `network_id` | `gsx-testnet-v1` |
+| `network_id` | `suwappu-testnet-v1` |
 | `chain_id` | `20251` |
 | Seed validators | 7 (us-east-1, us-west-2, eu-west-1, eu-central-1, ap-southeast-1, ap-northeast-1, sa-east-1) |
 | `rounds_per_epoch` | 4096 (4× devnet — longer epochs reduce governance churn) |
-| Faucet drip | 100 GSX, max 5 drips/hour per IP |
+| Faucet drip | 100 SUWAPPU, max 5 drips/hour per IP |
 | Wipe policy | None until mainnet cutover. State + points data is preserved across patch + minor releases. |
 
 ### Endpoints
@@ -91,11 +91,11 @@ the public wildcard endpoint will be:
 
 | Endpoint | URL |
 |---|---|
-| JSON-RPC | `https://rpc.testnet.gsx.globalsettlement.com` |
-| WebSocket subscribe | `wss://ws.testnet.gsx.globalsettlement.com/ws` |
-| Faucet (POST `/faucet { address }`) | `https://faucet.testnet.gsx.globalsettlement.com` |
-| Block explorer | `https://explorer.testnet.gsx.globalsettlement.com` |
-| Status page | `https://status.testnet.gsx.globalsettlement.com` |
+| JSON-RPC | `https://rpc.testnet.suwappu.globalsettlement.com` |
+| WebSocket subscribe | `wss://ws.testnet.suwappu.globalsettlement.com/ws` |
+| Faucet (POST `/faucet { address }`) | `https://faucet.testnet.suwappu.globalsettlement.com` |
+| Block explorer | `https://explorer.testnet.suwappu.globalsettlement.com` |
+| Status page | `https://status.testnet.suwappu.globalsettlement.com` |
 
 Today the wildcard endpoint returns 503 — see the same § for
 why. Until then, reach validators directly by EIP on port 9092:
@@ -120,7 +120,7 @@ for ip in 52.5.240.86 16.148.234.2 54.73.42.237 63.185.0.111 \
           18.139.179.124 3.114.228.57 54.233.81.124; do
   echo "$ip $(curl -fsS --max-time 5 -X POST \
        -H 'Content-Type: application/json' \
-       -d '{"jsonrpc":"2.0","id":1,"method":"gsx_getEpoch"}' \
+       -d '{"jsonrpc":"2.0","id":1,"method":"suwappu_getEpoch"}' \
        "http://$ip:9092/" | jq -r '.result.latest_committed_round')"
 done
 ```
@@ -147,7 +147,7 @@ foundation's 7 seed regions over the public internet.
 
 ## Local devnet
 
-A four-validator gsx-dag cluster on your laptop in one command.
+A four-validator suwappu-dag cluster on your laptop in one command.
 
 This guide is for developers who want to **try the chain**: spin
 nodes up, submit a transaction, see it commit, query state. It is
@@ -159,13 +159,13 @@ host's loopback.
 
 - **Docker** + **Docker Compose v2** (`docker compose version` ≥ 2.20).
 - **Python 3.8+** (for genesis generation — no third-party packages).
-- **Rust 1.78+** (`up` builds the host-side `gsx-keygen` to mint the
-  faucet ML-DSA key; `faucet` builds `gsx-faucet`).
+- **Rust 1.78+** (`up` builds the host-side `suwappu-keygen` to mint the
+  faucet ML-DSA key; `faucet` builds `suwappu-faucet`).
 - **~3 GB free disk** for the build image and four-node logs.
 - **`curl`** (for sanity-checking JSON-RPC from the host).
 
 If you don't have Docker, use `./scripts/devnet-local.sh up-baremetal`
-instead — it builds `gsx-node` (single-package release) and runs N
+instead — it builds `suwappu-node` (single-package release) and runs N
 processes (default 4) on loopback with distinct per-node ports
 (v<i> binds rpc on `127.0.0.1:$((9092+10*i))`). v0's RPC stays on
 `127.0.0.1:9092` so the `curl` and `faucet` subcommands below work the
@@ -175,14 +175,14 @@ details.
 ## One-command bring-up
 
 ```sh
-git clone https://github.com/GlobalSettlementNetwork/gsx-dag.git
-cd gsx-dag
+git clone https://github.com/suwappu/suwappu-dag.git
+cd suwappu-dag
 ./scripts/devnet-local.sh up
 ```
 
 What this does:
 
-1. Builds the `gsx-keygen` binary host-side and runs
+1. Builds the `suwappu-keygen` binary host-side and runs
    `scripts/gen-devnet-genesis.py`. The script writes `target/devnet/`
    containing `genesis.toml`, per-validator `v{0..3}/{mldsa,bls}.sk`,
    and `faucet/{mldsa.sk, mldsa.pk, address.hex}` — a real ML-DSA-65
@@ -192,13 +192,13 @@ What this does:
    address via a `[[prebalances]]` entry.
 2. Renders four `node.toml`s with peer-list entries pointing at
    the docker-compose bridge IPs (`172.30.0.10..13`).
-3. Builds the `gsx-dag:devnet` Docker image (cold ~10 min; warm
+3. Builds the `suwappu-dag:devnet` Docker image (cold ~10 min; warm
    re-runs in seconds via cargo-chef).
 4. Starts `v0`, `v1`, `v2`, `v3` and waits for v0's JSON-RPC
    healthcheck to pass.
 
 When it returns, **v0's JSON-RPC is live at `http://127.0.0.1:9092`**
-and its client-wire (TCP/bincode for `gsx-loadgen`) is on
+and its client-wire (TCP/bincode for `suwappu-loadgen`) is on
 `127.0.0.1:9091`.
 
 ## Sanity check
@@ -234,9 +234,9 @@ submits them via the local cluster's JSON-RPC. In a second terminal:
 ./scripts/devnet-local.sh faucet
 ```
 
-This builds `gsx-faucet` (single-package release build) and launches
+This builds `suwappu-faucet` (single-package release build) and launches
 it on `127.0.0.1:8080` against `http://127.0.0.1:9092`, pinned to the
-genesis `network_id` (`gsx-devnet-local`). Ctrl-C stops it.
+genesis `network_id` (`suwappu-devnet-local`). Ctrl-C stops it.
 
 End-to-end smoke test from a third terminal:
 
@@ -245,7 +245,7 @@ End-to-end smoke test from a third terminal:
 #    (address derivation drift between gen-script and runtime).
 curl -s http://127.0.0.1:8080/health | python3 -m json.tool
 
-# 2. Drip 100 GSX to a fresh address.
+# 2. Drip 100 SUWAPPU to a fresh address.
 ADDR="0x$(openssl rand -hex 20)"
 curl -sX POST -H 'Content-Type: application/json' \
      -d "{\"address\":\"$ADDR\"}" http://127.0.0.1:8080/faucet
@@ -253,7 +253,7 @@ curl -sX POST -H 'Content-Type: application/json' \
 # 3. Confirm the balance (wait a few seconds for commit).
 sleep 5
 curl -sX POST -H 'content-type: application/json' \
-     -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"gsx_getBalance\",\"params\":{\"address\":\"$ADDR\"}}" \
+     -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"suwappu_getBalance\",\"params\":{\"address\":\"$ADDR\"}}" \
      http://127.0.0.1:9092
 ```
 
@@ -268,14 +268,14 @@ printed in the faucet's startup log; both should equal
 ```sh
 # Rust (signs an ML-DSA-65 Transfer intent and submits it). NOTE:
 # `submit_transfer` is a [[bin]] in the standalone `examples/rust`
-# crate (excluded from the workspace), NOT a `gsx-client` example —
+# crate (excluded from the workspace), NOT a `suwappu-client` example —
 # run it from that directory:
 cd examples/rust && cargo run --bin submit_transfer
 # Against the public devnet instead of a local node — you MUST also
 # pass the public devnet's network_id (the example defaults to
-# "gsx-devnet-local"); otherwise the cross-network digest mismatches:
-GSX_RPC_URL=https://rpc.devnet.gsx.globalsettlement.com \
-GSX_NETWORK_ID=gsx-devnet \
+# "suwappu-devnet-local"); otherwise the cross-network digest mismatches:
+SUWAPPU_RPC_URL=https://rpc.devnet.suwappu.globalsettlement.com \
+SUWAPPU_NETWORK_ID=suwappu-devnet \
   cargo run --bin submit_transfer   # run from examples/rust
 ```
 
@@ -289,7 +289,7 @@ GSX_NETWORK_ID=gsx-devnet \
 The TypeScript SDK is read-only for now — signing/submit is WIP
 (pending an audited JS ML-DSA-65 library), so use the Rust example
 to submit. You can also submit directly via the faucet (above), the
-JSON-RPC `gsx_submitIntent` method, or the TCP/bincode client wire — see
+JSON-RPC `suwappu_submitIntent` method, or the TCP/bincode client wire — see
 [`docs/visuals/governance-flow.html`](docs/visuals/governance-flow.html)
 for the protocol shape.
 
@@ -300,7 +300,7 @@ The daemon publishes a WebSocket event stream at
 that path:
 
 ```ts
-import { Client } from "@gsx/client";
+import { Client } from "@suwappu/client";
 
 const client = new Client("http://127.0.0.1:9092");
 client.subscribeEvents({
@@ -309,7 +309,7 @@ client.subscribeEvents({
 ```
 
 ```rust
-use gsx_client::Client;
+use suwappu_client::Client;
 
 let client = Client::new("http://127.0.0.1:9092".into());
 // See examples/rust/subscribe_events.rs for a full runnable example.
@@ -323,9 +323,9 @@ let client = Client::new("http://127.0.0.1:9092".into());
 | `./scripts/devnet-local.sh down` | Stop containers, preserve `target/devnet/` so the next `up` is fast. |
 | `./scripts/devnet-local.sh reset` | Stop + wipe `target/devnet/` and log volumes. Use after schema changes. |
 | `./scripts/devnet-local.sh logs` | Tail v0's stdout (`Ctrl-C` to exit). |
-| `./scripts/devnet-local.sh curl` | `gsx_getEpoch` against v0 — quick liveness check. |
+| `./scripts/devnet-local.sh curl` | `suwappu_getEpoch` against v0 — quick liveness check. |
 | `docker compose logs v2 --tail=50` | One-off log fetch from a specific node. |
-| `docker compose --profile indexer up` | Start `postgres` + `gsx-indexer` alongside the cluster. Indexer's HTTP API binds to `127.0.0.1:9093`. |
+| `docker compose --profile indexer up` | Start `postgres` + `suwappu-indexer` alongside the cluster. Indexer's HTTP API binds to `127.0.0.1:9093`. |
 
 ## Indexer (optional)
 
@@ -338,7 +338,7 @@ curl http://127.0.0.1:9093/blocks/0   # fetch the genesis block
 ```
 
 Schema lives in
-[`crates/gsx-indexer/migrations/`](crates/gsx-indexer/migrations).
+[`crates/suwappu-indexer/migrations/`](crates/suwappu-indexer/migrations).
 The indexer crate builds with `--features postgres`; without that
 feature it falls back to an in-memory store (state lost on
 restart). See A5 in
@@ -379,7 +379,7 @@ If Docker isn't an option:
 
 What this does:
 
-1. Builds `gsx-keygen` and `gsx-node` (single-package release builds).
+1. Builds `suwappu-keygen` and `suwappu-node` (single-package release builds).
 2. Runs `gen-devnet-genesis.py` to produce `target/devnet/` exactly
    like the docker path — same genesis, same faucet keypair, same
    `[[prebalances]]`.
@@ -388,7 +388,7 @@ What this does:
    (peer), `:$((9091+10*i))` (client), `:$((9092+10*i))` (rpc). v0's RPC
    stays on `127.0.0.1:9092` so the rest of this guide (`curl`, `faucet`)
    is unchanged.
-4. Launches the N `gsx-node` processes in the background, recording their
+4. Launches the N `suwappu-node` processes in the background, recording their
    PIDs in `target/devnet/baremetal.pids` and logs in
    `target/devnet/v<i>/stdout.log`. It fails fast if a launched node exits
    immediately (ports already bound by a stale cluster) so it never falsely

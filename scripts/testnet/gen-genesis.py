@@ -6,7 +6,7 @@ ML-DSA / BLS keypairs + a seeded faucet authority.
 Forked from scripts/devnet/gen-genesis.py with these diffs:
   * 7 seed validator regions instead of 4 (matches paper §10.2's
     7-of-9 LTP corridor).
-  * `network_id = "gsx-testnet-v1"` (devnet is "gsx-devnet").
+  * `network_id = "suwappu-testnet-v1"` (devnet is "suwappu-devnet").
   * `rounds_per_epoch = 4096` (4× devnet — longer epochs reduce
     governance churn during the 12-month testnet life).
   * Faucet authority_id = 7 (devnet used id=4 with 4 validators).
@@ -22,7 +22,7 @@ Output layout (in --out-dir, default ./target/testnet/keys):
     ap-northeast-1/...
     sa-east-1/...
     faucet/mldsa.sk + mldsa.pk   <-- real ML-DSA-65
-    prebalances.toml             <-- faucet's initial GSX balance
+    prebalances.toml             <-- faucet's initial SUWAPPU balance
 """
 
 from __future__ import annotations
@@ -63,17 +63,17 @@ def placeholder_key(seed: bytes, length: int) -> bytes:
 
 
 def mint_real_faucet_key(out_dir: Path) -> tuple[bytes, bytes]:
-    """Real ML-DSA-65 keypair via gsx-keygen. Falls back to a
-    placeholder + loud warning if gsx-keygen isn't on PATH."""
+    """Real ML-DSA-65 keypair via suwappu-keygen. Falls back to a
+    placeholder + loud warning if suwappu-keygen isn't on PATH."""
     faucet_dir = out_dir / "faucet"
     faucet_dir.mkdir(parents=True, exist_ok=True)
     sk_path = faucet_dir / "mldsa.sk"
     pk_path = faucet_dir / "mldsa.pk"
 
-    if shutil.which("gsx-keygen") is not None:
+    if shutil.which("suwappu-keygen") is not None:
         subprocess.run(
             [
-                "gsx-keygen", "--algo", "mldsa",
+                "suwappu-keygen", "--algo", "mldsa",
                 "--sk", str(sk_path),
                 "--pk", str(pk_path),
             ],
@@ -83,10 +83,10 @@ def mint_real_faucet_key(out_dir: Path) -> tuple[bytes, bytes]:
         return sk_path.read_bytes(), pk_path.read_bytes()
 
     print(
-        "WARNING: gsx-keygen not found on PATH; emitting placeholder faucet "
+        "WARNING: suwappu-keygen not found on PATH; emitting placeholder faucet "
         "key. The faucet binary will reject every drip until a real ML-DSA-65 "
-        "keypair is placed in faucet/mldsa.{sk,pk}. Build gsx-keygen with: "
-        "  cargo build --release -p gsx-crypto --bin gsx-keygen",
+        "keypair is placed in faucet/mldsa.{sk,pk}. Build suwappu-keygen with: "
+        "  cargo build --release -p suwappu-crypto --bin suwappu-keygen",
         file=sys.stderr,
     )
     sk = placeholder_key(b"FAUCET-PLACEHOLDER-SK-testnet", 4032)
@@ -100,14 +100,14 @@ def mint_real_faucet_key(out_dir: Path) -> tuple[bytes, bytes]:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out-dir", type=Path, default=Path("./target/testnet/keys"))
-    ap.add_argument("--network-id", default="gsx-testnet-v1")
-    ap.add_argument("--validator-stake-gsx", type=int, default=1_000_000)
-    ap.add_argument("--authority-stake-gsx", type=int, default=1_000_000)
+    ap.add_argument("--network-id", default="suwappu-testnet-v1")
+    ap.add_argument("--validator-stake-suwappu", type=int, default=1_000_000)
+    ap.add_argument("--authority-stake-suwappu", type=int, default=1_000_000)
     ap.add_argument(
-        "--faucet-initial-balance-gsx",
+        "--faucet-initial-balance-suwappu",
         type=int,
         default=10_000_000_000,
-        help="10 billion GSX. Larger than devnet (1B) because testnet runs longer + has more dApps drawing on the faucet.",
+        help="10 billion SUWAPPU. Larger than devnet (1B) because testnet runs longer + has more dApps drawing on the faucet.",
     )
     ap.add_argument(
         "--rounds-per-epoch",
@@ -154,8 +154,8 @@ def main() -> int:
             f.write(f'label = "{region}"\n')
             f.write(f'mldsa_public_key_hex = "{mldsa_pk}"\n')
             f.write(f'bls_public_key_hex = "{bls_pk}"\n')
-            f.write(f"validator_stake_gsx = {args.validator_stake_gsx}\n")
-            f.write(f"authority_stake_gsx = {args.authority_stake_gsx}\n\n")
+            f.write(f"validator_stake_suwappu = {args.validator_stake_suwappu}\n")
+            f.write(f"authority_stake_suwappu = {args.authority_stake_suwappu}\n\n")
 
         # The faucet sits in the Authority Ring purely as a registered
         # signer (so client-submitted Transfer intents from
@@ -164,14 +164,14 @@ def main() -> int:
         # [[validators]] entry. Seating it as a validator inflates the
         # committee size n (= validators.len()) and both quorum
         # thresholds; since the faucet runs no node it never proposes or
-        # votes, which starves finalization. stake_gsx must still clear
-        # AUTHORITY_STAKE_THRESHOLD_GSX = 100_000 or AuthorityRegistry::admit
+        # votes, which starves finalization. stake_suwappu must still clear
+        # AUTHORITY_STAKE_THRESHOLD_SUWAPPU = 100_000 or AuthorityRegistry::admit
         # silently drops it and submissions hit UnknownSigner.
         f.write("[[signers]]\n")
         f.write(f"authority_id = {FAUCET_AUTHORITY_ID}\n")
         f.write(f'label = "{FAUCET_LABEL}"\n')
         f.write(f'mldsa_public_key_hex = "{faucet_pk_hex}"\n')
-        f.write(f"stake_gsx = 100000\n\n")
+        f.write(f"stake_suwappu = 100000\n\n")
 
         # Inline pre-balances in the genesis manifest itself so every
         # validator applies the same allocations to its substrate
@@ -180,10 +180,10 @@ def main() -> int:
         # reads ONLY this inline block.
         #
         # Address derivation: blake3(pk)[:20] — MUST match
-        # `gsx_faucet::address_from_pubkey` in
-        # `crates/gsx-faucet/src/lib.rs:90`. An earlier blake2b recipe
+        # `suwappu_faucet::address_from_pubkey` in
+        # `crates/suwappu-faucet/src/lib.rs:90`. An earlier blake2b recipe
         # here drifted from the faucet binary's blake3 and required a
-        # `GSX_FAUCET_ADDRESS` env override to bridge — that workaround
+        # `SUWAPPU_FAUCET_ADDRESS` env override to bridge — that workaround
         # was retired alongside this fix. Requires the `blake3` Python
         # package: `pip install blake3`.
         import blake3 as _b3
@@ -191,7 +191,7 @@ def main() -> int:
         _faucet_addr_hex = "0x" + _faucet_addr_20.hex()
         f.write("[[prebalances]]\n")
         f.write(f'address = "{_faucet_addr_hex}"\n')
-        f.write(f"balance_gsx = {args.faucet_initial_balance_gsx}\n")
+        f.write(f"balance_suwappu = {args.faucet_initial_balance_suwappu}\n")
         f.write(f'role = "faucet"\n\n')
 
     # Keep the standalone prebalances.toml as an operator-readable
@@ -206,7 +206,7 @@ def main() -> int:
         f.write("# file. Kept here for operator-readable audit only.\n\n")
         f.write("[[balances]]\n")
         f.write(f'address = "{faucet_addr_hex}"\n')
-        f.write(f"balance_gsx = {args.faucet_initial_balance_gsx}\n")
+        f.write(f"balance_suwappu = {args.faucet_initial_balance_suwappu}\n")
         f.write(f'role = "faucet"\n\n')
 
     print(f"wrote {genesis}", file=sys.stderr)
@@ -214,7 +214,7 @@ def main() -> int:
         print(f"  validators[{aid}] = {region}", file=sys.stderr)
     print(f"  signers[{FAUCET_AUTHORITY_ID}] = {FAUCET_LABEL} (pk={faucet_pk_hex[:16]}...)", file=sys.stderr)
     print(f"  faucet address = {faucet_addr_hex}", file=sys.stderr)
-    print(f"  faucet initial balance = {args.faucet_initial_balance_gsx:,} GSX", file=sys.stderr)
+    print(f"  faucet initial balance = {args.faucet_initial_balance_suwappu:,} SUWAPPU", file=sys.stderr)
     print(f"wrote {prebalances}", file=sys.stderr)
     print(
         "NOTE: validator keys are placeholders (matches devnet/perf); "

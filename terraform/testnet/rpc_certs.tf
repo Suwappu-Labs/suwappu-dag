@@ -27,7 +27,7 @@ resource "aws_acm_certificate" "rpc_us_west_2" {
   domain_name               = local.rpc_cert_domain
   subject_alternative_names = [local.rpc_cert_san]
   validation_method         = "DNS"
-  tags                      = { Name = "gsx-testnet-rpc-us-west-2" }
+  tags                      = { Name = "suwappu-testnet-rpc-us-west-2" }
   lifecycle { create_before_destroy = true }
 }
 resource "aws_acm_certificate_validation" "rpc_us_west_2" {
@@ -42,7 +42,7 @@ resource "aws_acm_certificate" "rpc_eu_west_1" {
   domain_name               = local.rpc_cert_domain
   subject_alternative_names = [local.rpc_cert_san]
   validation_method         = "DNS"
-  tags                      = { Name = "gsx-testnet-rpc-eu-west-1" }
+  tags                      = { Name = "suwappu-testnet-rpc-eu-west-1" }
   lifecycle { create_before_destroy = true }
 }
 resource "aws_acm_certificate_validation" "rpc_eu_west_1" {
@@ -57,7 +57,7 @@ resource "aws_acm_certificate" "rpc_eu_central_1" {
   domain_name               = local.rpc_cert_domain
   subject_alternative_names = [local.rpc_cert_san]
   validation_method         = "DNS"
-  tags                      = { Name = "gsx-testnet-rpc-eu-central-1" }
+  tags                      = { Name = "suwappu-testnet-rpc-eu-central-1" }
   lifecycle { create_before_destroy = true }
 }
 resource "aws_acm_certificate_validation" "rpc_eu_central_1" {
@@ -72,7 +72,7 @@ resource "aws_acm_certificate" "rpc_ap_southeast_1" {
   domain_name               = local.rpc_cert_domain
   subject_alternative_names = [local.rpc_cert_san]
   validation_method         = "DNS"
-  tags                      = { Name = "gsx-testnet-rpc-ap-southeast-1" }
+  tags                      = { Name = "suwappu-testnet-rpc-ap-southeast-1" }
   lifecycle { create_before_destroy = true }
 }
 resource "aws_acm_certificate_validation" "rpc_ap_southeast_1" {
@@ -87,7 +87,7 @@ resource "aws_acm_certificate" "rpc_ap_northeast_1" {
   domain_name               = local.rpc_cert_domain
   subject_alternative_names = [local.rpc_cert_san]
   validation_method         = "DNS"
-  tags                      = { Name = "gsx-testnet-rpc-ap-northeast-1" }
+  tags                      = { Name = "suwappu-testnet-rpc-ap-northeast-1" }
   lifecycle { create_before_destroy = true }
 }
 resource "aws_acm_certificate_validation" "rpc_ap_northeast_1" {
@@ -102,7 +102,7 @@ resource "aws_acm_certificate" "rpc_sa_east_1" {
   domain_name               = local.rpc_cert_domain
   subject_alternative_names = [local.rpc_cert_san]
   validation_method         = "DNS"
-  tags                      = { Name = "gsx-testnet-rpc-sa-east-1" }
+  tags                      = { Name = "suwappu-testnet-rpc-sa-east-1" }
   lifecycle { create_before_destroy = true }
 }
 resource "aws_acm_certificate_validation" "rpc_sa_east_1" {

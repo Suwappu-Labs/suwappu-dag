@@ -47,21 +47,21 @@ Anything in this repo's `crates/`, `clients/`, `scripts/`, or
 `fuzz/` is in scope. Specifically:
 
 - The Mysticeti-C consensus implementation
-  (`crates/gsx-consensus/`, `crates/gsx-node/src/daemon.rs`).
+  (`crates/suwappu-consensus/`, `crates/suwappu-node/src/daemon.rs`).
 - The fast-path equivocation slashing surface
-  (`crates/gsx-fastpath/`, especially `binding.rs` + `equivocation.rs`).
+  (`crates/suwappu-fastpath/`, especially `binding.rs` + `equivocation.rs`).
 - The ML-DSA-65 signature gate on client + JSON-RPC ingress
-  (`crates/gsx-node/src/client.rs::verify_signed_intent`,
-  `crates/gsx-rpc/src/methods.rs::submit_intent`).
-- The wire decode path (`crates/gsx-node/src/wire.rs` + the
+  (`crates/suwappu-node/src/client.rs::verify_signed_intent`,
+  `crates/suwappu-rpc/src/methods.rs::submit_intent`).
+- The wire decode path (`crates/suwappu-node/src/wire.rs` + the
   cargo-fuzz targets in `fuzz/`).
-- The cross-repo cryptographic primitives in `gsx-crypto`
+- The cross-repo cryptographic primitives in `suwappu-crypto`
   (ML-DSA-65, ML-KEM-768, BLS12-381, SHA3-256 — see
   [`docs/architecture/cryptographic-posture.md`](docs/architecture/cryptographic-posture.md)).
-- The LTP attestation surface in `gsx-ltp`.
+- The LTP attestation surface in `suwappu-ltp`.
 
-The state-substrate code (`gsx-db`) lives in
-[its own repo](https://github.com/GlobalSettlementNetwork/gsx-db);
+The state-substrate code (`suwappu-db`) lives in
+[its own repo](https://github.com/suwappu/suwappu-db);
 report substrate issues there.
 
 ## What's out of scope (for this repo)

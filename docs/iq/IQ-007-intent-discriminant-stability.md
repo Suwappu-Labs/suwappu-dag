@@ -4,8 +4,8 @@
 **Owner:** execution / node.
 **Date:** 2026-05-25.
 **Tracking:** issue #225. Surfaced by Codex review on PR #222
-(`crates/gsx-execution/src/substrate.rs:191`) and PR #208
-(`crates/gsx-execution/src/substrate.rs:500`).
+(`crates/suwappu-execution/src/substrate.rs:191`) and PR #208
+(`crates/suwappu-execution/src/substrate.rs:500`).
 
 ## Question
 
@@ -51,7 +51,7 @@ older builds.
 regenerates its substrate from genesis on every protocol-touching
 PR; the public testnet bring-up (#223) ships behind an off-chain
 operator program. The first cohort of external SDK consumers will
-pin a tagged gsx-dag release; that pin is the boundary across which
+pin a tagged suwappu-dag release; that pin is the boundary across which
 discriminants must stabilize.
 
 ### Cutover criterion
@@ -68,7 +68,7 @@ The first of the following events ends the churn-allowed regime:
 3. **Genesis-ceremony scripting begins.** Once a
    `scripts/mainnet/genesis-ceremony.sh` or equivalent lands and
    any operator's mainnet pubkey is committed to a manifest stored
-   in `gsx-papers` or another long-lived location.
+   in `suwappu-papers` or another long-lived location.
 
 At cutover, the discriminant axis becomes append-only and the
 churn-allowed allowance is retired.
@@ -103,7 +103,7 @@ A CI lint will check that any change to the `Intent` enum either:
 - (b) introduces a new versioned variant alongside the existing one
   without modifying the existing variant's field list.
 
-The lint reads `crates/gsx-execution/src/substrate.rs` at the
+The lint reads `crates/suwappu-execution/src/substrate.rs` at the
 `pub enum Intent` block and compares the variant order to a checked-in
 manifest pinned at cutover. The pinned manifest lives at
 `docs/architecture/intent-discriminant-manifest.txt` and is updated

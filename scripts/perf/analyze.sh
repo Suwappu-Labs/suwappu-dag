@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Join the collected NDJSON logs through gsx-metrics into a single CSV, then
+# Join the collected NDJSON logs through suwappu-metrics into a single CSV, then
 # render the plot.
 #
 # Usage: scripts/perf/analyze.sh
@@ -21,7 +21,7 @@ for f in "$LOG_DIR"/*.ndjson; do
 done
 
 echo "[analyze] joining ${#LOG_ARGS[@]} log files"
-"$ROOT/target/perf/gsx-metrics" "${LOG_ARGS[@]}" --lane main > "$OUT_CSV"
+"$ROOT/target/perf/suwappu-metrics" "${LOG_ARGS[@]}" --lane main > "$OUT_CSV"
 echo "[analyze] wrote $OUT_CSV"
 wc -l "$OUT_CSV"
 

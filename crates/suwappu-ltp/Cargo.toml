@@ -1,0 +1,21 @@
+[package]
+name = "suwappu-ltp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+description = "Lattice Transfer Protocol attestation pipeline + super-node integration (paper §10)."
+
+[dependencies]
+suwappu-crypto.workspace = true
+suwappu-precompiles.workspace = true
+blst.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+rand.workspace = true

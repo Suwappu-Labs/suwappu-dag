@@ -1,0 +1,53 @@
+[package]
+name = "suwappu-validator-program"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+description = "Testnet validator points-accumulator daemon. Probes seed + external validators for uptime, ingests their event-log uploads, computes the public POINTS.md formula, and serves a leaderboard HTTP API at program.testnet.suwappu.globalsettlement.com."
+
+[lib]
+name = "suwappu_validator_program"
+path = "src/lib.rs"
+
+[[bin]]
+name = "suwappu-validator-program"
+path = "src/main.rs"
+
+[dependencies]
+# JSON-RPC client — same dep the indexer uses for backfill.
+suwappu-client = { workspace = true }
+
+# HTTP service (leaderboard read API + admin endpoints).
+axum = { version = "0.7", features = ["macros"] }
+
+# Postgres via sqlx — matches suwappu-indexer's posture.
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls",
+    "postgres",
+    "macros",
+    "migrate",
+    "chrono",
+] }
+
+# Constant-time operations (C10 side-channel hardening)
+subtle = { workspace = true }
+
+# Async + utilities
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true, features = ["env"] }
+hex = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

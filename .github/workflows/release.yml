@@ -1,6 +1,6 @@
 name: release
 
-# Triggered by pushing a tag matching `gsx-dag-v*`. Builds release
+# Triggered by pushing a tag matching `suwappu-dag-v*`. Builds release
 # binaries for 3 targets and uploads them as GitHub Release assets so
 # external developers can `gh release download` without compiling from
 # source.
@@ -20,12 +20,12 @@ name: release
 # the runner is free for public repos.
 #
 # Binaries shipped per platform:
-#   - gsx-node              (validator daemon)
-#   - gsx-loadgen           (load generator + LoadGenClient CLI helper)
-#   - gsx-metrics           (post-hoc event-log analyzer)
-#   - gsx-indexer           (streaming indexer with HTTP read API)
-#   - gsx-faucet            (devnet/testnet faucet HTTP service)
-#   - gsx-validator-program (testnet points-accumulator daemon —
+#   - suwappu-node              (validator daemon)
+#   - suwappu-loadgen           (load generator + LoadGenClient CLI helper)
+#   - suwappu-metrics           (post-hoc event-log analyzer)
+#   - suwappu-indexer           (streaming indexer with HTTP read API)
+#   - suwappu-faucet            (devnet/testnet faucet HTTP service)
+#   - suwappu-validator-program (testnet points-accumulator daemon —
 #                            foundation-side; published so the
 #                            operator-program EC2 can pull it on
 #                            bootstrap)
@@ -37,11 +37,11 @@ name: release
 on:
   push:
     tags:
-      - 'gsx-dag-v*'
+      - 'suwappu-dag-v*'
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to release (e.g. gsx-dag-v0.1.0). Requires the tag to already exist.'
+        description: 'Tag to release (e.g. suwappu-dag-v0.1.0). Requires the tag to already exist.'
         required: true
 
 permissions:
@@ -79,12 +79,12 @@ jobs:
       # Private git dep `gsxdb-bridge` requires the deploy key — same
       # pattern as docs.yml. Cargo will pull from a different repo
       # otherwise and fail with "Repository not found".
-      - name: Setup gsx-db deploy key
+      - name: Setup suwappu-db deploy key
         env:
-          GSX_DB_DEPLOY_KEY: ${{ secrets.GSX_DB_DEPLOY_KEY }}
+          SUWAPPU_DB_DEPLOY_KEY: ${{ secrets.SUWAPPU_DB_DEPLOY_KEY }}
         run: |
           mkdir -p ~/.ssh
-          echo "$GSX_DB_DEPLOY_KEY" > ~/.ssh/id_ed25519
+          echo "$SUWAPPU_DB_DEPLOY_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan github.com >> ~/.ssh/known_hosts
 
@@ -108,18 +108,18 @@ jobs:
 
       # Build the binaries that have crate-level `[[bin]]` entries.
       #
-      # NOTE on gsx-loadgen / gsx-metrics: these are NOT standalone
-      # packages — they are `[[bin]]` targets *of the gsx-node package*
-      # (see crates/gsx-node/Cargo.toml). `--bins` builds every bin
-      # target of each selected `-p` package, so `-p gsx-node --bins`
-      # already emits gsx-node, gsx-loadgen, and gsx-metrics into
+      # NOTE on suwappu-loadgen / suwappu-metrics: these are NOT standalone
+      # packages — they are `[[bin]]` targets *of the suwappu-node package*
+      # (see crates/suwappu-node/Cargo.toml). `--bins` builds every bin
+      # target of each selected `-p` package, so `-p suwappu-node --bins`
+      # already emits suwappu-node, suwappu-loadgen, and suwappu-metrics into
       # target/<target>/release/, where the Package step picks them up.
-      # Do NOT add `-p gsx-loadgen` / `-p gsx-metrics`: cargo fails with
-      # "package ID specification `gsx-loadgen` did not match any
+      # Do NOT add `-p suwappu-loadgen` / `-p suwappu-metrics`: cargo fails with
+      # "package ID specification `suwappu-loadgen` did not match any
       # packages" because no such package exists. There are likewise no
-      # crates/gsx-loadgen or crates/gsx-metrics dirs to gate on.
+      # crates/suwappu-loadgen or crates/suwappu-metrics dirs to gate on.
       #
-      # gsx-faucet IS a standalone package (crates/gsx-faucet) and is
+      # suwappu-faucet IS a standalone package (crates/suwappu-faucet) and is
       # optional — gate on its crate dir existing so this workflow
       # doesn't break before G3 lands.
       #
@@ -130,12 +130,12 @@ jobs:
         env:
           CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
         run: |
-          CRATES="-p gsx-node -p gsx-indexer"
-          if [ -d crates/gsx-faucet ]; then
-            CRATES="$CRATES -p gsx-faucet"
+          CRATES="-p suwappu-node -p suwappu-indexer"
+          if [ -d crates/suwappu-faucet ]; then
+            CRATES="$CRATES -p suwappu-faucet"
           fi
-          if [ -d crates/gsx-validator-program ]; then
-            CRATES="$CRATES -p gsx-validator-program"
+          if [ -d crates/suwappu-validator-program ]; then
+            CRATES="$CRATES -p suwappu-validator-program"
           fi
           cargo build --release --target ${{ matrix.target }} $CRATES \
               --bins
@@ -145,14 +145,14 @@ jobs:
         run: |
           TAG="${{ github.event.inputs.tag || github.ref_name }}"
           TARGET="${{ matrix.target }}"
-          STAGING="gsx-dag-${TAG#gsx-dag-}-${TARGET}"
+          STAGING="suwappu-dag-${TAG#suwappu-dag-}-${TARGET}"
           mkdir -p "$STAGING"
 
-          # Collect every gsx-* binary cargo emitted. Filters out
-          # libraries, build artifacts, and the non-gsx side products
+          # Collect every suwappu-* binary cargo emitted. Filters out
+          # libraries, build artifacts, and the non-suwappu side products
           # (e.g. ureq's bundled binaries).
           BIN_DIR="target/${TARGET}/release"
-          for b in gsx-node gsx-loadgen gsx-metrics gsx-indexer gsx-faucet gsx-validator-program; do
+          for b in suwappu-node suwappu-loadgen suwappu-metrics suwappu-indexer suwappu-faucet suwappu-validator-program; do
             if [ -f "$BIN_DIR/$b" ]; then
               cp "$BIN_DIR/$b" "$STAGING/$b"
               chmod +x "$STAGING/$b"
@@ -163,18 +163,18 @@ jobs:
           # Bundle a minimal README inside the tarball so the unzipped
           # directory is self-documenting.
           cat > "$STAGING/README.txt" <<EOF
-          gsx-dag ${TAG} — ${TARGET}
+          suwappu-dag ${TAG} — ${TARGET}
 
           Binaries in this archive:
           $(ls "$STAGING" | grep -v README.txt | sed 's/^/  /')
 
           Quick start (against the public devnet):
-            ./gsx-node --help
-            ./gsx-loadgen --help
-            ./gsx-indexer --help
+            ./suwappu-node --help
+            ./suwappu-loadgen --help
+            ./suwappu-indexer --help
 
           See:
-            https://github.com/GlobalSettlementNetwork/gsx-dag
+            https://github.com/suwappu/suwappu-dag
             DEVNET.md for the public devnet RPC URL.
           EOF
 
@@ -215,7 +215,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ github.event.inputs.tag || github.ref_name }}"
-          VERSION="${TAG#gsx-dag-}"
+          VERSION="${TAG#suwappu-dag-}"
 
           # Generate a default release body from the CHANGELOG section
           # for this version, if it exists; otherwise from the tag
@@ -224,13 +224,13 @@ jobs:
           if [ -f CHANGELOG.md ] && grep -q "^## ${VERSION}$" CHANGELOG.md; then
             awk "/^## ${VERSION}$/{flag=1; next} /^## /{flag=0} flag" CHANGELOG.md > "$BODY_FILE"
           else
-            echo "gsx-dag ${VERSION}" > "$BODY_FILE"
+            echo "suwappu-dag ${VERSION}" > "$BODY_FILE"
             echo "" >> "$BODY_FILE"
             echo "Binaries: see assets below. Source: \`git checkout ${TAG}\`." >> "$BODY_FILE"
           fi
 
           gh release create "$TAG" \
-            --title "gsx-dag $VERSION" \
+            --title "suwappu-dag $VERSION" \
             --notes-file "$BODY_FILE" \
             --verify-tag \
             ./artifacts/*.tar.gz \

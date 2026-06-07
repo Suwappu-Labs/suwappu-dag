@@ -1,7 +1,7 @@
-# `@gsx/status-page` — gsx-devnet status page
+# `@suwappu/status-page` — suwappu-devnet status page
 
 Single-page vanilla HTML+JS app that surfaces devnet liveness at
-`https://status.devnet.gsx.globalsettlement.com/`. Designed to be
+`https://status.devnet.suwappu.globalsettlement.com/`. Designed to be
 glance-able from a phone during an incident — no framework, no
 build step, ~250 LOC total.
 
@@ -18,8 +18,8 @@ build step, ~250 LOC total.
   the ALB; whichever validator answers fastest).
 - **Faucet tile**: `/health` up/down.
 
-Polls `https://rpc.devnet.gsx.globalsettlement.com/gsx_getEpoch`
-and `https://faucet.devnet.gsx.globalsettlement.com/health` every
+Polls `https://rpc.devnet.suwappu.globalsettlement.com/suwappu_getEpoch`
+and `https://faucet.devnet.suwappu.globalsettlement.com/health` every
 5 seconds. No state stored anywhere — refresh the page for a
 clean slate.
 

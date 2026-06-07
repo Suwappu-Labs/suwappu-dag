@@ -1,10 +1,10 @@
 variable "name_prefix" {
-  description = "Prefix applied to every named AWS resource the module creates (Name tag, key_pair name, IAM role + instance-profile name, SG name). Must end with a hyphen. Concrete instantiations: devnet passes `gsx-dev-`; testnet passes `gsx-devnet-` (historical — the testnet went live before this var existed and owns the `gsx-devnet-` namespace; renaming to `gsx-testnet-` would force destroy+recreate of every keypair/SG/IAM role and is deferred to the next clean window)."
+  description = "Prefix applied to every named AWS resource the module creates (Name tag, key_pair name, IAM role + instance-profile name, SG name). Must end with a hyphen. Concrete instantiations: devnet passes `suwappu-dev-`; testnet passes `suwappu-devnet-` (historical — the testnet went live before this var existed and owns the `suwappu-devnet-` namespace; renaming to `suwappu-testnet-` would force destroy+recreate of every keypair/SG/IAM role and is deferred to the next clean window)."
   type        = string
 
   validation {
     condition     = can(regex("^[a-z0-9-]+-$", var.name_prefix))
-    error_message = "name_prefix must be lowercase alphanumerics + hyphens, ending in a hyphen (e.g. gsx-dev-)."
+    error_message = "name_prefix must be lowercase alphanumerics + hyphens, ending in a hyphen (e.g. suwappu-dev-)."
   }
 }
 
@@ -54,12 +54,12 @@ variable "metrics_port" {
 }
 
 variable "artifact_bucket" {
-  description = "S3 bucket holding the gsx-node artifact + genesis manifest."
+  description = "S3 bucket holding the suwappu-node artifact + genesis manifest."
   type        = string
 }
 
 variable "state_volume_gb" {
-  description = "Persistent EBS volume size (gp3) mounted at /var/lib/gsx."
+  description = "Persistent EBS volume size (gp3) mounted at /var/lib/suwappu."
   type        = number
 }
 

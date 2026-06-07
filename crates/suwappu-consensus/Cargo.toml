@@ -1,0 +1,21 @@
+[package]
+name = "suwappu-consensus"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+description = "Mysticeti-C certificate DAG consensus + BFT linearization for the Suwappu DAG L1 (paper §6)."
+
+[dependencies]
+suwappu-crypto.workspace = true
+blake3.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+rand.workspace = true

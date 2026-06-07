@@ -2,14 +2,14 @@
 #
 # Fork of terraform/devnet/cloudwatch.tf. Diffs:
 #   * 7 silent-peer alarms (one per seed validator) instead of 4.
-#   * Metric namespace `gsx-testnet` (vs `gsx-devnet`).
+#   * Metric namespace `suwappu-testnet` (vs `suwappu-devnet`).
 #   * Halt alarm + faucet alarm target the testnet's Route53 health
-#     check on `faucet.testnet.gsx.globalsettlement.com`.
-#   * SNS topic name `gsx-testnet-ops-pages`.
+#     check on `faucet.testnet.suwappu.globalsettlement.com`.
+#   * SNS topic name `suwappu-testnet-ops-pages`.
 
 resource "aws_sns_topic" "ops_pages" {
   provider = aws.us_east_1
-  name     = "gsx-testnet-ops-pages"
+  name     = "suwappu-testnet-ops-pages"
 }
 
 resource "aws_sns_topic_subscription" "ops_pages_email" {
@@ -23,8 +23,8 @@ resource "aws_sns_topic_subscription" "ops_pages_email" {
 # flat for 2 consecutive 1-min windows.
 resource "aws_cloudwatch_metric_alarm" "halt" {
   provider            = aws.us_east_1
-  alarm_name          = "gsx-testnet-halt"
-  alarm_description   = "Testnet has stopped progressing: `gsx_last_committed_round` MAX across all validators didn't advance in the last 5 minutes. Investigate via OPERATIONS.md § 'Diagnose stuck commits'."
+  alarm_name          = "suwappu-testnet-halt"
+  alarm_description   = "Testnet has stopped progressing: `suwappu_last_committed_round` MAX across all validators didn't advance in the last 5 minutes. Investigate via OPERATIONS.md § 'Diagnose stuck commits'."
   comparison_operator = "LessThanOrEqualToThreshold"
   evaluation_periods  = 2
   threshold           = 0
@@ -34,8 +34,8 @@ resource "aws_cloudwatch_metric_alarm" "halt" {
     id          = "current_max"
     return_data = false
     metric {
-      metric_name = "gsx_last_committed_round"
-      namespace   = "gsx-testnet"
+      metric_name = "suwappu_last_committed_round"
+      namespace   = "suwappu-testnet"
       period      = 60
       stat        = "Maximum"
     }
@@ -75,12 +75,12 @@ locals {
 resource "aws_cloudwatch_metric_alarm" "silent_peer" {
   for_each            = toset(local.validator_regions)
   provider            = aws.us_east_1
-  alarm_name          = "gsx-testnet-silent-peer-${each.key}"
+  alarm_name          = "suwappu-testnet-silent-peer-${each.key}"
   alarm_description   = "Validator ${each.key} stopped serving /metrics scrapes — likely crashed, locked up, or unreachable from CloudWatch agent. Cluster may still commit if joint quorum survives with the remaining 6."
   comparison_operator = "LessThanThreshold"
   evaluation_periods  = 2
-  metric_name         = "gsx_metrics_scrapes_total"
-  namespace           = "gsx-testnet"
+  metric_name         = "suwappu_metrics_scrapes_total"
+  namespace           = "suwappu-testnet"
   period              = 60
   statistic           = "Sum"
   threshold           = 1
@@ -102,13 +102,13 @@ resource "aws_route53_health_check" "faucet" {
   request_interval  = 30
   failure_threshold = 3
   tags = {
-    Name = "gsx-testnet-faucet-health"
+    Name = "suwappu-testnet-faucet-health"
   }
 }
 
 resource "aws_cloudwatch_metric_alarm" "faucet_down" {
   provider            = aws.us_east_1
-  alarm_name          = "gsx-testnet-faucet-down"
+  alarm_name          = "suwappu-testnet-faucet-down"
   alarm_description   = "Faucet /health is failing — devs can't acquire test tokens. Investigate via OPERATIONS.md § 'Restart the faucet service'."
   comparison_operator = "LessThanThreshold"
   evaluation_periods  = 2
@@ -137,13 +137,13 @@ resource "aws_route53_health_check" "program" {
   request_interval  = 30
   failure_threshold = 5 # softer than faucet; daemon is foundation-internal
   tags = {
-    Name = "gsx-testnet-program-health"
+    Name = "suwappu-testnet-program-health"
   }
 }
 
 resource "aws_cloudwatch_metric_alarm" "program_down" {
   provider            = aws.us_east_1
-  alarm_name          = "gsx-testnet-program-down"
+  alarm_name          = "suwappu-testnet-program-down"
   alarm_description   = "Points-accumulator leaderboard endpoint is failing — operators see stale or no leaderboard. NOT a chain-impact alarm; lower urgency than faucet/halt."
   comparison_operator = "LessThanThreshold"
   evaluation_periods  = 4
@@ -176,8 +176,8 @@ resource "aws_cloudwatch_metric_alarm" "program_down" {
 # validate the ApplicationELB dimensions against a plan before apply.
 resource "aws_cloudwatch_metric_alarm" "alb_rpc_unhealthy" {
   provider            = aws.us_east_1
-  alarm_name          = "gsx-testnet-alb-rpc-unhealthy"
-  alarm_description   = "rpc.testnet.gsx.* ALB target group has ≥1 unhealthy target for two consecutive 5-minute windows — the in-region validator behind the GA/ALB path is failing health checks (down or unreachable). Check the validator EC2 + EIP table in `terraform output validators`."
+  alarm_name          = "suwappu-testnet-alb-rpc-unhealthy"
+  alarm_description   = "rpc.testnet.suwappu.* ALB target group has ≥1 unhealthy target for two consecutive 5-minute windows — the in-region validator behind the GA/ALB path is failing health checks (down or unreachable). Check the validator EC2 + EIP table in `terraform output validators`."
   comparison_operator = "GreaterThanOrEqualToThreshold"
   evaluation_periods  = 2
   metric_name         = "UnHealthyHostCount"
@@ -196,8 +196,8 @@ resource "aws_cloudwatch_metric_alarm" "alb_rpc_unhealthy" {
 
 resource "aws_cloudwatch_metric_alarm" "alb_faucet_unhealthy" {
   provider            = aws.us_east_1
-  alarm_name          = "gsx-testnet-alb-faucet-unhealthy"
-  alarm_description   = "faucet.testnet.gsx.* ALB target group has ≥1 unhealthy target for two consecutive 5-minute windows. Singleton faucet — no failover — so this typically means the faucet EC2 is down or out of GSX balance. Complements the Route53 `faucet_down` health check."
+  alarm_name          = "suwappu-testnet-alb-faucet-unhealthy"
+  alarm_description   = "faucet.testnet.suwappu.* ALB target group has ≥1 unhealthy target for two consecutive 5-minute windows. Singleton faucet — no failover — so this typically means the faucet EC2 is down or out of SUWAPPU balance. Complements the Route53 `faucet_down` health check."
   comparison_operator = "GreaterThanOrEqualToThreshold"
   evaluation_periods  = 2
   metric_name         = "UnHealthyHostCount"
@@ -218,7 +218,7 @@ resource "aws_cloudwatch_metric_alarm" "alb_faucet_unhealthy" {
 # expected progress + an external-uploads-bucket activity tile.
 resource "aws_cloudwatch_dashboard" "testnet" {
   provider       = aws.us_east_1
-  dashboard_name = "gsx-testnet"
+  dashboard_name = "suwappu-testnet"
   dashboard_body = jsonencode({
     widgets = [
       {
@@ -231,7 +231,7 @@ resource "aws_cloudwatch_dashboard" "testnet" {
           title  = "Last committed round (per region)"
           region = "us-east-1"
           metrics = [
-            ["gsx-testnet", "gsx_last_committed_round", "region", "us-east-1"],
+            ["suwappu-testnet", "suwappu_last_committed_round", "region", "us-east-1"],
             ["...", "us-west-2"],
             ["...", "eu-west-1"],
             ["...", "eu-central-1"],
@@ -254,7 +254,7 @@ resource "aws_cloudwatch_dashboard" "testnet" {
           title  = "Mempool size (per region)"
           region = "us-east-1"
           metrics = [
-            ["gsx-testnet", "gsx_mempool_size", "region", "us-east-1"],
+            ["suwappu-testnet", "suwappu_mempool_size", "region", "us-east-1"],
             ["...", "us-west-2"],
             ["...", "eu-west-1"],
             ["...", "eu-central-1"],

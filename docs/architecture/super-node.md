@@ -1,7 +1,7 @@
 # Super-node — consolidated 6-of-9 Authority role for LTP corridors
 
-**Paper §**: 9 — Super-node role ([`gsx-papers/papers/dag-l1`](https://github.com/GlobalSettlementNetwork/gsx-papers))
-**Code**: `crates/gsx-ltp/src/` (corridor attestation) · `crates/gsx-authority/src/` (registry)
+**Paper §**: 9 — Super-node role ([`suwappu-papers/papers/dag-l1`](https://github.com/suwappu/suwappu-papers))
+**Code**: `crates/suwappu-ltp/src/` (corridor attestation) · `crates/suwappu-authority/src/` (registry)
 **IQs**: —
 **Visuals**: [`docs/visuals/ltp.html`](../visuals/ltp.html) (right panel + ecosystem atlas)
 **Sprint**: DAG-S15 (LTP 7-of-9 attestation) ✅ Closed · DAG-S16 (DA SLA) ✅ Closed · DAG-S17 (DID STARK) ✅ Closed
@@ -29,12 +29,12 @@ corridor registry entry.
 
 ## Cross-references
 
-- **Engineering:** `crates/gsx-ltp/src/attestation.rs` (the 7-of-9 aggregate
-  signature path), `crates/gsx-authority/src/lib.rs` (registry that names
+- **Engineering:** `crates/suwappu-ltp/src/attestation.rs` (the 7-of-9 aggregate
+  signature path), `crates/suwappu-authority/src/lib.rs` (registry that names
   super-nodes per corridor).
 - **Spec:** Paper §9 + §10 (LTP integration in [ltp-integration.md](ltp-integration.md)).
 - **Design decisions:** super-node role is described in the paper; no IQ
   has been opened against it.
-- **Visual:** the LTP-stack panel of [gsx-dag.html](../visuals/gsx-dag.html)
-  and [gsx-ecosystem-atlas.html](../visuals/gsx-ecosystem-atlas.html) both
+- **Visual:** the LTP-stack panel of [suwappu-dag.html](../visuals/suwappu-dag.html)
+  and [suwappu-ecosystem-atlas.html](../visuals/suwappu-ecosystem-atlas.html) both
   include "Authority Ring 30–50 · Super-node 7/9".

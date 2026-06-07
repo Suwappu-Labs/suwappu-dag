@@ -34,6 +34,6 @@ variable "client_port" {
 }
 
 variable "artifact_bucket" {
-  description = "S3 bucket holding the gsx-node artifact + genesis manifest."
+  description = "S3 bucket holding the suwappu-node artifact + genesis manifest."
   type        = string
 }

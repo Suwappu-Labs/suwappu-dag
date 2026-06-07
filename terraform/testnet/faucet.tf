@@ -6,13 +6,13 @@
 #   * Separate Secrets Manager secret + IAM role + S3 bucket
 #     references.
 #   * cloud-init env vars point at the testnet RPC DNS (rpc.
-#     testnet.gsx.globalsettlement.com).
+#     testnet.suwappu.globalsettlement.com).
 
 resource "aws_vpc" "faucet" {
   provider             = aws.us_east_1
   cidr_block           = "10.45.10.0/24"
   enable_dns_hostnames = true
-  tags                 = { Name = "gsx-testnet-faucet-vpc" }
+  tags                 = { Name = "suwappu-testnet-faucet-vpc" }
 }
 
 resource "aws_subnet" "faucet_public" {
@@ -21,13 +21,13 @@ resource "aws_subnet" "faucet_public" {
   cidr_block              = "10.45.10.0/26"
   map_public_ip_on_launch = true
   availability_zone       = "us-east-1a"
-  tags                    = { Name = "gsx-testnet-faucet-subnet" }
+  tags                    = { Name = "suwappu-testnet-faucet-subnet" }
 }
 
 resource "aws_internet_gateway" "faucet" {
   provider = aws.us_east_1
   vpc_id   = aws_vpc.faucet.id
-  tags     = { Name = "gsx-testnet-faucet-igw" }
+  tags     = { Name = "suwappu-testnet-faucet-igw" }
 }
 
 resource "aws_route_table" "faucet_public" {
@@ -37,7 +37,7 @@ resource "aws_route_table" "faucet_public" {
     cidr_block = "0.0.0.0/0"
     gateway_id = aws_internet_gateway.faucet.id
   }
-  tags = { Name = "gsx-testnet-faucet-rt" }
+  tags = { Name = "suwappu-testnet-faucet-rt" }
 }
 
 resource "aws_route_table_association" "faucet_public" {
@@ -48,8 +48,8 @@ resource "aws_route_table_association" "faucet_public" {
 
 resource "aws_security_group" "faucet" {
   provider    = aws.us_east_1
-  name        = "gsx-testnet-faucet-sg"
-  description = "GSX testnet - faucet ingress"
+  name        = "suwappu-testnet-faucet-sg"
+  description = "SUWAPPU testnet - faucet ingress"
   vpc_id      = aws_vpc.faucet.id
 
   ingress {
@@ -74,12 +74,12 @@ resource "aws_security_group" "faucet" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  tags = { Name = "gsx-testnet-faucet-sg" }
+  tags = { Name = "suwappu-testnet-faucet-sg" }
 }
 
 resource "aws_key_pair" "faucet_operator" {
   provider   = aws.us_east_1
-  key_name   = "gsx-testnet-faucet"
+  key_name   = "suwappu-testnet-faucet"
   public_key = var.ssh_public_key
 }
 
@@ -88,15 +88,15 @@ resource "aws_key_pair" "faucet_operator" {
 # different keypairs and rotate independently.
 resource "aws_secretsmanager_secret" "faucet_sk" {
   provider                = aws.us_east_1
-  name                    = "gsx-testnet/faucet/mldsa-secret-key"
-  description             = "ML-DSA-65 secret key for the gsx-testnet faucet authority. Rotate via docs/devnet/faucet-key-ceremony.md."
+  name                    = "suwappu-testnet/faucet/mldsa-secret-key"
+  description             = "ML-DSA-65 secret key for the suwappu-testnet faucet authority. Rotate via docs/devnet/faucet-key-ceremony.md."
   recovery_window_in_days = 30
-  tags                    = { Name = "gsx-testnet-faucet-mldsa-sk" }
+  tags                    = { Name = "suwappu-testnet-faucet-mldsa-sk" }
 }
 
 resource "aws_iam_role" "faucet" {
   provider = aws.us_east_1
-  name     = "gsx-testnet-faucet-ec2"
+  name     = "suwappu-testnet-faucet-ec2"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -132,7 +132,7 @@ resource "aws_iam_role_policy" "faucet_s3_read" {
       Effect = "Allow"
       Action = ["s3:GetObject"]
       Resource = [
-        "arn:aws:s3:::${aws_s3_bucket.artifacts.id}/bin/gsx-faucet",
+        "arn:aws:s3:::${aws_s3_bucket.artifacts.id}/bin/suwappu-faucet",
         "arn:aws:s3:::${aws_s3_bucket.artifacts.id}/keys/faucet/mldsa.pk",
       ]
     }]
@@ -153,7 +153,7 @@ resource "aws_iam_role_policy_attachment" "faucet_cw_agent" {
 
 resource "aws_iam_instance_profile" "faucet" {
   provider = aws.us_east_1
-  name     = "gsx-testnet-faucet"
+  name     = "suwappu-testnet-faucet"
   role     = aws_iam_role.faucet.name
 }
 
@@ -193,7 +193,7 @@ resource "aws_instance" "faucet" {
   })
 
   tags = {
-    Name             = "gsx-testnet-faucet"
+    Name             = "suwappu-testnet-faucet"
     "testnet:role"   = "faucet"
     "testnet:region" = "us-east-1"
   }
@@ -203,5 +203,5 @@ resource "aws_eip" "faucet" {
   provider = aws.us_east_1
   instance = aws_instance.faucet.id
   domain   = "vpc"
-  tags     = { Name = "gsx-testnet-faucet-eip" }
+  tags     = { Name = "suwappu-testnet-faucet-eip" }
 }

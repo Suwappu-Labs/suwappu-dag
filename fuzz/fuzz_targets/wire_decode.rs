@@ -1,12 +1,12 @@
 //! Fuzz target: framed decode of the inter-validator wire types.
 //!
-//! Contract: `gsx_node::codec::decode_frame::<T>(&[u8])` is total for
+//! Contract: `suwappu_node::codec::decode_frame::<T>(&[u8])` is total for
 //! every `T` we accept on the wire. No panic, no UB, no infinite
 //! recursion — only `Result::Ok` or `Result::Err`.
 //!
 //! Covers:
-//!   - `gsx_node::wire::WireMessage` (the peer-to-peer envelope)
-//!   - `gsx_node::client::ClientMessage` (the client-to-validator wire)
+//!   - `suwappu_node::wire::WireMessage` (the peer-to-peer envelope)
+//!   - `suwappu_node::client::ClientMessage` (the client-to-validator wire)
 //!
 //! Same surface as the `proptest_wire_decode.rs` proptests, but
 //! cargo-fuzz uses libFuzzer's coverage-guided mutation — typically
@@ -22,6 +22,6 @@
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|bytes: &[u8]| {
-    let _ = gsx_node::codec::decode_frame::<gsx_node::wire::WireMessage>(bytes);
-    let _ = gsx_node::codec::decode_frame::<gsx_node::client::ClientMessage>(bytes);
+    let _ = suwappu_node::codec::decode_frame::<suwappu_node::wire::WireMessage>(bytes);
+    let _ = suwappu_node::codec::decode_frame::<suwappu_node::client::ClientMessage>(bytes);
 });

@@ -7,7 +7,7 @@
  * Pre-req: a devnet up at `http://127.0.0.1:9092`. See ../../DEVNET.md.
  */
 
-import { Client } from "@gsx/client";
+import { Client } from "@suwappu/client";
 
 const client = new Client("http://127.0.0.1:9092");
 

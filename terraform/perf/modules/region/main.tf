@@ -1,7 +1,7 @@
 # Per-region validator instance.
 #
 # Provisions: VPC + public subnet + IGW + route table + security group +
-# EC2 instance + EIP + IAM role. Cloud-init pulls the gsx-node musl binary
+# EC2 instance + EIP + IAM role. Cloud-init pulls the suwappu-node musl binary
 # and genesis manifest from the shared artifact bucket and starts a systemd
 # unit. Each region's instance is independent — they only know about each
 # other through their public IPs (rendered into the per-instance node.toml
@@ -53,7 +53,7 @@ data "aws_ami" "ubuntu" {
 resource "aws_vpc" "this" {
   cidr_block           = "10.42.0.0/16"
   enable_dns_hostnames = true
-  tags                 = { Name = "gsx-perf-${var.region_label}-vpc" }
+  tags                 = { Name = "suwappu-perf-${var.region_label}-vpc" }
 }
 
 resource "aws_subnet" "public" {
@@ -63,12 +63,12 @@ resource "aws_subnet" "public" {
   # First AZ that offers the requested instance type. Sorting gives a
   # deterministic pick across applies.
   availability_zone = sort(data.aws_ec2_instance_type_offerings.supported.locations)[0]
-  tags              = { Name = "gsx-perf-${var.region_label}-subnet" }
+  tags              = { Name = "suwappu-perf-${var.region_label}-subnet" }
 }
 
 resource "aws_internet_gateway" "this" {
   vpc_id = aws_vpc.this.id
-  tags   = { Name = "gsx-perf-${var.region_label}-igw" }
+  tags   = { Name = "suwappu-perf-${var.region_label}-igw" }
 }
 
 resource "aws_route_table" "public" {
@@ -77,7 +77,7 @@ resource "aws_route_table" "public" {
     cidr_block = "0.0.0.0/0"
     gateway_id = aws_internet_gateway.this.id
   }
-  tags = { Name = "gsx-perf-${var.region_label}-rt" }
+  tags = { Name = "suwappu-perf-${var.region_label}-rt" }
 }
 
 resource "aws_route_table_association" "public" {
@@ -92,8 +92,8 @@ resource "aws_route_table_association" "public" {
 #   layer (ML-DSA signatures inside Cert/Vote/FastPath/LTP), not at the
 #   socket layer. Open ports keep the geographic-latency measurement clean.
 resource "aws_security_group" "this" {
-  name        = "gsx-perf-${var.region_label}-sg"
-  description = "GSX perf testnet - validator ingress"
+  name        = "suwappu-perf-${var.region_label}-sg"
+  description = "SUWAPPU perf testnet - validator ingress"
   vpc_id      = aws_vpc.this.id
 
   ingress {
@@ -125,18 +125,18 @@ resource "aws_security_group" "this" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  tags = { Name = "gsx-perf-${var.region_label}-sg" }
+  tags = { Name = "suwappu-perf-${var.region_label}-sg" }
 }
 
 resource "aws_key_pair" "operator" {
-  key_name   = "gsx-perf-${var.region_label}"
+  key_name   = "suwappu-perf-${var.region_label}"
   public_key = var.ssh_public_key
 }
 
 # Instance profile — read-only S3 access to the artifact bucket so cloud-init
 # can pull the binary + genesis manifest.
 resource "aws_iam_role" "ec2" {
-  name = "gsx-perf-${var.region_label}-ec2"
+  name = "suwappu-perf-${var.region_label}-ec2"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -184,7 +184,7 @@ resource "aws_iam_role_policy_attachment" "ssm" {
 }
 
 resource "aws_iam_instance_profile" "this" {
-  name = "gsx-perf-${var.region_label}"
+  name = "suwappu-perf-${var.region_label}"
   role = aws_iam_role.ec2.name
 }
 
@@ -211,7 +211,7 @@ resource "aws_instance" "validator" {
   })
 
   tags = {
-    Name        = "gsx-perf-${var.region_label}"
+    Name        = "suwappu-perf-${var.region_label}"
     AuthorityId = tostring(var.authority_id)
   }
 }
@@ -219,5 +219,5 @@ resource "aws_instance" "validator" {
 resource "aws_eip" "this" {
   instance = aws_instance.validator.id
   domain   = "vpc"
-  tags     = { Name = "gsx-perf-${var.region_label}-eip" }
+  tags     = { Name = "suwappu-perf-${var.region_label}-eip" }
 }

@@ -6,7 +6,7 @@ system for the v1 L2; revisit only on a strong-case event (see
 
 **Phase**: Track G G2.2 phase 2 (issue #97) — the verifier
 precompile now invokes the real `sp1-verifier` BN254 pairing
-check; the upcoming `gsx-l2-stm` crate (Phase 1.1 per
+check; the upcoming `suwappu-l2-stm` crate (Phase 1.1 per
 `~/.claude/plans/validated-prancing-curry.md`) is an SP1 guest
 program.
 
@@ -21,14 +21,14 @@ proposing any change to the proof-system surface.
 Across four crates and IQ-006, the codebase has been assuming
 **SP1 Groth16 BN254** as the L2 proof system:
 
-- `crates/gsx-l2-verifier-precompile/src/lib.rs` — fixed 260 B
+- `crates/suwappu-l2-verifier-precompile/src/lib.rs` — fixed 260 B
   proof + 240 B fixed-offset public-input layout (Filecoin /
   op-succinct shape)
-- `crates/gsx-l2-bridge/src/lib.rs` — L1Lock / L2BurnProven
+- `crates/suwappu-l2-bridge/src/lib.rs` — L1Lock / L2BurnProven
   payload validation aligned to the same public-input layout
-- `crates/gsx-l2-sequencer/src/lib.rs` — `BatchHeader`'s
+- `crates/suwappu-l2-sequencer/src/lib.rs` — `BatchHeader`'s
   240-byte public-input format gates on the verifier's offsets
-- `crates/gsx-l2-confidential/src/lib.rs` — Track H nullifier
+- `crates/suwappu-l2-confidential/src/lib.rs` — Track H nullifier
   commitments designed to fold into the same proof's
   `confidential_root` field
 - `docs/iq/IQ-006-l2-state-root-commitment-surface.md` —
@@ -61,7 +61,7 @@ The four open candidates worth comparing before committing:
 
 ## Why SP1 wins for v1
 
-1. **Verifier already wired.** `gsx-l2-verifier-precompile`
+1. **Verifier already wired.** `suwappu-l2-verifier-precompile`
    landed in G2.2 phase 1 with SP1's public-input layout baked
    in. Switching costs a complete rewrite of that crate + the
    sequencer's batch header + the IQ-006 decision record.
@@ -81,10 +81,10 @@ The four open candidates worth comparing before committing:
    Plonky3 and Nexus have no equivalent.
 
 4. **Confidential payload integration path is clear.** Track H
-   commitments (`gsx-l2-confidential`) bind into the proof's
+   commitments (`suwappu-l2-confidential`) bind into the proof's
    `confidential_root` public-input field. SP1's Rust guest
    model supports this trivially — the STM program imports
-   `gsx-l2-confidential::commit` and the resulting bytes flow
+   `suwappu-l2-confidential::commit` and the resulting bytes flow
    into the proof's public inputs. Plonky3's circuit DSL would
    require a dedicated commit gadget.
 
@@ -148,16 +148,16 @@ should cite this doc and the trigger above.
 
 ## Implementation references
 
-- Verifier: `crates/gsx-l2-verifier-precompile/src/lib.rs` —
+- Verifier: `crates/suwappu-l2-verifier-precompile/src/lib.rs` —
   `verify_l2_batch` calls `sp1_verifier::Groth16Verifier::verify`
   with the chain-state-pinned `aggregation_vk_hash`.
-- VK pinning: `crates/gsx-execution/src/l2_state.rs` —
+- VK pinning: `crates/suwappu-execution/src/l2_state.rs` —
   multi-chain `ChainVks` map keyed by `l2_chain_id_hash`.
-- STM circuit: `crates/gsx-l2-stm/` (Phase 1.1, forthcoming) —
+- STM circuit: `crates/suwappu-l2-stm/` (Phase 1.1, forthcoming) —
   SP1 guest program proving `(prev_l2_state_root,
   batch_da_commitment, prev_l1_state_root, l2_chain_id_hash) →
   (new_l2_state_root, range_vk_commitment, confidential_root)`.
-- Prover daemon: `crates/gsx-l2-prover/` (Phase 2.1,
+- Prover daemon: `crates/suwappu-l2-prover/` (Phase 2.1,
   forthcoming) — talks to Succinct Prover Network by default,
   with `--prover=local` fallback.
 
@@ -170,5 +170,5 @@ should cite this doc and the trigger above.
 - `~/.claude/plans/validated-prancing-curry.md` — the
   mainnet-ready L2 plan that sets the timeline this doc
   unblocks.
-- `crates/gsx-l2-verifier-precompile/src/lib.rs` lines 1–40 —
+- `crates/suwappu-l2-verifier-precompile/src/lib.rs` lines 1–40 —
   the in-tree explainer that points the reader here.

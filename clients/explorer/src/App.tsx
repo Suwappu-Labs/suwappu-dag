@@ -1,4 +1,4 @@
-// gsx-devnet explorer — single-page hash-routed app.
+// suwappu-devnet explorer — single-page hash-routed app.
 //
 // Routes:
 //   #/                → Home (recent blocks + live tip)
@@ -10,7 +10,7 @@
 // dependency — just `window.location.hash` parsing.
 
 import { useEffect, useState } from "react";
-import { Client } from "@gsx/client";
+import { Client } from "@suwappu/client";
 import { Home } from "./pages/Home.js";
 import { BlockPage } from "./pages/BlockPage.js";
 import { TxPage } from "./pages/TxPage.js";
@@ -49,7 +49,7 @@ export function App({ rpcUrl }: { rpcUrl: string }) {
     <div className="app">
       <header>
         <a href="#/" className="logo">
-          gsx-devnet explorer
+          suwappu-devnet explorer
         </a>
         <SearchBox />
         <span className="rpc-url" title="RPC URL the explorer is pointing at">
@@ -71,15 +71,15 @@ export function App({ rpcUrl }: { rpcUrl: string }) {
         )}
       </main>
       <footer>
-        <a href="https://github.com/GlobalSettlementNetwork/gsx-dag">
-          gsx-dag on GitHub
+        <a href="https://github.com/suwappu/suwappu-dag">
+          suwappu-dag on GitHub
         </a>
         {" · "}
-        <a href="https://github.com/GlobalSettlementNetwork/gsx-dag/blob/main/DEVNET.md">
+        <a href="https://github.com/suwappu/suwappu-dag/blob/main/DEVNET.md">
           DEVNET.md
         </a>
         {" · "}
-        <a href="https://github.com/GlobalSettlementNetwork/gsx-dag/blob/main/OPERATIONS.md">
+        <a href="https://github.com/suwappu/suwappu-dag/blob/main/OPERATIONS.md">
           OPERATIONS.md
         </a>
       </footer>

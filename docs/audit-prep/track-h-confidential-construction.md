@@ -10,11 +10,11 @@ foundation security team, Tier A buyers' compliance teams,
 academic reviewers post-mainnet.
 
 **Authoritative inputs:**
-- `gsx-strategy/docs/mainnet-plan.md` Track H §"The concrete
+- `suwappu-strategy/docs/mainnet-plan.md` Track H §"The concrete
   construction"
-- `crates/gsx-l2-confidential/src/lib.rs` (PR #180) — the
+- `crates/suwappu-l2-confidential/src/lib.rs` (PR #180) — the
   shipped phase-1 primitives
-- `crates/gsx-crypto/src/hash.rs` (PRs #170 + #181) — domain
+- `crates/suwappu-crypto/src/hash.rs` (PRs #170 + #181) — domain
   tags + HKDF
 - Lether (IACR ePrint 2026/076) — the closest academic
   precedent
@@ -63,12 +63,12 @@ The audit focus follows accordingly.
 
 | Primitive | Source | Width | Audit focus |
 |---|---|---|---|
-| SHA3-256 | FIPS 202 (NIST) | 32 B | Implementation correctness only (covered by `sha3` crate v0.10 + the existing `gsx-crypto::hash` proptest gates) |
-| HKDF-SHA3-256 | RFC 5869 + FIPS 202 | configurable | RustCrypto `hkdf` v0.12 (covered by upstream audits + the `gsx-crypto` proptest gates) |
+| SHA3-256 | FIPS 202 (NIST) | 32 B | Implementation correctness only (covered by `sha3` crate v0.10 + the existing `suwappu-crypto::hash` proptest gates) |
+| HKDF-SHA3-256 | RFC 5869 + FIPS 202 | configurable | RustCrypto `hkdf` v0.12 (covered by upstream audits + the `suwappu-crypto` proptest gates) |
 | ML-DSA-65 (FIPS 204) | NIST PQC standard | pk=1312 B, sk=4032 B, sig=3309 B (detached) | Covered by `pqcrypto-mldsa` 0.1 → `PQClean` reference impl; audited at PQC competition |
 | ML-KEM-768 (FIPS 203) | NIST PQC standard | pk=1184 B, sk=2400 B, ct=1568 B | Covered by `pqcrypto-mlkem` 0.1 → PQClean; same provenance |
 | BLS12-381 (IETF draft) | RFC + `blst` 0.3 | pk=48 B (G1), sig=96 B (G2) | Covered by `blst` v0.3.16 — Supranational-audited; existing DAG-S1 proptest gate |
-| `sha3_256_domain(tag, data)` | gsx-crypto local | 32 B | Verify the length-prefix (`u32::BE(tag.len()) || tag || data`) prevents boundary-shift attacks. Audited at gsx-crypto unit-test level. |
+| `sha3_256_domain(tag, data)` | suwappu-crypto local | 32 B | Verify the length-prefix (`u32::BE(tag.len()) || tag || data`) prevents boundary-shift attacks. Audited at suwappu-crypto unit-test level. |
 
 **Audit-firm expectation**: catalog these, confirm the
 upstream audits + version pins, NO detailed analysis required.
@@ -83,11 +83,11 @@ changes.
 
 | Track H primitive | Zcash analogue | Swap |
 |---|---|---|
-| Note commitment | Zcash Sapling note commitment (`NoteCommit^Sapling`) | Pedersen-hash-over-Jubjub → `SHA3-256-domain(GSX_L2_NOTE_COMMIT_V1, v_le ‖ r ‖ pk_owner)` |
-| Nullifier | Zcash Sapling `PRF^nf` | BLAKE2s_PRF → `SHA3-256-domain(GSX_L2_NULLIFIER_V1, nk ‖ cm ‖ position_le)` |
-| Nullifier key derivation | Zcash Sapling `nk` derivation | Jubjub-scalar-mult → `SHA3-256-domain(GSX_L2_NF_KEY_V1, sk_seed)` |
-| Viewing-key derivation (phase 2) | Zcash Sapling IVK derivation | Pallas-scalar-mult → `ML-KEM-768.KeyGen(SHA3-256-domain(GSX_L2_VIEWING_KEY_V1, sk_seed))` |
-| L2 address derivation | Ethereum address pattern | `keccak256(secp256k1_pk)[12..]` → `SHA3-256-domain(GSX_L2_ADDRESS_V1, ml_dsa_65_pk)[..20]` |
+| Note commitment | Zcash Sapling note commitment (`NoteCommit^Sapling`) | Pedersen-hash-over-Jubjub → `SHA3-256-domain(SUWAPPU_L2_NOTE_COMMIT_V1, v_le ‖ r ‖ pk_owner)` |
+| Nullifier | Zcash Sapling `PRF^nf` | BLAKE2s_PRF → `SHA3-256-domain(SUWAPPU_L2_NULLIFIER_V1, nk ‖ cm ‖ position_le)` |
+| Nullifier key derivation | Zcash Sapling `nk` derivation | Jubjub-scalar-mult → `SHA3-256-domain(SUWAPPU_L2_NF_KEY_V1, sk_seed)` |
+| Viewing-key derivation (phase 2) | Zcash Sapling IVK derivation | Pallas-scalar-mult → `ML-KEM-768.KeyGen(SHA3-256-domain(SUWAPPU_L2_VIEWING_KEY_V1, sk_seed))` |
+| L2 address derivation | Ethereum address pattern | `keccak256(secp256k1_pk)[12..]` → `SHA3-256-domain(SUWAPPU_L2_ADDRESS_V1, ml_dsa_65_pk)[..20]` |
 
 **Audit-firm expectation**: verify each swap is faithful to
 its Zcash analogue (the substitution doesn't introduce new
@@ -122,7 +122,7 @@ A short list. The audit budget concentrates here.
 |---|---|---|
 | **STARK-of-ML-DSA spend authorization** (H.3, lands later) | Verifying an ML-DSA-65 signature inside a SP1 zkVM guest program. Prior art: `sp1-ntt-gadget` (kota1026); academic: arya-STARK (eprint 2025/2238). **No published audit of any of these.** | Soundness of the in-circuit ML-DSA verification: does the STARK fail to verify exactly when the signature is invalid? Side-channel: does the prover leak the secret key? Constraint-system completeness. **Audit firms: Zellic / Veridise-ZK (Track A.5 #117) primary owner.** |
 | **PQ-only confidential construction** | NO production system uses ML-KEM-768 + ML-DSA-65 + SHA3-256 for a confidential transfer. The closest funded effort (EF ZKnox, Mar 2025) is at primitive selection; the closest academic (Lether, IACR 2026/076) is at protocol design. | High-level cryptographic argument: does the composition of standard PQ primitives + standard Zcash patterns inherit the security properties of each component? Or do compositional gaps emerge? |
-| **Domain-tag namespace** | All 5 L2 domain tags (`GSX_L2_NOTE_COMMIT_V1`, `GSX_L2_NULLIFIER_V1`, `GSX_L2_NF_KEY_V1`, `GSX_L2_VIEWING_KEY_V1`, `GSX_L2_ADDRESS_V1`) are foundation-pinned. Each derives a different protocol-critical value from the same input space. | Verify the namespace is collision-free + future-extensible. Check that `_V1` versioning provides a clean upgrade path. |
+| **Domain-tag namespace** | All 5 L2 domain tags (`SUWAPPU_L2_NOTE_COMMIT_V1`, `SUWAPPU_L2_NULLIFIER_V1`, `SUWAPPU_L2_NF_KEY_V1`, `SUWAPPU_L2_VIEWING_KEY_V1`, `SUWAPPU_L2_ADDRESS_V1`) are foundation-pinned. Each derives a different protocol-critical value from the same input space. | Verify the namespace is collision-free + future-extensible. Check that `_V1` versioning provides a clean upgrade path. |
 | **Phase-2 hybrid encryption envelope** | ML-KEM-768 + AES-256-GCM hybrid for memo encryption. Not novel in isolation (standard hybrid PKE pattern), but the **specific composition** with viewing-key derivation needs audit. | Verify the AEAD key derivation from the ML-KEM shared secret is sound + that the nonce derivation (planned: `SHA3-256(cm)[..12]`) is unique per encryption. |
 
 **Audit-firm expectation**: this is the substantive part of
@@ -169,7 +169,7 @@ exactly these adversary capabilities:
 | Malicious prover | Can choose what proof to submit | Cannot get an invalid batch accepted (verifier precompile rejects); the STARK soundness gives this |
 | Compromised viewing-key holder | Decrypts a delegator's memos | Sees `v` for that delegator's incoming notes; cannot forge spends |
 | Malicious delegator | Front-runs / griefs other delegators | Cannot extract value from confidential transfers; cannot retroactively rewrite commitments |
-| Quantum adversary post-Shor's | Breaks classical ECDSA + EC-DH | Track H confidentiality + spend authorization survives (ML-DSA + ML-KEM + SHA3 are PQ); the secp256k1 EVM tx-auth layer is classical (per Open Item #8 flip) but is OUT OF SCOPE for confidential value — see PQ-honesty matrix in `gsx-strategy/docs/mainnet-plan.md` Track H |
+| Quantum adversary post-Shor's | Breaks classical ECDSA + EC-DH | Track H confidentiality + spend authorization survives (ML-DSA + ML-KEM + SHA3 are PQ); the secp256k1 EVM tx-auth layer is classical (per Open Item #8 flip) but is OUT OF SCOPE for confidential value — see PQ-honesty matrix in `suwappu-strategy/docs/mainnet-plan.md` Track H |
 
 ### 4.2 Out-of-scope adversaries
 
@@ -193,14 +193,14 @@ EXPLICITLY in the published audit report:
    been formally audited against the Zcash spec before this
    audit.
 2. **Nullifier-key derivation is unpublished**: similar
-   reasoning — `nk = SHA3-256-domain(GSX_L2_NF_KEY_V1, sk_seed)`
+   reasoning — `nk = SHA3-256-domain(SUWAPPU_L2_NF_KEY_V1, sk_seed)`
    is a SHA3-swap of Zcash's Jubjub-scalar-mult, faithful but
    not formally audited.
 3. **Viewing-key derivation (phase 2) will be unpublished**:
    when phase 2 lands, the ML-KEM-768 seeded keygen will be
    audited as part of that PR's scope.
 4. **L2 address derivation is unpublished but obvious**:
-   `SHA3-256-domain(GSX_L2_ADDRESS_V1, ml_dsa_pk)[..20]`
+   `SHA3-256-domain(SUWAPPU_L2_ADDRESS_V1, ml_dsa_pk)[..20]`
    matches Ethereum's keccak-truncation pattern; the SHA3
    swap is mechanical.
 
@@ -224,17 +224,17 @@ against the existing test suite + add their own:
 
 | Component | Test location | Coverage |
 |---|---|---|
-| `commit_note` | `crates/gsx-l2-confidential/src/lib.rs` `tests` mod | determinism, distinguishes amount/randomness/owner, rejects wrong-width pk |
+| `commit_note` | `crates/suwappu-l2-confidential/src/lib.rs` `tests` mod | determinism, distinguishes amount/randomness/owner, rejects wrong-width pk |
 | `derive_nullifier_key` | same | determinism, distinguishes seeds |
 | `compute_nullifier` | same | determinism, distinguishes position/commitment/key |
 | `derive_l2_address` | same | determinism, distinguishes keys, 20-byte output |
-| `sha3_256_domain` | `crates/gsx-crypto/src/hash.rs` | length-prefix correctness, boundary-shift defense, KAT for empty + "abc" |
+| `sha3_256_domain` | `crates/suwappu-crypto/src/hash.rs` | length-prefix correctness, boundary-shift defense, KAT for empty + "abc" |
 | `hkdf_sha3_256` | same | determinism, info-label independence, salt independence, variable-length output |
 | Domain-tag distinctness | both crates | distinctness + identical-input separation |
-| Proptest property tests | both crates | 256 cases at default, 10k for sprint exit gates per GSXHELPER.md |
+| Proptest property tests | both crates | 256 cases at default, 10k for sprint exit gates per SUWAPPUHELPER.md |
 
 Audit firms should run the existing proptest at 100k cases
-(`PROPTEST_CASES=100000 cargo test -p gsx-l2-confidential`)
+(`PROPTEST_CASES=100000 cargo test -p suwappu-l2-confidential`)
 and add adversarial inputs (malformed pk, near-collision
 inputs, boundary-shift attempts).
 
@@ -248,7 +248,7 @@ The audit firms should produce, at minimum:
 |---|---|---|
 | **Published audit report** (sanitized) | Public — `docs/audit/<firm>-2026/` | PDF + signed integrity hash |
 | **Internal audit findings** (full) | Foundation security team | PDF + raw issue tracker dump |
-| **Test corpus contributions** | gsx-dag main branch | PR adding adversarial proptest cases |
+| **Test corpus contributions** | suwappu-dag main branch | PR adding adversarial proptest cases |
 | **Construction-provenance statement** | Audit report appendix | One paragraph confirming the §3 framing is honest |
 | **Composition-soundness argument** | Audit report body | High-level argument that the composition inherits each primitive's security |
 
@@ -261,20 +261,20 @@ engagement specs).
 
 ## 8. Cross-references
 
-- **Track H construction**: `gsx-strategy/docs/mainnet-plan.md`
+- **Track H construction**: `suwappu-strategy/docs/mainnet-plan.md`
   Track H §"The concrete construction"
-- **Phase 1 code**: `crates/gsx-l2-confidential/src/lib.rs`
+- **Phase 1 code**: `crates/suwappu-l2-confidential/src/lib.rs`
   (PR #180)
-- **Domain tags + HKDF**: `crates/gsx-crypto/src/hash.rs`
+- **Domain tags + HKDF**: `crates/suwappu-crypto/src/hash.rs`
   (PR #170)
-- **PQ-honesty matrix**: `gsx-strategy/docs/mainnet-plan.md`
+- **PQ-honesty matrix**: `suwappu-strategy/docs/mainnet-plan.md`
   Track H §"PQ-honesty posture" — explicit list of where PQ
   matters + where classical primitives are accepted at
   compatibility boundaries
 - **Custody requirements**: `docs/validator-custody-requirements.md`
   (E.2, PR #181) — user master-seed custody is the
   out-of-scope adversary boundary
-- **Verifier precompile**: `crates/gsx-l2-verifier-precompile/src/lib.rs`
+- **Verifier precompile**: `crates/suwappu-l2-verifier-precompile/src/lib.rs`
   (G2.2 phase 1, PR #179) — Track H circuits flow through
   this format-gate
 - **Lether** (academic precedent): IACR ePrint 2026/076 —

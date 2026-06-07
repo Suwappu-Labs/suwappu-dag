@@ -1,0 +1,19 @@
+[package]
+name = "suwappu-l2-verifier-precompile"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+description = "Suwappu DAG L1-side verifier precompile for the SP1-zkVM L2 (Track G Phase G2 #97). Stateless function: verify_l2_batch(proof, public_inputs, vk_hash) -> Result<()>. Filecoin/op-succinct shape."
+
+[dependencies]
+thiserror.workspace = true
+hex.workspace = true
+# SP1 Groth16 BN254 verifier (issue #97 / G2.2 phase 2). Provides
+# Groth16Verifier::verify + GROTH16_VK_BYTES (the SP1 verifier-circuit
+# VK baked in as a constant). The application VK hash is supplied at
+# call time by the substrate-side dispatch arm.
+sp1-verifier.workspace = true

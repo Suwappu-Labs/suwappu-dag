@@ -1,6 +1,6 @@
-# gsx-dag — Claude Code entry point
+# suwappu-dag — Claude Code entry point
 
-The project context for this repo lives in [`GSXHELPER.md`](./GSXHELPER.md).
+The project context for this repo lives in [`SUWAPPUHELPER.md`](./SUWAPPUHELPER.md).
 It is imported below so Claude Code auto-loads it at session start.
 
-@./GSXHELPER.md
+@./SUWAPPUHELPER.md

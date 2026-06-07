@@ -34,12 +34,12 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Setup gsx-db deploy key
+      - name: Setup suwappu-db deploy key
         env:
-          GSX_DB_DEPLOY_KEY: ${{ secrets.GSX_DB_DEPLOY_KEY }}
+          SUWAPPU_DB_DEPLOY_KEY: ${{ secrets.SUWAPPU_DB_DEPLOY_KEY }}
         run: |
           mkdir -p ~/.ssh
-          echo "$GSX_DB_DEPLOY_KEY" > ~/.ssh/id_ed25519
+          echo "$SUWAPPU_DB_DEPLOY_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan github.com >> ~/.ssh/known_hosts
 

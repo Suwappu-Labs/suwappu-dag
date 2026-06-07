@@ -1,6 +1,6 @@
 # IQ-003 — Fast-path lane architecture
 
-**Status:** Ratified 2026-05-15 — parallel-lane architecture shipped (DAG-S8 + DAG-S9 closed); K-binding cross-check live in `crates/gsx-node/src/daemon.rs::handle_fastpath_cert` (lines 837-872) with integration test `K_binding_violator_is_slashed` at lines 2556+
+**Status:** Ratified 2026-05-15 — parallel-lane architecture shipped (DAG-S8 + DAG-S9 closed); K-binding cross-check live in `crates/suwappu-node/src/daemon.rs::handle_fastpath_cert` (lines 837-872) with integration test `K_binding_violator_is_slashed` at lines 2556+
 **Owner:** consensus + fastpath
 **Date:** 2026-05-13 (ratified 2026-05-15)
 **Sprint:** DAG-S22 (downstream of S21) ✅
@@ -21,10 +21,10 @@ Paper §6.4 specifies a parallel fast-path certificate lane with:
 - 100% slashing for fast-path equivocation (paper Invariant 5)
 
 Current state:
-- `crates/gsx-fastpath/` ships the cert type, quorum aggregator, K-binding
+- `crates/suwappu-fastpath/` ships the cert type, quorum aggregator, K-binding
   proptest, and equivocation slashing proptest (DAG-S8 + S9).
-- `crates/gsx-node/src/wire.rs:91` defines `WireMessage::FastPath(FastPathCert)`.
-- `crates/gsx-node/src/daemon.rs:296-298` handler is a **no-op**:
+- `crates/suwappu-node/src/wire.rs:91` defines `WireMessage::FastPath(FastPathCert)`.
+- `crates/suwappu-node/src/daemon.rs:296-298` handler is a **no-op**:
   ```rust
   WireMessage::FastPath(_) | WireMessage::Ltp(_) => {
       // Lanes handled in follow-on commit. Ignored on the main lane.
@@ -68,7 +68,7 @@ Current state:
 2. **Migrate to Sui-style per-tx metadata in main-lane blocks.** Simpler
    wire surface (no `FastPathCert` message). But changes the slashing model
    from validator-slashing to client-self-DoS — breaks paper Invariant 5.
-3. **Defer fast-path entirely.** Keep `gsx-fastpath` as a library, never
+3. **Defer fast-path entirely.** Keep `suwappu-fastpath` as a library, never
    wire into the daemon. Acceptable for testnet; not acceptable for
    mainnet (loses the "sub-second finality for single-owner" property the
    paper claims).
@@ -95,7 +95,7 @@ once the main lane is committing reliably.
 
 ## Implementation (DAG-S22, post-S21)
 
-- New module `gsx-node/src/fastpath_lane.rs`.
+- New module `suwappu-node/src/fastpath_lane.rs`.
 - Fast-path proposer: detect single-owner intents in `pending_intents`,
   emit `FastPathCert` instead of main-lane block.
 - Fast-path receiver: aggregate quorum per fast-path cert.

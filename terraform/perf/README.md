@@ -1,4 +1,4 @@
-# GSX perf testnet — terraform
+# SUWAPPU perf testnet — terraform
 
 7-region AWS deployment for measuring main-lane consensus, fast-path, and
 LTP attestation latency under real geographic spread.
@@ -32,7 +32,7 @@ cd terraform/perf
 terraform init
 terraform plan \
   -var 'operator_ip_cidrs=["1.2.3.4/32","5.6.7.8/32"]' \
-  -var ssh_public_key="$(cat ~/.ssh/gsx-perf.pub)"
+  -var ssh_public_key="$(cat ~/.ssh/suwappu-perf.pub)"
 terraform apply ...
 ```
 

@@ -1,4 +1,4 @@
-# `apply.testnet.gsx.globalsettlement.com` — public-facing operator
+# `apply.testnet.suwappu.globalsettlement.com` — public-facing operator
 # application page. Phase B per
 # `~/.claude/plans/validated-prancing-curry.md`.
 #
@@ -27,9 +27,9 @@ variable "apply_form_typeform_url" {
 
 resource "aws_s3_bucket" "apply" {
   provider      = aws.us_east_1
-  bucket        = "gsx-dag-testnet-apply"
+  bucket        = "suwappu-dag-testnet-apply"
   force_destroy = true # SPA-style content; safe to wipe on stack rebuild
-  tags          = { Name = "gsx-dag-testnet-apply" }
+  tags          = { Name = "suwappu-dag-testnet-apply" }
 }
 
 resource "aws_s3_bucket_public_access_block" "apply" {
@@ -43,7 +43,7 @@ resource "aws_s3_bucket_public_access_block" "apply" {
 
 resource "aws_cloudfront_origin_access_control" "apply" {
   provider                          = aws.us_east_1
-  name                              = "gsx-testnet-apply-oac"
+  name                              = "suwappu-testnet-apply-oac"
   origin_access_control_origin_type = "s3"
   signing_behavior                  = "always"
   signing_protocol                  = "sigv4"
@@ -53,7 +53,7 @@ resource "aws_cloudfront_distribution" "apply" {
   provider            = aws.us_east_1
   enabled             = true
   is_ipv6_enabled     = true
-  comment             = "gsx-testnet operator-application landing page (Phase B)"
+  comment             = "suwappu-testnet operator-application landing page (Phase B)"
   default_root_object = "index.html"
   aliases             = ["apply.${var.testnet_subdomain}.${var.apex_domain}"]
   price_class         = "PriceClass_100"
@@ -94,7 +94,7 @@ resource "aws_cloudfront_distribution" "apply" {
     minimum_protocol_version = "TLSv1.2_2021"
   }
 
-  tags = { Name = "gsx-testnet-apply-cf" }
+  tags = { Name = "suwappu-testnet-apply-cf" }
 }
 
 resource "aws_s3_bucket_policy" "apply" {

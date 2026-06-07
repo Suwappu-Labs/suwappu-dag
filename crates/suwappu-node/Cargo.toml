@@ -1,0 +1,68 @@
+[package]
+name = "suwappu-node"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+description = "Top-level Suwappu DAG node binary: composes all layers into a running validator."
+
+[lib]
+name = "suwappu_node"
+path = "src/lib.rs"
+
+[[bin]]
+name = "suwappu-node"
+path = "src/main.rs"
+
+[[bin]]
+name = "suwappu-loadgen"
+path = "src/bin/suwappu-loadgen.rs"
+
+[[bin]]
+name = "suwappu-metrics"
+path = "src/bin/suwappu-metrics.rs"
+
+[dependencies]
+suwappu-crypto.workspace = true
+suwappu-consensus.workspace = true
+suwappu-authority.workspace = true
+suwappu-validator.workspace = true
+suwappu-fastpath.workspace = true
+suwappu-execution.workspace = true
+suwappu-precompiles.workspace = true
+suwappu-ltp.workspace = true
+suwappu-transport.workspace = true
+suwappu-rpc.workspace = true
+suwappu-mempool.workspace = true
+
+anyhow.workspace = true
+# G6: minimal Prometheus metrics endpoint (hand-rolled exporter,
+# `metrics_http.rs`). suwappu-rpc already pulls axum; consuming it here
+# adds nothing to the binary tree.
+axum = { version = "0.7", features = ["macros"] }
+bincode.workspace = true
+blake3.workspace = true
+clap.workspace = true
+hex.workspace = true
+# Pull the vendored-openssl flag into the linker graph so the musl build
+# bundles OpenSSL from source (reqwest -> openssl-sys transitive dep).
+openssl-sys.workspace = true
+# DAG-S31.3: parking_lot::Mutex for short critical sections on
+# votes/blocks/committed where the previous tokio::sync::Mutex's
+# async-yield overhead was wasted on sub-microsecond HashMap/HashSet
+# operations.
+parking_lot = "0.12"
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util", "sync", "time", "fs", "signal"] }
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

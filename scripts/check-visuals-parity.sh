@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # check-visuals-parity.sh — diff the cross-repo-shared visuals between
-# gsx-dag and gsx-lattice-protocol.
+# suwappu-dag and suwappu-lattice-protocol.
 #
 # Background: a small subset of docs/visuals/ is intentionally bit-identically
-# mirrored between gsx-dag and gsx-lattice-protocol so the LTP repo can render
-# the core stack diagrams without a cross-repo include. Canonical home: gsx-dag.
+# mirrored between suwappu-dag and suwappu-lattice-protocol so the LTP repo can render
+# the core stack diagrams without a cross-repo include. Canonical home: suwappu-dag.
 #
-# Each repo additionally carries its own diagrams (gsx-dag has the consensus
+# Each repo additionally carries its own diagrams (suwappu-dag has the consensus
 # deep-dives like commit-rule.md / governance-flow.md; LTP has dkg-ceremony.md,
 # corridor-quorum.md, etc.). Those are NOT checked here — only the explicit
 # `SHARED_FILES` allow-list is.
@@ -20,8 +20,8 @@
 # Usage:
 #   ./scripts/check-visuals-parity.sh [PEER_REPO_ROOT]
 #
-# If PEER_REPO_ROOT is omitted, default is `../gsx-lattice-protocol` relative
-# to the repo root (matches the user's `~/gsx-build/` checkout layout).
+# If PEER_REPO_ROOT is omitted, default is `../suwappu-lattice-protocol` relative
+# to the repo root (matches the user's `~/suwappu-build/` checkout layout).
 #
 # See docs/visuals/SOURCE-OF-TRUTH.md for the duplication policy + the
 # rationale for the allow-list shape.
@@ -29,16 +29,16 @@
 set -euo pipefail
 
 # Files that MUST be bit-identical across both repos. Add to this list when a
-# new diagram crosses the gsx-dag / LTP boundary (i.e., when LTP needs to
-# render it offline without resolving a relative path back to gsx-dag).
+# new diagram crosses the suwappu-dag / LTP boundary (i.e., when LTP needs to
+# render it offline without resolving a relative path back to suwappu-dag).
 SHARED_FILES=(
-  "mermaid/gsx-dag.md"
-  "mermaid/gsx-db.md"
+  "mermaid/suwappu-dag.md"
+  "mermaid/suwappu-db.md"
   "mermaid/ltp.md"
-  "gsx-dag.html"
-  "gsx-db.html"
+  "suwappu-dag.html"
+  "suwappu-db.html"
   "ltp.html"
-  "gsx-ecosystem-atlas.html"
+  "suwappu-ecosystem-atlas.html"
   "index.html"
 )
 
@@ -47,7 +47,7 @@ script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd "$script_dir/.." && pwd)
 
 our_visuals="$repo_root/docs/visuals"
-peer_root="${1:-$repo_root/../gsx-lattice-protocol}"
+peer_root="${1:-$repo_root/../suwappu-lattice-protocol}"
 peer_visuals="$peer_root/docs/visuals"
 
 if [[ ! -d "$our_visuals" ]]; then
@@ -98,6 +98,6 @@ done
 echo >&2
 echo "Shared set: ${SHARED_FILES[*]}" >&2
 echo "See docs/visuals/SOURCE-OF-TRUTH.md for the duplication policy." >&2
-echo "Canonical home is gsx-dag; edit there first, mirror to gsx-lattice-protocol." >&2
+echo "Canonical home is suwappu-dag; edit there first, mirror to suwappu-lattice-protocol." >&2
 
 exit 1

@@ -1,8 +1,8 @@
-// Persona webhook handler for the gsx-testnet operator program.
+// Persona webhook handler for the suwappu-testnet operator program.
 //
 // Wired by terraform/testnet/kyc.tf — receives Persona's webhook
-// posts at https://kyc.testnet.gsx.globalsettlement.com/persona-webhook
-// and upserts a row in the gsx_testnet_applications DynamoDB table
+// posts at https://kyc.testnet.suwappu.globalsettlement.com/persona-webhook
+// and upserts a row in the suwappu_testnet_applications DynamoDB table
 // keyed by the candidate's ML-DSA-65 pubkey hash.
 //
 // admit-operator.sh later queries this table by pubkey hash and
@@ -10,7 +10,7 @@
 //
 // HMAC validation is required: Persona signs each webhook body with
 // HMAC-SHA-256 using a shared secret set in Persona's dashboard.
-// The same secret lives in AWS Secrets Manager (gsx-testnet/kyc/persona
+// The same secret lives in AWS Secrets Manager (suwappu-testnet/kyc/persona
 // → field `webhook_secret`). We compare in constant time to defeat
 // timing-side-channel attacks.
 //

@@ -2,17 +2,17 @@
 #
 # Same shape as explorer.tf — S3 + CloudFront + Route53 + wildcard
 # ACM. The only differences:
-#   * Bucket name `gsx-dag-devnet-status` (separate from explorer).
-#   * DNS alias `status.devnet.gsx.globalsettlement.com`.
+#   * Bucket name `suwappu-dag-devnet-status` (separate from explorer).
+#   * DNS alias `status.devnet.suwappu.globalsettlement.com`.
 #   * No SPA fallback — status page is a single index.html + app.js,
 #     no client-side routing.
 
 resource "aws_s3_bucket" "status" {
   provider      = aws.us_east_1
-  bucket        = "gsx-dag-devnet-status"
+  bucket        = "suwappu-dag-devnet-status"
   force_destroy = false
 
-  tags = { Name = "gsx-devnet-status" }
+  tags = { Name = "suwappu-devnet-status" }
 }
 
 resource "aws_s3_bucket_public_access_block" "status" {
@@ -26,7 +26,7 @@ resource "aws_s3_bucket_public_access_block" "status" {
 
 resource "aws_cloudfront_origin_access_control" "status" {
   provider                          = aws.us_east_1
-  name                              = "gsx-devnet-status-oac"
+  name                              = "suwappu-devnet-status-oac"
   origin_access_control_origin_type = "s3"
   signing_behavior                  = "always"
   signing_protocol                  = "sigv4"
@@ -36,7 +36,7 @@ resource "aws_cloudfront_distribution" "status" {
   provider            = aws.us_east_1
   enabled             = true
   is_ipv6_enabled     = true
-  comment             = "gsx-devnet status page"
+  comment             = "suwappu-devnet status page"
   default_root_object = "index.html"
   aliases             = ["status.${var.devnet_subdomain}.${var.apex_domain}"]
   price_class         = "PriceClass_100"
@@ -68,7 +68,7 @@ resource "aws_cloudfront_distribution" "status" {
     minimum_protocol_version = "TLSv1.2_2021"
   }
 
-  tags = { Name = "gsx-devnet-status" }
+  tags = { Name = "suwappu-devnet-status" }
 }
 
 resource "aws_s3_bucket_policy" "status" {

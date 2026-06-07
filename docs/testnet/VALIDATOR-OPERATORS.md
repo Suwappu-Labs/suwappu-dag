@@ -1,6 +1,6 @@
-# gsx-testnet validator operators
+# suwappu-testnet validator operators
 
-This guide is for external operators who want to run a gsx-dag
+This guide is for external operators who want to run a suwappu-dag
 testnet validator and earn points that convert to mainnet token
 at launch.
 
@@ -10,7 +10,7 @@ For the foundation-internal infrastructure side, see
 
 ## TL;DR
 
-- You run **one gsx-node process** on your hardware that peers
+- You run **one suwappu-node process** on your hardware that peers
   with the foundation's 7 seed validators across the public
   internet.
 - You get **points per epoch** for: uptime, certs observed,
@@ -23,7 +23,7 @@ For the foundation-internal infrastructure side, see
 ## Eligibility
 
 - Foundation reviews each application via a public form at
-  `https://apply.testnet.gsx.globalsettlement.com`.
+  `https://apply.testnet.suwappu.globalsettlement.com`.
 - Must run hardware meeting the spec below.
 - Must complete KYC (jurisdictional restrictions per the
   foundation's token-distribution policy).
@@ -49,7 +49,7 @@ under-performing validators after 30 days; you can re-apply.
 
 ## Onboarding flow
 
-1. **Apply** at `https://apply.testnet.gsx.globalsettlement.com`.
+1. **Apply** at `https://apply.testnet.suwappu.globalsettlement.com`.
    Foundation runs basic identity + jurisdictional checks.
 2. **Foundation submits an `AdmitAuthority` governance Intent**
    with the ML-DSA-65 pubkey you mint locally (next step). Your
@@ -60,7 +60,7 @@ under-performing validators after 30 days; you can re-apply.
    event log to the foundation's S3 bucket; no other AWS access.
 4. **Wait one epoch boundary** for the admit Intent to land on
    chain. Once your `authority_id` shows up in
-   `gsx_getAuthorityRegistry`, you're live.
+   `suwappu_getAuthorityRegistry`, you're live.
 
 ## Local setup
 
@@ -68,9 +68,9 @@ under-performing validators after 30 days; you can re-apply.
 # 1. Mint your ML-DSA-65 + BLS12-381 keypairs OFF-HOST (e.g. on a
 #    fresh laptop you'll later wipe) — these will be your
 #    validator's signing keys.
-cargo build --release -p gsx-crypto --bin gsx-keygen
-./target/release/gsx-keygen --algo mldsa --sk ./mldsa.sk --pk ./mldsa.pk
-./target/release/gsx-keygen --algo bls --sk ./bls.sk --pk ./bls.pk
+cargo build --release -p suwappu-crypto --bin suwappu-keygen
+./target/release/suwappu-keygen --algo mldsa --sk ./mldsa.sk --pk ./mldsa.pk
+./target/release/suwappu-keygen --algo bls --sk ./bls.sk --pk ./bls.pk
 
 # 2. Send only the public keys to the foundation (the ML-DSA
 #    pubkey goes into the admit Intent). The secret keys NEVER
@@ -89,8 +89,8 @@ cat ./bls.pk | base64
 #     without a runtime install. Build matrix:
 #     `.github/workflows/release.yml`.
 TARGET=aarch64-unknown-linux-gnu   # or x86_64-unknown-linux-musl
-gh release download gsx-dag-v0.X.Y --pattern "*${TARGET}*"
-tar -xzf gsx-dag-0.X.Y-${TARGET}.tar.gz
+gh release download suwappu-dag-v0.X.Y --pattern "*${TARGET}*"
+tar -xzf suwappu-dag-0.X.Y-${TARGET}.tar.gz
 
 # 3b. Pull the public testnet genesis. While the wildcard
 #     ALB serves 503 (see DEVNET.md § "Public testnet" for the
@@ -98,14 +98,14 @@ tar -xzf gsx-dag-0.X.Y-${TARGET}.tar.gz
 #     bucket via its public-read prefix once foundation
 #     republishes it, OR via the URL the foundation sends in
 #     your onboarding packet.
-curl -fsSL https://testnet.gsx.globalsettlement.com/genesis.toml \
-    -o /etc/gsx/genesis.toml
+curl -fsSL https://testnet.suwappu.globalsettlement.com/genesis.toml \
+    -o /etc/suwappu/genesis.toml
 
 # 3c. Write your own node.toml. The seed peer list is in your
 #     onboarding packet (foundation hands out the per-region
 #     EIPs at admit time; the wildcard endpoint that publishes
 #     peers.txt is parked behind the same fronting follow-up).
-cat > /etc/gsx/node.toml <<EOF
+cat > /etc/suwappu/node.toml <<EOF
 self_id = "<your-operator-label>"
 authority_id = <your-assigned-id>
 listen = "0.0.0.0:9090"
@@ -114,32 +114,32 @@ rpc_listen = "127.0.0.1:9092"
 metrics_listen = "127.0.0.1:9093"
 round_ms = 250
 checkpoint_cadence_rounds = 1
-mldsa_secret_key_path = "/var/lib/gsx/mldsa.sk"
-bls_secret_key_path = "/var/lib/gsx/bls.sk"
-genesis_manifest_path = "/etc/gsx/genesis.toml"
-event_log_path = "/var/log/gsx/events.ndjson"
+mldsa_secret_key_path = "/var/lib/suwappu/mldsa.sk"
+bls_secret_key_path = "/var/lib/suwappu/bls.sk"
+genesis_manifest_path = "/etc/suwappu/genesis.toml"
+event_log_path = "/var/log/suwappu/events.ndjson"
 
 # Pull the current peer list as a starting point. You can prune
 # to your 3 closest geographically once latency telemetry lands.
-$(curl -fsSL https://testnet.gsx.globalsettlement.com/peers.txt)
+$(curl -fsSL https://testnet.suwappu.globalsettlement.com/peers.txt)
 EOF
 
 # 3d. Move your keys into place.
-sudo install -m 600 ./mldsa.sk /var/lib/gsx/mldsa.sk
-sudo install -m 600 ./bls.sk   /var/lib/gsx/bls.sk
-sudo chown -R gsx:gsx /var/lib/gsx
+sudo install -m 600 ./mldsa.sk /var/lib/suwappu/mldsa.sk
+sudo install -m 600 ./bls.sk   /var/lib/suwappu/bls.sk
+sudo chown -R suwappu:suwappu /var/lib/suwappu
 
 # 3e. systemd unit. Adapt the cloud-init from
 #     terraform/devnet/modules/validator/cloud-init.yaml.
-sudo systemctl enable gsx-node
-sudo systemctl start gsx-node
-journalctl -u gsx-node -f
+sudo systemctl enable suwappu-node
+sudo systemctl start suwappu-node
+journalctl -u suwappu-node -f
 ```
 
 ## Upload events.ndjson for points
 
 The points accumulator daemon (foundation-operated) reads from
-`s3://gsx-dag-testnet-validator-uploads/uploads/<your-authority-id>/`
+`s3://suwappu-dag-testnet-validator-uploads/uploads/<your-authority-id>/`
 every 5 minutes. You need to upload your rotated event log
 hourly. Use a sidecar cron + the AWS CLI:
 
@@ -148,22 +148,22 @@ hourly. Use a sidecar cron + the AWS CLI:
 # you. DO NOT use your foundation creds for anything else.
 sudo apt install -y awscli logrotate
 
-# Rotate gsx-node's events.ndjson hourly via logrotate:
-sudo tee /etc/logrotate.d/gsx-node-events <<'EOF'
-/var/log/gsx/events.ndjson {
+# Rotate suwappu-node's events.ndjson hourly via logrotate:
+sudo tee /etc/logrotate.d/suwappu-node-events <<'EOF'
+/var/log/suwappu/events.ndjson {
     hourly
     rotate 24
     compress
     delaycompress
     missingok
     notifempty
-    create 0644 gsx gsx
+    create 0644 suwappu suwappu
     postrotate
         # Upload the just-rotated file to S3.
-        AUTHORITY_ID="$(grep '^authority_id' /etc/gsx/node.toml | awk '{print $3}')"
+        AUTHORITY_ID="$(grep '^authority_id' /etc/suwappu/node.toml | awk '{print $3}')"
         TS=$(date -u +%Y-%m-%dT%H)
-        aws s3 cp /var/log/gsx/events.ndjson.1 \
-            "s3://gsx-dag-testnet-validator-uploads/uploads/$AUTHORITY_ID/$TS.ndjson" \
+        aws s3 cp /var/log/suwappu/events.ndjson.1 \
+            "s3://suwappu-dag-testnet-validator-uploads/uploads/$AUTHORITY_ID/$TS.ndjson" \
             --region us-east-1
     endscript
 }
@@ -172,7 +172,7 @@ EOF
 
 The foundation's accumulator reads the latest object per
 authority every 5 minutes and updates the leaderboard at
-`https://testnet.gsx.globalsettlement.com/leaderboard`.
+`https://testnet.suwappu.globalsettlement.com/leaderboard`.
 
 ## Points formula (summary)
 
@@ -209,7 +209,7 @@ of the total testnet allocation.
   upcoming protocol changes, scheduled maintenance windows, and
   leaderboard highlights.
 - Incidents page lives at
-  `https://status.testnet.gsx.globalsettlement.com`.
+  `https://status.testnet.suwappu.globalsettlement.com`.
 
 ## Tear-down
 
@@ -218,7 +218,7 @@ If you want to stop operating:
 1. Submit an exit ticket in `#validators`.
 2. Foundation submits an `ExitAuthority` governance Intent.
 3. At the next epoch boundary, your `authority_id` is removed
-   from the registry. Stop your `gsx-node` service.
+   from the registry. Stop your `suwappu-node` service.
 4. Your accumulated points are preserved through TGE; you
    continue to receive future airdrops per the published
    formula. Wallets used for points payout are KYC-bound.

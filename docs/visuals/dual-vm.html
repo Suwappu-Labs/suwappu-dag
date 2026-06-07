@@ -32,12 +32,12 @@
 <body>
   <div class="wrap">
     <div class="hero"><div class="dot"></div><h1>Dual-VM execution — EVM ↔ Move projection equality</h1></div>
-    <p class="sub">Paper §7. The gsx-execution thin adapter + the gsx-db substrate carries seven inherited invariants. Canonical source: <a href="mermaid/dual-vm.md">mermaid/dual-vm.md</a>.</p>
+    <p class="sub">Paper §7. The suwappu-execution thin adapter + the suwappu-db substrate carries seven inherited invariants. Canonical source: <a href="mermaid/dual-vm.md">mermaid/dual-vm.md</a>.</p>
 
     <div class="panel">
       <pre class="mermaid">
 flowchart LR
-    Intent["Intent inbound<br/>via consensus commit"] --> Exec["gsx-execution<br/>execute_block"]
+    Intent["Intent inbound<br/>via consensus commit"] --> Exec["suwappu-execution<br/>execute_block"]
     Exec --> Bridge["gsxdb-bridge<br/>Bridge::submit"]
     Bridge --> PBM["Polymorphic Balance Map<br/>BalanceSlot canonical state"]
     PBM --> Tree["State tree root<br/>+ proofs"]
@@ -55,16 +55,16 @@ flowchart LR
 
     <div class="notes">
       <h2>Single writer</h2>
-      <p>Only <code>gsxdb-bridge::Bridge::submit</code> (and the <code>BlockExecutor</code> invoked from <code>execute_block</code>) write to the <code>BalanceStore</code>. <code>gsxdb-lane</code> stages untrusted intents but cannot reach canonical state — the lane separation invariant (gsx-db Invariant 1).</p>
+      <p>Only <code>gsxdb-bridge::Bridge::submit</code> (and the <code>BlockExecutor</code> invoked from <code>execute_block</code>) write to the <code>BalanceStore</code>. <code>gsxdb-lane</code> stages untrusted intents but cannot reach canonical state — the lane separation invariant (suwappu-db Invariant 1).</p>
       <h2>Dual-VM projection equality (Invariant 2)</h2>
-      <p>EVM and Move read the same <code>BalanceSlot</code>. <code>balanceOf(addr)</code> and <code>Coin::value(addr)</code> agree at every committed block — gsx-db's <code>proptest dual_projection_equality_holds</code> enforces it at 10k cases.</p>
+      <p>EVM and Move read the same <code>BalanceSlot</code>. <code>balanceOf(addr)</code> and <code>Coin::value(addr)</code> agree at every committed block — suwappu-db's <code>proptest dual_projection_equality_holds</code> enforces it at 10k cases.</p>
       <h2>Replay equivalence (Invariant 7)</h2>
       <p>Recovery replay reapplies the committed blocks from the anchor pipeline and produces the same state tree root.</p>
       <h2>Why the chain inherits these</h2>
-      <p><code>gsx-execution</code> is a thin adapter; the substrate invariants travel through unchanged. See <a href="../architecture/gsx-db-bridge.md">architecture/gsx-db-bridge.md</a> for the full integration boundary writeup.</p>
+      <p><code>suwappu-execution</code> is a thin adapter; the substrate invariants travel through unchanged. See <a href="../architecture/suwappu-db-bridge.md">architecture/suwappu-db-bridge.md</a> for the full integration boundary writeup.</p>
     </div>
 
-    <div class="chips"><span class="chip">Paper §7</span><span class="chip">DAG-S10</span><span class="chip">DAG-S11</span><span class="chip">Invariant 4</span><span class="chip">gsx-db</span></div>
+    <div class="chips"><span class="chip">Paper §7</span><span class="chip">DAG-S10</span><span class="chip">DAG-S11</span><span class="chip">Invariant 4</span><span class="chip">suwappu-db</span></div>
     <div class="footer">Source: <a href="mermaid/dual-vm.md">mermaid/dual-vm.md</a> · See also: <a href="index.html">visual index</a></div>
   </div>
 </body>

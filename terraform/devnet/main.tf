@@ -1,4 +1,4 @@
-# 4-region GSX devnet — always-on, public RPC enabled, persistent state.
+# 4-region SUWAPPU devnet — always-on, public RPC enabled, persistent state.
 #
 # Region → authority_id mapping is stable. Any future region rotation MUST
 # regenerate genesis (the manifest's validators[N] must match
@@ -6,7 +6,7 @@
 #
 # vs. terraform/perf/:
 #   - 4 regions instead of 7 (cost + ops surface area).
-#   - Persistent EBS for /var/lib/gsx so daemon restarts and instance
+#   - Persistent EBS for /var/lib/suwappu so daemon restarts and instance
 #     replacements don't wipe consensus state.
 #   - rpc_listen ENABLED on each validator (perf testnet leaves it off
 #     to avoid measurement skew).
@@ -103,7 +103,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "artifacts" {
 # out-of-band before the alarm has somewhere to publish.
 resource "aws_sns_topic" "billing_alarm" {
   provider = aws.us_east_1
-  name     = "gsx-devnet-billing-alarm"
+  name     = "suwappu-devnet-billing-alarm"
 }
 
 resource "aws_sns_topic_subscription" "billing_alarm_email" {
@@ -116,7 +116,7 @@ resource "aws_sns_topic_subscription" "billing_alarm_email" {
 # CloudWatch billing metrics live in us-east-1 only (AWS global service).
 resource "aws_cloudwatch_metric_alarm" "monthly_billing_cap" {
   provider            = aws.us_east_1
-  alarm_name          = "gsx-devnet-monthly-billing-cap"
+  alarm_name          = "suwappu-devnet-monthly-billing-cap"
   alarm_description   = "Projected/actual monthly spend on the devnet exceeded ${var.monthly_billing_cap_usd} USD. Investigate via Cost Explorer."
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 1
@@ -149,10 +149,10 @@ module "us_east_1" {
   metrics_port      = var.metrics_port
   artifact_bucket   = aws_s3_bucket.artifacts.id
   state_volume_gb   = var.state_volume_gb
-  # devnet uses `gsx-dev-*` (not `gsx-devnet-*`) because the running
-  # testnet owns the `gsx-devnet-` namespace in the same AWS account.
+  # devnet uses `suwappu-dev-*` (not `suwappu-devnet-*`) because the running
+  # testnet owns the `suwappu-devnet-` namespace in the same AWS account.
   # See terraform/testnet/main.tf for the historical context.
-  name_prefix       = "gsx-dev-"
+  name_prefix       = "suwappu-dev-"
 }
 
 module "eu_west_1" {
@@ -169,10 +169,10 @@ module "eu_west_1" {
   metrics_port      = var.metrics_port
   artifact_bucket   = aws_s3_bucket.artifacts.id
   state_volume_gb   = var.state_volume_gb
-  # devnet uses `gsx-dev-*` (not `gsx-devnet-*`) because the running
-  # testnet owns the `gsx-devnet-` namespace in the same AWS account.
+  # devnet uses `suwappu-dev-*` (not `suwappu-devnet-*`) because the running
+  # testnet owns the `suwappu-devnet-` namespace in the same AWS account.
   # See terraform/testnet/main.tf for the historical context.
-  name_prefix       = "gsx-dev-"
+  name_prefix       = "suwappu-dev-"
 }
 
 module "ap_southeast_1" {
@@ -189,10 +189,10 @@ module "ap_southeast_1" {
   metrics_port      = var.metrics_port
   artifact_bucket   = aws_s3_bucket.artifacts.id
   state_volume_gb   = var.state_volume_gb
-  # devnet uses `gsx-dev-*` (not `gsx-devnet-*`) because the running
-  # testnet owns the `gsx-devnet-` namespace in the same AWS account.
+  # devnet uses `suwappu-dev-*` (not `suwappu-devnet-*`) because the running
+  # testnet owns the `suwappu-devnet-` namespace in the same AWS account.
   # See terraform/testnet/main.tf for the historical context.
-  name_prefix       = "gsx-dev-"
+  name_prefix       = "suwappu-dev-"
 }
 
 module "sa_east_1" {
@@ -209,8 +209,8 @@ module "sa_east_1" {
   metrics_port      = var.metrics_port
   artifact_bucket   = aws_s3_bucket.artifacts.id
   state_volume_gb   = var.state_volume_gb
-  # devnet uses `gsx-dev-*` (not `gsx-devnet-*`) because the running
-  # testnet owns the `gsx-devnet-` namespace in the same AWS account.
+  # devnet uses `suwappu-dev-*` (not `suwappu-devnet-*`) because the running
+  # testnet owns the `suwappu-devnet-` namespace in the same AWS account.
   # See terraform/testnet/main.tf for the historical context.
-  name_prefix       = "gsx-dev-"
+  name_prefix       = "suwappu-dev-"
 }

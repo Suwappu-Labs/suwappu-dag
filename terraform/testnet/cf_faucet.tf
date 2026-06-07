@@ -1,4 +1,4 @@
-# CloudFront distribution fronting `faucet.testnet.gsx.globalsettlement.com`.
+# CloudFront distribution fronting `faucet.testnet.suwappu.globalsettlement.com`.
 #
 # Phase 1 fronting per
 # /Users/mongolraider/.claude/plans/validated-prancing-curry.md.
@@ -17,7 +17,7 @@ resource "aws_cloudfront_distribution" "faucet" {
   provider        = aws.us_east_1
   enabled         = true
   is_ipv6_enabled = true
-  comment         = "gsx-testnet faucet fronting (Phase 1)"
+  comment         = "suwappu-testnet faucet fronting (Phase 1)"
   aliases         = ["faucet.${var.testnet_subdomain}.${var.apex_domain}"]
   price_class     = "PriceClass_100"
   web_acl_id      = aws_wafv2_web_acl.testnet_cf.arn
@@ -60,7 +60,7 @@ resource "aws_cloudfront_distribution" "faucet" {
     minimum_protocol_version = "TLSv1.2_2021"
   }
 
-  tags = { Name = "gsx-testnet-faucet-cf" }
+  tags = { Name = "suwappu-testnet-faucet-cf" }
 }
 
 output "cf_faucet_distribution_id" {

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Local-devnet bootstrap for gsx-dag.
+# Local-devnet bootstrap for suwappu-dag.
 #
 # Subcommands (docker):
 #   up      build the docker image + generate genesis + start 4 nodes
@@ -7,11 +7,11 @@
 #   reset   stop containers AND wipe target/devnet/ + log volumes
 #   logs    tail v0's stdout (Ctrl-C to exit)
 #   curl    quick sanity-check that v0's JSON-RPC is alive
-#   faucet  build + run gsx-faucet against the local cluster (foreground)
+#   faucet  build + run suwappu-faucet against the local cluster (foreground)
 #
-# Subcommands (baremetal — NO docker; runs N gsx-node processes on
+# Subcommands (baremetal — NO docker; runs N suwappu-node processes on
 # localhost with distinct per-node ports):
-#   up-baremetal [N]      build gsx-node + genesis + launch N nodes (default 4)
+#   up-baremetal [N]      build suwappu-node + genesis + launch N nodes (default 4)
 #   down-baremetal        stop the baremetal nodes (keeps target/devnet/)
 #   status-baremetal      per-node epoch/committed-round via JSON-RPC
 #   logs-baremetal [i]    tail v<i>'s stdout (default v0)
@@ -31,8 +31,8 @@ cmd=${1:-up}
 
 case "$cmd" in
   up)
-    echo "==> building gsx-keygen (host-side, needed to mint the faucet ML-DSA key)..."
-    cargo build --release -p gsx-crypto --bin gsx-keygen
+    echo "==> building suwappu-keygen (host-side, needed to mint the faucet ML-DSA key)..."
+    cargo build --release -p suwappu-crypto --bin suwappu-keygen
     export PATH="$repo_root/target/release:$PATH"
     echo
     echo "==> generating devnet genesis (4 nodes) under target/devnet/..."
@@ -50,10 +50,10 @@ client_listen = "0.0.0.0:9091"
 rpc_listen = "0.0.0.0:9092"
 round_ms = 250
 checkpoint_cadence_rounds = 1
-mldsa_secret_key_path = "/etc/gsx/mldsa.sk"
-bls_secret_key_path = "/etc/gsx/bls.sk"
-genesis_manifest_path = "/etc/gsx/genesis.toml"
-event_log_path = "/var/log/gsx/events.ndjson"
+mldsa_secret_key_path = "/etc/suwappu/mldsa.sk"
+bls_secret_key_path = "/etc/suwappu/bls.sk"
+genesis_manifest_path = "/etc/suwappu/genesis.toml"
+event_log_path = "/var/log/suwappu/events.ndjson"
 
 # Track-B (B1) hardening defaults — overridable per-deployment.
 max_client_connections = 256
@@ -73,7 +73,7 @@ EOF
       done
     done
     echo
-    echo "==> building gsx-dag:devnet image (cold builds take ~10 min)..."
+    echo "==> building suwappu-dag:devnet image (cold builds take ~10 min)..."
     docker compose build
     echo
     echo "==> starting cluster..."
@@ -83,7 +83,7 @@ EOF
     for _ in $(seq 1 30); do
       if curl -sfX POST http://127.0.0.1:9092 \
            -H 'content-type: application/json' \
-           -d '{"jsonrpc":"2.0","id":1,"method":"gsx_getEpoch","params":null}' \
+           -d '{"jsonrpc":"2.0","id":1,"method":"suwappu_getEpoch","params":null}' \
            > /dev/null 2>&1; then
         echo "    v0 JSON-RPC live at http://127.0.0.1:9092"
         break
@@ -120,22 +120,22 @@ EOF
   curl)
     curl -sX POST http://127.0.0.1:9092 \
       -H 'content-type: application/json' \
-      -d '{"jsonrpc":"2.0","id":1,"method":"gsx_getEpoch","params":null}' \
+      -d '{"jsonrpc":"2.0","id":1,"method":"suwappu_getEpoch","params":null}' \
       | python3 -m json.tool
     ;;
 
   up-baremetal)
-    # No-docker path: build gsx-node, generate genesis, write per-node
+    # No-docker path: build suwappu-node, generate genesis, write per-node
     # configs with DISTINCT localhost ports (the docker `up` reuses one
     # port set per container IP, which collides on a single host), then
-    # launch N gsx-node processes detached. State lives under target/devnet/.
+    # launch N suwappu-node processes detached. State lives under target/devnet/.
     n=${2:-4}
-    bin="target/release/gsx-node"
-    # gen-devnet-genesis.py invokes gsx-keygen to mint the faucet ML-DSA
+    bin="target/release/suwappu-node"
+    # gen-devnet-genesis.py invokes suwappu-keygen to mint the faucet ML-DSA
     # key, so it must be on PATH before genesis generation.
-    echo "==> building gsx-keygen + gsx-node (release)..."
-    cargo build --release -p gsx-crypto --bin gsx-keygen
-    cargo build --release -p gsx-node
+    echo "==> building suwappu-keygen + suwappu-node (release)..."
+    cargo build --release -p suwappu-crypto --bin suwappu-keygen
+    cargo build --release -p suwappu-node
     export PATH="$repo_root/target/release:$PATH"
     echo "==> generating devnet genesis ($n nodes) under target/devnet/..."
     python3 scripts/gen-devnet-genesis.py --num-nodes "$n" --out-dir target/devnet
@@ -192,7 +192,7 @@ EOF
       fi
       if curl -sfX POST http://127.0.0.1:9092 \
            -H 'content-type: application/json' \
-           -d '{"jsonrpc":"2.0","id":1,"method":"gsx_getEpoch","params":null}' \
+           -d '{"jsonrpc":"2.0","id":1,"method":"suwappu_getEpoch","params":null}' \
            > /dev/null 2>&1; then
         echo "    v0 JSON-RPC live at http://127.0.0.1:9092"
         rpc_up=1
@@ -215,7 +215,7 @@ EOF
   down-baremetal)
     if [ -f target/devnet/baremetal.pids ]; then
       while read -r pid; do
-        # Only signal the pid if it's still OUR gsx-node. A stale pidfile
+        # Only signal the pid if it's still OUR suwappu-node. A stale pidfile
         # (after a reboot or an unclean exit) can list pids the OS has since
         # reused for unrelated processes — match the config-path cmdline
         # before SIGTERM so we never kill a bystander.
@@ -239,7 +239,7 @@ EOF
       printf 'v%s (rpc %s): ' "$i" "$rpc"
       curl -sX POST "http://127.0.0.1:${rpc}" \
         -H 'content-type: application/json' \
-        -d '{"jsonrpc":"2.0","id":1,"method":"gsx_getEpoch","params":null}' 2> /dev/null \
+        -d '{"jsonrpc":"2.0","id":1,"method":"suwappu_getEpoch","params":null}' 2> /dev/null \
         | python3 -c 'import sys,json;d=json.load(sys.stdin).get("result",{});print("epoch",d.get("current"),"committed_round",d.get("latest_committed_round"))' 2> /dev/null \
         || echo "(no response)"
     done
@@ -256,8 +256,8 @@ EOF
       echo "       Run ./scripts/devnet-local.sh up first." >&2
       exit 2
     fi
-    echo "==> building gsx-faucet..."
-    cargo build --release -p gsx-faucet
+    echo "==> building suwappu-faucet..."
+    cargo build --release -p suwappu-faucet
     network_id=$(awk -F'"' '/^network_id = / { print $2; exit }' target/devnet/genesis.toml)
     faucet_addr=$(cat target/devnet/faucet/address.hex)
     echo
@@ -266,7 +266,7 @@ EOF
     echo "    faucet address = ${faucet_addr}"
     echo "    rpc            = http://127.0.0.1:9092"
     echo
-    exec ./target/release/gsx-faucet \
+    exec ./target/release/suwappu-faucet \
       --rpc-url http://127.0.0.1:9092 \
       --secret-key-path target/devnet/faucet/mldsa.sk \
       --public-key-path target/devnet/faucet/mldsa.pk \

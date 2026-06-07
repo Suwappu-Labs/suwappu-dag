@@ -1,30 +1,30 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/gsx-crypto",
-    "crates/gsx-consensus",
-    "crates/gsx-authority",
-    "crates/gsx-validator",
-    "crates/gsx-fastpath",
-    "crates/gsx-execution",
-    "crates/gsx-precompiles",
-    "crates/gsx-ltp",
-    "crates/gsx-transport",
-    "crates/gsx-node",
-    "crates/gsx-rpc",
-    "crates/gsx-indexer",
-    "crates/gsx-mempool",
-    "crates/gsx-faucet",
-    "crates/gsx-top",
-    "crates/gsx-validator-program",
-    "crates/gsx-mldsa-precompile",
-    "crates/gsx-l2-verifier-precompile",
-    "crates/gsx-l2-confidential",
-    "crates/gsx-l2-bridge",
-    "crates/gsx-l2-sequencer",
-    "crates/gsx-l2-stm",
-    "crates/gsx-l2-sequencer-daemon",
-    "crates/gsx-l2-prover",
+    "crates/suwappu-crypto",
+    "crates/suwappu-consensus",
+    "crates/suwappu-authority",
+    "crates/suwappu-validator",
+    "crates/suwappu-fastpath",
+    "crates/suwappu-execution",
+    "crates/suwappu-precompiles",
+    "crates/suwappu-ltp",
+    "crates/suwappu-transport",
+    "crates/suwappu-node",
+    "crates/suwappu-rpc",
+    "crates/suwappu-indexer",
+    "crates/suwappu-mempool",
+    "crates/suwappu-faucet",
+    "crates/suwappu-top",
+    "crates/suwappu-validator-program",
+    "crates/suwappu-mldsa-precompile",
+    "crates/suwappu-l2-verifier-precompile",
+    "crates/suwappu-l2-confidential",
+    "crates/suwappu-l2-bridge",
+    "crates/suwappu-l2-sequencer",
+    "crates/suwappu-l2-stm",
+    "crates/suwappu-l2-sequencer-daemon",
+    "crates/suwappu-l2-prover",
     "clients/rust-sdk",
 ]
 # B4: keep the cargo-fuzz workspace out of the main one — cargo-fuzz
@@ -32,47 +32,47 @@ members = [
 # that would force the whole workspace through nightly. Run via
 # `cd fuzz && cargo +nightly fuzz run <target>`. See
 # `docs/architecture/security.md` for the full procedure.
-exclude = ["fuzz", "examples/rust", "crates/gsx-l2-stm/program"]
+exclude = ["fuzz", "examples/rust", "crates/suwappu-l2-stm/program"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.78"
 license = "Apache-2.0"
-repository = "https://github.com/GlobalSettlementNetwork/gsx-dag"
-authors = ["Global Settlement Network <eng@globalsettlement.com>"]
+repository = "https://github.com/suwappu/suwappu-dag"
+authors = ["Suwappu <eng@globalsettlement.com>"]
 # Workspace-internal crates. These are not published to crates.io; consuming
 # code uses git/path dependencies on the repo. This also lets cargo-deny
 # accept the workspace path wildcards under `[bans] allow-wildcard-paths`.
 publish = false
 
 [workspace.dependencies]
-# External: gsx-db state substrate (paper §7.4)
+# External: suwappu-db state substrate (paper §7.4)
 gsxdb-bridge = { git = "https://github.com/GlobalSettlementNetwork/gsx-db.git", tag = "v0.1.0" }
 gsxdb-state = { git = "https://github.com/GlobalSettlementNetwork/gsx-db.git", tag = "v0.1.0" }
 
 # Internal
-gsx-crypto = { path = "crates/gsx-crypto", default-features = false }
-gsx-consensus = { path = "crates/gsx-consensus", default-features = false }
-gsx-authority = { path = "crates/gsx-authority", default-features = false }
-gsx-validator = { path = "crates/gsx-validator", default-features = false }
-gsx-fastpath = { path = "crates/gsx-fastpath" }
-gsx-execution = { path = "crates/gsx-execution" }
-gsx-precompiles = { path = "crates/gsx-precompiles" }
-gsx-ltp = { path = "crates/gsx-ltp" }
-gsx-transport = { path = "crates/gsx-transport" }
-gsx-rpc = { path = "crates/gsx-rpc" }
-gsx-indexer = { path = "crates/gsx-indexer" }
-gsx-mempool = { path = "crates/gsx-mempool" }
-gsx-faucet = { path = "crates/gsx-faucet" }
-gsx-validator-program = { path = "crates/gsx-validator-program" }
-gsx-l2-verifier-precompile = { path = "crates/gsx-l2-verifier-precompile" }
-gsx-l2-confidential = { path = "crates/gsx-l2-confidential" }
-gsx-l2-bridge = { path = "crates/gsx-l2-bridge" }
-gsx-l2-sequencer = { path = "crates/gsx-l2-sequencer" }
-gsx-l2-stm = { path = "crates/gsx-l2-stm" }
-gsx-l2-sequencer-daemon = { path = "crates/gsx-l2-sequencer-daemon" }
-gsx-client = { path = "clients/rust-sdk" }
+suwappu-crypto = { path = "crates/suwappu-crypto", default-features = false }
+suwappu-consensus = { path = "crates/suwappu-consensus", default-features = false }
+suwappu-authority = { path = "crates/suwappu-authority", default-features = false }
+suwappu-validator = { path = "crates/suwappu-validator", default-features = false }
+suwappu-fastpath = { path = "crates/suwappu-fastpath" }
+suwappu-execution = { path = "crates/suwappu-execution" }
+suwappu-precompiles = { path = "crates/suwappu-precompiles" }
+suwappu-ltp = { path = "crates/suwappu-ltp" }
+suwappu-transport = { path = "crates/suwappu-transport" }
+suwappu-rpc = { path = "crates/suwappu-rpc" }
+suwappu-indexer = { path = "crates/suwappu-indexer" }
+suwappu-mempool = { path = "crates/suwappu-mempool" }
+suwappu-faucet = { path = "crates/suwappu-faucet" }
+suwappu-validator-program = { path = "crates/suwappu-validator-program" }
+suwappu-l2-verifier-precompile = { path = "crates/suwappu-l2-verifier-precompile" }
+suwappu-l2-confidential = { path = "crates/suwappu-l2-confidential" }
+suwappu-l2-bridge = { path = "crates/suwappu-l2-bridge" }
+suwappu-l2-sequencer = { path = "crates/suwappu-l2-sequencer" }
+suwappu-l2-stm = { path = "crates/suwappu-l2-stm" }
+suwappu-l2-sequencer-daemon = { path = "crates/suwappu-l2-sequencer-daemon" }
+suwappu-client = { path = "clients/rust-sdk" }
 
 # Post-quantum primitives (FIPS 203 / 204)
 pqcrypto-mldsa = "0.1"
@@ -90,12 +90,12 @@ hkdf = "0.12"
 # Constant-time operations (C6 hardening — side-channel resistance)
 subtle = "2.6"
 
-# Erasure coding (RFC 6330) — gsx-transport block shred/reconstruct
+# Erasure coding (RFC 6330) — suwappu-transport block shred/reconstruct
 raptorq = "2.0"
 
 # SP1 Groth16 BN254 verifier (Track G G2.2 phase 2 — issue #97).
 # Pulls in the BN254 pairing dep tree; isolated to
-# `gsx-l2-verifier-precompile` so the rest of the workspace doesn't
+# `suwappu-l2-verifier-precompile` so the rest of the workspace doesn't
 # absorb its transitive deps. Verifier is `no_std`-compatible per
 # Succinct's docs but we use std-friendly default features.
 sp1-verifier = { version = "4", default-features = false }
@@ -110,7 +110,7 @@ hex = "0.4"
 # CLI
 clap = { version = "4", features = ["derive"] }
 
-# HTTP client (used by gsx-l2-sequencer-daemon's RpcL1Client to
+# HTTP client (used by suwappu-l2-sequencer-daemon's RpcL1Client to
 # call the L1 node's JSON-RPC endpoint).
 reqwest = { version = "0.11", features = ["json"] }
 

@@ -33,7 +33,7 @@
 
 resource "aws_lb" "rpc" {
   provider           = aws.us_east_1
-  name               = "gsx-devnet-rpc"
+  name               = "suwappu-devnet-rpc"
   internal           = false
   load_balancer_type = "application"
 
@@ -46,12 +46,12 @@ resource "aws_lb" "rpc" {
 
   drop_invalid_header_fields = true
 
-  tags = { Name = "gsx-devnet-rpc-alb" }
+  tags = { Name = "suwappu-devnet-rpc-alb" }
 }
 
 resource "aws_lb_target_group" "rpc" {
   provider    = aws.us_east_1
-  name        = "gsx-devnet-rpc-tg"
+  name        = "suwappu-devnet-rpc-tg"
   port        = var.rpc_port
   protocol    = "HTTP"
   target_type = "ip"
@@ -77,7 +77,7 @@ resource "aws_lb_target_group" "rpc" {
     enabled = false
   }
 
-  tags = { Name = "gsx-devnet-rpc-tg" }
+  tags = { Name = "suwappu-devnet-rpc-tg" }
 }
 
 # NOTE: ALB target_type = "ip" rejects public IPs that are not in the
@@ -123,7 +123,7 @@ resource "aws_lb_listener" "rpc_http_redirect" {
 
 resource "aws_lb" "faucet" {
   provider           = aws.us_east_1
-  name               = "gsx-devnet-faucet"
+  name               = "suwappu-devnet-faucet"
   internal           = false
   load_balancer_type = "application"
   subnets            = aws_subnet.alb_public.*.id
@@ -131,12 +131,12 @@ resource "aws_lb" "faucet" {
 
   drop_invalid_header_fields = true
 
-  tags = { Name = "gsx-devnet-faucet-alb" }
+  tags = { Name = "suwappu-devnet-faucet-alb" }
 }
 
 resource "aws_lb_target_group" "faucet" {
   provider    = aws.us_east_1
-  name        = "gsx-devnet-faucet-tg"
+  name        = "suwappu-devnet-faucet-tg"
   port        = 8080
   protocol    = "HTTP"
   target_type = "ip"
@@ -154,7 +154,7 @@ resource "aws_lb_target_group" "faucet" {
     timeout             = 10
   }
 
-  tags = { Name = "gsx-devnet-faucet-tg" }
+  tags = { Name = "suwappu-devnet-faucet-tg" }
 }
 
 # NOTE: same ALB-public-IP limitation as the RPC target group above.
@@ -199,7 +199,7 @@ resource "aws_vpc" "alb" {
   provider             = aws.us_east_1
   cidr_block           = "10.43.20.0/24"
   enable_dns_hostnames = true
-  tags                 = { Name = "gsx-devnet-alb-vpc" }
+  tags                 = { Name = "suwappu-devnet-alb-vpc" }
 }
 
 # ALBs require subnets in ≥ 2 AZs.
@@ -210,13 +210,13 @@ resource "aws_subnet" "alb_public" {
   cidr_block              = cidrsubnet(aws_vpc.alb.cidr_block, 2, count.index)
   availability_zone       = ["us-east-1a", "us-east-1b"][count.index]
   map_public_ip_on_launch = true
-  tags                    = { Name = "gsx-devnet-alb-subnet-${count.index}" }
+  tags                    = { Name = "suwappu-devnet-alb-subnet-${count.index}" }
 }
 
 resource "aws_internet_gateway" "alb" {
   provider = aws.us_east_1
   vpc_id   = aws_vpc.alb.id
-  tags     = { Name = "gsx-devnet-alb-igw" }
+  tags     = { Name = "suwappu-devnet-alb-igw" }
 }
 
 resource "aws_route_table" "alb_public" {
@@ -226,7 +226,7 @@ resource "aws_route_table" "alb_public" {
     cidr_block = "0.0.0.0/0"
     gateway_id = aws_internet_gateway.alb.id
   }
-  tags = { Name = "gsx-devnet-alb-rt" }
+  tags = { Name = "suwappu-devnet-alb-rt" }
 }
 
 resource "aws_route_table_association" "alb_public" {
@@ -238,7 +238,7 @@ resource "aws_route_table_association" "alb_public" {
 
 resource "aws_security_group" "alb_rpc" {
   provider    = aws.us_east_1
-  name        = "gsx-devnet-alb-rpc-sg"
+  name        = "suwappu-devnet-alb-rpc-sg"
   description = "RPC ALB ingress"
   vpc_id      = aws_vpc.alb.id
 
@@ -264,12 +264,12 @@ resource "aws_security_group" "alb_rpc" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  tags = { Name = "gsx-devnet-alb-rpc-sg" }
+  tags = { Name = "suwappu-devnet-alb-rpc-sg" }
 }
 
 resource "aws_security_group" "alb_faucet" {
   provider    = aws.us_east_1
-  name        = "gsx-devnet-alb-faucet-sg"
+  name        = "suwappu-devnet-alb-faucet-sg"
   description = "Faucet ALB ingress"
   vpc_id      = aws_vpc.alb.id
 
@@ -295,5 +295,5 @@ resource "aws_security_group" "alb_faucet" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  tags = { Name = "gsx-devnet-alb-faucet-sg" }
+  tags = { Name = "suwappu-devnet-alb-faucet-sg" }
 }

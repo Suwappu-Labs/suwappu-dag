@@ -14,11 +14,11 @@
 
 resource "aws_globalaccelerator_accelerator" "rpc" {
   provider        = aws.us_east_1
-  name            = "gsx-testnet-rpc"
+  name            = "suwappu-testnet-rpc"
   ip_address_type = "IPV4"
   enabled         = true
 
-  tags = { Name = "gsx-testnet-rpc-ga" }
+  tags = { Name = "suwappu-testnet-rpc-ga" }
 }
 
 # TCP passthrough on 443 (RPC + WS over TLS) and 80 (the ALB issues the

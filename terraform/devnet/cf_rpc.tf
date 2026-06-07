@@ -1,4 +1,4 @@
-# CloudFront distribution fronting `rpc.devnet.gsx.globalsettlement.com`
+# CloudFront distribution fronting `rpc.devnet.suwappu.globalsettlement.com`
 # (and the `wss://ws.devnet.*` path for event subscriptions).
 #
 # Ported from terraform/testnet/cf_rpc.tf, adapted to the 4-region
@@ -21,7 +21,7 @@
 # CloudFront's `custom_origin_config.domain_name` requires a publicly
 # resolvable DNS name at distribution-create time, and a raw IP is
 # rejected. We deliberately do NOT use names in the devnet subzone
-# (e.g. `origin-us-east-1.devnet.gsx.globalsettlement.com`) — that
+# (e.g. `origin-us-east-1.devnet.suwappu.globalsettlement.com`) — that
 # subzone is created in this same `terraform apply`, and its NS
 # records are not yet published into the apex zone on first bring-up.
 # CloudFront's distribution-creation validator therefore can't resolve
@@ -70,7 +70,7 @@
 #
 # The CloudFront → origin TCP connection appears, from the origin's
 # perspective, to come from a CloudFront edge IP — NOT the viewer's.
-# gsx-rpc's per-IP token bucket therefore can't read the viewer's
+# suwappu-rpc's per-IP token bucket therefore can't read the viewer's
 # real IP from the socket peer address; if it does, the bucket key
 # collapses to a handful of edge IPs and a single viewer can drain
 # the limit for everyone.
@@ -87,7 +87,7 @@
 # bucket needs to bind to real client IPs through CloudFront, the
 # follow-on is to (a) restrict the validator security group RPC
 # port to the `com.amazonaws.global.cloudfront.origin-facing` prefix
-# list + operator CIDRs, and (b) configure gsx-rpc to read XFF /
+# list + operator CIDRs, and (b) configure suwappu-rpc to read XFF /
 # `CloudFront-Viewer-Address`. Both are out of scope for this PR
 # — the immediate fix here is the bootstrap-blocking origin DNS
 # above.)
@@ -112,7 +112,7 @@ resource "aws_cloudfront_distribution" "rpc" {
   provider        = aws.us_east_1
   enabled         = true
   is_ipv6_enabled = true
-  comment         = "gsx-devnet JSON-RPC + WebSocket fronting"
+  comment         = "suwappu-devnet JSON-RPC + WebSocket fronting"
   aliases = [
     "rpc.${var.devnet_subdomain}.${var.apex_domain}",
     "ws.${var.devnet_subdomain}.${var.apex_domain}",
@@ -181,7 +181,7 @@ resource "aws_cloudfront_distribution" "rpc" {
 
   # JSON-RPC over POST. CachingDisabled + AllViewer (AWS-managed
   # policies) — TTL 0, forward all headers/methods to the origin so
-  # X-Forwarded-For / CloudFront-Viewer-Address reach gsx-rpc for
+  # X-Forwarded-For / CloudFront-Viewer-Address reach suwappu-rpc for
   # the per-IP bucket (see the header comment).
   default_cache_behavior {
     target_origin_id       = "validator-failover"
@@ -220,7 +220,7 @@ resource "aws_cloudfront_distribution" "rpc" {
     minimum_protocol_version = "TLSv1.2_2021"
   }
 
-  tags = { Name = "gsx-devnet-rpc-cf" }
+  tags = { Name = "suwappu-devnet-rpc-cf" }
 }
 
 output "cf_rpc_distribution_id" {

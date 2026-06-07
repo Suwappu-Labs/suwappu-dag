@@ -2,16 +2,16 @@
 #
 # S3 bucket holds the built artifacts (Vite emits a `dist/` directory).
 # CloudFront fronts it with the wildcard ACM cert + DNS record for
-# explorer.devnet.gsx.globalsettlement.com. The GitHub Actions
+# explorer.devnet.suwappu.globalsettlement.com. The GitHub Actions
 # workflow at .github/workflows/explorer.yml runs `vite build` + s3
 # sync + invalidation on every push to main.
 
 resource "aws_s3_bucket" "explorer" {
   provider      = aws.us_east_1
-  bucket        = "gsx-dag-devnet-explorer"
+  bucket        = "suwappu-dag-devnet-explorer"
   force_destroy = false # explorer is published; don't accidentally wipe.
 
-  tags = { Name = "gsx-devnet-explorer" }
+  tags = { Name = "suwappu-devnet-explorer" }
 }
 
 resource "aws_s3_bucket_public_access_block" "explorer" {
@@ -28,7 +28,7 @@ resource "aws_s3_bucket_public_access_block" "explorer" {
 
 resource "aws_cloudfront_origin_access_control" "explorer" {
   provider                          = aws.us_east_1
-  name                              = "gsx-devnet-explorer-oac"
+  name                              = "suwappu-devnet-explorer-oac"
   origin_access_control_origin_type = "s3"
   signing_behavior                  = "always"
   signing_protocol                  = "sigv4"
@@ -38,7 +38,7 @@ resource "aws_cloudfront_distribution" "explorer" {
   provider            = aws.us_east_1
   enabled             = true
   is_ipv6_enabled     = true
-  comment             = "gsx-devnet explorer SPA"
+  comment             = "suwappu-devnet explorer SPA"
   default_root_object = "index.html"
   aliases             = ["explorer.${var.devnet_subdomain}.${var.apex_domain}"]
   price_class         = "PriceClass_100" # US + EU only; cheapest tier
@@ -88,7 +88,7 @@ resource "aws_cloudfront_distribution" "explorer" {
     minimum_protocol_version = "TLSv1.2_2021"
   }
 
-  tags = { Name = "gsx-devnet-explorer" }
+  tags = { Name = "suwappu-devnet-explorer" }
 }
 
 # OAC policy that lets THIS CloudFront distribution read from the

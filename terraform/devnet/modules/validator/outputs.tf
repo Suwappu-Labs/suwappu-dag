@@ -9,7 +9,7 @@ output "instance_id" {
 }
 
 output "state_volume_id" {
-  description = "Persistent EBS volume id holding /var/lib/gsx. Survives instance replacement; carries consensus state + event log."
+  description = "Persistent EBS volume id holding /var/lib/suwappu. Survives instance replacement; carries consensus state + event log."
   value       = aws_ebs_volume.state.id
 }
 

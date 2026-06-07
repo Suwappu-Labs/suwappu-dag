@@ -66,7 +66,7 @@ resource "aws_lb_target_group" "rpc" {
   target_type = "instance"
   vpc_id      = var.vpc_id
 
-  # gsx-rpc answers GET / with 405 (JSON-RPC is POST-only), so accept
+  # suwappu-rpc answers GET / with 405 (JSON-RPC is POST-only), so accept
   # the 2xx-4xx band as "process is up" — same matcher as the old
   # single-region skeleton in alb.tf.
   health_check {

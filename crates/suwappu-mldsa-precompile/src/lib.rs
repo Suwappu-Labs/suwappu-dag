@@ -1,20 +1,20 @@
 //! On-chain ML-DSA-65 (FIPS 204) signature-verification precompile core.
 //!
-//! This crate implements the load-bearing, security-critical part of GSX's
+//! This crate implements the load-bearing, security-critical part of Suwappu's
 //! on-chain post-quantum signature verification (audit program P5b, Phase 1):
 //! given `pubkey || signature || message`, it returns a 32-byte EVM word that
 //! is `1` iff the ML-DSA-65 detached signature is valid, else `0`.
 //!
 //! It wraps the same NIST PQC reference verifier (`pqcrypto-mldsa`, ML-DSA-65)
-//! used by `gsx-crypto` for validator/consensus signatures, so it is genuinely
+//! used by `suwappu-crypto` for validator/consensus signatures, so it is genuinely
 //! FIPS-204 post-quantum sound — no SNARK wrapper, no scheme substitution
 //! (contrast the SP1→Groth16/BN254 path, which is Shor-broken; see
-//! `docs/security/audits/suwappu/P5b_ONCHAIN_PQ.md` in gsx-lattice-protocol).
+//! `docs/security/audits/suwappu/P5b_ONCHAIN_PQ.md` in suwappu-lattice-protocol).
 //!
 //! Two consumers:
-//!   1. **GSX-DAG EVM precompile** (via `gsx-revm`): register at a fixed address
+//!   1. **Suwappu DAG EVM precompile** (via `suwappu-revm`): register at a fixed address
 //!      so bridge contracts can `staticcall` it during mint/unlock/finalize.
-//!   2. **GSX-DAG intent handler** (ship-now path while the EVM substrate is
+//!   2. **Suwappu DAG intent handler** (ship-now path while the EVM substrate is
 //!      finished): call [`verify`] directly from the execution substrate.
 //!
 //! The verifier is pure and stateless: output is a deterministic function of
