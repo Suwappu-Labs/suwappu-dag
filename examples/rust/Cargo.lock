@@ -771,7 +771,7 @@ dependencies = [
 [[package]]
 name = "gsxdb-bridge"
 version = "0.0.1"
-source = "git+https://github.com/GlobalSettlementNetwork/gsx-db.git?tag=v0.1.0#2fee8066a3c230179a2a173db7947fbf84fd9e93"
+source = "git+https://github.com/Suwappu-Labs/suwappu-db.git?tag=v0.1.0#2fee8066a3c230179a2a173db7947fbf84fd9e93"
 dependencies = [
  "blake3",
  "gsxdb-state",
@@ -787,7 +787,7 @@ dependencies = [
 [[package]]
 name = "gsxdb-state"
 version = "0.0.1"
-source = "git+https://github.com/GlobalSettlementNetwork/gsx-db.git?tag=v0.1.0#2fee8066a3c230179a2a173db7947fbf84fd9e93"
+source = "git+https://github.com/Suwappu-Labs/suwappu-db.git?tag=v0.1.0#2fee8066a3c230179a2a173db7947fbf84fd9e93"
 dependencies = [
  "blake3",
  "hex",
