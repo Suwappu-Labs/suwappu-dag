@@ -15,7 +15,10 @@ members = [
     "crates/suwappu-indexer",
     "crates/suwappu-mempool",
     "crates/suwappu-faucet",
-    "crates/suwappu-top",
+    # "crates/suwappu-top" — scaffolded (see crates/suwappu-top/DESIGN.md) but not
+    # yet implemented: no src/, and its [[bin]] points at a missing src/main.rs,
+    # which fails workspace clippy/build. Excluded below until the source lands;
+    # re-add here when implementing. Nothing depends on it.
     "crates/suwappu-validator-program",
     "crates/suwappu-mldsa-precompile",
     "crates/suwappu-l2-verifier-precompile",
@@ -32,7 +35,7 @@ members = [
 # that would force the whole workspace through nightly. Run via
 # `cd fuzz && cargo +nightly fuzz run <target>`. See
 # `docs/architecture/security.md` for the full procedure.
-exclude = ["fuzz", "examples/rust", "crates/suwappu-l2-stm/program"]
+exclude = ["fuzz", "examples/rust", "crates/suwappu-l2-stm/program", "crates/suwappu-top"]
 
 [workspace.package]
 version = "0.1.0"
