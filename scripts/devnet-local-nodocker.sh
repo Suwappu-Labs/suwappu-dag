@@ -105,7 +105,11 @@ authority_id = ${i}
 listen = "127.0.0.1:${LISTEN_PORT}"
 client_listen = "127.0.0.1:${CLIENT_PORT}"
 rpc_listen = "127.0.0.1:${RPC_PORT}"
-round_ms = 250
+# Local-devnet cadence: 1000ms (not 250) — under-provisioned local boxes
+# can't deliver messages within a 250ms round when N nodes each spin a
+# full tokio runtime, causing leader-timeout force-proposes + lag. 1s
+# tolerates the local latency; tighten on a real multi-core rig.
+round_ms = 1000
 checkpoint_cadence_rounds = 1
 mldsa_secret_key_path = "${VDIR}/mldsa.sk"
 bls_secret_key_path = "${VDIR}/bls.sk"
@@ -140,7 +144,14 @@ TOML
     for i in 0 1 2 3; do
         VDIR="$DEVNET_DIR/v${i}"
         LOG="$VDIR/gsx-node.log"
-        RUST_LOG=info "$BINARY" --config "$VDIR/node.toml" > "$LOG" 2>&1 &
+        # Cap each node's tokio runtime to a few worker threads. gsx-node uses
+        # #[tokio::main] with no worker_threads, so the default runtime grabs ALL
+        # cores PER node — running N nodes on one box oversubscribes the CPU
+        # (N×ncpu threads thrashing), starving message delivery and stalling the
+        # slowest node's commit. ${GSX_DEVNET_WORKER_THREADS:-2} keeps N nodes
+        # within the core budget; raise it on a bigger rig.
+        RUST_LOG=info TOKIO_WORKER_THREADS="${GSX_DEVNET_WORKER_THREADS:-2}" \
+            "$BINARY" --config "$VDIR/node.toml" > "$LOG" 2>&1 &
         echo "    v${i} PID=$! log=${LOG}"
     done
     echo
