@@ -74,24 +74,38 @@ pub fn leader(round: Round, n: CommitteeSize) -> AuthorityId {
 /// Return the certificate hash authored by `author` at `round` in `dag`,
 /// if it exists. There is at most one (round, author) certificate in an
 /// honest DAG; equivocation detection lands in DAG-S7.
+///
+/// Under equivocation (multiple certs with the same (round, author)) the
+/// returned hash is the minimum `CertHash` among them — identical to the
+/// original `linearize().find()` which emits within-round certs in
+/// `(author, hash)` ascending order and therefore returns the min hash first.
 pub fn cert_at(dag: &DagStore, round: Round, author: AuthorityId) -> Option<CertHash> {
-    dag.linearize().into_iter().find(|h| {
-        let c = dag.get(h).expect("hash from linearize must resolve");
-        c.round == round && c.author == author
-    })
+    dag.round_hashes(round)
+        .iter()
+        .copied()
+        .filter(|h| {
+            dag.get(h)
+                .expect("hash from round_hashes must resolve")
+                .author
+                == author
+        })
+        .min()
 }
 
 /// Return the set of distinct authors at `round` who directly reference
 /// `target` as one of their parents.
 fn supporters(dag: &DagStore, target: CertHash, round: Round) -> BTreeSet<AuthorityId> {
-    let mut authors = BTreeSet::new();
-    for h in dag.linearize() {
-        let c = dag.get(&h).expect("hash from linearize must resolve");
-        if c.round == round && c.parents.contains(&target) {
-            authors.insert(c.author);
-        }
-    }
-    authors
+    dag.round_hashes(round)
+        .iter()
+        .filter_map(|h| {
+            let c = dag.get(h).expect("hash from round_hashes must resolve");
+            if c.parents.contains(&target) {
+                Some(c.author)
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 /// Decision for a single leader slot under the Mysticeti-C commit rule.
@@ -205,12 +219,7 @@ pub fn decide_slot(dag: &DagStore, target_round: Round, n: CommitteeSize) -> Lea
         LeaderStatus::Skip => return LeaderStatus::Skip,
         LeaderStatus::Undecided => {}
     }
-    let max_round = match dag
-        .linearize()
-        .into_iter()
-        .filter_map(|h| dag.get(&h).map(|c| c.round))
-        .max()
-    {
+    let max_round = match dag.max_round() {
         Some(r) => r,
         None => return LeaderStatus::Undecided,
     };
@@ -260,7 +269,13 @@ pub fn commit_leader(dag: &DagStore, round: Round, n: CommitteeSize) -> Option<C
 
 /// Walk the DAG from `start` and collect every ancestor (including
 /// `start` itself). Returns the ancestor set as a deterministic
-/// linearized vector following `DagStore::linearize()`'s order.
+/// linearized vector following `DagStore::linearize()`'s order:
+/// round-ascending, within a round `(author, hash)` ascending.
+///
+/// The BFS collects `seen` hashes; we then filter to in-DAG entries
+/// (same as `linearize().filter(seen.contains)` — linearize only emits
+/// certs actually in the store) and sort by `(round, author, hash)`,
+/// which reproduces the linearize order exactly.
 pub fn causal_history(dag: &DagStore, start: CertHash) -> Vec<CertHash> {
     let mut seen: HashSet<CertHash> = HashSet::new();
     let mut queue: VecDeque<CertHash> = VecDeque::new();
@@ -275,10 +290,18 @@ pub fn causal_history(dag: &DagStore, start: CertHash) -> Vec<CertHash> {
             }
         }
     }
-    dag.linearize()
+    // Filter to certs that are actually in the DAG (mirrors linearize's
+    // implicit filter) then sort by (round, author, hash) to reproduce
+    // linearize order.
+    let mut out: Vec<CertHash> = seen
         .into_iter()
-        .filter(|h| seen.contains(h))
-        .collect()
+        .filter(|h| dag.contains(h))
+        .collect();
+    out.sort_by_key(|h| {
+        let c = dag.get(h).expect("just filtered to in-dag hashes");
+        (c.round, c.author, *h)
+    });
+    out
 }
 
 /// Run the Mysticeti-C commit rule (direct + indirect) across every
@@ -289,12 +312,7 @@ pub fn causal_history(dag: &DagStore, start: CertHash) -> Vec<CertHash> {
 /// inherited via the indirect rule — deduplicated to preserve
 /// append-only finality.
 pub fn finalize(dag: &DagStore, n: CommitteeSize) -> Vec<CertHash> {
-    let max_round = match dag
-        .linearize()
-        .into_iter()
-        .map(|h| dag.get(&h).unwrap().round)
-        .max()
-    {
+    let max_round = match dag.max_round() {
         Some(r) => r,
         None => return Vec::new(),
     };
@@ -571,5 +589,342 @@ mod tests {
             LeaderStatus::Direct(leader_hash),
             "direct decision must short-circuit"
         );
+    }
+
+    // ----------------------------------------------------------------
+    // Equivalence proptest — verifies the index-based substitution is
+    // byte-identical to the original linearize()-based implementation.
+    //
+    // The reference functions below are verbatim copies of the original
+    // linearize()-based bodies. They share ZERO code with the production
+    // implementations. If this proptest passes, the substitution is safe.
+    // ----------------------------------------------------------------
+    mod equivalence {
+        use super::*;
+        use proptest::prelude::*;
+        use std::collections::HashSet as StdHashSet;
+
+        // ---- Reference implementations (original linearize-based bodies) ----
+
+        fn cert_at_reference(
+            dag: &DagStore,
+            round: Round,
+            author: AuthorityId,
+        ) -> Option<CertHash> {
+            dag.linearize().into_iter().find(|h| {
+                let c = dag.get(h).expect("hash from linearize must resolve");
+                c.round == round && c.author == author
+            })
+        }
+
+        fn supporters_reference(
+            dag: &DagStore,
+            target: CertHash,
+            round: Round,
+        ) -> BTreeSet<AuthorityId> {
+            let mut authors = BTreeSet::new();
+            for h in dag.linearize() {
+                let c = dag.get(&h).expect("hash from linearize must resolve");
+                if c.round == round && c.parents.contains(&target) {
+                    authors.insert(c.author);
+                }
+            }
+            authors
+        }
+
+        fn causal_history_reference(dag: &DagStore, start: CertHash) -> Vec<CertHash> {
+            let mut seen: StdHashSet<CertHash> = StdHashSet::new();
+            let mut queue: VecDeque<CertHash> = VecDeque::new();
+            queue.push_back(start);
+            while let Some(h) = queue.pop_front() {
+                if !seen.insert(h) {
+                    continue;
+                }
+                if let Some(c) = dag.get(&h) {
+                    for p in &c.parents {
+                        queue.push_back(*p);
+                    }
+                }
+            }
+            dag.linearize()
+                .into_iter()
+                .filter(|h| seen.contains(h))
+                .collect()
+        }
+
+        fn try_direct_decide_reference(
+            dag: &DagStore,
+            round: Round,
+            n: CommitteeSize,
+        ) -> LeaderStatus {
+            let author = leader(round, n);
+            let leader_hash = match cert_at_reference(dag, round, author) {
+                Some(h) => h,
+                None => return LeaderStatus::Undecided,
+            };
+            let support = supporters_reference(dag, leader_hash, round + 1);
+            if support.len() as u32 >= quorum_threshold(n) {
+                LeaderStatus::Direct(leader_hash)
+            } else {
+                LeaderStatus::Undecided
+            }
+        }
+
+        fn try_indirect_decide_reference(
+            dag: &DagStore,
+            target_round: Round,
+            anchor: CertHash,
+            n: CommitteeSize,
+        ) -> LeaderStatus {
+            let target_author = leader(target_round, n);
+            let target_hash = match cert_at_reference(dag, target_round, target_author) {
+                Some(h) => h,
+                None => return LeaderStatus::Skip,
+            };
+            if causal_history_reference(dag, anchor).contains(&target_hash) {
+                LeaderStatus::Direct(target_hash)
+            } else {
+                LeaderStatus::Skip
+            }
+        }
+
+        fn decide_slot_reference(
+            dag: &DagStore,
+            target_round: Round,
+            n: CommitteeSize,
+        ) -> LeaderStatus {
+            match try_direct_decide_reference(dag, target_round, n) {
+                LeaderStatus::Direct(h) => return LeaderStatus::Direct(h),
+                LeaderStatus::Skip => return LeaderStatus::Skip,
+                LeaderStatus::Undecided => {}
+            }
+            let max_round = match dag
+                .linearize()
+                .into_iter()
+                .filter_map(|h| dag.get(&h).map(|c| c.round))
+                .max()
+            {
+                Some(r) => r,
+                None => return LeaderStatus::Undecided,
+            };
+            let mut any_anchor_seen = false;
+            for anchor_round in (target_round + 2)..=max_round {
+                if let LeaderStatus::Direct(anchor_hash) =
+                    try_direct_decide_reference(dag, anchor_round, n)
+                {
+                    any_anchor_seen = true;
+                    match try_indirect_decide_reference(dag, target_round, anchor_hash, n) {
+                        LeaderStatus::Direct(h) => return LeaderStatus::Direct(h),
+                        LeaderStatus::Skip | LeaderStatus::Undecided => continue,
+                    }
+                }
+            }
+            if any_anchor_seen {
+                LeaderStatus::Skip
+            } else {
+                LeaderStatus::Undecided
+            }
+        }
+
+        fn finalize_reference(dag: &DagStore, n: CommitteeSize) -> Vec<CertHash> {
+            let max_round = match dag
+                .linearize()
+                .into_iter()
+                .map(|h| dag.get(&h).unwrap().round)
+                .max()
+            {
+                Some(r) => r,
+                None => return Vec::new(),
+            };
+            let mut finalized: Vec<CertHash> = Vec::new();
+            let mut included: StdHashSet<CertHash> = StdHashSet::new();
+            for r in 0..max_round {
+                if let LeaderStatus::Direct(leader_hash) =
+                    decide_slot_reference(dag, r, n)
+                {
+                    for h in causal_history_reference(dag, leader_hash) {
+                        if included.insert(h) {
+                            finalized.push(h);
+                        }
+                    }
+                }
+            }
+            finalized
+        }
+
+        // ---- DAG generator ----
+        //
+        // Builds a random valid DAG: varied committee size, varied depth,
+        // sparse parent sets, potential equivocation (2 certs at same
+        // (round,author)), and potential missing leaders.
+
+        fn build_random_dag(
+            n: CommitteeSize,
+            n_rounds: u64,
+            // per-round bitmask: which authors produce a cert (as u64 bitmask)
+            author_masks: &[u64],
+            // per-round equivocation mask: which authors produce a 2nd cert
+            equivoc_masks: &[u64],
+        ) -> DagStore {
+            let mut dag = DagStore::new();
+            let mut round_hashes: Vec<Vec<CertHash>> = Vec::new();
+
+            for r in 0..n_rounds {
+                let mask = author_masks[r as usize];
+                let eq_mask = equivoc_masks[r as usize];
+                let prev = if r == 0 {
+                    vec![]
+                } else {
+                    round_hashes[r as usize - 1].clone()
+                };
+
+                let mut this_round: Vec<CertHash> = Vec::new();
+                for a in 0..n {
+                    if mask & (1u64 << a) == 0 {
+                        continue;
+                    }
+                    let mut payload = [0u8; 32];
+                    payload[0] = a as u8;
+                    payload[1] = r as u8;
+                    payload[2] = 0xAA;
+                    let cert = if r == 0 {
+                        Certificate::genesis(a as AuthorityId, payload)
+                    } else {
+                        Certificate {
+                            author: a as AuthorityId,
+                            round: r,
+                            parents: prev.clone(),
+                            payload_digest: payload,
+                        }
+                    };
+                    // Insert may fail if parents are empty for round>0
+                    // (happens when prev is empty). Accept both outcomes.
+                    if let Ok(h) = dag.insert(cert) {
+                        this_round.push(h);
+                    }
+
+                    // Equivocating second cert for same (round, author)
+                    // (distinct payload_digest so hash differs).
+                    // For round>0 we need parents, so only equivocate when prev
+                    // is non-empty (guaranteed when mask had at least one author
+                    // last round). For round 0 (genesis), parents are always empty.
+                    if eq_mask & (1u64 << a) != 0 && (r == 0 || !prev.is_empty()) {
+                        let mut payload2 = [0u8; 32];
+                        payload2[0] = a as u8;
+                        payload2[1] = r as u8;
+                        payload2[2] = 0xBB; // differs from 0xAA above
+                        let cert2 = if r == 0 {
+                            Certificate::genesis(a as AuthorityId, payload2)
+                        } else {
+                            Certificate {
+                                author: a as AuthorityId,
+                                round: r,
+                                parents: prev.clone(),
+                                payload_digest: payload2,
+                            }
+                        };
+                        if let Ok(h2) = dag.insert(cert2) {
+                            this_round.push(h2);
+                        }
+                    }
+                }
+                round_hashes.push(this_round);
+            }
+            dag
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig {
+                cases: 4096,
+                max_shrink_iters: 64,
+                ..ProptestConfig::default()
+            })]
+
+            /// Equivalence oracle: the index-based production functions must
+            /// produce byte-identical results to the original linearize()-based
+            /// reference implementations on every random valid DAG — including
+            /// DAGs with equivocation, missing leaders, and deep round chains.
+            ///
+            /// Covers:
+            /// - `cert_at` for all (round, author) pairs
+            /// - `supporters` (via `try_direct_decide` call chain)
+            /// - `causal_history` for sampled starts
+            /// - `decide_slot` for all rounds
+            /// - **`finalize`** full committed-sequence equality (headline)
+            #[test]
+            fn index_vs_linearize_equivalence(
+                n in 1u32..=13u32,
+                // Cap at 12 rounds: deep enough for multi-wave indirect
+                // commit chains (target → anchor+2 → anchor+4...) while
+                // keeping per-case O(R^2 × |certs|) work bounded in
+                // debug mode at 4096 cases.
+                n_rounds in 1u64..=12u64,
+                author_masks in proptest::collection::vec(any::<u64>(), 1..=12),
+                equivoc_masks in proptest::collection::vec(any::<u64>(), 1..=12),
+            ) {
+                // Pad/truncate masks to n_rounds length.
+                let n_rounds = n_rounds.min(12);
+                let mut am = author_masks;
+                let mut em = equivoc_masks;
+                am.resize(n_rounds as usize, u64::MAX);
+                em.resize(n_rounds as usize, 0u64);
+                // Ensure genesis round always has at least one author.
+                am[0] |= 1;
+
+                let dag = build_random_dag(n, n_rounds, &am, &em);
+
+                if dag.is_empty() {
+                    return Ok(());
+                }
+
+                // 1. cert_at equivalence for all (round, author).
+                for round in dag.rounds() {
+                    for author in 0..n {
+                        let prod = cert_at(&dag, round, author as AuthorityId);
+                        let refr = cert_at_reference(&dag, round, author as AuthorityId);
+                        prop_assert_eq!(
+                            prod, refr,
+                            "cert_at diverged at round={} author={}",
+                            round, author
+                        );
+                    }
+                }
+
+                // 2. decide_slot equivalence for all rounds.
+                let max_r = dag.max_round().unwrap_or(0);
+                for round in 0..=max_r {
+                    let prod = decide_slot(&dag, round, n);
+                    let refr = decide_slot_reference(&dag, round, n);
+                    prop_assert_eq!(
+                        prod, refr,
+                        "decide_slot diverged at round={} n={}",
+                        round, n
+                    );
+                }
+
+                // 3. causal_history equivalence for every cert in the DAG.
+                for round in dag.rounds() {
+                    for &h in dag.round_hashes(round) {
+                        let prod = causal_history(&dag, h);
+                        let refr = causal_history_reference(&dag, h);
+                        prop_assert_eq!(
+                            prod, refr,
+                            "causal_history diverged starting from hash in round={}",
+                            round
+                        );
+                    }
+                }
+
+                // 4. finalize equivalence (headline assertion).
+                let prod_fin = finalize(&dag, n);
+                let ref_fin = finalize_reference(&dag, n);
+                prop_assert_eq!(
+                    prod_fin, ref_fin,
+                    "finalize diverged: committed order differs for n={} n_rounds={}",
+                    n, n_rounds
+                );
+            }
+        }
+
     }
 }
