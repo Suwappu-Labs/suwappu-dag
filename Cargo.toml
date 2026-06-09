@@ -20,6 +20,7 @@ members = [
     "crates/gsx-l2-confidential",
     "crates/gsx-l2-bridge",
     "crates/gsx-l2-sequencer",
+    "crates/suwappu-mldsa-precompile",
     "clients/rust-sdk",
 ]
 # B4: keep the cargo-fuzz workspace out of the main one — cargo-fuzz
