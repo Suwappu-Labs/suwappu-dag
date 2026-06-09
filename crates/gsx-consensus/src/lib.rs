@@ -20,6 +20,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod bridge_header;
 pub mod cert;
 pub mod commit;
 pub mod dag;

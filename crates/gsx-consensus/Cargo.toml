@@ -19,3 +19,4 @@ tracing.workspace = true
 [dev-dependencies]
 proptest.workspace = true
 rand.workspace = true
+sha3.workspace = true
