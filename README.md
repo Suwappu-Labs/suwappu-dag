@@ -225,6 +225,77 @@ implements where applicable.
 
 ---
 
+## Bridge attestation (source side)
+
+When a GSX-DAG validator commits a round, the `gsx-consensus` bridge-header
+module captures the committed `(round, post_root)` and produces a
+**validator-quorum side-attestation** — a signed claim that this validator's
+local execution produced `state_root` at `block_number`. The destination bridge
+oracle trusts an honest **>2/3-stake quorum** of these attestations; this is
+sync-committee–class safety, not a consensus light client and not a
+cryptographic source-state proof.
+
+### Preimage and digest
+
+The attestation signs a 32-byte **BLAKE3** digest of a 148-byte preimage
+(`abi.encodePacked`-equivalent, byte-identical to the Solidity side):
+
+```
+HEADER_DOMAIN (32)  ||  networkId (32)  ||  oracle (20)
+  ||  blockNumber-as-uint256-BE (32)  ||  stateRoot (32)
+```
+
+`HEADER_DOMAIN = keccak256("SUWAPPU_GSXDAG_HEADER_V1")` is hard-pinned as a
+cross-language constant verified by tests on both the Rust and Solidity sides.
+`stateRoot` is the gsx-dag BLAKE3 L1 state root (`ExecutionReport::post_root`);
+it is **not** an EVM-MPT root and is therefore **not** storage-provable — the
+header is an opaque finalized-round anchor.
+
+### Signing
+
+Each validator holds an ML-DSA-65 (FIPS 204) keypair registered in genesis.
+`HeaderAttestation::create` in `crates/gsx-consensus/src/bridge_header.rs`
+computes the digest and produces a detached ML-DSA-65 signature. The
+`suwappu-mldsa-precompile` crate (in `crates/suwappu-mldsa-precompile/`) is
+the ML-DSA-65 verify core used by the destination EVM (see `gsx-revm`'s
+`suwappu-revm` crate, address `0x0101`).
+
+### RPC
+
+The daemon (`crates/gsx-node/src/daemon.rs`) exposes a
+`gsx_getHeaderAttestation` JSON-RPC that signs on demand and caches the latest
+`HeaderAttestation` for the most recently committed round. An off-chain relayer
+polls every validator's RPC endpoint, collects a set whose cumulative stake
+exceeds the on-chain `>2/3` threshold, and submits the aggregated attestations
+to the destination `GsxDagQuorumHeaderOracle`.
+
+> **Honest framing.** The oracle/registry wiring into the mint path is not yet
+> live; validators can produce and serve attestations via RPC, but the
+> end-to-end bridge finalization path (`submitHeader` on the destination) is
+> not yet wired to any production contract. The BLS12-381 aggregate used in the
+> LTP layer (§10.2) is a separate system and is **classical, NOT
+> post-quantum**. The ML-DSA-65 side-attestation described here is the only
+> path that is post-quantum.
+
+### Flow
+
+```mermaid
+flowchart LR
+    Commit["DAG commit\n(round r)"] --> Capture["Capture\n(round, post_root)"]
+    Capture --> Digest["BLAKE3\nHEADER_DOMAIN || networkId || oracle\n|| blockNumber || stateRoot\n-> 32-byte digest"]
+    Digest --> Sign["ML-DSA-65 sign\n(validator secret key)"]
+    Sign --> Attest["HeaderAttestation\n{block_number, state_root,\n authority_id, pubkey, sig}"]
+    Attest --> RPC["gsx_getHeaderAttestation\nJSON-RPC"]
+    RPC --> Relayer["Off-chain relayer\ncollects >2/3-stake\nquorum of attestations"]
+```
+
+The destination-side quorum verifier (in `gsx-revm/crates/suwappu-revm/`) uses
+native EVM precompiles `0x0102` (BLAKE3) and `0x0101` (ML-DSA-65) to verify
+each attestation and finalize the header — the only configuration that is both
+trust-minimized and post-quantum.
+
+---
+
 ## Development
 
 ```bash
