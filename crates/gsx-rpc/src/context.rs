@@ -189,6 +189,36 @@ pub struct TransactionView {
     pub intent: IntentView,
 }
 
+/// JSON-safe projection of this node's ML-DSA bridge-header side-attestation
+/// over its latest finalized block.
+///
+/// A relayer polls each validator's `gsx_getHeaderAttestation`, collects a set
+/// whose stake clears the on-chain >2/3 threshold, sorts by
+/// `keccak256(pubkey)`, and submits to `GsxDagQuorumHeaderOracle.submitHeader`.
+/// `network_id` and `oracle` echo the exact binding the signature commits to,
+/// so the relayer knows which deployment the attestation is valid for.
+///
+/// Honest framing: this is a validator's *attestation*, not a proof.
+/// `state_root` is the gsx-dag BLAKE3 L1 root, which is not storage-provable;
+/// safety rests on an honest >2/3-stake quorum.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeaderAttestationView {
+    /// DAG round of the latest finalized block.
+    pub block_number: u64,
+    /// 32-byte BLAKE3 L1 state root after that block (0x-prefixed hex).
+    pub state_root: String,
+    /// Attesting Authority Ring member id.
+    pub authority_id: u32,
+    /// Attesting validator's ML-DSA-65 public key (0x-prefixed hex).
+    pub pubkey: String,
+    /// Detached ML-DSA-65 signature over the header digest (0x-prefixed hex).
+    pub signature: String,
+    /// uint256 network id this signature binds to (0x-prefixed 32-byte hex).
+    pub network_id: String,
+    /// Oracle address this signature binds to (0x-prefixed 20-byte hex).
+    pub oracle: String,
+}
+
 /// Read-only view over the node state needed by the JSON-RPC methods.
 ///
 /// Implementers must guarantee:
@@ -264,6 +294,18 @@ pub trait StateView: Send + Sync + 'static {
     /// returned receiver is per-subscriber: dropping it cancels the
     /// subscription cleanly.
     fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<EventView>;
+
+    /// This node's signed bridge-header side-attestation over its latest
+    /// finalized block, or `None` if no block has finalized yet or the node has
+    /// no bridge signer configured (no `mldsa_secret_key_path` /
+    /// `bridge_oracle_address`). The default implementation returns `None`
+    /// (header attestation disabled), so mock/test state views need not
+    /// implement it.
+    fn header_attestation(
+        &self,
+    ) -> impl std::future::Future<Output = Option<HeaderAttestationView>> + Send {
+        async { None }
+    }
 }
 
 /// Error taxonomy returned by `StateView::submit_intent`. Maps directly

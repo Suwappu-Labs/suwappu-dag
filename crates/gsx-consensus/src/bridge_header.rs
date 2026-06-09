@@ -32,7 +32,7 @@
 //! `block_number` is a `u64` widened to a 32-byte big-endian `uint256`
 //! (24 leading zero bytes), matching Solidity's `abi.encodePacked(uint256)`.
 
-use gsx_crypto::mldsa::{sign, SecretKey};
+use gsx_crypto::mldsa::{sign, verify, PublicKey, SecretKey, Signature};
 
 /// Total length, in bytes, of the bridge-header attestation preimage.
 pub const HEADER_PREIMAGE_LEN: usize = 148;
@@ -103,6 +103,77 @@ pub fn sign_header(digest: &[u8; 32], sk: &SecretKey) -> Vec<u8> {
         .expect("ml-dsa-65 detached_sign over a valid secret key is infallible")
         .as_bytes()
         .to_vec()
+}
+
+/// A single validator's ML-DSA side-attestation over a gsx-dag block header.
+///
+/// This is the unit a relayer collects from each validator's RPC and, once it
+/// holds a set whose stake exceeds the on-chain >2/3 threshold, submits to the
+/// destination `GsxDagQuorumHeaderOracle.submitHeader`. It carries the signing
+/// validator's ML-DSA-65 public key so the relayer can sort by
+/// `keccak256(pubkey)` (the contract's strictly-increasing dedup order) and so
+/// the on-chain registry can match it to a registered, staked member.
+///
+/// Honest trust model: an attestation is a validator's *claim* about the block
+/// header it locally finalized; it is **not** a proof. `state_root` is the
+/// gsx-dag BLAKE3 L1 state root (`ExecutionReport::post_root`), which is **not**
+/// an EVM-MPT root and is therefore **not** storage-provable today — the header
+/// is an opaque finalized-round anchor. Safety rests on an honest >2/3-stake
+/// quorum, not on cryptographic source-state inclusion.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeaderAttestation {
+    /// The committed DAG round whose execution produced `state_root`.
+    pub block_number: u64,
+    /// The gsx-dag BLAKE3 L1 state root after executing the block at
+    /// `block_number` (`ExecutionReport::post_root`).
+    pub state_root: [u8; 32],
+    /// The attesting Authority Ring member id (matches the on-chain registry).
+    pub authority_id: u32,
+    /// The attesting validator's ML-DSA-65 public-key bytes.
+    pub pubkey: Vec<u8>,
+    /// Detached ML-DSA-65 signature over `header_digest(network_id, oracle,
+    /// block_number, state_root)`.
+    pub signature: Vec<u8>,
+}
+
+impl HeaderAttestation {
+    /// Build and sign an attestation for `(block_number, state_root)` bound to
+    /// `(network_id, oracle)` under the validator's ML-DSA keypair.
+    pub fn create(
+        network_id: [u8; 32],
+        oracle: [u8; 20],
+        block_number: u64,
+        state_root: [u8; 32],
+        authority_id: u32,
+        pubkey: &PublicKey,
+        sk: &SecretKey,
+    ) -> Self {
+        let digest = header_digest(network_id, oracle, block_number, state_root);
+        Self {
+            block_number,
+            state_root,
+            authority_id,
+            pubkey: pubkey.as_bytes().to_vec(),
+            signature: sign_header(&digest, sk),
+        }
+    }
+
+    /// Verify this attestation's signature binds its `(block_number,
+    /// state_root)` to `(network_id, oracle)` under its own carried public key.
+    ///
+    /// Returns `false` (never panics) on malformed key/signature bytes. This
+    /// checks only the signature; it does NOT check that `pubkey` belongs to a
+    /// registered, staked validator — the on-chain registry / relayer does that.
+    pub fn verify(&self, network_id: [u8; 32], oracle: [u8; 20]) -> bool {
+        let digest = header_digest(network_id, oracle, self.block_number, self.state_root);
+        match (
+            PublicKey::from_bytes(&self.pubkey),
+            Signature::from_bytes(&self.signature),
+        ) {
+            (Ok(pk), Ok(sig)) => verify(&digest, &sig, &pk).is_ok(),
+            _ => false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -206,5 +277,53 @@ mod tests {
             verify(&tampered, &sig, &pk).is_err(),
             "signature must not verify over a different digest"
         );
+    }
+
+    /// A `HeaderAttestation` binds to the golden digest (non-vacuous: asserted
+    /// against the embedded golden preimage's BLAKE3, not a re-derivation),
+    /// verifies under the correct `(network_id, oracle)`, and fails under a
+    /// wrong oracle or a tampered state root.
+    #[test]
+    fn attestation_binds_to_golden_digest_and_verifies() {
+        let (pk, sk) = keypair();
+        let (network_id, oracle, block_number, state_root) = golden_scalars();
+        let att =
+            HeaderAttestation::create(network_id, oracle, block_number, state_root, 7, &pk, &sk);
+
+        // Non-vacuous: the digest this attestation signed equals BLAKE3 of the
+        // embedded forge golden preimage.
+        let golden_digest = *blake3::hash(&decode_hex(FORGE_GOLDEN_PREIMAGE_HEX)).as_bytes();
+        let signed_digest = header_digest(network_id, oracle, att.block_number, att.state_root);
+        assert_eq!(
+            signed_digest, golden_digest,
+            "attestation must sign the golden digest"
+        );
+
+        assert_eq!(att.authority_id, 7);
+        assert!(
+            att.verify(network_id, oracle),
+            "honest attestation must verify"
+        );
+
+        // Bound to a specific oracle: a different oracle address must not verify.
+        let mut other_oracle = oracle;
+        other_oracle[19] ^= 0x01;
+        assert!(
+            !att.verify(network_id, other_oracle),
+            "attestation must not verify against a different oracle binding"
+        );
+
+        // Tampering the state root must break verification.
+        let mut forged = att.clone();
+        forged.state_root[0] ^= 0x01;
+        assert!(
+            !forged.verify(network_id, oracle),
+            "tampered state root must not verify"
+        );
+
+        // Malformed signature/pubkey bytes return false, never panic.
+        let mut malformed = att.clone();
+        malformed.signature.truncate(4);
+        assert!(!malformed.verify(network_id, oracle));
     }
 }

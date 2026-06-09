@@ -39,6 +39,23 @@ pub async fn get_validator_registry<S: StateView>(
     serde_json::to_value(snap).map_err(|e| RpcError::Internal(e.to_string()))
 }
 
+/// `gsx_getHeaderAttestation` — no params; returns this node's signed
+/// bridge-header side-attestation over its latest finalized block as a
+/// `HeaderAttestationView`, or JSON `null` if no block has finalized yet or the
+/// node has no bridge signer configured. A relayer polls this on every
+/// validator and aggregates a >2/3-stake set for
+/// `GsxDagQuorumHeaderOracle.submitHeader`.
+pub async fn get_header_attestation<S: StateView>(
+    state: &S,
+    params: &Value,
+) -> Result<Value, RpcError> {
+    expect_no_params(params)?;
+    match state.header_attestation().await {
+        Some(att) => serde_json::to_value(att).map_err(|e| RpcError::Internal(e.to_string())),
+        None => Ok(Value::Null),
+    }
+}
+
 #[derive(Deserialize)]
 struct GetStakeParams {
     authority_id: u32,

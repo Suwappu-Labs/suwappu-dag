@@ -15,8 +15,8 @@ use std::sync::Arc;
 
 use gsx_execution::Intent;
 use gsx_rpc::context::{
-    AuthorityMemberView, BlockView, EpochView, EventView, IntentView, StateView, SubmitIntentError,
-    TransactionView, ValidatorMemberView,
+    AuthorityMemberView, BlockView, EpochView, EventView, HeaderAttestationView, IntentView,
+    StateView, SubmitIntentError, TransactionView, ValidatorMemberView,
 };
 use tokio::sync::broadcast;
 
@@ -326,5 +326,61 @@ impl StateView for NodeStateView {
         // `NodeStateView::new` keeps the buffer pumped; dropping
         // this receiver cancels the subscription cleanly.
         self.event_view_tx.subscribe()
+    }
+
+    /// Sign-and-cache this node's bridge-header side-attestation over the latest
+    /// finalized `(round, post_root)`. ML-DSA signing (~ms) happens HERE, off
+    /// the commit loop's `inner` lock — the cache is re-signed only when the
+    /// captured round advances. Returns `None` when attestation is unconfigured
+    /// or no block has finalized yet.
+    async fn header_attestation(&self) -> Option<HeaderAttestationView> {
+        let signer = self.state.bridge_signer.as_ref()?;
+
+        // Short read of the latest captured header, then drop the lock.
+        let (block_number, state_root) = {
+            let inner = self.state.inner.lock().await;
+            inner.latest_bridge_header?
+        };
+
+        // Fast path: return the cached attestation if it already covers this
+        // exact header. parking_lot guard held only across a comparison.
+        if let Some(att) = self.state.bridge_attestation_cache.lock().as_ref() {
+            if att.block_number == block_number && att.state_root == state_root {
+                return Some(attestation_to_view(att, signer));
+            }
+        }
+
+        // Slow path: sign once (off-lock), cache, return. A benign race where
+        // two concurrent callers both sign is harmless — both produce a valid
+        // attestation for the same header and the last write wins.
+        let att = gsx_consensus::bridge_header::HeaderAttestation::create(
+            signer.network_id,
+            signer.oracle,
+            block_number,
+            state_root,
+            signer.authority_id,
+            &signer.pubkey,
+            &signer.secret_key,
+        );
+        let view = attestation_to_view(&att, signer);
+        *self.state.bridge_attestation_cache.lock() = Some(att);
+        Some(view)
+    }
+}
+
+/// Project a signed `HeaderAttestation` + its signer binding into the JSON-safe
+/// `HeaderAttestationView` (0x-prefixed hex fields).
+fn attestation_to_view(
+    att: &gsx_consensus::bridge_header::HeaderAttestation,
+    signer: &crate::daemon::BridgeHeaderSigner,
+) -> HeaderAttestationView {
+    HeaderAttestationView {
+        block_number: att.block_number,
+        state_root: format!("0x{}", hex::encode(att.state_root)),
+        authority_id: att.authority_id,
+        pubkey: format!("0x{}", hex::encode(&att.pubkey)),
+        signature: format!("0x{}", hex::encode(&att.signature)),
+        network_id: format!("0x{}", hex::encode(signer.network_id)),
+        oracle: format!("0x{}", hex::encode(signer.oracle)),
     }
 }
