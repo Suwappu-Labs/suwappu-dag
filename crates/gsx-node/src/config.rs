@@ -119,6 +119,25 @@ pub struct NodeConfig {
     /// throttled toward 10 Hz, abuse floods are bounded.
     #[serde(default = "default_rpc_per_ip_refill_per_sec")]
     pub rpc_per_ip_refill_per_sec: u64,
+
+    /// Bridge header-attestation: the deployed `GsxDagQuorumHeaderOracle`
+    /// address (0x-prefixed 20-byte hex) this validator's header attestations
+    /// bind to. UNSET (the default) disables header attestation entirely —
+    /// `gsx_getHeaderAttestation` returns `null`. The oracle address is folded
+    /// into every attestation digest, so an attestation is valid only for this
+    /// one oracle deployment. Header attestation also requires a loadable
+    /// `mldsa_secret_key_path`; if the key cannot be read, attestation stays
+    /// disabled (logged at startup).
+    #[serde(default)]
+    pub bridge_oracle_address: Option<String>,
+
+    /// Bridge header-attestation: the uint256 network id (0x-prefixed 32-byte
+    /// hex) folded into the attestation digest. Defaults to
+    /// `keccak256("suwappu-perf-7r")` when unset, matching the destination
+    /// wiring's pinned value. MUST byte-match the deployed registry's
+    /// `networkId` immutable or the on-chain quorum check fails silently.
+    #[serde(default)]
+    pub bridge_network_id: Option<String>,
 }
 
 /// One peer entry inside [`NodeConfig::peers`].
@@ -367,6 +386,8 @@ mod tests {
             client_per_ip_limit: 8,
             rpc_per_ip_capacity: 60,
             rpc_per_ip_refill_per_sec: 10,
+            bridge_oracle_address: None,
+            bridge_network_id: None,
             metrics_listen: None,
         };
         let err = manifest.validate_against(&cfg).unwrap_err();

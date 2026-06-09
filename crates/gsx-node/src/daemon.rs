@@ -89,6 +89,148 @@ pub(crate) struct State {
     /// content dedup, capacity floor with priority-ordered eviction,
     /// and TTL expiry. See `crates/gsx-mempool/src/lib.rs`.
     pub(crate) mempool: std::sync::Arc<gsx_mempool::Mempool>,
+    /// Bridge header-attestation signer, or `None` when header attestation is
+    /// not configured (no `bridge_oracle_address`, or the ML-DSA key could not
+    /// be loaded). When `None`, `gsx_getHeaderAttestation` returns `null`.
+    pub(crate) bridge_signer: Option<BridgeHeaderSigner>,
+    /// Lazily-signed cache for the latest bridge-header attestation. Signing
+    /// ML-DSA is ~ms and must never happen under the commit loop's `inner`
+    /// lock; instead the RPC adapter signs on demand and caches here, re-signing
+    /// only when `StateInner::latest_bridge_header` advances to a new round.
+    pub(crate) bridge_attestation_cache:
+        parking_lot::Mutex<Option<gsx_consensus::bridge_header::HeaderAttestation>>,
+}
+
+/// Material needed to produce this validator's bridge-header side-attestations.
+///
+/// Honest framing: holding this lets the node sign a *claim* about the block
+/// header it locally finalized. It is not a consensus light client and not a
+/// source-state proof; the destination oracle trusts an honest >2/3-stake
+/// quorum of these attestations.
+pub(crate) struct BridgeHeaderSigner {
+    /// This validator's Authority Ring id (matches the on-chain registry).
+    pub(crate) authority_id: AuthorityId,
+    /// uint256 network id (big-endian) folded into every attestation digest.
+    /// Must byte-match the deployed registry's `networkId` immutable.
+    pub(crate) network_id: [u8; 32],
+    /// The deployed `GsxDagQuorumHeaderOracle` address folded into the digest.
+    pub(crate) oracle: [u8; 20],
+    /// This validator's ML-DSA-65 public key (as registered in genesis).
+    pub(crate) pubkey: gsx_crypto::mldsa::PublicKey,
+    /// This validator's ML-DSA-65 secret key, loaded from
+    /// `mldsa_secret_key_path`. First runtime use of the node's signing key.
+    pub(crate) secret_key: gsx_crypto::mldsa::SecretKey,
+}
+
+/// Default bridge network id = `keccak256("suwappu-perf-7r")`, hard-pinned as a
+/// 32-byte literal (byte-identical to the value the destination wiring PR
+/// pinned and to `bridge_header`'s golden vector). Used when
+/// `NodeConfig::bridge_network_id` is unset.
+const DEFAULT_BRIDGE_NETWORK_ID: [u8; 32] = [
+    0xff, 0x43, 0x1b, 0x38, 0x51, 0xff, 0x00, 0xbe, 0x6b, 0x5a, 0x4b, 0xd9, 0xb6, 0x7e, 0x7d, 0x41,
+    0x18, 0x30, 0x06, 0x93, 0x93, 0x78, 0x65, 0xdf, 0xe7, 0x58, 0x47, 0xdf, 0xd7, 0xcd, 0xd7, 0x8a,
+];
+
+impl BridgeHeaderSigner {
+    /// Build the signer from config + genesis, or `None` if header attestation
+    /// is not configured or the key/identity cannot be resolved. Never panics;
+    /// every failure path logs and disables attestation (fail-open to "no
+    /// attestation", never fail-closed to a crash).
+    fn from_config(cfg: &NodeConfig, manifest: &GenesisManifest) -> Option<Self> {
+        // Gating field: no oracle address => header attestation disabled.
+        let oracle_hex = cfg.bridge_oracle_address.as_deref()?;
+        let oracle = match decode_hex_array::<20>(oracle_hex) {
+            Some(o) => o,
+            None => {
+                tracing::warn!(
+                    oracle = oracle_hex,
+                    "bridge: invalid oracle address hex; header attestation disabled"
+                );
+                return None;
+            }
+        };
+        let network_id = match cfg.bridge_network_id.as_deref() {
+            None => DEFAULT_BRIDGE_NETWORK_ID,
+            Some(h) => match decode_hex_array::<32>(h) {
+                Some(n) => n,
+                None => {
+                    tracing::warn!(
+                        network_id = h,
+                        "bridge: invalid network_id hex; header attestation disabled"
+                    );
+                    return None;
+                }
+            },
+        };
+        // Load the ML-DSA secret key from disk (raw bytes, else hex).
+        let sk = match std::fs::read(&cfg.mldsa_secret_key_path) {
+            Ok(raw) => load_mldsa_secret(&raw),
+            Err(e) => {
+                tracing::warn!(path = %cfg.mldsa_secret_key_path.display(), err = %e, "bridge: cannot read mldsa_secret_key_path; header attestation disabled");
+                return None;
+            }
+        }?;
+        // Own public key from the genesis manifest entry for this authority.
+        let v = manifest
+            .validators
+            .iter()
+            .find(|v| v.authority_id == cfg.authority_id)?;
+        let pk_bytes = hex::decode(v.mldsa_public_key_hex.trim_start_matches("0x")).ok()?;
+        let pubkey = gsx_crypto::mldsa::PublicKey::from_bytes(&pk_bytes).ok()?;
+        // sk↔pk correspondence guard: the secret key is loaded from disk but the
+        // public key comes from genesis. If they are not a keypair, every
+        // attestation would carry the genesis pk with a signature made by the
+        // file sk and be rejected everywhere (locally by `verify`, and on-chain
+        // by the registry's registered pk) — silently halting this validator's
+        // bridge contribution. Probe once at startup and fail LOUD (ERROR +
+        // disable) instead of silently on-chain.
+        let probe = b"gsx-bridge-header-keypair-probe";
+        let matches = gsx_crypto::mldsa::sign(probe, &sk)
+            .ok()
+            .is_some_and(|sig| gsx_crypto::mldsa::verify(probe, &sig, &pubkey).is_ok());
+        if !matches {
+            tracing::error!(
+                authority_id = cfg.authority_id,
+                "bridge: loaded ML-DSA secret key does NOT match the genesis public key for this authority; header attestation DISABLED (check mldsa_secret_key_path vs genesis mldsa_public_key_hex)"
+            );
+            return None;
+        }
+        tracing::info!(
+            authority_id = cfg.authority_id,
+            oracle = oracle_hex,
+            "bridge: header attestation ENABLED (validator-quorum side-attestation, UNFED until a relayer aggregates >2/3 stake)"
+        );
+        Some(Self {
+            authority_id: cfg.authority_id,
+            network_id,
+            oracle,
+            pubkey,
+            secret_key: sk,
+        })
+    }
+}
+
+/// Decode a 0x-optional hex string into a fixed `[u8; N]`, or `None` on bad
+/// length / bad hex.
+fn decode_hex_array<const N: usize>(s: &str) -> Option<[u8; N]> {
+    let bytes = hex::decode(s.trim_start_matches("0x")).ok()?;
+    if bytes.len() != N {
+        return None;
+    }
+    let mut out = [0u8; N];
+    out.copy_from_slice(&bytes);
+    Some(out)
+}
+
+/// Load an ML-DSA-65 secret key from file contents: try raw bytes first, then
+/// a hex envelope. `None` if neither parses.
+fn load_mldsa_secret(raw: &[u8]) -> Option<gsx_crypto::mldsa::SecretKey> {
+    if let Ok(sk) = gsx_crypto::mldsa::SecretKey::from_bytes(raw) {
+        return Some(sk);
+    }
+    let text = std::str::from_utf8(raw).ok()?.trim();
+    let decoded = hex::decode(text.trim_start_matches("0x")).ok()?;
+    gsx_crypto::mldsa::SecretKey::from_bytes(&decoded).ok()
 }
 
 /// Cold-path fields. Pre-S31 these lived on `State` directly; now
@@ -156,6 +298,13 @@ pub(crate) struct StateInner {
     /// from `try_commit`. `usize` is the position in `block.intents` so
     /// the explorer can resolve to a single intent cheaply.
     pub(crate) tx_to_block: HashMap<[u8; 32], (Round, CertHash, usize)>,
+    /// Latest finalized `(round, post_root)` captured at commit for the bridge
+    /// header attestation surface. Lossy-latest: overwritten on every commit,
+    /// `None` until the first block finalizes. Read by the RPC adapter to
+    /// lazily sign `gsx_getHeaderAttestation`. The pair is only co-available at
+    /// execution time (`InMemorySubstrate::state_root()` returns latest with no
+    /// round→root history), so it must be captured here, not reconstructed.
+    pub(crate) latest_bridge_header: Option<(u64, [u8; 32])>,
 }
 
 /// Round-based epoch counter for validator-set governance (DAG-S25).
@@ -264,7 +413,7 @@ fn load_corridors(manifest: &GenesisManifest) -> HashMap<(ChainId, ChainId), Cor
 }
 
 impl State {
-    fn new(manifest: &GenesisManifest) -> Self {
+    fn new(manifest: &GenesisManifest, bridge_signer: Option<BridgeHeaderSigner>) -> Self {
         let mut stake_table = StakeTable::new();
         let mut authority_registry = AuthorityRegistry::new();
         let mut validator_registry = ValidatorRegistry::new();
@@ -321,10 +470,13 @@ impl State {
                 detected_equivocations: Vec::new(),
                 blocks_by_round: BTreeMap::new(),
                 tx_to_block: HashMap::new(),
+                latest_bridge_header: None,
             }),
             mempool: std::sync::Arc::new(gsx_mempool::Mempool::new(
                 gsx_mempool::MempoolConfig::default(),
             )),
+            bridge_signer,
+            bridge_attestation_cache: parking_lot::Mutex::new(None),
         }
     }
 
@@ -401,7 +553,11 @@ impl Daemon {
             tasks: mut wire_tasks,
         } = wire.split();
         let outbound = Arc::new(outbound);
-        let state = Arc::new(State::new(&manifest));
+        // First runtime use of the validator's ML-DSA key: load it (if header
+        // attestation is configured) so the RPC adapter can sign bridge
+        // headers. `None` => attestation disabled; the daemon still runs.
+        let bridge_signer = BridgeHeaderSigner::from_config(&cfg, &manifest);
+        let state = Arc::new(State::new(&manifest, bridge_signer));
 
         // DAG-S31.4 / A3: client + JSON-RPC intent submissions flow
         // through `state.mempool` directly. The pre-A3 `intent_tx` /
@@ -1229,7 +1385,13 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
             // Substrate execution under inner lock.
             {
                 let mut inner = state.inner.lock().await;
-                let _ = execute_block(&mut inner.substrate, &block);
+                let report = execute_block(&mut inner.substrate, &block);
+                // Bridge header attestation: capture (round, post_root) at the
+                // single canonical commit point — the only place the pair is
+                // co-available (the substrate exposes only the latest root, with
+                // no round→root history). Lossy-latest; read out-of-band and
+                // signed lazily by the RPC adapter, never under this lock.
+                inner.latest_bridge_header = Some((report.round, report.post_root));
                 // IQ-003: index single-owner-equivalent main-lane txs so
                 // the fast-path receiver can K-binding cross-check.
                 // Skip governance/admin intents — only state-touching
@@ -1683,6 +1845,83 @@ mod tests {
     use super::*;
     use crate::config::{GenesisValidator, Peer};
 
+    /// Bridge header-attestation key-loading + hex helpers, and a full
+    /// create→verify roundtrip under a key loaded the way `from_config` loads
+    /// it (raw bytes, then hex envelope). Covers the novel runtime-key path
+    /// without standing up a full daemon.
+    #[test]
+    fn bridge_helpers_and_attestation_roundtrip() {
+        // Fixed-length hex decode: length is enforced.
+        assert!(
+            decode_hex_array::<20>("0x00").is_none(),
+            "short hex must be rejected"
+        );
+        let oracle = decode_hex_array::<20>("0x00000000000000000000000000000000000000a1")
+            .expect("20-byte oracle decodes");
+        assert_eq!(oracle[19], 0xa1);
+
+        // The pinned default network id is keccak256("suwappu-perf-7r") — the
+        // same value proven cross-language in `gsx_consensus::bridge_header`'s
+        // golden vector. A fat-finger here would silently fail every on-chain
+        // quorum check, so assert the full 32 bytes.
+        let expected_network_id = decode_hex_array::<32>(
+            "0xff431b3851ff00be6b5a4bd9b67e7d4118300693937865dfe75847dfd7cdd78a",
+        )
+        .unwrap();
+        assert_eq!(DEFAULT_BRIDGE_NETWORK_ID, expected_network_id);
+
+        // A real key loaded from raw bytes, and from a hex envelope, both work.
+        let (pk, sk) = gsx_crypto::mldsa::keypair();
+        let raw = sk.as_bytes().to_vec();
+        let from_raw = load_mldsa_secret(&raw).expect("raw secret-key bytes load");
+        let hex_envelope = format!("0x{}\n", hex::encode(&raw));
+        let from_hex = load_mldsa_secret(hex_envelope.as_bytes()).expect("hex secret-key loads");
+
+        // Garbage loads to None, never panics.
+        assert!(load_mldsa_secret(b"not a key").is_none());
+
+        // An attestation signed with the loaded key verifies against its
+        // binding and fails under a different oracle.
+        let att = gsx_consensus::bridge_header::HeaderAttestation::create(
+            DEFAULT_BRIDGE_NETWORK_ID,
+            oracle,
+            4242,
+            [0x11; 32],
+            0,
+            &pk,
+            &from_raw,
+        );
+        assert!(att.verify(DEFAULT_BRIDGE_NETWORK_ID, oracle));
+        let mut other = oracle;
+        other[0] ^= 0x01;
+        assert!(!att.verify(DEFAULT_BRIDGE_NETWORK_ID, other));
+
+        // The hex-loaded key is the same secret, so it reproduces the signature
+        // surface identically (verifies under the same pk).
+        let att2 = gsx_consensus::bridge_header::HeaderAttestation::create(
+            DEFAULT_BRIDGE_NETWORK_ID,
+            oracle,
+            4242,
+            [0x11; 32],
+            0,
+            &pk,
+            &from_hex,
+        );
+        assert!(att2.verify(DEFAULT_BRIDGE_NETWORK_ID, oracle));
+
+        // sk↔pk correspondence probe (the guard `from_config` runs at startup):
+        // a signature by `sk` verifies under its own `pk` but NOT under an
+        // unrelated key — so a mismatched (file-sk, genesis-pk) pair is caught.
+        let probe = b"gsx-bridge-header-keypair-probe";
+        let sig = gsx_crypto::mldsa::sign(probe, &sk).unwrap();
+        assert!(gsx_crypto::mldsa::verify(probe, &sig, &pk).is_ok());
+        let (other_pk, _other_sk) = gsx_crypto::mldsa::keypair();
+        assert!(
+            gsx_crypto::mldsa::verify(probe, &sig, &other_pk).is_err(),
+            "probe must reject a non-matching public key"
+        );
+    }
+
     #[test]
     fn f_plus_one_matches_byzantine_threshold() {
         // Standard BFT: f = floor((n-1)/3).
@@ -1765,6 +2004,8 @@ mod tests {
             client_per_ip_limit: 8,
             rpc_per_ip_capacity: 60,
             rpc_per_ip_refill_per_sec: 10,
+            bridge_oracle_address: None,
+            bridge_network_id: None,
             metrics_listen: None,
         };
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
@@ -1848,6 +2089,8 @@ mod tests {
             client_per_ip_limit: 8,
             rpc_per_ip_capacity: 60,
             rpc_per_ip_refill_per_sec: 10,
+            bridge_oracle_address: None,
+            bridge_network_id: None,
             metrics_listen: None,
         };
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
@@ -1946,6 +2189,8 @@ mod tests {
                 client_per_ip_limit: 8,
                 rpc_per_ip_capacity: 60,
                 rpc_per_ip_refill_per_sec: 10,
+                bridge_oracle_address: None,
+                bridge_network_id: None,
                 metrics_listen: None,
             };
             let d = Daemon::start(cfg, manifest.clone()).await.unwrap();
@@ -2086,6 +2331,8 @@ mod tests {
                 client_per_ip_limit: 8,
                 rpc_per_ip_capacity: 60,
                 rpc_per_ip_refill_per_sec: 10,
+                bridge_oracle_address: None,
+                bridge_network_id: None,
                 metrics_listen: None,
             };
             let d = Daemon::start(cfg, manifest.clone()).await.unwrap();
@@ -2490,6 +2737,8 @@ mod tests {
             client_per_ip_limit: 8,
             rpc_per_ip_capacity: 60,
             rpc_per_ip_refill_per_sec: 10,
+            bridge_oracle_address: None,
+            bridge_network_id: None,
             metrics_listen: None,
         };
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
@@ -2646,7 +2895,7 @@ mod tests {
             EventLog::start(&std::env::temp_dir().join("gsx-fastpath-test.ndjson"))
                 .await
                 .unwrap();
-        let state = Arc::new(State::new(&manifest));
+        let state = Arc::new(State::new(&manifest, None));
         let outbound: HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>> = HashMap::new();
         let self_id: AuthorityId = 0;
 
@@ -2745,7 +2994,7 @@ mod tests {
             EventLog::start(&std::env::temp_dir().join("gsx-fp-k-binding-test.ndjson"))
                 .await
                 .unwrap();
-        let state = Arc::new(State::new(&manifest));
+        let state = Arc::new(State::new(&manifest, None));
         let outbound: HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>> = HashMap::new();
         let self_id: AuthorityId = 0;
 
@@ -2850,7 +3099,7 @@ mod tests {
         let (log, _log_task) = EventLog::start(&std::env::temp_dir().join("gsx-ltp-test.ndjson"))
             .await
             .unwrap();
-        let state = Arc::new(State::new(&manifest));
+        let state = Arc::new(State::new(&manifest, None));
 
         let payload = gsx_ltp::AttestationPayload {
             source_chain: 1u64, // Ethereum
@@ -2950,7 +3199,7 @@ mod tests {
         let (log, _log_task) = EventLog::start(&std::env::temp_dir().join("gsx-ltp-unreg.ndjson"))
             .await
             .unwrap();
-        let state = Arc::new(State::new(&manifest));
+        let state = Arc::new(State::new(&manifest, None));
         assert!(state.inner.lock().await.corridors.is_empty());
 
         let payload = gsx_ltp::AttestationPayload {
@@ -3018,6 +3267,8 @@ mod tests {
             client_per_ip_limit: 8,
             rpc_per_ip_capacity: 60,
             rpc_per_ip_refill_per_sec: 10,
+            bridge_oracle_address: None,
+            bridge_network_id: None,
             metrics_listen: None,
         };
         let _d = Daemon::start(cfg.clone(), manifest).await.unwrap();
@@ -3108,6 +3359,8 @@ mod tests {
             client_per_ip_limit: 8,
             rpc_per_ip_capacity: 60,
             rpc_per_ip_refill_per_sec: 10,
+            bridge_oracle_address: None,
+            bridge_network_id: None,
             metrics_listen: None,
         };
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
@@ -3222,6 +3475,8 @@ mod tests {
             client_per_ip_limit: 8,
             rpc_per_ip_capacity: 60,
             rpc_per_ip_refill_per_sec: 10,
+            bridge_oracle_address: None,
+            bridge_network_id: None,
             metrics_listen: None,
         };
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
@@ -3334,6 +3589,8 @@ mod tests {
             client_per_ip_limit: 8,
             rpc_per_ip_capacity: 60,
             rpc_per_ip_refill_per_sec: 10,
+            bridge_oracle_address: None,
+            bridge_network_id: None,
             metrics_listen: None,
         };
         let _d = Daemon::start(cfg.clone(), manifest).await.unwrap();
