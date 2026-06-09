@@ -32,6 +32,19 @@ pub fn keypair() -> (PublicKey, SecretKey) {
     (pk, sk)
 }
 
+/// Generate a fresh BLS keypair and return the raw serialised bytes.
+///
+/// Returns `(pk_bytes, sk_bytes)`:
+/// - `pk_bytes` is the 48-byte compressed G1 public key.
+/// - `sk_bytes` is the 32-byte big-endian secret scalar.
+///
+/// Convenience wrapper for key-generation tools that need `Vec<u8>` directly
+/// rather than the blst concrete types.
+pub fn keypair_bytes() -> (Vec<u8>, Vec<u8>) {
+    let (pk, sk) = keypair();
+    (pk.to_bytes().to_vec(), sk.to_bytes().to_vec())
+}
+
 /// Sign a message under a single BLS secret key.
 pub fn sign(message: &[u8], sk: &SecretKey) -> Signature {
     sk.sign(message, BLS_DST, &[])

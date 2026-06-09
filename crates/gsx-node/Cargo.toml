@@ -25,6 +25,10 @@ path = "src/bin/gsx-loadgen.rs"
 name = "gsx-metrics"
 path = "src/bin/gsx-metrics.rs"
 
+[[bin]]
+name = "gsx-keygen"
+path = "src/bin/gsx-keygen.rs"
+
 [dependencies]
 gsx-crypto.workspace = true
 gsx-consensus.workspace = true
