@@ -293,10 +293,13 @@ pub fn causal_history(dag: &DagStore, start: CertHash) -> Vec<CertHash> {
     // Filter to certs that are actually in the DAG (mirrors linearize's
     // implicit filter) then sort by (round, author, hash) to reproduce
     // linearize order.
-    let mut out: Vec<CertHash> = seen
-        .into_iter()
-        .filter(|h| dag.contains(h))
-        .collect();
+    let mut out: Vec<CertHash> = seen.into_iter().filter(|h| dag.contains(h)).collect();
+    // FORK-CRITICAL: the trailing `*h` is the only thing that makes this
+    // order TOTAL. `seen` is a HashSet (nondeterministic iteration), and two
+    // equivocating certs can share the same (round, author). Without `*h`,
+    // sort_by_key would leave their relative order unspecified → different
+    // nodes could linearize the same anchor's causal history differently →
+    // consensus fork. Do not drop the `*h` tie-breaker.
     out.sort_by_key(|h| {
         let c = dag.get(h).expect("just filtered to in-dag hashes");
         (c.round, c.author, *h)
@@ -739,9 +742,7 @@ mod tests {
             let mut finalized: Vec<CertHash> = Vec::new();
             let mut included: StdHashSet<CertHash> = StdHashSet::new();
             for r in 0..max_round {
-                if let LeaderStatus::Direct(leader_hash) =
-                    decide_slot_reference(dag, r, n)
-                {
+                if let LeaderStatus::Direct(leader_hash) = decide_slot_reference(dag, r, n) {
                     for h in causal_history_reference(dag, leader_hash) {
                         if included.insert(h) {
                             finalized.push(h);
@@ -755,8 +756,37 @@ mod tests {
         // ---- DAG generator ----
         //
         // Builds a random valid DAG: varied committee size, varied depth,
-        // sparse parent sets, potential equivocation (2 certs at same
-        // (round,author)), and potential missing leaders.
+        // SPARSE per-author parent sets (so siblings at the same round have
+        // DIFFERENT ancestor sets — this is what makes the indirect
+        // Skip→Direct path reachable, where a target leader cert exists but
+        // is NOT in a later anchor's causal history), potential equivocation
+        // (2 certs at same (round,author)), and potential missing leaders.
+
+        /// Pick a sparse subset of `prev` as parents for cert `(round, author)`.
+        ///
+        /// The per-author XOR makes two siblings at the same round select
+        /// DIFFERENT parents from the same `prev`, so their causal histories
+        /// diverge — the exact topology the dense `prev.clone()` generator
+        /// never produced (and the reason the IQ-004 multi-anchor indirect
+        /// branch now gets real differential coverage). Falls back to a single
+        /// parent when the mask selects none, keeping the chain connected.
+        fn select_parents(prev: &[CertHash], mask: u64, author: CommitteeSize) -> Vec<CertHash> {
+            if prev.is_empty() {
+                return vec![];
+            }
+            let seed = mask ^ (author as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            let mut parents: Vec<CertHash> = prev
+                .iter()
+                .copied()
+                .enumerate()
+                .filter(|(i, _)| seed & (1u64 << (i % 64)) != 0)
+                .map(|(_, h)| h)
+                .collect();
+            if parents.is_empty() {
+                parents.push(prev[0]);
+            }
+            parents
+        }
 
         fn build_random_dag(
             n: CommitteeSize,
@@ -765,6 +795,9 @@ mod tests {
             author_masks: &[u64],
             // per-round equivocation mask: which authors produce a 2nd cert
             equivoc_masks: &[u64],
+            // per-round bitmask: which of prev's certs are eligible parents
+            // (XOR'd with author in select_parents so siblings differ)
+            parent_masks: &[u64],
         ) -> DagStore {
             let mut dag = DagStore::new();
             let mut round_hashes: Vec<Vec<CertHash>> = Vec::new();
@@ -772,6 +805,7 @@ mod tests {
             for r in 0..n_rounds {
                 let mask = author_masks[r as usize];
                 let eq_mask = equivoc_masks[r as usize];
+                let p_mask = parent_masks[r as usize];
                 let prev = if r == 0 {
                     vec![]
                 } else {
@@ -783,6 +817,11 @@ mod tests {
                     if mask & (1u64 << a) == 0 {
                         continue;
                     }
+                    let parents = if r == 0 {
+                        vec![]
+                    } else {
+                        select_parents(&prev, p_mask, a)
+                    };
                     let mut payload = [0u8; 32];
                     payload[0] = a as u8;
                     payload[1] = r as u8;
@@ -793,22 +832,18 @@ mod tests {
                         Certificate {
                             author: a as AuthorityId,
                             round: r,
-                            parents: prev.clone(),
+                            parents: parents.clone(),
                             payload_digest: payload,
                         }
                     };
-                    // Insert may fail if parents are empty for round>0
-                    // (happens when prev is empty). Accept both outcomes.
                     if let Ok(h) = dag.insert(cert) {
                         this_round.push(h);
                     }
 
                     // Equivocating second cert for same (round, author)
-                    // (distinct payload_digest so hash differs).
-                    // For round>0 we need parents, so only equivocate when prev
-                    // is non-empty (guaranteed when mask had at least one author
-                    // last round). For round 0 (genesis), parents are always empty.
-                    if eq_mask & (1u64 << a) != 0 && (r == 0 || !prev.is_empty()) {
+                    // (distinct payload_digest so hash differs). Shares the
+                    // sibling's sparse parent set.
+                    if eq_mask & (1u64 << a) != 0 {
                         let mut payload2 = [0u8; 32];
                         payload2[0] = a as u8;
                         payload2[1] = r as u8;
@@ -819,7 +854,7 @@ mod tests {
                             Certificate {
                                 author: a as AuthorityId,
                                 round: r,
-                                parents: prev.clone(),
+                                parents: parents.clone(),
                                 payload_digest: payload2,
                             }
                         };
@@ -848,8 +883,12 @@ mod tests {
             /// Covers:
             /// - `cert_at` for all (round, author) pairs
             /// - `supporters` (via `try_direct_decide` call chain)
-            /// - `causal_history` for sampled starts
-            /// - `decide_slot` for all rounds
+            /// - `causal_history` for every cert in the DAG
+            /// - `decide_slot` for all rounds — including the indirect
+            ///   Skip→Direct path, now reachable thanks to sparse per-author
+            ///   parent sets (siblings have divergent ancestor sets, so a
+            ///   target leader can exist yet be absent from a later anchor's
+            ///   causal history — the IQ-004 multi-anchor scan)
             /// - **`finalize`** full committed-sequence equality (headline)
             #[test]
             fn index_vs_linearize_equivalence(
@@ -861,17 +900,23 @@ mod tests {
                 n_rounds in 1u64..=12u64,
                 author_masks in proptest::collection::vec(any::<u64>(), 1..=12),
                 equivoc_masks in proptest::collection::vec(any::<u64>(), 1..=12),
+                parent_masks in proptest::collection::vec(any::<u64>(), 1..=12),
             ) {
                 // Pad/truncate masks to n_rounds length.
                 let n_rounds = n_rounds.min(12);
                 let mut am = author_masks;
                 let mut em = equivoc_masks;
+                let mut pm = parent_masks;
                 am.resize(n_rounds as usize, u64::MAX);
                 em.resize(n_rounds as usize, 0u64);
+                // Pad parent masks with an alternating-bit pattern (sparse,
+                // not full) so padded rounds still exercise divergent ancestor
+                // sets rather than collapsing back to dense parents.
+                pm.resize(n_rounds as usize, 0xAAAA_AAAA_AAAA_AAAA);
                 // Ensure genesis round always has at least one author.
                 am[0] |= 1;
 
-                let dag = build_random_dag(n, n_rounds, &am, &em);
+                let dag = build_random_dag(n, n_rounds, &am, &em, &pm);
 
                 if dag.is_empty() {
                     return Ok(());
@@ -925,6 +970,5 @@ mod tests {
                 );
             }
         }
-
     }
 }
