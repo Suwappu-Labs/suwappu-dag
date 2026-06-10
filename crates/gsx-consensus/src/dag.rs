@@ -100,6 +100,37 @@ impl DagStore {
         Ok(hash)
     }
 
+    /// Return all certificate hashes at the given round.
+    ///
+    /// The returned slice is in insertion order (not sorted); callers
+    /// that need `(author, hash)` order must sort themselves.
+    /// Returns an empty slice for rounds not present in the store.
+    pub fn round_hashes(&self, round: Round) -> &[CertHash] {
+        self.by_round.get(&round).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// Return the highest round present in the store, or `None` if the
+    /// store is empty.
+    ///
+    /// INVARIANT (load-bearing for the commit path): this equals
+    /// `linearize().map(round).max()` only because `by_round` is append-only
+    /// and every key has ≥1 cert — `insert` is the sole mutator and always
+    /// pushes a hash. If a future change adds pruning/GC or otherwise leaves
+    /// an empty `by_round` Vec, `max_round`/`rounds`/`round_hashes` silently
+    /// diverge from their linearize-derived equivalents and the commit-path
+    /// substitution in `commit.rs` breaks. See `commit.rs::mod equivalence`.
+    pub fn max_round(&self) -> Option<Round> {
+        self.by_round.keys().next_back().copied()
+    }
+
+    /// Iterate over all rounds present in the store, in ascending order.
+    ///
+    /// See [`Self::max_round`] for the append-only / non-empty-Vec invariant
+    /// this relies on.
+    pub fn rounds(&self) -> impl Iterator<Item = Round> + '_ {
+        self.by_round.keys().copied()
+    }
+
     /// Produce the deterministic linearization of the DAG.
     ///
     /// Order: rounds ascending; within a round, certificates sorted by

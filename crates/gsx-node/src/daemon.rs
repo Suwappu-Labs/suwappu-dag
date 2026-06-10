@@ -1317,13 +1317,7 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
     let n = state.inner.lock().await.n_authorities;
     let candidate_rounds: BTreeSet<u64> = {
         let dag = state.dag.read().await;
-        let mut rounds = BTreeSet::new();
-        for h in dag.linearize() {
-            if let Some(c) = dag.get(&h) {
-                rounds.insert(c.round);
-            }
-        }
-        rounds
+        dag.rounds().collect()
     };
 
     for round in candidate_rounds {
