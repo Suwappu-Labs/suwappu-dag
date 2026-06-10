@@ -36,7 +36,7 @@ jobs:
       - name: Setup gsx-db deploy key
         uses: webfactory/ssh-agent@v0.10.0
         with:
-          ssh-private-key: ${{ secrets.GSX_DB_DEPLOY_KEY }}
+          ssh-private-key: ${{ secrets.SUWAPPU_DB_DEPLOY_KEY }}
       - name: Rewrite https://github.com → git@github.com for cargo
         run: git config --global url."git@github.com:".insteadOf "https://github.com/"
       - uses: dtolnay/rust-toolchain@stable
@@ -53,7 +53,7 @@ jobs:
       - name: Setup gsx-db deploy key
         uses: webfactory/ssh-agent@v0.10.0
         with:
-          ssh-private-key: ${{ secrets.GSX_DB_DEPLOY_KEY }}
+          ssh-private-key: ${{ secrets.SUWAPPU_DB_DEPLOY_KEY }}
       - name: Rewrite https://github.com → git@github.com for cargo
         run: git config --global url."git@github.com:".insteadOf "https://github.com/"
       - uses: dtolnay/rust-toolchain@stable
@@ -68,7 +68,7 @@ jobs:
       - name: Setup gsx-db deploy key
         uses: webfactory/ssh-agent@v0.10.0
         with:
-          ssh-private-key: ${{ secrets.GSX_DB_DEPLOY_KEY }}
+          ssh-private-key: ${{ secrets.SUWAPPU_DB_DEPLOY_KEY }}
       - name: Rewrite https://github.com → git@github.com for cargo
         run: git config --global url."git@github.com:".insteadOf "https://github.com/"
       - uses: dtolnay/rust-toolchain@stable

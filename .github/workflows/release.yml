@@ -71,7 +71,7 @@ jobs:
       # otherwise and fail with "Repository not found".
       - name: Setup gsx-db deploy key
         env:
-          GSX_DB_DEPLOY_KEY: ${{ secrets.GSX_DB_DEPLOY_KEY }}
+          GSX_DB_DEPLOY_KEY: ${{ secrets.SUWAPPU_DB_DEPLOY_KEY }}
         run: |
           mkdir -p ~/.ssh
           echo "$GSX_DB_DEPLOY_KEY" > ~/.ssh/id_ed25519

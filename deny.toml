@@ -40,6 +40,21 @@ ignore = [
     # added precisely to make this future migration detectable.
     # Re-check: 2026-Q4.
     "RUSTSEC-2025-0141",
+    # The `pqcrypto-*` family is flagged UNMAINTAINED (not vulnerable) because
+    # the upstream PQClean project is being archived. These crates provide the
+    # NIST FIPS 204 / FIPS 203 ML-DSA-65 + ML-KEM-768 backend that is the
+    # load-bearing PQ-conservative crypto surface (CLAUDE.md invariant #2) — so
+    # they cannot simply be dropped. No maintained drop-in equivalent has
+    # stabilized yet. `bans`/`licenses`/`sources` all pass; this is the only
+    # advisories failure.
+    # Gate: migrate to a maintained PQ backend (RustCrypto `ml-dsa`/`ml-kem`
+    # once production-ready, or a vetted PQClean fork) — needs a crypto IQ +
+    # ACVP re-vector against gsx-crypto's existing vectors before any swap.
+    # Re-check: 2026-Q4.
+    "RUSTSEC-2026-0161", # pqcrypto-mlkem
+    "RUSTSEC-2026-0162", # pqcrypto-traits
+    "RUSTSEC-2026-0163", # pqcrypto-internals
+    "RUSTSEC-2026-0166", # pqcrypto-mldsa
 ]
 
 [licenses]
@@ -79,6 +94,7 @@ unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = [
     # gsx-db state substrate (paper §7.4). Consumed at v0.1.0 by
-    # gsx-execution's GsxDbSubstrate adapter.
-    "https://github.com/GlobalSettlementNetwork/gsx-db",
+    # gsx-execution's GsxDbSubstrate adapter. Migrated to the Suwappu home
+    # (Suwappu-Labs/suwappu-db); same tag/revision as the old gsx-db v0.1.0.
+    "https://github.com/Suwappu-Labs/suwappu-db",
 ]
