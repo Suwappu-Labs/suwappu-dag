@@ -5,7 +5,7 @@
 # required because:
 #
 # - The workspace depends on private repos
-#   (`GlobalSettlementNetwork/gsx-db`).
+#   (`Suwappu-Labs/suwappu-db`).
 # - libgit2 inside cargo does NOT honour the `gh` credential helper or
 #   most credential-store integrations on macOS / Linux.
 # - The system `git` binary, configured by `gh auth login`, succeeds.

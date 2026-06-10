@@ -79,6 +79,7 @@ unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = [
     # gsx-db state substrate (paper §7.4). Consumed at v0.1.0 by
-    # gsx-execution's GsxDbSubstrate adapter.
-    "https://github.com/GlobalSettlementNetwork/gsx-db",
+    # gsx-execution's GsxDbSubstrate adapter. Migrated to the Suwappu home
+    # (Suwappu-Labs/suwappu-db); same tag/revision as the old gsx-db v0.1.0.
+    "https://github.com/Suwappu-Labs/suwappu-db",
 ]
