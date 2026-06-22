@@ -23,8 +23,9 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: '22'
-          cache: 'npm'
-          cache-dependency-path: clients/ts-sdk/package-lock.json
+          # No npm cache: package-lock.json is gitignored, so the cache
+          # dependency-path can't resolve and the step errored on every run.
+          # The install step below already handles the lockfile-less case.
       - name: Install (no lockfile yet — fall back to plain install)
         run: |
           if [ -f package-lock.json ]; then
