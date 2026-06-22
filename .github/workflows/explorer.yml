@@ -1,12 +1,12 @@
 name: explorer
 
-# Build + deploy the gsx-devnet block explorer SPA to S3 + invalidate
+# Build + deploy the suwappu-devnet block explorer SPA to S3 + invalidate
 # CloudFront on every push to main that touches the explorer or its
 # SDK dep. Manual dispatch is also wired for ad-hoc rebuilds.
 #
 # Pre-reqs (one-time, set by an operator):
 #   - AWS IAM role for GitHub OIDC with s3:PutObject on
-#     `gsx-dag-devnet-explorer/*` + cloudfront:CreateInvalidation on
+#     `suwappu-dag-devnet-explorer/*` + cloudfront:CreateInvalidation on
 #     the explorer distribution.
 #   - The role ARN must be set as the `EXPLORER_DEPLOY_ROLE` repo
 #     secret (or org secret).
@@ -46,7 +46,7 @@ jobs:
 
       # Build the TS SDK first — the explorer depends on its
       # `dist/` output via file:../ts-sdk.
-      - name: Build @gsx/client TS SDK
+      - name: Build @suwappu/client TS SDK
         working-directory: clients/ts-sdk
         run: |
           npm install --no-audit --no-fund
@@ -57,7 +57,7 @@ jobs:
         env:
           # Bake the public devnet URL into the bundle. Override
           # locally by setting VITE_RPC_URL.
-          VITE_RPC_URL: https://rpc.devnet.gsx.globalsettlement.com
+          VITE_RPC_URL: https://rpc.devnet.suwappu.bot
         run: |
           npm install --no-audit --no-fund
           npm run typecheck
@@ -78,12 +78,12 @@ jobs:
           EXPLORER_DEPLOY_ROLE: ${{ secrets.EXPLORER_DEPLOY_ROLE }}
         working-directory: clients/explorer
         run: |
-          aws s3 sync ./dist/ s3://gsx-dag-devnet-explorer/ \
+          aws s3 sync ./dist/ s3://suwappu-dag-devnet-explorer/ \
               --delete \
               --cache-control "public, max-age=300, must-revalidate"
           # index.html is the entry point; bust its cache aggressively
           # so hash routing keeps working after a deploy.
-          aws s3 cp ./dist/index.html s3://gsx-dag-devnet-explorer/index.html \
+          aws s3 cp ./dist/index.html s3://suwappu-dag-devnet-explorer/index.html \
               --cache-control "no-cache, no-store, must-revalidate"
 
       - name: Invalidate CloudFront
@@ -92,7 +92,7 @@ jobs:
           EXPLORER_DEPLOY_ROLE: ${{ secrets.EXPLORER_DEPLOY_ROLE }}
         run: |
           DIST_ID=$(aws cloudfront list-distributions \
-              --query "DistributionList.Items[?Aliases.Items[?contains(@, 'explorer.devnet.gsx')]].Id | [0]" \
+              --query "DistributionList.Items[?Aliases.Items[?contains(@, 'explorer.devnet.suwappu')]].Id | [0]" \
               --output text)
           aws cloudfront create-invalidation \
               --distribution-id "$DIST_ID" \

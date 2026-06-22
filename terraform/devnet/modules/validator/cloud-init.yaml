@@ -1,11 +1,11 @@
 #cloud-config
 #
-# Bootstrap a GSX devnet validator. Differences from the perf cloud-init:
+# Bootstrap a SUWAPPU devnet validator. Differences from the perf cloud-init:
 #   * Formats + mounts the persistent EBS attached at ${state_device} to
-#     /var/lib/gsx (idempotent — only formats if filesystem absent).
+#     /var/lib/suwappu (idempotent — only formats if filesystem absent).
 #   * Installs amazon-cloudwatch-agent and points it at the local
 #     Prometheus exporter (port ${metrics_port}).
-#   * Restarts the gsx-node service on update (relies on a separate
+#   * Restarts the suwappu-node service on update (relies on a separate
 #     "update binary" SSM run document — see OPERATIONS.md G5).
 
 package_update: true
@@ -16,69 +16,69 @@ packages:
   - amazon-cloudwatch-agent
 
 write_files:
-  - path: /etc/systemd/system/gsx-node.service
+  - path: /etc/systemd/system/suwappu-node.service
     content: |
       [Unit]
-      Description=GSX DAG validator (devnet)
-      After=network-online.target gsx-bootstrap.service var-lib-gsx.mount
-      Requires=gsx-bootstrap.service var-lib-gsx.mount
+      Description=SUWAPPU DAG validator (devnet)
+      After=network-online.target suwappu-bootstrap.service var-lib-suwappu.mount
+      Requires=suwappu-bootstrap.service var-lib-suwappu.mount
 
       [Service]
       Type=simple
-      User=gsx
-      Group=gsx
+      User=suwappu
+      Group=suwappu
       Environment=RUST_LOG=info
-      ExecStart=/opt/gsx/gsx-node --config /etc/gsx/node.toml
+      ExecStart=/opt/suwappu/suwappu-node --config /etc/suwappu/node.toml
       Restart=on-failure
       RestartSec=3
-      StandardOutput=append:/var/log/gsx/stdout.log
-      StandardError=append:/var/log/gsx/stderr.log
+      StandardOutput=append:/var/log/suwappu/stdout.log
+      StandardError=append:/var/log/suwappu/stderr.log
       LimitNOFILE=65535
 
       [Install]
       WantedBy=multi-user.target
 
-  - path: /etc/systemd/system/gsx-bootstrap.service
+  - path: /etc/systemd/system/suwappu-bootstrap.service
     content: |
       [Unit]
-      Description=Pull GSX binaries + config from S3
-      After=network-online.target var-lib-gsx.mount
-      Requires=var-lib-gsx.mount
+      Description=Pull SUWAPPU binaries + config from S3
+      After=network-online.target var-lib-suwappu.mount
+      Requires=var-lib-suwappu.mount
       Wants=network-online.target
 
       [Service]
       Type=oneshot
       RemainAfterExit=yes
-      ExecStart=/opt/gsx/bootstrap.sh
-      StandardOutput=append:/var/log/gsx/bootstrap.log
-      StandardError=append:/var/log/gsx/bootstrap.log
+      ExecStart=/opt/suwappu/bootstrap.sh
+      StandardOutput=append:/var/log/suwappu/bootstrap.log
+      StandardError=append:/var/log/suwappu/bootstrap.log
 
-  - path: /etc/systemd/system/var-lib-gsx.mount
+  - path: /etc/systemd/system/var-lib-suwappu.mount
     content: |
       [Unit]
-      Description=Mount persistent gsx state volume
+      Description=Mount persistent suwappu state volume
       DefaultDependencies=no
       Before=local-fs.target
 
       [Mount]
       What=${state_device}
-      Where=/var/lib/gsx
+      Where=/var/lib/suwappu
       Type=ext4
       Options=defaults,noatime
 
       [Install]
       WantedBy=local-fs.target
 
-  - path: /opt/gsx/mount-state.sh
+  - path: /opt/suwappu/mount-state.sh
     permissions: '0755'
     content: |
       #!/bin/bash
-      # Format the state EBS volume if it's blank; mount it at /var/lib/gsx.
+      # Format the state EBS volume if it's blank; mount it at /var/lib/suwappu.
       # Idempotent — runs on every boot; only formats if the filesystem is
       # absent (i.e. first boot of a brand new EBS volume).
       set -euo pipefail
       DEV="${state_device}"
-      MNT=/var/lib/gsx
+      MNT=/var/lib/suwappu
       mkdir -p "$MNT"
       # Wait up to 60s for the EBS attach to settle on Nitro instances.
       for i in $(seq 1 30); do
@@ -86,11 +86,11 @@ write_files:
         sleep 2
       done
       if ! blkid "$DEV" >/dev/null 2>&1; then
-        mkfs.ext4 -L gsx-state "$DEV"
+        mkfs.ext4 -L suwappu-state "$DEV"
       fi
       mount "$DEV" "$MNT" || true
 
-  - path: /opt/gsx/bootstrap.sh
+  - path: /opt/suwappu/bootstrap.sh
     permissions: '0755'
     content: |
       #!/bin/bash
@@ -98,24 +98,24 @@ write_files:
       BUCKET="${artifact_bucket}"
       REGION="${region_label}"
       AUTHORITY="${authority_id}"
-      mkdir -p /opt/gsx /etc/gsx /var/lib/gsx /var/log/gsx
+      mkdir -p /opt/suwappu /etc/suwappu /var/lib/suwappu /var/log/suwappu
       # Pull binary + genesis + per-region node.toml.
-      aws s3 cp "s3://$BUCKET/bin/gsx-node" /opt/gsx/gsx-node
-      chmod +x /opt/gsx/gsx-node
-      aws s3 cp "s3://$BUCKET/genesis/genesis.toml" /etc/gsx/genesis.toml
-      aws s3 cp "s3://$BUCKET/configs/$REGION/node.toml" /etc/gsx/node.toml
+      aws s3 cp "s3://$BUCKET/bin/suwappu-node" /opt/suwappu/suwappu-node
+      chmod +x /opt/suwappu/suwappu-node
+      aws s3 cp "s3://$BUCKET/genesis/genesis.toml" /etc/suwappu/genesis.toml
+      aws s3 cp "s3://$BUCKET/configs/$REGION/node.toml" /etc/suwappu/node.toml
       # Per-region keys land on the persistent volume — they survive
       # instance replacement so we don't have to re-bootstrap keys when
       # the validator EC2 is rebuilt.
-      if [[ ! -f /var/lib/gsx/mldsa.sk ]]; then
-        aws s3 cp "s3://$BUCKET/keys/$REGION/mldsa.sk" /var/lib/gsx/mldsa.sk
-        chmod 600 /var/lib/gsx/mldsa.sk
+      if [[ ! -f /var/lib/suwappu/mldsa.sk ]]; then
+        aws s3 cp "s3://$BUCKET/keys/$REGION/mldsa.sk" /var/lib/suwappu/mldsa.sk
+        chmod 600 /var/lib/suwappu/mldsa.sk
       fi
-      if [[ ! -f /var/lib/gsx/bls.sk ]]; then
-        aws s3 cp "s3://$BUCKET/keys/$REGION/bls.sk" /var/lib/gsx/bls.sk
-        chmod 600 /var/lib/gsx/bls.sk
+      if [[ ! -f /var/lib/suwappu/bls.sk ]]; then
+        aws s3 cp "s3://$BUCKET/keys/$REGION/bls.sk" /var/lib/suwappu/bls.sk
+        chmod 600 /var/lib/suwappu/bls.sk
       fi
-      chown -R gsx:gsx /opt/gsx /etc/gsx /var/lib/gsx /var/log/gsx
+      chown -R suwappu:suwappu /opt/suwappu /etc/suwappu /var/lib/suwappu /var/log/suwappu
 
   - path: /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
     content: |
@@ -124,7 +124,7 @@ write_files:
           "run_as_user": "cwagent"
         },
         "metrics": {
-          "namespace": "gsx-devnet",
+          "namespace": "suwappu-devnet",
           "metrics_collected": {
             "prometheus": {
               "prometheus_config_path": "/opt/aws/amazon-cloudwatch-agent/etc/prometheus.yaml",
@@ -132,16 +132,16 @@ write_files:
                 "metric_declaration": [
                   {
                     "source_labels": ["job"],
-                    "label_matcher": "gsx-node",
+                    "label_matcher": "suwappu-node",
                     "dimensions": [["region", "authority_id"]],
                     "metric_selectors": [
-                      "^gsx_committed_rounds_total$",
-                      "^gsx_last_committed_round$",
-                      "^gsx_round_driver_lag_seconds$",
-                      "^gsx_inbound_certs_total$",
-                      "^gsx_mempool_size$",
-                      "^gsx_rpc_requests_total$",
-                      "^gsx_rpc_rejected_total$"
+                      "^suwappu_committed_rounds_total$",
+                      "^suwappu_last_committed_round$",
+                      "^suwappu_round_driver_lag_seconds$",
+                      "^suwappu_inbound_certs_total$",
+                      "^suwappu_mempool_size$",
+                      "^suwappu_rpc_requests_total$",
+                      "^suwappu_rpc_rejected_total$"
                     ]
                   }
                 ]
@@ -157,7 +157,7 @@ write_files:
         scrape_interval: 30s
         scrape_timeout: 10s
       scrape_configs:
-        - job_name: gsx-node
+        - job_name: suwappu-node
           static_configs:
             - targets:
                 - 127.0.0.1:${metrics_port}
@@ -166,15 +166,15 @@ write_files:
                 authority_id: "${authority_id}"
 
 runcmd:
-  - groupadd --system gsx
-  - useradd --system --gid gsx --no-create-home --shell /usr/sbin/nologin gsx
-  - mkdir -p /var/log/gsx
-  - chown gsx:gsx /var/log/gsx
-  - /opt/gsx/mount-state.sh
+  - groupadd --system suwappu
+  - useradd --system --gid suwappu --no-create-home --shell /usr/sbin/nologin suwappu
+  - mkdir -p /var/log/suwappu
+  - chown suwappu:suwappu /var/log/suwappu
+  - /opt/suwappu/mount-state.sh
   - systemctl daemon-reload
-  - systemctl enable var-lib-gsx.mount
-  - systemctl start var-lib-gsx.mount
-  - systemctl enable gsx-bootstrap.service gsx-node.service
-  - systemctl start gsx-bootstrap.service
-  - systemctl start gsx-node.service
+  - systemctl enable var-lib-suwappu.mount
+  - systemctl start var-lib-suwappu.mount
+  - systemctl enable suwappu-bootstrap.service suwappu-node.service
+  - systemctl start suwappu-bootstrap.service
+  - systemctl start suwappu-node.service
   - /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s

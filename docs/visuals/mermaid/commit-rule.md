@@ -1,6 +1,6 @@
 # Mysticeti-C commit rule — direct + indirect + orphan window
 
-Covers `crates/gsx-consensus/src/commit.rs` end-to-end: `try_direct_decide`,
+Covers `crates/suwappu-consensus/src/commit.rs` end-to-end: `try_direct_decide`,
 `try_indirect_decide`, `decide_slot`, `causal_history`. Highlights the
 parent-set freeze window that [IQ-004](../../iq/IQ-004-decide-slot-orphan-window.md)
 catches.

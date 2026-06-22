@@ -33,10 +33,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Setup gsx-db deploy key
+      - name: Setup suwappu-db deploy key
         uses: webfactory/ssh-agent@v0.10.0
         with:
-          ssh-private-key: ${{ secrets.GSX_DB_DEPLOY_KEY }}
+          ssh-private-key: ${{ secrets.SUWAPPU_DB_DEPLOY_KEY }}
       - name: Rewrite https://github.com → git@github.com for cargo
         run: git config --global url."git@github.com:".insteadOf "https://github.com/"
       - uses: dtolnay/rust-toolchain@stable
@@ -50,10 +50,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Setup gsx-db deploy key
+      - name: Setup suwappu-db deploy key
         uses: webfactory/ssh-agent@v0.10.0
         with:
-          ssh-private-key: ${{ secrets.GSX_DB_DEPLOY_KEY }}
+          ssh-private-key: ${{ secrets.SUWAPPU_DB_DEPLOY_KEY }}
       - name: Rewrite https://github.com → git@github.com for cargo
         run: git config --global url."git@github.com:".insteadOf "https://github.com/"
       - uses: dtolnay/rust-toolchain@stable
@@ -65,16 +65,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Setup gsx-db deploy key
+      - name: Setup suwappu-db deploy key
         uses: webfactory/ssh-agent@v0.10.0
         with:
-          ssh-private-key: ${{ secrets.GSX_DB_DEPLOY_KEY }}
+          ssh-private-key: ${{ secrets.SUWAPPU_DB_DEPLOY_KEY }}
       - name: Rewrite https://github.com → git@github.com for cargo
         run: git config --global url."git@github.com:".insteadOf "https://github.com/"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # cargo-deny runs on the host runner (not the EmbarkStudios container
-      # action) so the SSH agent set up above is reachable for the gsx-db
+      # action) so the SSH agent set up above is reachable for the suwappu-db
       # private git dep. The container action exports SSH_AUTH_SOCK into the
       # container but doesn't mount the agent's UNIX socket, breaking auth.
       - name: Install cargo-deny

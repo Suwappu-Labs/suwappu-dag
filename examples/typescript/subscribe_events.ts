@@ -12,7 +12,7 @@
  * it's on.
  */
 
-import { Client } from "@gsx/client";
+import { Client } from "@suwappu/client";
 import { WebSocket as WsWebSocket } from "ws";
 
 const client = new Client("http://127.0.0.1:9092");

@@ -1,4 +1,4 @@
-# 7-region GSX perf testnet.
+# 7-region SUWAPPU perf testnet.
 #
 # One module instantiation per AWS region. The set matches the paper's 7-of-9
 # LTP corridor (paper §10.2) so the geographic-latency measurement is directly
@@ -57,7 +57,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "artifacts" {
   }
 
   # CodeBuild source bundles are inputs only — `scripts/perf/build.sh`
-  # uploads a fresh `sources/gsx-dag.zip` on every build invocation, so
+  # uploads a fresh `sources/suwappu-dag.zip` on every build invocation, so
   # any historical zip is dead weight.
   rule {
     id     = "expire-sources"
@@ -127,7 +127,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "artifacts" {
   }
 
   # Bucket-wide cleanup of obsolete versions left by versioned overwrites
-  # (e.g. `bin/gsx-node` is overwritten on every CodeBuild release —
+  # (e.g. `bin/suwappu-node` is overwritten on every CodeBuild release —
   # versioning preserves the prior copy as noncurrent, which we don't
   # need beyond 30 days). Per-prefix rules above already cover their
   # own noncurrent cleanup; this is the catch-all for the rest.

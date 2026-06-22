@@ -16,7 +16,7 @@
 * [Transport — SCION + RaptorQ (§6.3)](architecture/transport.md)
 * [Fast path — single-owner + K-binding (§6.4)](architecture/fast-path.md)
 * [Execution — dual VM (§7)](architecture/execution.md)
-* [gsx-db bridge — substrate dep boundary (§7)](architecture/gsx-db-bridge.md)
+* [suwappu-db bridge — substrate dep boundary (§7)](architecture/suwappu-db-bridge.md)
 * [Application — precompiles (§8)](architecture/application.md)
 * [Super-node — 7-of-9 (§9)](architecture/super-node.md)
 * [LTP integration — Commit/Lattice/Materialize (§10)](architecture/ltp-integration.md)

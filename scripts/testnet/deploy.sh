@@ -46,7 +46,7 @@ case "${CMD}" in
         fi
         if [[ "${CMD}" == "apply" && -z "${BILLING_ALARM_EMAIL:-}" ]]; then
             echo "error: BILLING_ALARM_EMAIL env var required" >&2
-            echo "  example: BILLING_ALARM_EMAIL=ops@globalsettlement.com $0 apply" >&2
+            echo "  example: BILLING_ALARM_EMAIL=ops@suwappu.bot $0 apply" >&2
             exit 1
         fi
         ;;

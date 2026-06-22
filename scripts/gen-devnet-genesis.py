@@ -2,7 +2,7 @@
 """
 Generate a local-devnet genesis manifest + per-validator config and
 key files. Output is consumed by `docker-compose.yml` + the
-`gsx-node` binary's `--config` flag.
+`suwappu-node` binary's `--config` flag.
 
 Unlike the perf-testnet `gen-genesis.py` (which is keyed on AWS
 regions), this script is parameterized only on validator count and
@@ -24,7 +24,7 @@ the deployment target.
 Keys: this script writes deterministic placeholder bytes derived from
 a seed. **Acceptable only for a LOCAL devnet that never accepts
 external traffic.** For any public testnet / mainnet, use the
-real `gsx-crypto` keygen path.
+real `suwappu-crypto` keygen path.
 
 Usage:
     ./scripts/gen-devnet-genesis.py --num-nodes 4 --out-dir target/devnet
@@ -37,7 +37,7 @@ import hashlib
 import sys
 from pathlib import Path
 
-DEFAULT_NETWORK_ID = "gsx-devnet-local"
+DEFAULT_NETWORK_ID = "suwappu-devnet-local"
 
 
 def placeholder_key(seed: bytes, length: int) -> bytes:
@@ -85,14 +85,14 @@ def main() -> int:
     ap.add_argument(
         "--seed",
         type=str,
-        default="gsx-devnet-2026",
+        default="suwappu-devnet-2026",
         help="Deterministic seed for placeholder keys.",
     )
     ap.add_argument(
-        "--validator-stake-gsx",
+        "--validator-stake-suwappu",
         type=int,
         default=150_000,
-        help="Per-validator stake (default 150_000 — above AUTHORITY_STAKE_THRESHOLD_GSX).",
+        help="Per-validator stake (default 150_000 — above AUTHORITY_STAKE_THRESHOLD_SUWAPPU).",
     )
     ap.add_argument(
         "--rounds-per-epoch",
@@ -137,8 +137,8 @@ def main() -> int:
                 "label": label,
                 "mldsa_public_key_hex": mldsa_pk.hex(),
                 "bls_public_key_hex": bls_pk.hex(),
-                "validator_stake_gsx": args.validator_stake_gsx,
-                "authority_stake_gsx": args.validator_stake_gsx,
+                "validator_stake_suwappu": args.validator_stake_suwappu,
+                "authority_stake_suwappu": args.validator_stake_suwappu,
             }
         )
 
@@ -156,8 +156,8 @@ def main() -> int:
                 f'label = "{v["label"]}"',
                 f'mldsa_public_key_hex = "{v["mldsa_public_key_hex"]}"',
                 f'bls_public_key_hex = "{v["bls_public_key_hex"]}"',
-                f'validator_stake_gsx = {v["validator_stake_gsx"]}',
-                f'authority_stake_gsx = {v["authority_stake_gsx"]}',
+                f'validator_stake_suwappu = {v["validator_stake_suwappu"]}',
+                f'authority_stake_suwappu = {v["authority_stake_suwappu"]}',
                 "",
             ]
         )

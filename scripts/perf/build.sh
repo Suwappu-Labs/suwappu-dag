@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Cross-compile gsx-node / gsx-loadgen / gsx-metrics to
+# Cross-compile suwappu-node / suwappu-loadgen / suwappu-metrics to
 # x86_64-unknown-linux-musl via AWS CodeBuild.
 #
 # Why CodeBuild and not `cross`? Repo convention is to avoid Docker Desktop
@@ -9,12 +9,12 @@
 #
 # Prereqs (one-time):
 #   1. terraform/perf has been applied (creates the artifact bucket + project)
-#   2. The gsx-db deploy key is uploaded to SSM:
-#        aws ssm put-parameter --name /gsx-perf/gsx-db-deploy-key \
-#          --type SecureString --value "$(cat ~/.ssh/gsx-db-deploy)" \
+#   2. The suwappu-db deploy key is uploaded to SSM:
+#        aws ssm put-parameter --name /suwappu-perf/suwappu-db-deploy-key \
+#          --type SecureString --value "$(cat ~/.ssh/suwappu-db-deploy)" \
 #          --profile gsn --region us-east-1
 #
-# Output: target/perf/{gsx-node,gsx-loadgen,gsx-metrics}, pulled from S3.
+# Output: target/perf/{suwappu-node,suwappu-loadgen,suwappu-metrics}, pulled from S3.
 
 set -euo pipefail
 
@@ -45,7 +45,7 @@ echo "[build] codebuild project: $PROJECT"
 
 # 1. Package the workspace (excluding target/, .git/, large irrelevant trees).
 mkdir -p "$OUT"
-SOURCE_ZIP="$OUT/gsx-dag.zip"
+SOURCE_ZIP="$OUT/suwappu-dag.zip"
 echo "[build] packaging source -> $SOURCE_ZIP"
 cd "$ROOT"
 rm -f "$SOURCE_ZIP"
@@ -53,8 +53,8 @@ rm -f "$SOURCE_ZIP"
 git archive --format=zip --prefix= -o "$SOURCE_ZIP" HEAD
 
 # 2. Upload to S3.
-echo "[build] uploading source to s3://$BUCKET/sources/gsx-dag.zip"
-aws s3 cp "$SOURCE_ZIP" "s3://$BUCKET/sources/gsx-dag.zip" --region us-east-1
+echo "[build] uploading source to s3://$BUCKET/sources/suwappu-dag.zip"
+aws s3 cp "$SOURCE_ZIP" "s3://$BUCKET/sources/suwappu-dag.zip" --region us-east-1
 
 # 3. Start the CodeBuild build and poll for completion.
 echo "[build] starting CodeBuild project $PROJECT"
@@ -86,7 +86,7 @@ done
 
 # 4. Pull artifacts back to target/perf/.
 echo "[build] pulling binaries from s3://$BUCKET/bin/"
-for bin in gsx-node gsx-loadgen gsx-metrics; do
+for bin in suwappu-node suwappu-loadgen suwappu-metrics; do
   aws s3 cp "s3://$BUCKET/bin/$bin" "$OUT/$bin" --region us-east-1
   chmod +x "$OUT/$bin"
 done

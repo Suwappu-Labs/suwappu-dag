@@ -18,7 +18,7 @@
 # losing this state would orphan every resource in the gsn account.
 
 resource "aws_s3_bucket" "tf_state" {
-  bucket = "gsx-dag-tf-state"
+  bucket = "suwappu-dag-tf-state"
 
   lifecycle {
     prevent_destroy = true
@@ -51,7 +51,7 @@ resource "aws_s3_bucket_public_access_block" "tf_state" {
 }
 
 resource "aws_dynamodb_table" "tf_locks" {
-  name         = "gsx-dag-tf-locks"
+  name         = "suwappu-dag-tf-locks"
   billing_mode = "PAY_PER_REQUEST"
   hash_key     = "LockID"
 

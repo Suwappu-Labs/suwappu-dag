@@ -1,6 +1,6 @@
 # Delegated Proof-of-Stake (post-TGE permissionless entry)
 
-**Status:** Spec ratified from `gsx-strategy/docs/mainnet-plan.md`
+**Status:** Spec ratified from `suwappu-strategy/docs/mainnet-plan.md`
 Track E §4.4 + Tokenomics v2 §4.1. **Implementation lands at
 v1.1 (M+3 post-mainnet)** — this PR specs the design so the
 governance + tokenomics whitepaper can reference a frozen
@@ -62,18 +62,18 @@ permissionless entry opens.
 All three new Intents are governance-routine — they go through
 the standard `apply_intent` dispatch and land at the next
 epoch boundary (matching the existing Phase-G governance
-pattern at `crates/gsx-execution/src/substrate.rs:Intent::
+pattern at `crates/suwappu-execution/src/substrate.rs:Intent::
 AdmitAuthority`).
 
 ### 2.1 `Intent::DelegateStake`
 
-Token holder delegates GSX to a Validator-Ring member.
+Token holder delegates SUWAPPU to a Validator-Ring member.
 
 ```rust
 Intent::DelegateStake {
     delegator: Address,       // address holding the stake
     validator: AuthorityId,   // validator-ring id receiving delegation
-    amount: Balance,          // GSX to delegate
+    amount: Balance,          // SUWAPPU to delegate
 }
 ```
 
@@ -82,7 +82,7 @@ Intent::DelegateStake {
   `credit_unchecked` debit pattern matching C.8)
 - Credit a reserved per-validator delegation account
   `delegation_pool(validator)` — derived as
-  `BLAKE3("gsx-delegation-pool-v1" || validator_id_le)[..20]`
+  `BLAKE3("suwappu-delegation-pool-v1" || validator_id_le)[..20]`
 - Record the delegator→validator→amount triple in the
   delegation registry (state-tree leaf parallel to balances)
 - At the next epoch boundary, update the validator's
@@ -90,7 +90,7 @@ Intent::DelegateStake {
   quorum-threshold + reward computation
 
 **Reservation invariant**: the per-validator delegation-pool
-addresses are added to `crates/gsx-execution/src/reserved.rs`
+addresses are added to `crates/suwappu-execution/src/reserved.rs`
 when this lands, with `is_reserved` extended to recognize
 them programmatically (BLAKE3 prefix match) rather than as
 fixed constants. This avoids a 500-entry hardcoded list at the
@@ -153,13 +153,13 @@ three** of the following hold:
 
 | Requirement | Threshold |
 |---|---|
-| Self-stake | ≥ **100,000 GSX** (matches Paper §5.1 AUTHORITY_STAKE_THRESHOLD_GSX) |
-| Total delegated stake | ≥ **1,000,000 GSX** |
+| Self-stake | ≥ **100,000 SUWAPPU** (matches Paper §5.1 AUTHORITY_STAKE_THRESHOLD_SUWAPPU) |
+| Total delegated stake | ≥ **1,000,000 SUWAPPU** |
 | Compliance attestation | Passed per `docs/validator-custody-requirements.md` (Tier B equivalent) |
 
 The thresholds give the foundation room to admit ~300
-Standard Validators between TGE and Y5 (300 × 1.1 M GSX
-delegated = ~330 M GSX delegated, well within the
+Standard Validators between TGE and Y5 (300 × 1.1 M SUWAPPU
+delegated = ~330 M SUWAPPU delegated, well within the
 30% Ecosystem allocation's ability to seed-delegate early
 validators if needed).
 
@@ -249,7 +249,7 @@ concentration:
 
 ### 5.3 Comparison with Tier A self-stake
 
-A Tier A buyer's 15 M GSX self-stake represents (at 10B total
+A Tier A buyer's 15 M SUWAPPU self-stake represents (at 10B total
 supply): 0.15% of total supply. Of that, 0.05% is the
 governance cap — so Tier A buyers have effective governance
 representation but cannot dominate. This is
@@ -303,14 +303,14 @@ delegators creates moral hazard on validator selection.
 
 ## 7. Reserved address derivations
 
-Per `crates/gsx-execution/src/reserved.rs` (PR #177) the
+Per `crates/suwappu-execution/src/reserved.rs` (PR #177) the
 slashing-pool + treasury addresses are pinned BLAKE3 derivations.
 The delegated-PoS variants extend the pattern with per-
 validator pool addresses:
 
 ```
 delegation_pool_address(validator_id: u32) =
-    BLAKE3("gsx-delegation-pool-v1" || validator_id.to_be_bytes())[..20]
+    BLAKE3("suwappu-delegation-pool-v1" || validator_id.to_be_bytes())[..20]
 ```
 
 `reserved::is_reserved` extends to a programmatic check:
@@ -360,14 +360,14 @@ delegated qualification.
 The doc above is the spec. The implementation is a series of
 follow-up PRs (at M+3 post-mainnet, ≈ M21):
 
-1. **New Intent variants** in `crates/gsx-execution/src/substrate.rs`:
+1. **New Intent variants** in `crates/suwappu-execution/src/substrate.rs`:
    `DelegateStake`, `UndelegateStake`, `ClaimUnbonded`,
    `SetValidatorCommission` — same `#[non_exhaustive]` pattern
    as G2.1 / G3.1 / C.8
-2. **Delegation registry** in `crates/gsx-execution` as a
+2. **Delegation registry** in `crates/suwappu-execution` as a
    parallel state-tree structure (similar to balance map)
 3. **Per-validator delegation-pool reserved addresses** in
-   `crates/gsx-execution/src/reserved.rs` with the prefix-
+   `crates/suwappu-execution/src/reserved.rs` with the prefix-
    match `is_delegation_pool_address`
 4. **Unbonding queue** with epoch-boundary sweep
 5. **Voting-cap math** in the governance Intent handlers
@@ -394,13 +394,13 @@ follow-up PRs (at M+3 post-mainnet, ≈ M21):
   identically
 - **Custody requirements**: `docs/validator-custody-requirements.md`
   (E.2, PR #181) — Standard Validators meet Tier B custody bar
-- **Reserved addresses**: `crates/gsx-execution/src/reserved.rs`
+- **Reserved addresses**: `crates/suwappu-execution/src/reserved.rs`
   (C.8 / PR #177) — pattern this doc extends with delegation
   pools
 - **Tokenomics whitepaper** (Track C C.7): references this
   doc for the §2.4 voting-cap mechanism + §4.1 DPoS
   description
-- **Sale model**: `gsx-strategy/docs/sources/GSX-Node-Validator-Sale-Model-v2.0.xlsx`
+- **Sale model**: `suwappu-strategy/docs/sources/SUWAPPU-Node-Validator-Sale-Model-v2.0.xlsx`
   — Tier A / Tier B slot economics this doc preserves
 
 ---

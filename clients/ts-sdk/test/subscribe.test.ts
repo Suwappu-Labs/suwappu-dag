@@ -3,7 +3,7 @@
  *
  * Uses node's native `node:test` runner and a mock `WebSocket`
  * implementation so we don't bind a real socket. End-to-end
- * integration against a running gsx-node lives in
+ * integration against a running suwappu-node lives in
  * `clients/rust-sdk/tests/integration.rs` — this file pins down the
  * TS-side parsing + error-classification behavior.
  */

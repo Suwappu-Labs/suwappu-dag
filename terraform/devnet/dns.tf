@@ -1,17 +1,17 @@
 # G2 — DNS records for the public devnet.
 #
-# Subdomain layout (all under devnet.gsx.globalsettlement.com):
+# Subdomain layout (all under devnet.suwappu.suwappu.bot):
 #
-#   rpc.devnet.gsx        → ALB fronting the 4 validators (JSON-RPC + WS)
-#   faucet.devnet.gsx     → ALB fronting the faucet EC2
-#   explorer.devnet.gsx   → CloudFront distribution serving the SPA   (G7)
-#   status.devnet.gsx     → CloudFront distribution serving the status page (G8)
+#   rpc.devnet.suwappu        → ALB fronting the 4 validators (JSON-RPC + WS)
+#   faucet.devnet.suwappu     → ALB fronting the faucet EC2
+#   explorer.devnet.suwappu   → CloudFront distribution serving the SPA   (G7)
+#   status.devnet.suwappu     → CloudFront distribution serving the status page (G8)
 #
 # All DNS records use ALIAS to the underlying AWS endpoints
 # (cheaper than A records + faster + no TTL gotchas).
 #
 # OPEN ITEM: this stack assumes the apex zone for
-# `globalsettlement.com` lives in account 492042618949 (the same
+# `suwappu.bot` lives in account 492042618949 (the same
 # gsn account). If the apex zone lives in a different account,
 # the operator must publish the NS records of this devnet zone
 # into that apex zone manually after the first `terraform apply`.
@@ -19,13 +19,13 @@
 variable "apex_domain" {
   description = "The apex domain that hosts the devnet subdomain. The team must already own this and the Route53 zone for it must be reachable from the gsn account (either same-account or via a delegated subdomain NS record)."
   type        = string
-  default     = "globalsettlement.com"
+  default     = "suwappu.bot"
 }
 
 variable "devnet_subdomain" {
   description = "Subdomain under which all devnet records live."
   type        = string
-  default     = "devnet.gsx"
+  default     = "devnet.suwappu"
 }
 
 # Hosted zone for the devnet subdomain. The team has two options:
@@ -44,7 +44,7 @@ resource "aws_route53_zone" "devnet" {
   provider = aws.us_east_1
   name     = "${var.devnet_subdomain}.${var.apex_domain}"
   tags = {
-    Name = "gsx-devnet-zone"
+    Name = "suwappu-devnet-zone"
   }
 
   # Devnet DNS lives forever; force_destroy is a footgun.
@@ -100,7 +100,7 @@ resource "aws_route53_record" "faucet" {
   }
 }
 
-# explorer.devnet.gsx + status.devnet.gsx record stubs live with
+# explorer.devnet.suwappu + status.devnet.suwappu record stubs live with
 # their respective CloudFront distributions (G7 + G8 add them).
 
 # Output the NS records so an operator can paste them into the apex

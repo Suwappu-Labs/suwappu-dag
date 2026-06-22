@@ -1,0 +1,19 @@
+[package]
+name = "suwappu-authority"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+description = "Authority Ring (Proof-of-Authority) admission and certificate production (paper §5.1)."
+
+[dependencies]
+suwappu-crypto.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+suwappu-consensus.workspace = true
+proptest.workspace = true

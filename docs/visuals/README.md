@@ -1,10 +1,10 @@
-# GSX visuals
+# SUWAPPU visuals
 
-Inline-rendered diagrams covering the GSX stack. Mermaid blocks below
+Inline-rendered diagrams covering the SUWAPPU stack. Mermaid blocks below
 render natively on GitHub and GitBook (no plugin required). For the
 standalone presentation-style HTML pages with extra styling and
 keyboard navigation, see [`index.html`](./index.html) — that also lists
-the [ecosystem atlas](./gsx-ecosystem-atlas.html) and the five
+the [ecosystem atlas](./suwappu-ecosystem-atlas.html) and the five
 consensus deep-dives.
 
 > **Canonical source:** Mermaid (this README + sources under
@@ -15,17 +15,17 @@ consensus deep-dives.
 
 ## Stack layers
 
-### GSX DAG — chain architecture
+### SUWAPPU DAG — chain architecture
 
 Mysticeti-C certificate DAG, dual-ring security (Authority + Validator),
 dual-VM execution, and LTP transfer-and-attestation surface.
 
 ```mermaid
 flowchart LR
-  Users[Users / Apps] --> DAG[gsx-dag]
+  Users[Users / Apps] --> DAG[suwappu-dag]
   DAG --> C[Consensus<br/>Mysticeti-C DAG]
   C --> E[Execution<br/>Dual VM]
-  E --> DB[gsx-db<br/>Canonical state lattice]
+  E --> DB[suwappu-db<br/>Canonical state lattice]
   DB --> LTP[LTP<br/>Commit / Lattice / Materialize]
   LTP --> Corridors[(Base chains / corridors)]
   subgraph Rings[Dual-ring security]
@@ -35,21 +35,21 @@ flowchart LR
   C --- Rings
 ```
 
-Source: [`mermaid/gsx-dag.md`](./mermaid/gsx-dag.md) ·
-[presentation](./gsx-dag.html) ·
+Source: [`mermaid/suwappu-dag.md`](./mermaid/suwappu-dag.md) ·
+[presentation](./suwappu-dag.html) ·
 [architecture/overview.md](../architecture/overview.md)
 
-### GSX DB — canonical state lattice
+### SUWAPPU DB — canonical state lattice
 
-Sealed mutation pipeline: untrusted ingest (`gsxdb-lane`) cannot import
-into canonical state; only `gsxdb-bridge` mediates after validation +
+Sealed mutation pipeline: untrusted ingest (`suwappudb-lane`) cannot import
+into canonical state; only `suwappudb-bridge` mediates after validation +
 OCC. Read projectors (EVM `balanceOf`, Move `Coin::value`) attach to
 the canonical state without bypassing the bridge.
 
 ```mermaid
 flowchart LR
-  Lane[gsxdb-lane<br/>untrusted ingest] --> Bridge[gsxdb-bridge<br/>validation + OCC]
-  Bridge --> State[gsxdb-state<br/>canonical state]
+  Lane[suwappudb-lane<br/>untrusted ingest] --> Bridge[suwappudb-bridge<br/>validation + OCC]
+  Bridge --> State[suwappudb-state<br/>canonical state]
   Lane -. cannot import .- State
   State --> Tree[State tree<br/>root + proofs]
   State --> Anchor[AnchorDispatcher<br/>MAC / registry]
@@ -58,9 +58,9 @@ flowchart LR
   Read2[Move projector<br/>Coin::value] --> State
 ```
 
-Source: [`mermaid/gsx-db.md`](./mermaid/gsx-db.md) ·
-[presentation](./gsx-db.html) ·
-[architecture/gsx-db-bridge.md](../architecture/gsx-db-bridge.md)
+Source: [`mermaid/suwappu-db.md`](./mermaid/suwappu-db.md) ·
+[presentation](./suwappu-db.html) ·
+[architecture/suwappu-db-bridge.md](../architecture/suwappu-db-bridge.md)
 
 ### LTP — transfer-and-attestation layer
 
@@ -99,7 +99,7 @@ Source: [`mermaid/ltp.md`](./mermaid/ltp.md) ·
 ### Mysticeti-C commit rule
 
 Direct + indirect commit rule with the IQ-004 parent-set freeze window.
-Covers `crates/gsx-consensus/src/commit.rs` end-to-end.
+Covers `crates/suwappu-consensus/src/commit.rs` end-to-end.
 
 ```mermaid
 flowchart TB
@@ -189,17 +189,17 @@ Source: [`mermaid/governance-flow.md`](./mermaid/governance-flow.md) ·
 
 EVM and Move read the same `BalanceSlot`; `balanceOf(addr)` and
 `Coin::value(addr)` agree bit-for-bit at every committed block. Single
-writer (`gsxdb-bridge`). Substrate invariants inherited from gsx-db.
+writer (`suwappudb-bridge`). Substrate invariants inherited from suwappu-db.
 
 ```mermaid
 flowchart LR
-    Intent[Intent inbound<br/>via consensus commit] --> Exec[gsx-execution<br/>execute_block]
-    Exec --> Bridge[gsxdb-bridge<br/>Bridge::submit]
+    Intent[Intent inbound<br/>via consensus commit] --> Exec[suwappu-execution<br/>execute_block]
+    Exec --> Bridge[suwappudb-bridge<br/>Bridge::submit]
     Bridge --> PBM[Polymorphic Balance Map<br/>BalanceSlot canonical state]
     PBM --> Tree[State tree root<br/>+ proofs]
     PBM --> Anchor[AnchorDispatcher<br/>MAC / registry]
     PBM --> Replay[Replay / recovery<br/>same result post-restart]
-    Lane[gsxdb-lane<br/>untrusted ingest] -. cannot import<br/>into PBM .- PBM
+    Lane[suwappudb-lane<br/>untrusted ingest] -. cannot import<br/>into PBM .- PBM
     subgraph Projectors[Read-only projectors]
       EVM[EVM projector<br/>balanceOf]
       Move[Move projector<br/>Coin::value]
@@ -211,7 +211,7 @@ flowchart LR
 Source: [`mermaid/dual-vm.md`](./mermaid/dual-vm.md) ·
 [presentation](./dual-vm.html) ·
 [architecture/execution.md](../architecture/execution.md) ·
-[architecture/gsx-db-bridge.md](../architecture/gsx-db-bridge.md)
+[architecture/suwappu-db-bridge.md](../architecture/suwappu-db-bridge.md)
 
 ### SCION transport + RaptorQ
 
@@ -241,8 +241,8 @@ Source: [`mermaid/scion-transport.md`](./mermaid/scion-transport.md) ·
 
 ## Cross-cutting
 
-- [**GSX Ecosystem Atlas (HTML)**](./gsx-ecosystem-atlas.html) — single-page atlas of the full GSX stack: DAG L1, the dual-VM execution substrate, LTP attestation, the tokenization studio, and ecosystem geometry. Best viewed in a browser; the page is a hand-drawn SVG and doesn't have a Mermaid equivalent.
-- [**Auth dispatch (Mermaid, draft)**](./mermaid/auth-dispatch.md) — the gsx-db IQ-7 anchor hybrid AND-gate (`AuthScheme` discriminant + ECDSA + ML-DSA-65). Not yet promoted to an HTML presentation; useful for reading alongside the substrate's anchor pipeline.
+- [**SUWAPPU Ecosystem Atlas (HTML)**](./suwappu-ecosystem-atlas.html) — single-page atlas of the full SUWAPPU stack: DAG L1, the dual-VM execution substrate, LTP attestation, the tokenization studio, and ecosystem geometry. Best viewed in a browser; the page is a hand-drawn SVG and doesn't have a Mermaid equivalent.
+- [**Auth dispatch (Mermaid, draft)**](./mermaid/auth-dispatch.md) — the suwappu-db IQ-7 anchor hybrid AND-gate (`AuthScheme` discriminant + ECDSA + ML-DSA-65). Not yet promoted to an HTML presentation; useful for reading alongside the substrate's anchor pipeline.
 
 ## Notes
 
@@ -254,7 +254,7 @@ Source: [`mermaid/scion-transport.md`](./mermaid/scion-transport.md) ·
   earliest visual format; the Mermaid + inline-rendered README is the
   canonical home going forward. Retained for hand-editing workflows.
 - **Cross-repo:** the same `docs/visuals/` tree is bit-identically
-  mirrored in `gsx-lattice-protocol` so the LTP repo can render the
+  mirrored in `suwappu-lattice-protocol` so the LTP repo can render the
   diagrams offline. Drift is detected by
   `scripts/check-visuals-parity.sh` (added in a follow-up PR).
   Source-of-truth policy: edit here first, mirror manually until the

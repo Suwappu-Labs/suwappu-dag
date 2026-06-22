@@ -50,7 +50,7 @@ substitution.** (Contrast the SP1→Groth16/BN254 path, which is Shor-broken —
   substrate edit is gated on that decision.
 - ⏭️ **EVM precompile path** (the `0x0101` registration above) is separately blocked
   on the `production-evm-executor` feature (PRs #25-31) and best done by **inlining**
-  the verify into `suwappu-revm` to avoid a circular gsx-revm↔gsx-dag dependency.
+  the verify into `suwappu-revm` to avoid a circular suwappu-revm↔suwappu-dag dependency.
 
 ## Binding to the bridged commit
 

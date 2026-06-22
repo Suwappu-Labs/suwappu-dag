@@ -1,0 +1,27 @@
+[package]
+name = "suwappu-execution"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+description = "DAG block executor — wires the suwappu-db state substrate into the consensus pipeline (paper §7)."
+
+[dependencies]
+suwappu-authority.workspace = true
+suwappu-consensus.workspace = true
+suwappu-crypto.workspace = true
+suwappu-l2-verifier-precompile.workspace = true
+suwappudb-bridge.workspace = true
+suwappudb-state.workspace = true
+blake3.workspace = true
+hex.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+rand.workspace = true

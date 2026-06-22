@@ -1,4 +1,4 @@
-# gsx-dag root composition.
+# suwappu-dag root composition.
 #
 # Skeleton only — no resources defined yet. Real validator-node provisioning
 # lands in DAG-S20 (full node E2E) per docs/architecture/sprint-map.md.

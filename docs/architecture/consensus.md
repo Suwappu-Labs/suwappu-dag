@@ -1,6 +1,6 @@
 # Consensus
 
-Paper §6. Implemented in [`gsx-consensus`](../../crates/gsx-consensus).
+Paper §6. Implemented in [`suwappu-consensus`](../../crates/suwappu-consensus).
 **This doc is the canonical "how it works" writeup.** Design-decision
 detail (paper-vs-production formulas, indirect commit, orphan-window
 liveness gap) lives in the IQs linked inline.
@@ -66,11 +66,11 @@ the leader cert carried vanishes from the commit pipeline. Current
 mitigation: client-side resubmit on timeout (see PR #44 + the
 `dag-decide-slot-single-cert-orphan-after-parent-set-frozen` operator
 skill). Real fix tracked in
-[#45](https://github.com/GlobalSettlementNetwork/gsx-dag/issues/45).
+[#45](https://github.com/Suwappu-Labs/suwappu-dag/issues/45).
 
 ## Quorum formula
 
-`crates/gsx-consensus/src/commit.rs::quorum_threshold` ships:
+`crates/suwappu-consensus/src/commit.rs::quorum_threshold` ships:
 
 ```rust
 pub fn quorum_threshold(n: CommitteeSize) -> u32 {
@@ -89,7 +89,7 @@ collapses to unanimity for `n ∈ {1, 4, 7, …}`.
 `n = 3f+1`, so Theorem 2's safety proof is unchanged. The integer
 encoding is the only thing the production formula adjusts. Full
 analysis: [IQ-001](../iq/IQ-001-quorum-formula.md) — ratified
-2026-05-14 via [gsx-papers#1](https://github.com/GlobalSettlementNetwork/gsx-papers/pull/1).
+2026-05-14 via [suwappu-papers#1](https://github.com/Suwappu-Labs/suwappu-papers/pull/1).
 
 ## Commit rule
 
@@ -136,7 +136,7 @@ or [presentation](../visuals/commit-rule.html).
 
 ## Joint-quorum AND-gate (Theorem 2)
 
-`crates/gsx-consensus/src/joint.rs::validator_quorum_met` runs the
+`crates/suwappu-consensus/src/joint.rs::validator_quorum_met` runs the
 Validator-Ring stake side. A candidate cert finalizes iff:
 
 1. The Authority Ring's `decide_slot` returns `Direct(leader_hash)`, AND
@@ -158,7 +158,7 @@ Domain provides cryptographically anchored route-authority rotation. Block
 propagation uses RaptorQ erasure coding (RFC 6330) [RFC 6330, 2011].
 
 Detailed transport spec: [transport.md](transport.md). Implementation:
-[`gsx-transport`](../../crates/gsx-transport).
+[`suwappu-transport`](../../crates/suwappu-transport).
 
 ## Fast-path lane
 
@@ -172,7 +172,7 @@ of the offending Authority Node's bonded stake plus expulsion.
 
 Detailed spec: [fast-path.md](fast-path.md). Architecture decision in
 [IQ-003](../iq/IQ-003-fast-path-architecture.md). Implementation:
-[`gsx-fastpath`](../../crates/gsx-fastpath).
+[`suwappu-fastpath`](../../crates/suwappu-fastpath).
 
 ## Sprint exit gates
 
@@ -181,8 +181,8 @@ Detailed spec: [fast-path.md](fast-path.md). Architecture decision in
 | DAG-S3 | `dag_topological_order_unique` @ 10k |
 | DAG-S4 | `mysticeti_c_finality` @ 10k |
 | DAG-S5 | `joint_quorum_safety` @ 10k (Theorem 2) |
-| DAG-S21.1 | IQ-001 ratification ([gsx-papers#1](https://github.com/GlobalSettlementNetwork/gsx-papers/pull/1)) |
-| DAG-S21.2 | IQ-002 ratification ([gsx-papers#1](https://github.com/GlobalSettlementNetwork/gsx-papers/pull/1)) |
+| DAG-S21.1 | IQ-001 ratification ([suwappu-papers#1](https://github.com/Suwappu-Labs/suwappu-papers/pull/1)) |
+| DAG-S21.2 | IQ-002 ratification ([suwappu-papers#1](https://github.com/Suwappu-Labs/suwappu-papers/pull/1)) |
 
 ## Cross-references
 
@@ -190,8 +190,8 @@ Detailed spec: [fast-path.md](fast-path.md). Architecture decision in
   integer encoding), [IQ-002](../iq/IQ-002-indirect-commit.md) (indirect
   commit), [IQ-004](../iq/IQ-004-decide-slot-orphan-window.md) (orphan
   window).
-- **Engineering:** `crates/gsx-consensus/src/commit.rs`,
-  `crates/gsx-consensus/src/joint.rs`, `crates/gsx-node/src/daemon.rs::run_round_driver`.
+- **Engineering:** `crates/suwappu-consensus/src/commit.rs`,
+  `crates/suwappu-consensus/src/joint.rs`, `crates/suwappu-node/src/daemon.rs::run_round_driver`.
 - **Visuals:** [commit-rule](../visuals/mermaid/commit-rule.md),
   [README](../visuals/README.md), [index.html](../visuals/index.html).
 - **Safety + liveness narrative:** [safety-liveness.md](safety-liveness.md).

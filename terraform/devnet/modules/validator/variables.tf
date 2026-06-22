@@ -44,11 +44,11 @@ variable "metrics_port" {
 }
 
 variable "artifact_bucket" {
-  description = "S3 bucket holding the gsx-node artifact + genesis manifest."
+  description = "S3 bucket holding the suwappu-node artifact + genesis manifest."
   type        = string
 }
 
 variable "state_volume_gb" {
-  description = "Persistent EBS volume size (gp3) mounted at /var/lib/gsx."
+  description = "Persistent EBS volume size (gp3) mounted at /var/lib/suwappu."
   type        = number
 }

@@ -1,7 +1,7 @@
 # AWS CodeBuild project for the musl cross-compile.
 #
 # Avoids using Docker Desktop locally for cross-platform builds (per repo
-# convention). Source is uploaded to s3://artifact_bucket/sources/gsx-dag.zip
+# convention). Source is uploaded to s3://artifact_bucket/sources/suwappu-dag.zip
 # before each invocation by scripts/perf/build.sh; CodeBuild pulls it, runs
 # `cargo build --target x86_64-unknown-linux-musl`, drops the binaries to
 # s3://artifact_bucket/bin/.
@@ -11,7 +11,7 @@
 
 resource "aws_iam_role" "codebuild" {
   provider = aws.us_east_1
-  name     = "gsx-perf-codebuild"
+  name     = "suwappu-perf-codebuild"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -60,7 +60,7 @@ resource "aws_iam_role_policy" "codebuild" {
           "ssm:GetParameters",
         ]
         Resource = [
-          "arn:aws:ssm:us-east-1:*:parameter/gsx-perf/*",
+          "arn:aws:ssm:us-east-1:*:parameter/suwappu-perf/*",
         ]
       },
       {
@@ -74,8 +74,8 @@ resource "aws_iam_role_policy" "codebuild" {
 
 resource "aws_codebuild_project" "musl" {
   provider     = aws.us_east_1
-  name         = "gsx-perf-musl-build"
-  description  = "Cross-compile gsx-node binaries to x86_64-unknown-linux-musl for the perf testnet"
+  name         = "suwappu-perf-musl-build"
+  description  = "Cross-compile suwappu-node binaries to x86_64-unknown-linux-musl for the perf testnet"
   service_role = aws_iam_role.codebuild.arn
 
   build_timeout = 30
@@ -104,7 +104,7 @@ resource "aws_codebuild_project" "musl" {
 
   source {
     type      = "S3"
-    location  = "${aws_s3_bucket.artifacts.id}/sources/gsx-dag.zip"
+    location  = "${aws_s3_bucket.artifacts.id}/sources/suwappu-dag.zip"
     buildspec = "scripts/perf/buildspec.yml"
   }
 
@@ -115,7 +115,7 @@ resource "aws_codebuild_project" "musl" {
 
   logs_config {
     cloudwatch_logs {
-      group_name  = "/aws/codebuild/gsx-perf-musl-build"
+      group_name  = "/aws/codebuild/suwappu-perf-musl-build"
       stream_name = "main"
     }
   }

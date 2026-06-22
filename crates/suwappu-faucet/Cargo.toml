@@ -1,0 +1,56 @@
+[package]
+name = "suwappu-faucet"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+description = "Devnet test-token faucet. Single HTTP endpoint that signs Transfer intents from a seeded ML-DSA-65 faucet key and submits them via suwappu-client. Per-IP token-bucket rate limit reuses suwappu-mempool's LeakyBucket."
+
+[lib]
+name = "suwappu_faucet"
+path = "src/lib.rs"
+
+[[bin]]
+name = "suwappu-faucet"
+path = "src/main.rs"
+
+[dependencies]
+# JSON-RPC + sign path. We deliberately don't depend on `suwappu-node`
+# (the full validator daemon) — it pulls in suwappudb-bridge + the entire
+# consensus stack. The faucet only needs to (a) bincode an Intent,
+# (b) compute the canonical signing digest, (c) ML-DSA-sign it,
+# (d) submit_intent_raw via the SDK. The digest recipe is reproduced
+# inline (see src/lib.rs::intent_signing_digest) so this crate's dep
+# tree stays minimal.
+suwappu-client = { workspace = true }
+suwappu-crypto = { workspace = true }
+suwappu-execution = { workspace = true }
+suwappu-mempool = { workspace = true }
+
+# bincode — must use `config::legacy()` to byte-match what
+# `suwappu_node::codec::encode` produces (F4 IQ-005).
+bincode = { workspace = true }
+
+# HTTP service
+axum = { version = "0.7", features = ["macros"] }
+tower = { version = "0.5", features = ["util", "limit"] }
+tower-http = { version = "0.6", features = ["limit", "trace"] }
+
+# Async + utilities
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+blake3 = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true, features = ["env"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+http-body-util = "0.1"

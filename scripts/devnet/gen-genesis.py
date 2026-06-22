@@ -18,11 +18,11 @@ Output layout (in --out-dir, default ./target/devnet/keys):
     faucet/mldsa.pk       <-- matching public key
 
 Validator-side keys (entries 0-3) use deterministic placeholders for now —
-this matches the perf testnet's posture and reflects that gsx-node does
+this matches the perf testnet's posture and reflects that suwappu-node does
 NOT currently verify ML-DSA signatures on validator-to-validator wire
 traffic (only on client-submitted intents at the verify_signed_intent
 gate). If/when on-wire validator-side ML-DSA verification lands, this
-script must switch to real keys via the gsx-keygen binary.
+script must switch to real keys via the suwappu-keygen binary.
 
 The faucet's authority entry (id = 4) MUST have a real ML-DSA-65 keypair
 because every faucet drip submits a signed Transfer intent through the
@@ -63,9 +63,9 @@ def placeholder_key(seed: bytes, length: int) -> bytes:
 
 
 def mint_real_faucet_key(out_dir: Path) -> tuple[bytes, bytes]:
-    """Generate a real ML-DSA-65 keypair for the faucet via gsx-keygen.
+    """Generate a real ML-DSA-65 keypair for the faucet via suwappu-keygen.
 
-    Falls back to placeholder bytes if gsx-keygen isn't available, with a
+    Falls back to placeholder bytes if suwappu-keygen isn't available, with a
     loud warning — but a placeholder faucet key cannot actually sign
     valid transfers, so the faucet service will reject every drip until
     a real key is dropped in place.
@@ -75,11 +75,11 @@ def mint_real_faucet_key(out_dir: Path) -> tuple[bytes, bytes]:
     sk_path = faucet_dir / "mldsa.sk"
     pk_path = faucet_dir / "mldsa.pk"
 
-    if shutil.which("gsx-keygen") is not None:
-        # gsx-keygen --algo mldsa --sk <path> --pk <path>
+    if shutil.which("suwappu-keygen") is not None:
+        # suwappu-keygen --algo mldsa --sk <path> --pk <path>
         subprocess.run(
             [
-                "gsx-keygen",
+                "suwappu-keygen",
                 "--algo", "mldsa",
                 "--sk", str(sk_path),
                 "--pk", str(pk_path),
@@ -91,10 +91,10 @@ def mint_real_faucet_key(out_dir: Path) -> tuple[bytes, bytes]:
 
     # Fallback — placeholder. Faucet WILL NOT WORK with this key.
     print(
-        "WARNING: gsx-keygen not found on PATH; emitting placeholder faucet "
+        "WARNING: suwappu-keygen not found on PATH; emitting placeholder faucet "
         "key. The faucet binary will reject every drip until a real ML-DSA-65 "
-        "keypair is placed in faucet/mldsa.{sk,pk}. Build gsx-keygen with: "
-        "  cargo build --release -p gsx-crypto --bin gsx-keygen",
+        "keypair is placed in faucet/mldsa.{sk,pk}. Build suwappu-keygen with: "
+        "  cargo build --release -p suwappu-crypto --bin suwappu-keygen",
         file=sys.stderr,
     )
     seed_sk = f"FAUCET-PLACEHOLDER-SK".encode()
@@ -110,25 +110,25 @@ def mint_real_faucet_key(out_dir: Path) -> tuple[bytes, bytes]:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out-dir", type=Path, default=Path("./target/devnet/keys"))
-    ap.add_argument("--network-id", default="gsx-devnet")
+    ap.add_argument("--network-id", default="suwappu-devnet")
     ap.add_argument(
-        "--validator-stake-gsx",
+        "--validator-stake-suwappu",
         type=int,
         default=1_000_000,
-        help="Per-validator stake in GSX (paper Definition 1). u64 in the manifest.",
+        help="Per-validator stake in SUWAPPU (paper Definition 1). u64 in the manifest.",
     )
     ap.add_argument(
-        "--authority-stake-gsx",
+        "--authority-stake-suwappu",
         type=int,
         default=1_000_000,
-        help="Per-validator Authority Ring stake in GSX. u64 in the manifest.",
+        help="Per-validator Authority Ring stake in SUWAPPU. u64 in the manifest.",
     )
     ap.add_argument(
-        "--faucet-initial-balance-gsx",
+        "--faucet-initial-balance-suwappu",
         type=int,
         default=1_000_000_000,
-        help="Genesis-time balance of the faucet address (1 billion GSX by default — "
-             "enough for ~10 million drips at 100 GSX/drip).",
+        help="Genesis-time balance of the faucet address (1 billion SUWAPPU by default — "
+             "enough for ~10 million drips at 100 SUWAPPU/drip).",
     )
     ap.add_argument(
         "--rounds-per-epoch",
@@ -161,7 +161,7 @@ def main() -> int:
         # Public-key surrogate — matches the perf-testnet pattern. The
         # validator-side ML-DSA verifier is not on the wire today; if it
         # ever lands, replace this with the real pk produced by
-        # gsx-keygen.
+        # suwappu-keygen.
         mldsa_pk = hashlib.blake2b(mldsa_sk, digest_size=32).hexdigest()
         bls_pk = hashlib.blake2b(bls_sk, digest_size=48).hexdigest()
 
@@ -182,27 +182,27 @@ def main() -> int:
             f.write(f'label = "{region}"\n')
             f.write(f'mldsa_public_key_hex = "{mldsa_pk}"\n')
             f.write(f'bls_public_key_hex = "{bls_pk}"\n')
-            f.write(f"validator_stake_gsx = {args.validator_stake_gsx}\n")
-            f.write(f"authority_stake_gsx = {args.authority_stake_gsx}\n\n")
+            f.write(f"validator_stake_suwappu = {args.validator_stake_suwappu}\n")
+            f.write(f"authority_stake_suwappu = {args.authority_stake_suwappu}\n\n")
 
         # Faucet authority — registered in the manifest so its signature
         # gate (`verify_signed_intent` resolves signer_pubkey_hash against
         # the seated AuthorityRegistry) accepts faucet-signed transfers.
         # The faucet does NOT participate in consensus — its stake is
         # nominal — but it must be a seated Authority for the ML-DSA
-        # signature check on `gsx_submitIntent` to pass.
+        # signature check on `suwappu_submitIntent` to pass.
         f.write("[[validators]]\n")
         f.write(f"authority_id = {FAUCET_AUTHORITY_ID}\n")
         f.write(f'label = "{FAUCET_LABEL}"\n')
         f.write(f'mldsa_public_key_hex = "{faucet_pk_hex}"\n')
         f.write(f'bls_public_key_hex = "{faucet_bls_pk_hex}"\n')
-        f.write(f"validator_stake_gsx = 1\n")
-        f.write(f"authority_stake_gsx = 1\n\n")
+        f.write(f"validator_stake_suwappu = 1\n")
+        f.write(f"authority_stake_suwappu = 1\n\n")
 
     # Pre-balances file — applied by the daemon at genesis-load time so
     # the faucet address starts with enough tokens to drip. The faucet
     # address is the blake3 hash of its ML-DSA pubkey, truncated to 20
-    # bytes (matches the gsx-execution Address derivation).
+    # bytes (matches the suwappu-execution Address derivation).
     import hashlib as _h
     faucet_addr_20 = _h.blake2b(faucet_pk, digest_size=32).digest()[:20]
     faucet_addr_hex = "0x" + faucet_addr_20.hex()
@@ -214,7 +214,7 @@ def main() -> int:
         f.write("# is the entire devnet token supply for the foreseeable future.\n\n")
         f.write("[[balances]]\n")
         f.write(f'address = "{faucet_addr_hex}"\n')
-        f.write(f"balance_gsx = {args.faucet_initial_balance_gsx}\n")
+        f.write(f"balance_suwappu = {args.faucet_initial_balance_suwappu}\n")
         f.write(f'role = "faucet"\n\n')
 
     print(f"wrote {genesis}", file=sys.stderr)
@@ -222,7 +222,7 @@ def main() -> int:
         print(f"  validators[{aid}] = {region}", file=sys.stderr)
     print(f"  validators[{FAUCET_AUTHORITY_ID}] = {FAUCET_LABEL} (pk={faucet_pk_hex[:16]}...)", file=sys.stderr)
     print(f"  faucet address = {faucet_addr_hex}", file=sys.stderr)
-    print(f"  faucet initial balance = {args.faucet_initial_balance_gsx:,} GSX", file=sys.stderr)
+    print(f"  faucet initial balance = {args.faucet_initial_balance_suwappu:,} SUWAPPU", file=sys.stderr)
     print(f"wrote {prebalances}", file=sys.stderr)
     print(
         "NOTE: validator keys are placeholders (matches perf); only the faucet "

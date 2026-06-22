@@ -1,0 +1,20 @@
+[package]
+name = "suwappu-validator"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+description = "Validator Ring (Proof-of-Stake) ratification and slashing (paper §5.2)."
+
+[dependencies]
+suwappu-crypto.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+suwappu-authority.workspace = true
+suwappu-consensus.workspace = true
+proptest.workspace = true

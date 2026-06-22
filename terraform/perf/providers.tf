@@ -16,10 +16,10 @@ terraform {
 
 locals {
   common_tags = {
-    Project    = "gsx-dag"
+    Project    = "suwappu-dag"
     Component  = "perf-testnet"
     ManagedBy  = "terraform"
-    Repository = "GlobalSettlementNetwork/gsx-dag"
+    Repository = "Suwappu-Labs/suwappu-dag"
   }
 }
 

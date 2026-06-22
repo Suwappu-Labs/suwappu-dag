@@ -9,7 +9,7 @@ use anyhow::Result;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let client = gsx_client::Client::new("http://127.0.0.1:9092");
+    let client = suwappu_client::Client::new("http://127.0.0.1:9092");
     let epoch = client.get_epoch().await?;
     println!(
         "current epoch         : {}\n\

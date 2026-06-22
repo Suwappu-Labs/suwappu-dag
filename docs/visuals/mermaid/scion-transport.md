@@ -1,6 +1,6 @@
 # SCION transport — path-authenticated routing + RaptorQ shred/reconstruct
 
-Covers `crates/gsx-transport/` end-to-end: RaptorQ in-memory
+Covers `crates/suwappu-transport/` end-to-end: RaptorQ in-memory
 (DAG-S2 exit gate), SCION path auth (DAG-S18), SCION-IP-Gateway fallback
 (DAG-S19). Paper §6.3.
 

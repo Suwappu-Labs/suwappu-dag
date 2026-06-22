@@ -6,7 +6,7 @@
 
 resource "aws_lb" "rpc" {
   provider           = aws.us_east_1
-  name               = "gsx-testnet-rpc"
+  name               = "suwappu-testnet-rpc"
   internal           = false
   load_balancer_type = "application"
 
@@ -17,12 +17,12 @@ resource "aws_lb" "rpc" {
 
   drop_invalid_header_fields = true
 
-  tags = { Name = "gsx-testnet-rpc-alb" }
+  tags = { Name = "suwappu-testnet-rpc-alb" }
 }
 
 resource "aws_lb_target_group" "rpc" {
   provider    = aws.us_east_1
-  name        = "gsx-testnet-rpc-tg"
+  name        = "suwappu-testnet-rpc-tg"
   port        = var.rpc_port
   protocol    = "HTTP"
   target_type = "ip"
@@ -45,7 +45,7 @@ resource "aws_lb_target_group" "rpc" {
     enabled = false
   }
 
-  tags = { Name = "gsx-testnet-rpc-tg" }
+  tags = { Name = "suwappu-testnet-rpc-tg" }
 }
 
 # Cross-region IP targets — 7 seed validators registered.
@@ -133,7 +133,7 @@ resource "aws_lb_listener" "rpc_http_redirect" {
 
 resource "aws_lb" "faucet" {
   provider           = aws.us_east_1
-  name               = "gsx-testnet-faucet"
+  name               = "suwappu-testnet-faucet"
   internal           = false
   load_balancer_type = "application"
   subnets            = aws_subnet.alb_public.*.id
@@ -141,12 +141,12 @@ resource "aws_lb" "faucet" {
 
   drop_invalid_header_fields = true
 
-  tags = { Name = "gsx-testnet-faucet-alb" }
+  tags = { Name = "suwappu-testnet-faucet-alb" }
 }
 
 resource "aws_lb_target_group" "faucet" {
   provider    = aws.us_east_1
-  name        = "gsx-testnet-faucet-tg"
+  name        = "suwappu-testnet-faucet-tg"
   port        = 8080
   protocol    = "HTTP"
   target_type = "ip"
@@ -164,7 +164,7 @@ resource "aws_lb_target_group" "faucet" {
     timeout             = 10
   }
 
-  tags = { Name = "gsx-testnet-faucet-tg" }
+  tags = { Name = "suwappu-testnet-faucet-tg" }
 }
 
 resource "aws_lb_target_group_attachment" "faucet" {
@@ -211,7 +211,7 @@ resource "aws_vpc" "alb" {
   provider             = aws.us_east_1
   cidr_block           = "10.45.0.0/24" # /24 distinct from devnet's 10.43.20.0/24
   enable_dns_hostnames = true
-  tags                 = { Name = "gsx-testnet-alb-vpc" }
+  tags                 = { Name = "suwappu-testnet-alb-vpc" }
 }
 
 resource "aws_subnet" "alb_public" {
@@ -221,13 +221,13 @@ resource "aws_subnet" "alb_public" {
   cidr_block              = cidrsubnet(aws_vpc.alb.cidr_block, 2, count.index)
   availability_zone       = ["us-east-1a", "us-east-1b"][count.index]
   map_public_ip_on_launch = true
-  tags                    = { Name = "gsx-testnet-alb-subnet-${count.index}" }
+  tags                    = { Name = "suwappu-testnet-alb-subnet-${count.index}" }
 }
 
 resource "aws_internet_gateway" "alb" {
   provider = aws.us_east_1
   vpc_id   = aws_vpc.alb.id
-  tags     = { Name = "gsx-testnet-alb-igw" }
+  tags     = { Name = "suwappu-testnet-alb-igw" }
 }
 
 resource "aws_route_table" "alb_public" {
@@ -237,7 +237,7 @@ resource "aws_route_table" "alb_public" {
     cidr_block = "0.0.0.0/0"
     gateway_id = aws_internet_gateway.alb.id
   }
-  tags = { Name = "gsx-testnet-alb-rt" }
+  tags = { Name = "suwappu-testnet-alb-rt" }
 }
 
 resource "aws_route_table_association" "alb_public" {
@@ -249,7 +249,7 @@ resource "aws_route_table_association" "alb_public" {
 
 resource "aws_security_group" "alb_rpc" {
   provider    = aws.us_east_1
-  name        = "gsx-testnet-alb-rpc-sg"
+  name        = "suwappu-testnet-alb-rpc-sg"
   description = "RPC ALB ingress"
   vpc_id      = aws_vpc.alb.id
 
@@ -275,12 +275,12 @@ resource "aws_security_group" "alb_rpc" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  tags = { Name = "gsx-testnet-alb-rpc-sg" }
+  tags = { Name = "suwappu-testnet-alb-rpc-sg" }
 }
 
 resource "aws_security_group" "alb_faucet" {
   provider    = aws.us_east_1
-  name        = "gsx-testnet-alb-faucet-sg"
+  name        = "suwappu-testnet-alb-faucet-sg"
   description = "Faucet ALB ingress"
   vpc_id      = aws_vpc.alb.id
 
@@ -306,5 +306,5 @@ resource "aws_security_group" "alb_faucet" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  tags = { Name = "gsx-testnet-alb-faucet-sg" }
+  tags = { Name = "suwappu-testnet-alb-faucet-sg" }
 }

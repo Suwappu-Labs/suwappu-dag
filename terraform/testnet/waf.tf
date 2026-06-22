@@ -4,7 +4,7 @@
 
 resource "aws_wafv2_web_acl" "testnet" {
   provider = aws.us_east_1
-  name     = "gsx-testnet-waf"
+  name     = "suwappu-testnet-waf"
   scope    = "REGIONAL"
 
   default_action {
@@ -28,7 +28,7 @@ resource "aws_wafv2_web_acl" "testnet" {
 
     visibility_config {
       cloudwatch_metrics_enabled = true
-      metric_name                = "gsx-testnet-rate-limit-per-ip"
+      metric_name                = "suwappu-testnet-rate-limit-per-ip"
       sampled_requests_enabled   = true
     }
   }
@@ -50,7 +50,7 @@ resource "aws_wafv2_web_acl" "testnet" {
 
     visibility_config {
       cloudwatch_metrics_enabled = true
-      metric_name                = "gsx-testnet-common-rules"
+      metric_name                = "suwappu-testnet-common-rules"
       sampled_requests_enabled   = true
     }
   }
@@ -72,18 +72,18 @@ resource "aws_wafv2_web_acl" "testnet" {
 
     visibility_config {
       cloudwatch_metrics_enabled = true
-      metric_name                = "gsx-testnet-ip-reputation"
+      metric_name                = "suwappu-testnet-ip-reputation"
       sampled_requests_enabled   = true
     }
   }
 
   visibility_config {
     cloudwatch_metrics_enabled = true
-    metric_name                = "gsx-testnet-waf"
+    metric_name                = "suwappu-testnet-waf"
     sampled_requests_enabled   = true
   }
 
-  tags = { Name = "gsx-testnet-waf" }
+  tags = { Name = "suwappu-testnet-waf" }
 }
 
 resource "aws_wafv2_web_acl_association" "rpc" {

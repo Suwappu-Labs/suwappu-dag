@@ -5,11 +5,11 @@ Paper §5. The validator set is decomposed into two concentric quorums.
 ## Authority Ring 𝒜 (Proof-of-Authority)
 
 - **Size:** 30–50 licensed institutional entities (`AUTHORITY_RING_MIN`–`AUTHORITY_RING_MAX`).
-- **Stake threshold:** 100,000 GSX per member (`AUTHORITY_STAKE_THRESHOLD_GSX`).
+- **Stake threshold:** 100,000 SUWAPPU per member (`AUTHORITY_STAKE_THRESHOLD_SUWAPPU`).
 - **Role:** produce certificates into the DAG, sign compliance attestations,
   participate in the fast-path quorum.
 - **Admission:** under the Authority-Phase Matrix (paper §14):
-  - **Phase G2:** GSX entity admits members against a published qualification
+  - **Phase G2:** SUWAPPU entity admits members against a published qualification
     rubric — regulatory licensure in the candidate's jurisdictional corridor,
     operational maturity, posted base-chain PoS stake at the per-Authority-Node
     threshold, and a signed corridor mandate.
@@ -18,17 +18,17 @@ Paper §5. The validator set is decomposed into two concentric quorums.
 - **Cap rationale:** the cap of 50 is anchored on regulatory-licensing
   tractability, not consensus throughput (which scales further).
 
-Implementation in [`gsx-authority`](../../crates/gsx-authority).
+Implementation in [`suwappu-authority`](../../crates/suwappu-authority).
 
 ## Validator Ring 𝒱 (Proof-of-Stake)
 
 - **Size:** 100–500 stake-weighted open participants.
-- **Genesis stake threshold:** 25,000 GSX (`VALIDATOR_STAKE_THRESHOLD_GSX`).
+- **Genesis stake threshold:** 25,000 SUWAPPU (`VALIDATOR_STAKE_THRESHOLD_SUWAPPU`).
 - **Role:** ratify ordering, vote on Mysticeti commit rounds, enforce slashing.
 - **Admission:** open to any party meeting the stake threshold, the operational
   uptime requirement, and the cryptographic key-management standard.
 
-Implementation in [`gsx-validator`](../../crates/gsx-validator).
+Implementation in [`suwappu-validator`](../../crates/suwappu-validator).
 
 ## Quorum (Definition 2)
 
@@ -39,7 +39,7 @@ Implementation in [`gsx-validator`](../../crates/gsx-validator).
 
 Cross-corridor LTP settlement additionally assumes Byzantine fault tolerance
 within each corridor's super-node attestation quorum, sized to require
-seven-of-nine corridor witnesses (paper §10, `gsx-ltp`).
+seven-of-nine corridor witnesses (paper §10, `suwappu-ltp`).
 
 ## Why two rings
 
@@ -66,7 +66,7 @@ admission gates and corruption profiles are independent.
 
 ## Joint-quorum AND-gate (Theorem 2)
 
-A safety violation of the GSX DAG L1 requires Byzantine corruption of *both*
+A safety violation of the SUWAPPU DAG L1 requires Byzantine corruption of *both*
 the Authority Ring and the Validator Ring simultaneously: there exist
 $f_𝒜$, $f_𝒱$ such that any proposed conflicting commit must be signed by an
 $f_𝒜 ≥ (1/3)|𝒜|$ Byzantine subset of the Authority Ring **and** an

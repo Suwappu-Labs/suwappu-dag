@@ -1,6 +1,6 @@
 ---
 name: Bug report
-about: Report unexpected behavior in gsx-dag
+about: Report unexpected behavior in suwappu-dag
 title: "[BUG] "
 labels: ["bug", "triage"]
 ---
@@ -29,10 +29,10 @@ What actually happens?
 
 ## Environment
 
-- gsx-dag commit / tag:
+- suwappu-dag commit / tag:
 - Rust toolchain (`rustc -V`):
 - OS / arch:
-- Stack (`gsx-node`, `gsx-loadgen`, `gsx-indexer`, devnet, testnet, local):
+- Stack (`suwappu-node`, `suwappu-loadgen`, `suwappu-indexer`, devnet, testnet, local):
 
 ## Logs / artifacts
 

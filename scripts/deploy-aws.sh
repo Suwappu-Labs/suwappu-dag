@@ -94,7 +94,7 @@ if [[ ( "${STACK}" == "perf" || "${STACK}" == "devnet" || "${STACK}" == "testnet
     SSH_PUB="${SSH_PUB:-$HOME/.ssh/id_ed25519.pub}"
     if [[ ! -f "${SSH_PUB}" ]]; then
         echo "error: SSH public key not found at ${SSH_PUB}" >&2
-        echo "  generate one with: ssh-keygen -t ed25519 -f \$HOME/.ssh/gsx-perf -N \"\"" >&2
+        echo "  generate one with: ssh-keygen -t ed25519 -f \$HOME/.ssh/suwappu-perf -N \"\"" >&2
         exit 1
     fi
     TF_VARS+=(-var "operator_ip_cidrs=${CIDR_LIST}")
@@ -106,7 +106,7 @@ if [[ ( "${STACK}" == "perf" || "${STACK}" == "devnet" || "${STACK}" == "testnet
     if [[ "${STACK}" == "devnet" || "${STACK}" == "testnet" ]]; then
         if [[ -z "${BILLING_ALARM_EMAIL:-}" ]]; then
             echo "error: BILLING_ALARM_EMAIL env var required for ${STACK} apply/destroy" >&2
-            echo "  example: BILLING_ALARM_EMAIL=ops@globalsettlement.com ./scripts/deploy-aws.sh apply ${STACK}" >&2
+            echo "  example: BILLING_ALARM_EMAIL=ops@suwappu.bot ./scripts/deploy-aws.sh apply ${STACK}" >&2
             exit 1
         fi
         TF_VARS+=(-var "billing_alarm_email=${BILLING_ALARM_EMAIL}")

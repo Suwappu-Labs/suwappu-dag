@@ -1,4 +1,4 @@
-# 7-region GSX testnet seed cluster.
+# 7-region SUWAPPU testnet seed cluster.
 #
 # Foundation operates these 7 nodes; external validators (Track B
 # points program) bring their own hardware and connect via the
@@ -92,7 +92,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "artifacts" {
 # seed set + the validator-program EC2 + RDS.
 resource "aws_sns_topic" "billing_alarm" {
   provider = aws.us_east_1
-  name     = "gsx-testnet-billing-alarm"
+  name     = "suwappu-testnet-billing-alarm"
 }
 
 resource "aws_sns_topic_subscription" "billing_alarm_email" {
@@ -104,7 +104,7 @@ resource "aws_sns_topic_subscription" "billing_alarm_email" {
 
 resource "aws_cloudwatch_metric_alarm" "monthly_billing_cap" {
   provider            = aws.us_east_1
-  alarm_name          = "gsx-testnet-monthly-billing-cap"
+  alarm_name          = "suwappu-testnet-monthly-billing-cap"
   alarm_description   = "Projected/actual monthly spend on the testnet exceeded ${var.monthly_billing_cap_usd} USD. Investigate via Cost Explorer + the validator-program traffic charts."
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 1

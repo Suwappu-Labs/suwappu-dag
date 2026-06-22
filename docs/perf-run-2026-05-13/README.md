@@ -1,4 +1,4 @@
-# GSX DAG perf run — 2026-05-13 (4-region, post-f+1)
+# SUWAPPU DAG perf run — 2026-05-13 (4-region, post-f+1)
 
 Second AWS campaign, this time with the leader-aware f+1 fallback
 (commit `8b2902a`) and the 6-region testnet trimmed to 4 fast-RTT regions
@@ -6,7 +6,7 @@ after the 2026-05-12 run showed cross-Pacific peers stalling consensus.
 
 ## What ran
 - 4 t3.small EC2s in us-east-1, us-west-2, eu-west-1, ap-northeast-1.
-- 90 seconds of `gsx-loadgen --rate 100` from us-east-1 EC2 against its
+- 90 seconds of `suwappu-loadgen --rate 100` from us-east-1 EC2 against its
   own client port.
 - Binary compiled via AWS CodeBuild (no Docker Desktop locally per repo
   preference).
@@ -112,7 +112,7 @@ The TCP wire (length-prefixed bincode, geometric reconnect) is solid:
 
 ## Files
 - `*.ndjson` — full event logs (uploaded via S3 + IAM PutObject to
-  `s3://gsx-dag-perf-artifacts/logs/`, then pulled locally).
+  `s3://suwappu-dag-perf-artifacts/logs/`, then pulled locally).
 - `loadgen.csv` — `client_submitted_ms,tx_hash` per row, 9000 rows.
 
 ## What worked vs. last campaign

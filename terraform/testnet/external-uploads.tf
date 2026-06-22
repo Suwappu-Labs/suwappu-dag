@@ -11,7 +11,7 @@
 # they can only write under their own prefix.
 #
 # The points accumulator daemon (Track B follow-up — see
-# crates/gsx-validator-program/) reads from this bucket on a
+# crates/suwappu-validator-program/) reads from this bucket on a
 # schedule and writes the leaderboard to validator-program.tf's
 # RDS instance.
 
@@ -20,7 +20,7 @@ resource "aws_s3_bucket" "external_uploads" {
   bucket        = var.external_uploads_bucket
   force_destroy = false
 
-  tags = { Name = "gsx-testnet-validator-uploads" }
+  tags = { Name = "suwappu-testnet-validator-uploads" }
 }
 
 # Public READ is blocked — only the points-accumulator daemon's
@@ -80,7 +80,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "external_uploads" {
 # policy template that the onboarding workflow specializes.
 resource "aws_iam_policy" "external_operator_upload_template" {
   provider    = aws.us_east_1
-  name        = "gsx-testnet-external-operator-upload-template"
+  name        = "suwappu-testnet-external-operator-upload-template"
   description = "Template policy for external validator operators — substitute AUTHORITY_ID_PLACEHOLDER at onboarding time. The onboarding workflow creates a per-operator IAM user + attaches a specialized copy of this policy."
   policy = jsonencode({
     Version = "2012-10-17"

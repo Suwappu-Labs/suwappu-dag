@@ -1,0 +1,70 @@
+[package]
+name = "suwappu-indexer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+description = "Streaming indexer for suwappu-dag. Tails suwappu_subscribeEvents over WebSocket, stores commits in a queryable store, and exposes a thin HTTP API for explorers and analytics."
+
+[lib]
+name = "suwappu_indexer"
+path = "src/lib.rs"
+
+[[bin]]
+name = "suwappu-indexer"
+path = "src/main.rs"
+
+[dependencies]
+# Share the view types so the indexer's HTTP API serves the same
+# shapes suwappu-rpc returns. Zero glue code between RPC and indexer.
+suwappu-rpc = { workspace = true }
+
+# F2 (A5 Phase 2): the indexer uses the Rust SDK as its JSON-RPC
+# client for startup catch-up backfill. The SDK already exposes
+# `get_epoch` (chain head) and `get_block(round)` with the right
+# error shapes for NotFound → None, so we don't re-roll HTTP plumbing
+# here.
+suwappu-client = { workspace = true }
+
+# HTTP server (read API for explorer) and WebSocket client.
+axum = { version = "0.7", features = ["macros"] }
+tokio-tungstenite = { version = "0.21", default-features = false, features = ["connect"] }
+futures-util = "0.3"
+
+# Persistence: the in-memory store ships unconditionally for tests +
+# the MVP scaffold; the Postgres backend is feature-gated so the
+# scaffold compiles + tests run without a Postgres dependency.
+# `--features postgres` pulls in sqlx and enables the
+# `PostgresStore` adapter selected at runtime via
+# `--database-url`/`SUWAPPU_INDEXER_DATABASE_URL`.
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls",
+    "postgres",
+    "macros",
+    "migrate",
+], optional = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+
+tokio = { workspace = true }
+clap = { workspace = true, features = ["env"] }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
+[features]
+default = []
+# Enable Postgres-backed persistence. Pulls in sqlx + tls-rustls. The
+# in-memory store remains available without this feature so unit
+# tests + the scaffold don't require a live Postgres.
+postgres = ["dep:sqlx"]

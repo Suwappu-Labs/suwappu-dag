@@ -1,6 +1,6 @@
 # OPERATIONS
 
-Runbooks for running the gsx-devnet. Every procedure here is written
+Runbooks for running the suwappu-devnet. Every procedure here is written
 to be executable cold — a fresh operator who has never deployed the
 devnet should be able to follow any section without asking
 questions.
@@ -15,10 +15,10 @@ Every procedure assumes:
 
 - `AWS_PROFILE=gsn` resolves to account `492042618949`. Verify with
   `aws sts get-caller-identity` before any action.
-- GitHub identity is `tomagsx`. `gh auth status` should show that
+- GitHub identity is `tomasuwappu`. `gh auth status` should show that
   account active. If the active token is for a different account
   (e.g. `0xSoftBoi`), switch with
-  `env -u GH_TOKEN -u GITHUB_TOKEN gh auth switch --user tomagsx`.
+  `env -u GH_TOKEN -u GITHUB_TOKEN gh auth switch --user tomasuwappu`.
 
 ---
 
@@ -26,38 +26,38 @@ Every procedure assumes:
 
 Run once when standing up the devnet for the first time.
 
-1. **Build a release `gsx-node` + `gsx-faucet` + `gsx-indexer`** for
+1. **Build a release `suwappu-node` + `suwappu-faucet` + `suwappu-indexer`** for
    `aarch64-unknown-linux-musl` (matches the `t4g.medium` validator
-   AMI). Easiest: push a `gsx-dag-v0.1.0` tag and let
+   AMI). Easiest: push a `suwappu-dag-v0.1.0` tag and let
    `.github/workflows/release.yml` produce the binaries; then
    download.
 
    ```sh
-   git tag -a gsx-dag-v0.1.0 -m "gsx-dag 0.1.0"
-   git push origin gsx-dag-v0.1.0
+   git tag -a suwappu-dag-v0.1.0 -m "suwappu-dag 0.1.0"
+   git push origin suwappu-dag-v0.1.0
    gh run watch
-   gh release download gsx-dag-v0.1.0 \
+   gh release download suwappu-dag-v0.1.0 \
      --pattern '*aarch64-unknown-linux-musl*'
-   tar -xzf gsx-dag-0.1.0-aarch64-unknown-linux-musl.tar.gz
+   tar -xzf suwappu-dag-0.1.0-aarch64-unknown-linux-musl.tar.gz
    ```
 
 2. **Generate genesis + per-region keys + faucet keypair.**
 
    ```sh
-   cargo build --release -p gsx-crypto --bin gsx-keygen
+   cargo build --release -p suwappu-crypto --bin suwappu-keygen
    ./scripts/devnet/gen-genesis.py --out-dir ./target/devnet/keys
    ```
 
    Verify the genesis manifest declares 5 validators (4 region
    validators + 1 faucet authority at `authority_id = 4`) and the
-   prebalances.toml lists the faucet's address with 1 billion GSX.
+   prebalances.toml lists the faucet's address with 1 billion SUWAPPU.
 
 3. **Apply the terraform stack.** First apply creates the S3
    artifact bucket; subsequent steps upload bin + keys + configs
    into it.
 
    ```sh
-   BILLING_ALARM_EMAIL=ops@globalsettlement.com \
+   BILLING_ALARM_EMAIL=ops@suwappu.bot \
      ./scripts/devnet/deploy.sh apply
    ```
 
@@ -67,14 +67,14 @@ Run once when standing up the devnet for the first time.
 4. **Upload binary + keys + faucet public key** to S3:
 
    ```sh
-   BUCKET=gsx-dag-devnet-artifacts
+   BUCKET=suwappu-dag-devnet-artifacts
    # Validator binary (from step 1).
-   aws s3 cp ./gsx-dag-0.1.0-aarch64-unknown-linux-musl/gsx-node \
-       s3://$BUCKET/bin/gsx-node --profile gsn
+   aws s3 cp ./suwappu-dag-0.1.0-aarch64-unknown-linux-musl/suwappu-node \
+       s3://$BUCKET/bin/suwappu-node --profile gsn
 
    # Faucet binary.
-   aws s3 cp ./gsx-dag-0.1.0-aarch64-unknown-linux-musl/gsx-faucet \
-       s3://$BUCKET/bin/gsx-faucet --profile gsn
+   aws s3 cp ./suwappu-dag-0.1.0-aarch64-unknown-linux-musl/suwappu-faucet \
+       s3://$BUCKET/bin/suwappu-faucet --profile gsn
 
    # Per-region validator keys + genesis (NOT the faucet secret —
    # that goes to Secrets Manager in step 5).
@@ -91,7 +91,7 @@ Run once when standing up the devnet for the first time.
 
    ```sh
    aws secretsmanager put-secret-value \
-       --secret-id gsx-devnet/faucet/mldsa-secret-key \
+       --secret-id suwappu-devnet/faucet/mldsa-secret-key \
        --secret-binary fileb://./target/devnet/keys/faucet/mldsa.sk \
        --profile gsn --region us-east-1
    ```
@@ -111,12 +111,12 @@ Run once when standing up the devnet for the first time.
      | jq -r '.[].instance_id' \
      | xargs -I {} aws ssm send-command --instance-ids {} \
          --document-name AWS-RunShellScript \
-         --parameters 'commands=["systemctl restart gsx-bootstrap gsx-node"]' \
+         --parameters 'commands=["systemctl restart suwappu-bootstrap suwappu-node"]' \
          --profile gsn --region us-east-1
    ```
 
 8. **Verify the mesh is up.** Within 60 seconds, every validator's
-   `gsx_getEpoch.latest_committed_round` should be non-zero and
+   `suwappu_getEpoch.latest_committed_round` should be non-zero and
    monotonically advancing:
 
    ```sh
@@ -125,7 +125,7 @@ Run once when standing up the devnet for the first time.
             | jq -r ".[\"$region\"].public_ip")
      echo -n "$region ($ip): "
      curl -fsS -X POST -H 'Content-Type: application/json' \
-          -d '{"jsonrpc":"2.0","id":1,"method":"gsx_getEpoch"}' \
+          -d '{"jsonrpc":"2.0","id":1,"method":"suwappu_getEpoch"}' \
           "http://$ip:9092/" | jq -r '.result.latest_committed_round'
    done
    ```
@@ -149,8 +149,8 @@ After step 9 returns a tx_hash, the devnet is operational.
 
 ## 2. Restart a stuck validator
 
-Symptoms: a single region's `gsx_last_committed_round` lags >30
-behind the others, or the `gsx-devnet-silent-peer-<region>` alarm
+Symptoms: a single region's `suwappu_last_committed_round` lags >30
+behind the others, or the `suwappu-devnet-silent-peer-<region>` alarm
 fires.
 
 1. **Identify the instance:**
@@ -171,13 +171,13 @@ fires.
 3. **Inside the session, inspect logs + restart:**
 
    ```sh
-   sudo journalctl -u gsx-node -n 200 --no-pager
-   sudo systemctl restart gsx-node
-   sudo systemctl status gsx-node
+   sudo journalctl -u suwappu-node -n 200 --no-pager
+   sudo systemctl restart suwappu-node
+   sudo systemctl status suwappu-node
    ```
 
 4. **Verify reconnect.** From off-host, watch
-   `gsx_subscribeEvents` for the next "committed" event from this
+   `suwappu_subscribeEvents` for the next "committed" event from this
    region's authority:
 
    ```sh
@@ -203,7 +203,7 @@ operator handoff.
    keep the new secret out of any shared filesystem):
 
    ```sh
-   cargo run --release -p gsx-crypto --bin gsx-keygen -- \
+   cargo run --release -p suwappu-crypto --bin suwappu-keygen -- \
      --algo mldsa --sk ./new/<region>/mldsa.sk \
                   --pk ./new/<region>/mldsa.pk
    ```
@@ -227,7 +227,7 @@ operator handoff.
 
    ```sh
    for region in ...; do
-     curl -fsS -X POST -d '{"jsonrpc":"2.0","id":1,"method":"gsx_getAuthorityRegistry"}' \
+     curl -fsS -X POST -d '{"jsonrpc":"2.0","id":1,"method":"suwappu_getAuthorityRegistry"}' \
           "http://<region-ip>:9092/" | jq '.result | length'
    done
    # Expected: 5 (4 validators + 1 faucet) — count is unchanged.
@@ -238,21 +238,21 @@ operator handoff.
 
    ```sh
    aws s3 cp ./new/<region>/mldsa.sk \
-       s3://gsx-dag-devnet-artifacts/keys/<region>/mldsa.sk --profile gsn
+       s3://suwappu-dag-devnet-artifacts/keys/<region>/mldsa.sk --profile gsn
    aws s3 cp ./new/<region>/mldsa.pk \
-       s3://gsx-dag-devnet-artifacts/keys/<region>/mldsa.pk --profile gsn
+       s3://suwappu-dag-devnet-artifacts/keys/<region>/mldsa.pk --profile gsn
    # SSM into the instance and force a re-bootstrap so it pulls
    # the new key + restarts:
    aws ssm send-command --instance-ids <i-...> \
        --document-name AWS-RunShellScript \
        --parameters 'commands=["
-         rm -f /var/lib/gsx/mldsa.sk /var/lib/gsx/bls.sk
-         systemctl restart gsx-bootstrap gsx-node
+         rm -f /var/lib/suwappu/mldsa.sk /var/lib/suwappu/bls.sk
+         systemctl restart suwappu-bootstrap suwappu-node
        "]' --profile gsn --region <region>
    ```
 
 6. **Verify** the new key is in use: the validator's
-   `gsx_getAuthorityRegistry` entry shows the new `authority_id`
+   `suwappu_getAuthorityRegistry` entry shows the new `authority_id`
    + new pubkey hex.
 
 ---
@@ -289,14 +289,14 @@ governance change.
    reserve via:
 
    ```sh
-   # ad-hoc Transfer of N GSX from reserve to new faucet address
+   # ad-hoc Transfer of N SUWAPPU from reserve to new faucet address
    ```
 
 7. **Update Secrets Manager:**
 
    ```sh
    aws secretsmanager put-secret-value \
-       --secret-id gsx-devnet/faucet/mldsa-secret-key \
+       --secret-id suwappu-devnet/faucet/mldsa-secret-key \
        --secret-binary fileb://./new/faucet/mldsa.sk \
        --profile gsn --region us-east-1
    ```
@@ -308,7 +308,7 @@ governance change.
                 | jq -r '.instance_id')
    aws ssm send-command --instance-ids $faucet_id \
        --document-name AWS-RunShellScript \
-       --parameters 'commands=["systemctl restart gsx-faucet-bootstrap gsx-faucet"]' \
+       --parameters 'commands=["systemctl restart suwappu-faucet-bootstrap suwappu-faucet"]' \
        --profile gsn --region us-east-1
    ```
 
@@ -326,9 +326,9 @@ When: a new tagged release lands and the devnet should pick it up.
 1. **Download the release binaries.**
 
    ```sh
-   gh release download gsx-dag-v0.X.Y \
+   gh release download suwappu-dag-v0.X.Y \
      --pattern '*aarch64-unknown-linux-musl*'
-   tar -xzf gsx-dag-0.X.Y-aarch64-unknown-linux-musl.tar.gz
+   tar -xzf suwappu-dag-0.X.Y-aarch64-unknown-linux-musl.tar.gz
    ```
 
 2. **Upload to S3** (versioned bucket — overwrite is safe; the
@@ -336,9 +336,9 @@ When: a new tagged release lands and the devnet should pick it up.
    per the lifecycle policy):
 
    ```sh
-   BUCKET=gsx-dag-devnet-artifacts
-   aws s3 cp ./gsx-dag-0.X.Y-aarch64-unknown-linux-musl/gsx-node \
-       s3://$BUCKET/bin/gsx-node --profile gsn
+   BUCKET=suwappu-dag-devnet-artifacts
+   aws s3 cp ./suwappu-dag-0.X.Y-aarch64-unknown-linux-musl/suwappu-node \
+       s3://$BUCKET/bin/suwappu-node --profile gsn
    ```
 
 3. **Rolling restart, one region at a time.** Wait for each region
@@ -351,14 +351,14 @@ When: a new tagged release lands and the devnet should pick it up.
      echo "Restarting $region ($id)..."
      aws ssm send-command --instance-ids $id \
          --document-name AWS-RunShellScript \
-         --parameters 'commands=["systemctl restart gsx-bootstrap gsx-node"]' \
+         --parameters 'commands=["systemctl restart suwappu-bootstrap suwappu-node"]' \
          --profile gsn --region $region
      # Wait for tip-round to advance again before moving on.
      sleep 60
      ip=$(./scripts/devnet/deploy.sh output -json validators \
             | jq -r ".[\"$region\"].public_ip")
      curl -fsS -X POST \
-          -d '{"jsonrpc":"2.0","id":1,"method":"gsx_getEpoch"}' \
+          -d '{"jsonrpc":"2.0","id":1,"method":"suwappu_getEpoch"}' \
           "http://$ip:9092/" | jq .result.latest_committed_round
    done
    ```
@@ -391,10 +391,10 @@ Same procedure as § 5, but:
 
 ## 7. Diagnose stuck commits
 
-When: `gsx-devnet-halt` alarm fires.
+When: `suwappu-devnet-halt` alarm fires.
 
 1. **Check the CloudWatch dashboard** at
-   `https://us-east-1.console.aws.amazon.com/cloudwatch/home?region=us-east-1#dashboards/dashboard/gsx-devnet`.
+   `https://us-east-1.console.aws.amazon.com/cloudwatch/home?region=us-east-1#dashboards/dashboard/suwappu-devnet`.
    Identify whether tip-round is flat on ALL 4 regions (cluster
    halt) or just a subset (partial — see § 2 for single-region
    recovery).
@@ -407,12 +407,12 @@ When: `gsx-devnet-halt` alarm fires.
      id=...
      aws ssm send-command --instance-ids $id \
          --document-name AWS-RunShellScript \
-         --parameters 'commands=["tail -n 50 /var/log/gsx/events.ndjson | grep committed | tail -5"]' \
+         --parameters 'commands=["tail -n 50 /var/log/suwappu/events.ndjson | grep committed | tail -5"]' \
          --profile gsn --region $region
    done
    ```
 
-3. **Per-validator state snapshot via `gsx_getEpoch`:** if some
+3. **Per-validator state snapshot via `suwappu_getEpoch`:** if some
    regions return a higher `latest_committed_round` than others,
    the lagging regions are still catching up — wait 5 minutes
    before deeper investigation.
@@ -447,7 +447,7 @@ for region in us-east-1 eu-west-1 ap-southeast-1 sa-east-1; do
   volume=$(./scripts/devnet/deploy.sh output -json validators \
              | jq -r ".[\"$region\"].state_volume_id")
   aws ec2 create-snapshot --volume-id $volume \
-      --description "gsx-devnet pre-patch $(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      --description "suwappu-devnet pre-patch $(date -u +%Y-%m-%dT%H:%M:%SZ)" \
       --profile gsn --region $region
 done
 ```
@@ -459,7 +459,7 @@ done
 # 2. Detach the existing state volume.
 # 3. Create a new volume from the snapshot in the same AZ.
 # 4. Attach the new volume at /dev/sdf.
-# 5. SSM in; remount /var/lib/gsx; restart gsx-node.
+# 5. SSM in; remount /var/lib/suwappu; restart suwappu-node.
 ```
 
 Restore is intentionally manual — the procedure is rare and
@@ -510,7 +510,7 @@ resume cleanly.
 
 1. Start each validator: `aws ec2 start-instances --instance-ids
    <id>`. The persistent EBS reattaches at boot; cloud-init
-   restarts `gsx-node`.
+   restarts `suwappu-node`.
 2. Start the faucet: same `start-instances`.
 3. Verify mesh per § 1 step 8.
 
@@ -522,7 +522,7 @@ without first deploying the patched binary per § 6.
 ## 10. Testnet operations
 
 Procedures §§ 1–9 above apply to the **devnet**. The **testnet**
-is structurally identical (same gsx-node binary, same systemd
+is structurally identical (same suwappu-node binary, same systemd
 unit shape, same SSM access pattern), with these scale-up
 diffs:
 
@@ -535,9 +535,9 @@ diffs:
   § 10.2 below.
 - **Validator-program EC2 + RDS** runs the points accumulator
   daemon (forthcoming) — see § 10.3.
-- **DNS surface** is `*.testnet.gsx.globalsettlement.com`
-  (devnet uses `*.devnet.gsx.*`).
-- **Chain id 20251**, network_id `gsx-testnet-v1`.
+- **DNS surface** is `*.testnet.suwappu.bot`
+  (devnet uses `*.devnet.suwappu.*`).
+- **Chain id 20251**, network_id `suwappu-testnet-v1`.
 
 When a procedure from §§ 1–9 also applies to testnet, swap
 `devnet` → `testnet` in the paths + bucket names + the
@@ -556,18 +556,18 @@ bumped up. Use `./scripts/testnet/deploy.sh apply` (not
 ./scripts/testnet/gen-genesis.py --out-dir ./target/testnet/keys
 
 # 2. First apply (creates buckets + EC2 + EBS + EIPs).
-BILLING_ALARM_EMAIL=ops@globalsettlement.com \
+BILLING_ALARM_EMAIL=ops@suwappu.bot \
   ./scripts/testnet/deploy.sh apply
 
 # 3. Upload binary + keys + genesis + prebalances to S3.
-BUCKET=gsx-dag-testnet-artifacts
-aws s3 cp ./bin/gsx-node              s3://$BUCKET/bin/gsx-node              --profile gsn
-aws s3 cp ./bin/gsx-faucet            s3://$BUCKET/bin/gsx-faucet            --profile gsn
+BUCKET=suwappu-dag-testnet-artifacts
+aws s3 cp ./bin/suwappu-node              s3://$BUCKET/bin/suwappu-node              --profile gsn
+aws s3 cp ./bin/suwappu-faucet            s3://$BUCKET/bin/suwappu-faucet            --profile gsn
 aws s3 sync ./target/testnet/keys/    s3://$BUCKET/keys/                     --profile gsn --exclude "faucet/mldsa.sk"
 aws s3 cp  ./target/testnet/keys/genesis.toml      s3://$BUCKET/genesis/genesis.toml      --profile gsn
 aws s3 cp  ./target/testnet/keys/prebalances.toml  s3://$BUCKET/genesis/prebalances.toml  --profile gsn
 aws secretsmanager put-secret-value \
-    --secret-id gsx-testnet/faucet/mldsa-secret-key \
+    --secret-id suwappu-testnet/faucet/mldsa-secret-key \
     --secret-binary fileb://./target/testnet/keys/faucet/mldsa.sk \
     --profile gsn --region us-east-1
 
@@ -580,23 +580,23 @@ aws secretsmanager put-secret-value \
   | jq -r '.[].instance_id' \
   | xargs -I {} aws ssm send-command --instance-ids {} \
       --document-name AWS-RunShellScript \
-      --parameters 'commands=["systemctl restart gsx-bootstrap gsx-node"]' \
+      --parameters 'commands=["systemctl restart suwappu-bootstrap suwappu-node"]' \
       --profile gsn --region us-east-1
 
 # 6. Verify all 7 seeds via the public ALB.
 curl -fsS -X POST -H 'Content-Type: application/json' \
-     -d '{"jsonrpc":"2.0","id":1,"method":"gsx_getEpoch"}' \
-     https://rpc.testnet.gsx.globalsettlement.com/ | jq .
+     -d '{"jsonrpc":"2.0","id":1,"method":"suwappu_getEpoch"}' \
+     https://rpc.testnet.suwappu.bot/ | jq .
 
 # 7. Verify the faucet end-to-end.
-curl -fsS https://faucet.testnet.gsx.globalsettlement.com/health | jq .
+curl -fsS https://faucet.testnet.suwappu.bot/health | jq .
 ```
 
 After step 7 returns 200 with a sensible epoch, the testnet
 is serving external traffic.
 
 **Post-bootstrap one-time DNS step.** The testnet zone is in
-the gsn account; if `globalsettlement.com`'s apex zone lives
+the gsn account; if `suwappu.bot`'s apex zone lives
 in a different account, an operator must paste the
 `testnet_nameservers` output as NS records under the apex.
 See `terraform/testnet/dns.tf` for the output.
@@ -617,9 +617,9 @@ they apply + KYC. The flow:
 ```
 
 The script:
-1. Creates IAM user `gsx-testnet-operator-acme-validator-co`.
+1. Creates IAM user `suwappu-testnet-operator-acme-validator-co`.
 2. Attaches a policy scoped to `s3:PutObject` on exactly
-   `s3://gsx-dag-testnet-validator-uploads/uploads/8/*`.
+   `s3://suwappu-dag-testnet-validator-uploads/uploads/8/*`.
 3. Generates an access-key + secret pair.
 4. Prints the credentials in a block to forward to the
    operator out-of-band (Signal / 1Password secure share).
@@ -630,7 +630,7 @@ for their setup procedure.
 
 ### 10.3 Deploy the points-accumulator daemon
 
-The daemon binary (`crates/gsx-validator-program/`) is a
+The daemon binary (`crates/suwappu-validator-program/`) is a
 forthcoming PR. Once it lands + a tagged release publishes
 the binary, deploy via SSM:
 
@@ -641,22 +641,22 @@ aws ssm send-command --instance-ids $PROGRAM_ID \
     --document-name AWS-RunShellScript \
     --profile gsn --region us-east-1 \
     --parameters 'commands=["
-      aws s3 cp s3://gsx-dag-testnet-artifacts/bin/gsx-validator-program /opt/gsx/gsx-validator-program
-      chmod +x /opt/gsx/gsx-validator-program
+      aws s3 cp s3://suwappu-dag-testnet-artifacts/bin/suwappu-validator-program /opt/suwappu/suwappu-validator-program
+      chmod +x /opt/suwappu/suwappu-validator-program
       # Install + enable the systemd unit shipped alongside the binary.
       systemctl daemon-reload
-      systemctl enable gsx-validator-program
-      systemctl start gsx-validator-program
+      systemctl enable suwappu-validator-program
+      systemctl start suwappu-validator-program
     "]'
 ```
 
 Verify the leaderboard endpoint comes up:
 
 ```sh
-curl -fsS https://program.testnet.gsx.globalsettlement.com/leaderboard | jq .
+curl -fsS https://program.testnet.suwappu.bot/leaderboard | jq .
 ```
 
-The `gsx-testnet-program-down` CloudWatch alarm switches from
+The `suwappu-testnet-program-down` CloudWatch alarm switches from
 "missing-data" to "OK" within 5 minutes of the daemon
 responding.
 

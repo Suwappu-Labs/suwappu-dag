@@ -1,5 +1,5 @@
 /**
- * Tests for the `@gsx/client` SDK.
+ * Tests for the `@suwappu/client` SDK.
  *
  * Uses node's native `node:test` runner (no vitest/jest dep) and a
  * fake `fetch` so we don't bind a real TCP socket. The server
@@ -72,11 +72,11 @@ test("non-NotFound RpcError is thrown", async () => {
   const { fetch } = makeFetchMock(() => ({
     jsonrpc: "2.0",
     id: 1,
-    error: { code: -32601, message: "method not found: gsx_bogus" },
+    error: { code: -32601, message: "method not found: suwappu_bogus" },
   }));
   const client = new Client("http://localhost:0", { fetch });
   await assert.rejects(
-    () => client.call("gsx_bogus"),
+    () => client.call("suwappu_bogus"),
     (err: unknown) => err instanceof RpcError && (err as RpcError).code === -32601,
   );
 });
@@ -132,8 +132,8 @@ test("positional vs object params encode correctly via the generic call()", asyn
     result: null,
   }));
   const client = new Client("http://localhost:0", { fetch });
-  await client.call("gsx_getStake", { authority_id: 0 });
-  await client.call("gsx_getStake", [0]);
+  await client.call("suwappu_getStake", { authority_id: 0 });
+  await client.call("suwappu_getStake", [0]);
   const bodies = captured.map((r) => JSON.parse(r.init.body as string));
   assert.deepEqual(bodies[0]?.params, { authority_id: 0 });
   assert.deepEqual(bodies[1]?.params, [0]);

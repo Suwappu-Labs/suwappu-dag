@@ -2,7 +2,7 @@
 """
 Plot latency CDFs for the main DAG lane across all 7 regions.
 
-Reads `target/perf/run/main_lane.csv` (produced by gsx-metrics) and emits:
+Reads `target/perf/run/main_lane.csv` (produced by suwappu-metrics) and emits:
 
 - `target/perf/run/cdf_main_lane.png` — per-region commit-latency CDF
   (received_ms - proposed_ms for the authoring region, or
@@ -34,7 +34,7 @@ def main() -> int:
         "--csv",
         type=Path,
         default=Path("target/perf/run/main_lane.csv"),
-        help="CSV from gsx-metrics with columns: cert_hash,region,proposed_ms,received_ms,voted_ms,committed_ms",
+        help="CSV from suwappu-metrics with columns: cert_hash,region,proposed_ms,received_ms,voted_ms,committed_ms",
     )
     ap.add_argument(
         "--out",
@@ -89,7 +89,7 @@ def main() -> int:
         plt.plot(lats, ys, label=f"{region} (n={len(lats)})")
     plt.xlabel("commit latency (ms) — committed_ms − proposed_ms")
     plt.ylabel("CDF")
-    plt.title("GSX DAG main-lane commit latency, 7-region testnet")
+    plt.title("SUWAPPU DAG main-lane commit latency, 7-region testnet")
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.tight_layout()

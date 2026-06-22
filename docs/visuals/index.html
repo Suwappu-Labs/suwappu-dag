@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>GSX Visual Index</title>
+  <title>SUWAPPU Visual Index</title>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>
     * { box-sizing: border-box; }
@@ -60,28 +60,28 @@
 <body>
   <div class="wrap">
     <a class="top-link" href="README.md">← inline-rendered Mermaid README (GitHub + GitBook native)</a>
-    <div class="hero"><div class="dot"></div><h1>GSX Visual Index</h1></div>
-    <p class="sub">Standalone presentation pages for the GSX stack. For GitHub / GitBook viewers, the same diagrams render inline in <a href="README.md">README.md</a>; Mermaid sources live in <a href="mermaid/">mermaid/</a>.</p>
+    <div class="hero"><div class="dot"></div><h1>SUWAPPU Visual Index</h1></div>
+    <p class="sub">Standalone presentation pages for the SUWAPPU stack. For GitHub / GitBook viewers, the same diagrams render inline in <a href="README.md">README.md</a>; Mermaid sources live in <a href="mermaid/">mermaid/</a>.</p>
 
     <div class="section-title"><span class="dot" style="width:8px;height:8px"></span><h3>Cross-cutting</h3></div>
     <div class="grid">
-      <a class="card" href="gsx-ecosystem-atlas.html">
-        <h2>GSX Ecosystem Atlas</h2>
+      <a class="card" href="suwappu-ecosystem-atlas.html">
+        <h2>SUWAPPU Ecosystem Atlas</h2>
         <p>Single-page atlas: DAG, DB, LTP, charts, geometry, wire-size anchors.</p>
         <div class="tagrow"><span class="tag">ecosystem</span><span class="tag">overview</span></div>
       </a>
     </div>
 
     <div class="section-title"><span class="dot" style="width:8px;height:8px;background:#34d399"></span><h3>Stack layers</h3></div>
-    <p class="section-sub">One presentation per layer in the GSX stack.</p>
+    <p class="section-sub">One presentation per layer in the SUWAPPU stack.</p>
     <div class="grid">
-      <a class="card" href="gsx-dag.html">
-        <h2>GSX DAG</h2>
+      <a class="card" href="suwappu-dag.html">
+        <h2>SUWAPPU DAG</h2>
         <p>Chain architecture, crate map, dual-ring security, commitment story.</p>
         <div class="tagrow"><span class="tag">Mysticeti-C</span><span class="tag">dual VM</span><span class="tag">LTP</span></div>
       </a>
-      <a class="card" href="gsx-db.html">
-        <h2>GSX DB</h2>
+      <a class="card" href="suwappu-db.html">
+        <h2>SUWAPPU DB</h2>
         <p>Canonical state lattice, sealed mutation path, mechanical upgrade surfaces.</p>
         <div class="tagrow"><span class="tag">BridgeToken</span><span class="tag">replay</span><span class="tag">parity</span></div>
       </a>
@@ -112,8 +112,8 @@
       </a>
       <a class="card" href="dual-vm.html">
         <h2>Dual-VM execution</h2>
-        <p>EVM ↔ Move projection equality on the gsx-db polymorphic balance map.</p>
-        <div class="tagrow"><span class="tag">DAG-S10</span><span class="tag">gsx-db</span></div>
+        <p>EVM ↔ Move projection equality on the suwappu-db polymorphic balance map.</p>
+        <div class="tagrow"><span class="tag">DAG-S10</span><span class="tag">suwappu-db</span></div>
       </a>
       <a class="card" href="scion-transport.html">
         <h2>SCION transport</h2>
@@ -125,22 +125,22 @@
     <div class="section-title"><span class="dot" style="width:8px;height:8px;background:#a78bfa"></span><h3>Mermaid sources (canonical)</h3></div>
     <p class="section-sub">Text-native sources — these are the source of truth; HTML pages above are auxiliary slide decks.</p>
     <div class="grid">
-      <a class="card" href="mermaid/gsx-dag.md"><h2>GSX DAG</h2><p>Chain stack flow.</p></a>
-      <a class="card" href="mermaid/gsx-db.md"><h2>GSX DB</h2><p>Substrate lattice + mutation pipeline.</p></a>
+      <a class="card" href="mermaid/suwappu-dag.md"><h2>SUWAPPU DAG</h2><p>Chain stack flow.</p></a>
+      <a class="card" href="mermaid/suwappu-db.md"><h2>SUWAPPU DB</h2><p>Substrate lattice + mutation pipeline.</p></a>
       <a class="card" href="mermaid/ltp.md"><h2>LTP</h2><p>Lifecycle + security stack.</p></a>
       <a class="card" href="mermaid/commit-rule.md"><h2>Commit rule</h2><p>decide_slot direct/indirect + orphan window.</p></a>
       <a class="card" href="mermaid/fast-path-and-slashing.md"><h2>Fast path + slashing</h2><p>K-binding cross-check + equivocation proof.</p></a>
       <a class="card" href="mermaid/governance-flow.md"><h2>Governance flow</h2><p>pending_governance + deferred activation.</p></a>
       <a class="card" href="mermaid/dual-vm.md"><h2>Dual-VM execution</h2><p>EVM ↔ Move projection equality.</p></a>
       <a class="card" href="mermaid/scion-transport.md"><h2>SCION transport</h2><p>Path auth + RaptorQ + orphan-pull.</p></a>
-      <a class="card" href="mermaid/auth-dispatch.md"><h2>Auth dispatch (draft)</h2><p>Anchor hybrid AND-gate (gsx-db IQ-7).</p></a>
+      <a class="card" href="mermaid/auth-dispatch.md"><h2>Auth dispatch (draft)</h2><p>Anchor hybrid AND-gate (suwappu-db IQ-7).</p></a>
     </div>
 
     <div class="section-title"><span class="dot" style="width:8px;height:8px;background:#94a3b8"></span><h3>Excalidraw archive</h3></div>
     <p class="section-sub">Historical hand-drawn dark-mode canvases. Mermaid is the canonical source going forward; these are retained for reference and live-editing workflows.</p>
     <div class="grid">
-      <a class="card" href="excalidraw-archive/gsx-dag.excalidraw"><h2>GSX DAG — Excalidraw</h2><p>Hand-drawn variant of the chain stack.</p></a>
-      <a class="card" href="excalidraw-archive/gsx-db.excalidraw"><h2>GSX DB — Excalidraw</h2><p>Hand-drawn variant of the substrate lattice.</p></a>
+      <a class="card" href="excalidraw-archive/suwappu-dag.excalidraw"><h2>SUWAPPU DAG — Excalidraw</h2><p>Hand-drawn variant of the chain stack.</p></a>
+      <a class="card" href="excalidraw-archive/suwappu-db.excalidraw"><h2>SUWAPPU DB — Excalidraw</h2><p>Hand-drawn variant of the substrate lattice.</p></a>
       <a class="card" href="excalidraw-archive/ltp.excalidraw"><h2>LTP — Excalidraw</h2><p>Hand-drawn variant of the transfer lifecycle.</p></a>
     </div>
 

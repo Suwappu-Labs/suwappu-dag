@@ -1,8 +1,8 @@
 {
-  "name": "gsx-examples-ts",
+  "name": "suwappu-examples-ts",
   "version": "0.1.0",
   "private": true,
-  "description": "Runnable TypeScript examples against a local gsx-dag devnet.",
+  "description": "Runnable TypeScript examples against a local suwappu-dag devnet.",
   "type": "module",
   "scripts": {
     "example:query-epoch": "tsx query_epoch.ts",
@@ -10,7 +10,7 @@
     "example:subscribe-events": "tsx subscribe_events.ts"
   },
   "dependencies": {
-    "@gsx/client": "file:../../clients/ts-sdk",
+    "@suwappu/client": "file:../../clients/ts-sdk",
     "ws": "^8.18.0"
   },
   "devDependencies": {

@@ -1,14 +1,14 @@
 # Transport — SCION path-authenticated routing + RaptorQ shred/reconstruct
 
-**Paper §**: 6.3 — Inter-validator transport ([`gsx-papers/papers/dag-l1`](https://github.com/GlobalSettlementNetwork/gsx-papers))
-**Code**: `crates/gsx-transport/src/` (entry: `lib.rs`)
+**Paper §**: 6.3 — Inter-validator transport ([`suwappu-papers/papers/dag-l1`](https://github.com/Suwappu-Labs/suwappu-papers))
+**Code**: `crates/suwappu-transport/src/` (entry: `lib.rs`)
 **IQs**: —
 **Visuals**: [`docs/visuals/mermaid/scion-transport.md`](../visuals/mermaid/scion-transport.md) *(coming with PR-2)*
 **Sprint**: DAG-S2 (RaptorQ) ✅ Closed · DAG-S18 (SCION) ✅ Closed · DAG-S19 (SCION-IP-Gateway) ✅ Closed
 
 ## What it does
 
-`gsx-transport` carries certificates, votes, fast-path messages, and LTP
+`suwappu-transport` carries certificates, votes, fast-path messages, and LTP
 attestations between validators. Cert payloads are sharded with RaptorQ
 fountain codes so any `k`-of-`n` shards reconstruct the original, decoupling
 delivery success from packet loss. Path-authenticated routing rides SCION when
@@ -29,8 +29,8 @@ the path choice is opaque to the round driver.
 
 ## Cross-references
 
-- **Engineering:** `crates/gsx-transport/src/lib.rs`, the inbox + outbound
-  channels at `crates/gsx-node/src/daemon.rs::run_inbox` consume the wire
+- **Engineering:** `crates/suwappu-transport/src/lib.rs`, the inbox + outbound
+  channels at `crates/suwappu-node/src/daemon.rs::run_inbox` consume the wire
   events transport produces.
 - **Spec:** Paper §6.3, §6.4 (transport plus fast-path overlay).
 - **Design decisions:** none ratified — transport choices were spec'd in the
@@ -41,4 +41,4 @@ the path choice is opaque to the round driver.
 - **Related operator concern:** orphan-pull retries that ride on this
   transport are bounded by per-orphan backoff added in DAG-S32 — see the
   `dag-orphan-pull-retry-storm-without-per-orphan-backoff` operator skill
-  notes and `crates/gsx-node/src/daemon.rs::run_sync_sweeper`.
+  notes and `crates/suwappu-node/src/daemon.rs::run_sync_sweeper`.

@@ -1,12 +1,12 @@
 // Home page — recent blocks + live tip.
 //
-// Polls `gsx_getEpoch` every 3 seconds to discover the chain head;
+// Polls `suwappu_getEpoch` every 3 seconds to discover the chain head;
 // renders the last ~30 blocks in reverse order. Skip rounds
-// (Mysticeti-C `Skip` outcome) are elided — `gsx_getBlock` returns
+// (Mysticeti-C `Skip` outcome) are elided — `suwappu_getBlock` returns
 // null for them, and we just don't render them.
 
 import { useEffect, useState } from "react";
-import type { Client, BlockView, EpochView } from "@gsx/client";
+import type { Client, BlockView, EpochView } from "@suwappu/client";
 
 const RECENT_COUNT = 30;
 const POLL_MS = 3000;

@@ -1,4 +1,4 @@
-# gsx-dag mainnet-readiness audit (2026-05-15)
+# suwappu-dag mainnet-readiness audit (2026-05-15)
 
 ## Context
 
@@ -11,7 +11,7 @@ materially changed:
 1. Issue #18 was claimed open; it's been fixed (#32 deferred-activation
    + #18 epoch-boundary; see IQ-002 ratification).
 2. K-binding cross-check was claimed unwired; it ships at
-   `crates/gsx-node/src/daemon.rs:837-872` with integration test
+   `crates/suwappu-node/src/daemon.rs:837-872` with integration test
    `K_binding_violator_is_slashed` at line 2556+ (PR A2 documents).
 3. Account-abstraction enforcement was claimed unwired; the ML-DSA-65
    client-wire gate landed in #28 (`verify_signed_intent`).
@@ -40,8 +40,8 @@ Diff against the May-14 capability matrix:
 | Query RPC | Write-only TCP bincode (`Critical` blocker) | **JSON-RPC MVP shipped**, 8 methods + WS subscribe live |
 | Client SDK | None (`Critical`) | **Rust + TS at full parity**, 8 methods + WS in both |
 | Block explorer | None (`High`) | Still missing — out of scope until indexer matures |
-| Indexer | None (`High`) | **Scaffold + Postgres backend shipped**; backfill via `gsx_getBlock` still missing |
-| Mempool | FIFO into `pending_intents` (`High`) | **gsx-mempool wired**: per-peer rate limit + priority + dedup + TTL |
+| Indexer | None (`High`) | **Scaffold + Postgres backend shipped**; backfill via `suwappu_getBlock` still missing |
+| Mempool | FIFO into `pending_intents` (`High`) | **suwappu-mempool wired**: per-peer rate limit + priority + dedup + TTL |
 | Account abstraction | Not enforced at wire (`High`) | **Enforced**: `verify_signed_intent` on client wire + JSON-RPC ingress |
 | Deployed bridges | LTP framework only (`Critical`) | Unchanged — out of scope until corridor super-node infra lands |
 | Restaking / AVS integration | n/a | n/a |
@@ -54,7 +54,7 @@ Diff against the May-14 capability matrix:
 The May-14 audit explicitly flagged the client listener as a
 slow-loris attack surface; this is now hardened.
 
-### Client TCP wire (`crates/gsx-node/src/client.rs`)
+### Client TCP wire (`crates/suwappu-node/src/client.rs`)
 
 | Defense | Default | NodeConfig knob |
 |---|---|---|
@@ -62,9 +62,9 @@ slow-loris attack surface; this is now hardened.
 | Per-source-IP concurrent-connection cap | 8 | `client_per_ip_limit` |
 | Idle-frame timeout | 30 s | `client_idle_timeout_ms` |
 | ML-DSA-65 signature gate on every intent | always | `verify_signed_intent` (Issue #28) |
-| Per-peer leaky bucket (via mempool admission) | 100 burst / 50 tok-s | `gsx_mempool::MempoolConfig` |
+| Per-peer leaky bucket (via mempool admission) | 100 burst / 50 tok-s | `suwappu_mempool::MempoolConfig` |
 
-### Validator peer wire (`crates/gsx-node/src/wire.rs`)
+### Validator peer wire (`crates/suwappu-node/src/wire.rs`)
 
 | Defense | Default | Source |
 |---|---|---|
@@ -74,7 +74,7 @@ slow-loris attack surface; this is now hardened.
 | Orphan-cert buffer cap | 4096 entries | `MAX_ORPHAN_CERTS` |
 | Per-orphan exponential backoff | 500 ms → 5 s cap | `orphan_pull_backoff_ms` (DAG-S32) |
 
-### JSON-RPC ingress (`crates/gsx-rpc/src/router.rs`)
+### JSON-RPC ingress (`crates/suwappu-rpc/src/router.rs`)
 
 | Defense | Default | Source |
 |---|---|---|
@@ -98,9 +98,9 @@ in workspace root). Three targets, weekly scheduled CI:
 
 | Target | Surface |
 |---|---|
-| `wire_decode` | `gsx_node::codec::decode_frame::<{WireMessage, ClientMessage}>` (F4) |
+| `wire_decode` | `suwappu_node::codec::decode_frame::<{WireMessage, ClientMessage}>` (F4) |
 | `dag_insert` | `DagStore::insert` against bincode-decoded `Certificate` streams |
-| `decide_slot` | `gsx_consensus::decide_slot` over arbitrary DAG topologies (exercises IQ-004 multi-anchor scan) |
+| `decide_slot` | `suwappu_consensus::decide_slot` over arbitrary DAG topologies (exercises IQ-004 multi-anchor scan) |
 
 See [`docs/architecture/security.md`](../architecture/security.md) for
 the operator catalog.
@@ -109,8 +109,8 @@ the operator catalog.
 
 | IQ | Topic | May-14 | May-15 |
 |---|---|---|---|
-| IQ-001 | Quorum formula | Ratified via gsx-papers#1 | Unchanged |
-| IQ-002 | Indirect commit | Ratified via gsx-papers#1 | Unchanged |
+| IQ-001 | Quorum formula | Ratified via suwappu-papers#1 | Unchanged |
+| IQ-002 | Indirect commit | Ratified via suwappu-papers#1 | Unchanged |
 | IQ-003 | Fast-path lane | Pending sign-off | **Ratified** (PR A2 confirms wired) |
 | IQ-004 | `decide_slot` orphan window | (didn't exist on May-14) | **Ratified** — Option A multi-anchor scan shipped (PR A1) |
 
@@ -171,30 +171,30 @@ QRL Zond, Naoris).
 
 **Tracked code paths (post-Track-A + post-B1..B4):**
 
-- `crates/gsx-consensus/src/commit.rs::decide_slot` — IQ-004
+- `crates/suwappu-consensus/src/commit.rs::decide_slot` — IQ-004
   multi-anchor scan (PR A1).
-- `crates/gsx-node/src/daemon.rs::handle_fastpath_cert:837-872` —
+- `crates/suwappu-node/src/daemon.rs::handle_fastpath_cert:837-872` —
   K-binding cross-check (PR A2 ratifies).
-- `crates/gsx-node/src/daemon.rs::run_round_driver:1551` — mempool
+- `crates/suwappu-node/src/daemon.rs::run_round_driver:1551` — mempool
   drain (PR A3).
-- `crates/gsx-node/src/client.rs::run` — semaphore + per-IP map
+- `crates/suwappu-node/src/client.rs::run` — semaphore + per-IP map
   + idle timeout (PR B1).
-- `crates/gsx-rpc/src/router.rs::router_with_limits` — tower
+- `crates/suwappu-rpc/src/router.rs::router_with_limits` — tower
   middleware (PR B2).
-- `crates/gsx-node/src/wire.rs::enforce_compact_variant_cap` —
+- `crates/suwappu-node/src/wire.rs::enforce_compact_variant_cap` —
   per-variant size cap (PR B3).
 - `fuzz/` — cargo-fuzz workspace (PR B4).
 
 ## 8. Open items / known unknowns
 
 - ~~**Per-IP JSON-RPC rate limit**~~ — **shipped F1 on 2026-05-15**
-  ([PR #67](https://github.com/GlobalSettlementNetwork/gsx-dag/pull/67)):
-  `PerIpRateLimiter` reuses `gsx_mempool::LeakyBucket`; defaults
+  ([PR #67](https://github.com/Suwappu-Labs/suwappu-dag/pull/67)):
+  `PerIpRateLimiter` reuses `suwappu_mempool::LeakyBucket`; defaults
   60 burst / 10 req/s per IP; emits `RpcError::RateLimited`
   (`-32099`) inside a JSON-RPC envelope.
 - ~~**Indexer backfill**~~ — **shipped F2 on 2026-05-15**
-  ([PR #68](https://github.com/GlobalSettlementNetwork/gsx-dag/pull/68)):
-  `gsx_indexer::backfill::catch_up` walks `gsx_getBlock` from
+  ([PR #68](https://github.com/Suwappu-Labs/suwappu-dag/pull/68)):
+  `suwappu_indexer::backfill::catch_up` walks `suwappu_getBlock` from
   `Store::latest_round()` to the new `EpochView.latest_committed_round`
   chain-head field; idempotent against existing rows.
 - ~~**bincode 2.x migration**~~ — **shipped F4 on 2026-05-16**
@@ -204,7 +204,7 @@ QRL Zond, Naoris).
   so future codec flips fail-fast on
   `FrameDecodeError::UnknownVersion`.
 - **`phase_g_admit_and_eject` flake** — F3 (shipped 2026-05-15,
-  [PR #69](https://github.com/GlobalSettlementNetwork/gsx-dag/pull/69))
+  [PR #69](https://github.com/Suwappu-Labs/suwappu-dag/pull/69))
   added a 30-second pre-convergence propagation probe that
   bisects the flake into propagation-class vs boundary-drain
   class. The structural fix (cert-broadcast retry on orphan-pull

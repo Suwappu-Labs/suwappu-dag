@@ -1,7 +1,7 @@
 // Block detail — round, cert hash, intent list with tx-hash links.
 
 import { useEffect, useState } from "react";
-import type { Client, BlockView } from "@gsx/client";
+import type { Client, BlockView } from "@suwappu/client";
 
 export function BlockPage({
   client,
@@ -136,7 +136,7 @@ function IntentSummary({ intent }: { intent: BlockView["intents"][number] }) {
       return (
         <span>
           {shortHash(intent.from)} → {shortHash(intent.to)}: {intent.amount}{" "}
-          GSX
+          SUWAPPU
         </span>
       );
     case "admit_authority":

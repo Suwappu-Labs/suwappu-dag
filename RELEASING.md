@@ -1,4 +1,4 @@
-# Releasing gsx-dag
+# Releasing suwappu-dag
 
 Public releases publish binaries to GitHub Releases for external
 developers. The cadence is roughly:
@@ -67,8 +67,8 @@ version; the devnet wipes-and-regenesis on that boundary.
 
    ```sh
    VERSION=0.1.1
-   git tag -a "gsx-dag-v${VERSION}" -m "gsx-dag ${VERSION}"
-   git push origin "gsx-dag-v${VERSION}"
+   git tag -a "suwappu-dag-v${VERSION}" -m "suwappu-dag ${VERSION}"
+   git push origin "suwappu-dag-v${VERSION}"
    ```
 
 6. **Watch the release workflow.** The push triggers
@@ -81,15 +81,15 @@ version; the devnet wipes-and-regenesis on that boundary.
    gh run watch
    ```
 
-7. **Verify the Release page.** `gh release view gsx-dag-v${VERSION}`
+7. **Verify the Release page.** `gh release view suwappu-dag-v${VERSION}`
    should list three `*.tar.gz` archives + a `SHA256SUMS` file.
 
 8. **Smoke test on at least one platform.**
 
    ```sh
-   gh release download gsx-dag-v${VERSION} --pattern '*linux-musl*'
-   tar -xzf gsx-dag-${VERSION}-x86_64-unknown-linux-musl.tar.gz
-   ./gsx-dag-${VERSION}-x86_64-unknown-linux-musl/gsx-node --help
+   gh release download suwappu-dag-v${VERSION} --pattern '*linux-musl*'
+   tar -xzf suwappu-dag-${VERSION}-x86_64-unknown-linux-musl.tar.gz
+   ./suwappu-dag-${VERSION}-x86_64-unknown-linux-musl/suwappu-node --help
    ```
 
 9. **Roll the devnet (optional, per the wipe policy).** If this is a
@@ -97,7 +97,7 @@ version; the devnet wipes-and-regenesis on that boundary.
    "Update validator binary" to push the new binary to each region.
    If major + hard fork, OPERATIONS.md § "Devnet wipe + regenesis".
 
-10. **Announce.** Post the Release URL to the GSX Discord + the
+10. **Announce.** Post the Release URL to the SUWAPPU Discord + the
     `#announcements` channel in the team Slack.
 
 ## Recovery
@@ -107,7 +107,7 @@ If the release workflow fails partway through:
 - **`build` job fails on one platform:** binaries for the other
   platforms are uploaded as artifacts but no Release is created.
   Fix the failing platform, then re-run via
-  `gh workflow run release.yml -f tag=gsx-dag-v${VERSION}`.
+  `gh workflow run release.yml -f tag=suwappu-dag-v${VERSION}`.
 - **`release` job fails (rare — only `gh release create`):** the
   tag exists but no Release page. Delete the tag's draft Release
   if present, then re-run the workflow.
@@ -118,15 +118,15 @@ If the release workflow fails partway through:
 
 ## Pre-flight gotchas
 
-- **The `GSX_DB_DEPLOY_KEY` secret must be present** on the repo (or
+- **The `SUWAPPU_DB_DEPLOY_KEY` secret must be present** on the repo (or
   inherited from the org). Without it, the workflow's `cargo build`
-  fails to fetch `gsxdb-bridge`. Check via Repo Settings →
+  fails to fetch `suwappudb-bridge`. Check via Repo Settings →
   Secrets → Actions.
 - **CI billing.** Each release run consumes ~15 minutes of macOS
   runner time (the most expensive class). If billing is exhausted,
   the workflow fails before any build job runs.
-- **`gsx-faucet` crate may not exist yet.** Pre-G3, the release
-  workflow gates the gsx-faucet build behind a directory existence
+- **`suwappu-faucet` crate may not exist yet.** Pre-G3, the release
+  workflow gates the suwappu-faucet build behind a directory existence
   check and skips silently. Post-G3, the binary appears automatically.
 
 ## See also

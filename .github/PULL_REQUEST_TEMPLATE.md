@@ -1,5 +1,5 @@
 <!--
-Thanks for contributing to gsx-dag. Fill in the sections below — none of
+Thanks for contributing to suwappu-dag. Fill in the sections below — none of
 them are throw-away, every line shapes how this PR gets reviewed.
 
 If this is a draft / WIP, mark it as a draft. Otherwise reviewers assume
@@ -42,7 +42,7 @@ that matches the change:
   - Theorem 2 safety (joint-quorum AND-gate)
   - PQ crypto surface (ML-DSA-65 / ML-KEM-768)
   - LTP constant-size commitment (≈1,600 B)
-  - Substrate invariants inherited from gsx-db
+  - Substrate invariants inherited from suwappu-db
   - Fast-path equivocation slashing (100% bond forfeiture)
   - Reserved-address invariant (only protocol-owned arms mutate them)
   - State-root atomicity (all-or-nothing on failure)
@@ -52,8 +52,8 @@ explain why and which test pins the new shape). -->
 
 ## Subagent verdicts
 
-<!-- For PRs touching gsx-crypto / gsx-consensus / gsx-fastpath /
-gsx-transport / joint-quorum logic, paste the specialist-subagent
+<!-- For PRs touching suwappu-crypto / suwappu-consensus / suwappu-fastpath /
+suwappu-transport / joint-quorum logic, paste the specialist-subagent
 verdicts from CLAUDE.md§Specialist-subagents. Skip otherwise. -->
 
 ## Closes

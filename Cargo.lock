@@ -203,6 +203,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "base16ct"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c7f02d4ea65f2c1853089ffd8d2787bdbc63de2f0d29dedbcf8ccdfa0ccd4cf"
+
+[[package]]
 name = "base64"
 version = "0.21.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -515,6 +521,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 
 [[package]]
+name = "crypto-bigint"
+version = "0.5.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0dc92fb57ca44df6db8059111ab3af99a63d5d0f8375d9972e319a379c6bab76"
+dependencies = [
+ "generic-array",
+ "rand_core 0.6.4",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
 name = "crypto-common"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -577,12 +595,45 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
+name = "ecdsa"
+version = "0.16.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee27f32b5c5292967d2d4a9d7f1e0b0aed2c15daded5a60300e4abb9d8020bca"
+dependencies = [
+ "der",
+ "digest",
+ "elliptic-curve",
+ "rfc6979",
+ "signature",
+ "spki",
+]
+
+[[package]]
 name = "either"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "elliptic-curve"
+version = "0.13.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b5e6043086bf7973472e0c7dff2142ea0b680d30e18d9cc40f267efbf222bd47"
+dependencies = [
+ "base16ct",
+ "crypto-bigint",
+ "digest",
+ "ff",
+ "generic-array",
+ "group",
+ "pkcs8",
+ "rand_core 0.6.4",
+ "sec1",
+ "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -637,6 +688,16 @@ name = "fastrand"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
+
+[[package]]
+name = "ff"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0b50bfb653653f9ca9095b427bed08ab8d75a137839d9ad64eb11810d5b6393"
+dependencies = [
+ "rand_core 0.6.4",
+ "subtle",
+]
 
 [[package]]
 name = "find-msvc-tools"
@@ -792,6 +853,7 @@ checksum = "85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a"
 dependencies = [
  "typenum",
  "version_check",
+ "zeroize",
 ]
 
 [[package]]
@@ -837,345 +899,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
-name = "gsx-authority"
-version = "0.1.0"
+name = "group"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0f9ef7462f7c099f518d754361858f86d8a07af53ba9af0fe635bbccb151a63"
 dependencies = [
- "gsx-consensus",
- "gsx-crypto",
- "proptest",
- "serde",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "gsx-client"
-version = "0.1.0"
-dependencies = [
- "axum",
- "gsx-rpc",
- "hex",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "gsx-consensus"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "gsx-crypto",
- "proptest",
- "rand 0.8.6",
- "serde",
- "sha3",
- "thiserror 1.0.69",
- "tracing",
-]
-
-[[package]]
-name = "gsx-crypto"
-version = "0.1.0"
-dependencies = [
- "blst",
- "hex",
- "hkdf",
- "pqcrypto-mldsa",
- "pqcrypto-mlkem",
- "pqcrypto-traits",
- "proptest",
- "rand 0.8.6",
- "rand_chacha 0.3.1",
- "serde",
- "sha3",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "gsx-execution"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "gsx-authority",
- "gsx-consensus",
- "gsx-crypto",
- "gsx-l2-verifier-precompile",
- "gsxdb-bridge",
- "gsxdb-state",
- "hex",
- "proptest",
- "rand 0.8.6",
- "serde",
- "thiserror 1.0.69",
- "tracing",
-]
-
-[[package]]
-name = "gsx-fastpath"
-version = "0.1.0"
-dependencies = [
- "gsx-authority",
- "gsx-consensus",
- "gsx-crypto",
- "proptest",
- "serde",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "gsx-faucet"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "bincode",
- "blake3",
- "clap",
- "gsx-client",
- "gsx-crypto",
- "gsx-execution",
- "gsx-mempool",
- "hex",
- "http-body-util",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "gsx-indexer"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "clap",
- "futures-util",
- "gsx-client",
- "gsx-rpc",
- "hex",
- "serde",
- "serde_json",
- "sqlx",
- "thiserror 1.0.69",
- "tokio",
- "tokio-tungstenite 0.21.0",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "gsx-l2-bridge"
-version = "0.1.0"
-dependencies = [
- "hex",
- "serde",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "gsx-l2-confidential"
-version = "0.1.0"
-dependencies = [
- "gsx-crypto",
- "hex",
- "proptest",
- "serde",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "gsx-l2-sequencer"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "gsx-l2-verifier-precompile",
- "hex",
- "serde",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "gsx-l2-verifier-precompile"
-version = "0.1.0"
-dependencies = [
- "hex",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "gsx-ltp"
-version = "0.1.0"
-dependencies = [
- "blst",
- "gsx-crypto",
- "gsx-precompiles",
- "proptest",
- "rand 0.8.6",
- "serde",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "gsx-mempool"
-version = "0.1.0"
-dependencies = [
- "bincode",
- "blake3",
- "gsx-execution",
- "hex",
- "serde",
- "thiserror 1.0.69",
- "tracing",
-]
-
-[[package]]
-name = "gsx-node"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "bincode",
- "blake3",
- "clap",
- "gsx-authority",
- "gsx-consensus",
- "gsx-crypto",
- "gsx-execution",
- "gsx-fastpath",
- "gsx-ltp",
- "gsx-mempool",
- "gsx-precompiles",
- "gsx-rpc",
- "gsx-transport",
- "gsx-validator",
- "hex",
- "openssl-sys",
- "parking_lot",
- "proptest",
- "rand 0.8.6",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "gsx-precompiles"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "gsx-crypto",
- "proptest",
- "rand 0.8.6",
- "serde",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "gsx-rpc"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "blake3",
- "gsx-authority",
- "gsx-consensus",
- "gsx-mempool",
- "gsx-validator",
- "hex",
- "http-body-util",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tower",
- "tower-http",
- "tracing",
-]
-
-[[package]]
-name = "gsx-transport"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "gsx-crypto",
- "proptest",
- "rand 0.8.6",
- "raptorq",
- "serde",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "gsx-validator"
-version = "0.1.0"
-dependencies = [
- "gsx-authority",
- "gsx-consensus",
- "gsx-crypto",
- "proptest",
- "serde",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "gsx-validator-program"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "chrono",
- "clap",
- "gsx-client",
- "hex",
- "serde",
- "serde_json",
- "sqlx",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "gsxdb-bridge"
-version = "0.0.1"
-source = "git+https://github.com/GlobalSettlementNetwork/gsx-db.git?tag=v0.1.0#2fee8066a3c230179a2a173db7947fbf84fd9e93"
-dependencies = [
- "blake3",
- "gsxdb-state",
- "hex",
- "rayon",
- "redb",
- "reqwest",
- "serde_json",
- "tracing",
- "ureq",
-]
-
-[[package]]
-name = "gsxdb-state"
-version = "0.0.1"
-source = "git+https://github.com/GlobalSettlementNetwork/gsx-db.git?tag=v0.1.0#2fee8066a3c230179a2a173db7947fbf84fd9e93"
-dependencies = [
- "blake3",
- "hex",
- "redb",
- "serde",
- "serde_json",
+ "ff",
+ "rand_core 0.6.4",
+ "subtle",
 ]
 
 [[package]]
@@ -1590,6 +1321,20 @@ dependencies = [
  "futures-util",
  "once_cell",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "k256"
+version = "0.13.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6e3919bbaa2945715f0bb6d3934a173d1e9a59ac23767fbaaef277265a7411b"
+dependencies = [
+ "cfg-if",
+ "ecdsa",
+ "elliptic-curve",
+ "once_cell",
+ "sha2",
+ "signature",
 ]
 
 [[package]]
@@ -2278,6 +2023,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rfc6979"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8dd2a808d456c4a54e300a23e9f5a67e122c3024119acbfd73e3bf664491cb2"
+dependencies = [
+ "hmac",
+ "subtle",
+]
+
+[[package]]
 name = "ring"
 version = "0.17.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2406,6 +2161,20 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+
+[[package]]
+name = "sec1"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3e97a565f76233a6003f9f5c54be1d9c5bdfa3eccfb189469f11ec4901c47dc"
+dependencies = [
+ "base16ct",
+ "der",
+ "generic-array",
+ "pkcs8",
+ "subtle",
+ "zeroize",
+]
 
 [[package]]
 name = "security-framework"
@@ -2862,11 +2631,355 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
+name = "suwappu-authority"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "serde",
+ "suwappu-consensus",
+ "suwappu-crypto",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "suwappu-client"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "hex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "suwappu-rpc",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "suwappu-consensus"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "proptest",
+ "rand 0.8.6",
+ "serde",
+ "sha3",
+ "suwappu-crypto",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
+name = "suwappu-crypto"
+version = "0.1.0"
+dependencies = [
+ "blst",
+ "hex",
+ "hkdf",
+ "pqcrypto-mldsa",
+ "pqcrypto-mlkem",
+ "pqcrypto-traits",
+ "proptest",
+ "rand 0.8.6",
+ "rand_chacha 0.3.1",
+ "serde",
+ "sha3",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "suwappu-execution"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "hex",
+ "proptest",
+ "rand 0.8.6",
+ "serde",
+ "suwappu-authority",
+ "suwappu-consensus",
+ "suwappu-crypto",
+ "suwappu-l2-verifier-precompile",
+ "suwappudb-bridge",
+ "suwappudb-state",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
+name = "suwappu-fastpath"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "serde",
+ "suwappu-authority",
+ "suwappu-consensus",
+ "suwappu-crypto",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "suwappu-faucet"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "bincode",
+ "blake3",
+ "clap",
+ "hex",
+ "http-body-util",
+ "serde",
+ "serde_json",
+ "suwappu-client",
+ "suwappu-crypto",
+ "suwappu-execution",
+ "suwappu-mempool",
+ "thiserror 1.0.69",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "suwappu-indexer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "futures-util",
+ "hex",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "suwappu-client",
+ "suwappu-rpc",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-tungstenite 0.21.0",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "suwappu-l2-bridge"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "serde",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "suwappu-l2-confidential"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "proptest",
+ "serde",
+ "suwappu-crypto",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "suwappu-l2-sequencer"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "hex",
+ "serde",
+ "suwappu-l2-verifier-precompile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "suwappu-l2-verifier-precompile"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "suwappu-ltp"
+version = "0.1.0"
+dependencies = [
+ "blst",
+ "proptest",
+ "rand 0.8.6",
+ "serde",
+ "suwappu-crypto",
+ "suwappu-precompiles",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "suwappu-mempool"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "blake3",
+ "hex",
+ "serde",
+ "suwappu-execution",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
 name = "suwappu-mldsa-precompile"
 version = "0.1.0"
 dependencies = [
  "pqcrypto-mldsa",
  "pqcrypto-traits",
+]
+
+[[package]]
+name = "suwappu-node"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "bincode",
+ "blake3",
+ "clap",
+ "hex",
+ "openssl-sys",
+ "parking_lot",
+ "proptest",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "suwappu-authority",
+ "suwappu-consensus",
+ "suwappu-crypto",
+ "suwappu-execution",
+ "suwappu-fastpath",
+ "suwappu-ltp",
+ "suwappu-mempool",
+ "suwappu-precompiles",
+ "suwappu-rpc",
+ "suwappu-transport",
+ "suwappu-validator",
+ "thiserror 1.0.69",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "suwappu-precompiles"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "proptest",
+ "rand 0.8.6",
+ "serde",
+ "suwappu-crypto",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "suwappu-rpc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "blake3",
+ "hex",
+ "http-body-util",
+ "serde",
+ "serde_json",
+ "suwappu-authority",
+ "suwappu-consensus",
+ "suwappu-mempool",
+ "suwappu-validator",
+ "thiserror 1.0.69",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tracing",
+]
+
+[[package]]
+name = "suwappu-transport"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "proptest",
+ "rand 0.8.6",
+ "raptorq",
+ "serde",
+ "suwappu-crypto",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "suwappu-validator"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "serde",
+ "suwappu-authority",
+ "suwappu-consensus",
+ "suwappu-crypto",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "suwappu-validator-program"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "clap",
+ "hex",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "suwappu-client",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "suwappudb-bridge"
+version = "0.1.0-pre"
+source = "git+https://github.com/Suwappu-Labs/suwappu-db.git?tag=v0.2.0#cc7b17ad39d3c5fcb3edcbf8b200c5da2abb89c9"
+dependencies = [
+ "blake3",
+ "hex",
+ "k256",
+ "rayon",
+ "redb",
+ "reqwest",
+ "serde_json",
+ "sha3",
+ "suwappudb-state",
+ "tracing",
+ "ureq",
+]
+
+[[package]]
+name = "suwappudb-state"
+version = "0.1.0-pre"
+source = "git+https://github.com/Suwappu-Labs/suwappu-db.git?tag=v0.2.0#cc7b17ad39d3c5fcb3edcbf8b200c5da2abb89c9"
+dependencies = [
+ "blake3",
+ "hex",
+ "redb",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

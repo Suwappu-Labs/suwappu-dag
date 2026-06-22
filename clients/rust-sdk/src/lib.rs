@@ -1,4 +1,4 @@
-//! `gsx-client` — Rust client SDK for the gsx-dag JSON-RPC query API.
+//! `suwappu-client` — Rust client SDK for the suwappu-dag JSON-RPC query API.
 //!
 //! # Stability promise
 //!
@@ -10,7 +10,7 @@
 //! - **Between minor versions** (e.g. 0.2 → 0.3), the public API may
 //!   gain new methods or fields; existing method signatures will not
 //!   break, but new variants may appear on `#[non_exhaustive]` enums
-//!   (notably `gsx_rpc::error::RpcError` and `gsx_execution::Intent`).
+//!   (notably `suwappu_rpc::error::RpcError` and `suwappu_execution::Intent`).
 //! - **At 1.0**, signatures freeze under the standard semver guarantee
 //!   and breaking changes require a major bump.
 //!
@@ -19,12 +19,12 @@
 //! precisely so adding a new variant in a future protocol revision
 //! (Phase G3/G4 governance ops, future application-level RPC errors)
 //! is a non-breaking change for SDK consumers. `LeaderStatus` from
-//! `gsx_consensus` is deliberately exhaustive (Direct/Skip/Undecided)
+//! `suwappu_consensus` is deliberately exhaustive (Direct/Skip/Undecided)
 //! because it tracks the paper's canonical commit-rule outcomes; any
 //! fourth state would be a paper-level amendment and a major bump.
 //!
-//! Wraps the JSON-RPC 2.0 methods exposed by `gsx-rpc` (bound into the
-//! daemon by `crates/gsx-node/src/rpc_adapter.rs`). The current method
+//! Wraps the JSON-RPC 2.0 methods exposed by `suwappu-rpc` (bound into the
+//! daemon by `crates/suwappu-node/src/rpc_adapter.rs`). The current method
 //! surface is read-only (Phase 2.1 MVP):
 //!
 //! - [`Client::get_epoch`]
@@ -33,7 +33,7 @@
 //! - [`Client::get_stake`]
 //!
 //! The view types ([`EpochView`], [`AuthorityMemberView`],
-//! [`ValidatorMemberView`]) are re-exported from `gsx-rpc` so a binary
+//! [`ValidatorMemberView`]) are re-exported from `suwappu-rpc` so a binary
 //! crate that depends on both stays compatible.
 //!
 //! ## Quick start
@@ -41,8 +41,8 @@
 //! Point at the public hosted devnet:
 //!
 //! ```no_run
-//! # async fn doc() -> Result<(), gsx_client::Error> {
-//! let client = gsx_client::Client::new("https://rpc.devnet.gsx.globalsettlement.com");
+//! # async fn doc() -> Result<(), suwappu_client::Error> {
+//! let client = suwappu_client::Client::new("https://rpc.devnet.suwappu.bot");
 //! let epoch = client.get_epoch().await?;
 //! println!(
 //!     "epoch={} rounds_per_epoch={} last_boundary_round={}",
@@ -67,14 +67,14 @@ mod error;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub use error::Error;
-pub use gsx_rpc::context::{
+pub use suwappu_rpc::context::{
     AuthorityMemberView, BalanceView, BlockView, EpochView, IntentView, TransactionView,
     ValidatorMemberView,
 };
 use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::{json, Value};
 
-/// JSON-RPC client targeting a single gsx-dag node's RPC endpoint.
+/// JSON-RPC client targeting a single suwappu-dag node's RPC endpoint.
 ///
 /// Cheap to clone (internally just an `Arc` to the reqwest client plus
 /// the base URL). The auto-incrementing JSON-RPC `id` field is shared
@@ -107,17 +107,17 @@ impl Client {
 
     /// Current epoch snapshot.
     pub async fn get_epoch(&self) -> Result<EpochView, Error> {
-        self.call("gsx_getEpoch", Value::Null).await
+        self.call("suwappu_getEpoch", Value::Null).await
     }
 
     /// Ordered list of seated Authority Ring members.
     pub async fn get_authority_registry(&self) -> Result<Vec<AuthorityMemberView>, Error> {
-        self.call("gsx_getAuthorityRegistry", Value::Null).await
+        self.call("suwappu_getAuthorityRegistry", Value::Null).await
     }
 
     /// Ordered list of seated Validator Ring members.
     pub async fn get_validator_registry(&self) -> Result<Vec<ValidatorMemberView>, Error> {
-        self.call("gsx_getValidatorRegistry", Value::Null).await
+        self.call("suwappu_getValidatorRegistry", Value::Null).await
     }
 
     /// Posted stake for a specific authority id. Returns `Ok(None)` for
@@ -125,7 +125,7 @@ impl Client {
     /// any other error class.
     pub async fn get_stake(&self, authority_id: u32) -> Result<Option<StakeEntry>, Error> {
         match self
-            .call::<StakeEntry>("gsx_getStake", json!({ "authority_id": authority_id }))
+            .call::<StakeEntry>("suwappu_getStake", json!({ "authority_id": authority_id }))
             .await
         {
             Ok(entry) => Ok(Some(entry)),
@@ -140,7 +140,7 @@ impl Client {
     /// [`Client::get_stake`] if you need the NotFound translation pattern.
     pub async fn get_balance(&self, address: [u8; 20]) -> Result<BalanceView, Error> {
         let hex_addr = format!("0x{}", hex::encode(address));
-        self.call::<BalanceView>("gsx_getBalance", json!({ "address": hex_addr }))
+        self.call::<BalanceView>("suwappu_getBalance", json!({ "address": hex_addr }))
             .await
     }
 
@@ -150,7 +150,7 @@ impl Client {
     /// the future). Other errors propagate.
     pub async fn get_block(&self, round: u64) -> Result<Option<BlockView>, Error> {
         match self
-            .call::<BlockView>("gsx_getBlock", json!({ "round": round }))
+            .call::<BlockView>("suwappu_getBlock", json!({ "round": round }))
             .await
         {
             Ok(v) => Ok(Some(v)),
@@ -167,7 +167,7 @@ impl Client {
     ) -> Result<Option<TransactionView>, Error> {
         let hex_h = format!("0x{}", hex::encode(tx_hash));
         match self
-            .call::<TransactionView>("gsx_getTransaction", json!({ "tx_hash": hex_h }))
+            .call::<TransactionView>("suwappu_getTransaction", json!({ "tx_hash": hex_h }))
             .await
         {
             Ok(v) => Ok(Some(v)),
@@ -180,8 +180,8 @@ impl Client {
     ///
     /// **Low-level** — the caller is responsible for:
     ///
-    /// 1. bincode-serializing the typed `gsx_execution::Intent` into
-    ///    `intent_bincode`. This SDK doesn't depend on `gsx-execution`
+    /// 1. bincode-serializing the typed `suwappu_execution::Intent` into
+    ///    `intent_bincode`. This SDK doesn't depend on `suwappu-execution`
     ///    yet so the encoding stays on the caller side; a typed helper
     ///    `submit_signed(Intent, &SecretKey, &str)` lands in a follow-up.
     /// 2. Computing the signing digest:
@@ -190,7 +190,7 @@ impl Client {
     /// 3. Computing `blake3(public_key_bytes)` for `signer_pubkey_hash`.
     ///
     /// Returns the daemon's computed intent hash on success (same as
-    /// what will appear in `gsx_getTransaction` lookups).
+    /// what will appear in `suwappu_getTransaction` lookups).
     pub async fn submit_intent_raw(
         &self,
         intent_bincode: &[u8],
@@ -206,7 +206,7 @@ impl Client {
             "signature": format!("0x{}", hex::encode(signature)),
             "signer_pubkey_hash": format!("0x{}", hex::encode(signer_pubkey_hash)),
         });
-        let ack: Ack = self.call("gsx_submitIntent", params).await?;
+        let ack: Ack = self.call("suwappu_submitIntent", params).await?;
         let trimmed = ack
             .tx_hash
             .strip_prefix("0x")
@@ -230,7 +230,7 @@ impl Client {
             "params": params,
         });
 
-        tracing::debug!(method, id, "gsx-client: sending request");
+        tracing::debug!(method, id, "suwappu-client: sending request");
 
         let resp = self
             .http
@@ -275,9 +275,9 @@ impl Clone for Client {
 pub struct StakeEntry {
     /// Authority id this entry describes.
     pub id: u32,
-    /// Posted stake in GSX, encoded as a decimal string (u128 doesn't
+    /// Posted stake in SUWAPPU, encoded as a decimal string (u128 doesn't
     /// fit in a JSON number).
-    pub stake_gsx: String,
+    pub stake_suwappu: String,
 }
 
 #[derive(Debug, Deserialize)]

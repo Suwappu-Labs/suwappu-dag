@@ -29,7 +29,7 @@ async fn main() -> Result<()> {
     let mut addr = [0u8; 20];
     addr.copy_from_slice(&bytes);
 
-    let client = gsx_client::Client::new("http://127.0.0.1:9092");
+    let client = suwappu_client::Client::new("http://127.0.0.1:9092");
     let view = client.get_balance(addr).await?;
     println!(
         "address : {}\nbalance : {} (decimal string; lift to u128 for math)",

@@ -1,6 +1,6 @@
 #cloud-config
 #
-# Bootstrap the gsx-faucet HTTP service for the public testnet.
+# Bootstrap the suwappu-faucet HTTP service for the public testnet.
 # Forked from terraform/devnet/faucet-cloud-init.yaml; only env
 # vars + bucket / secret references differ.
 
@@ -12,71 +12,71 @@ packages:
   - amazon-cloudwatch-agent
 
 write_files:
-  - path: /etc/systemd/system/gsx-faucet.service
+  - path: /etc/systemd/system/suwappu-faucet.service
     content: |
       [Unit]
-      Description=GSX testnet faucet
-      After=network-online.target gsx-faucet-bootstrap.service
-      Requires=gsx-faucet-bootstrap.service
+      Description=SUWAPPU testnet faucet
+      After=network-online.target suwappu-faucet-bootstrap.service
+      Requires=suwappu-faucet-bootstrap.service
 
       [Service]
       Type=simple
-      User=gsx
-      Group=gsx
-      Environment=RUST_LOG=gsx_faucet=info,axum=warn
-      Environment=GSX_FAUCET_RPC_URL=${rpc_url}
-      Environment=GSX_FAUCET_NETWORK_ID=${network_id}
-      Environment=GSX_FAUCET_SK_PATH=/var/lib/gsx-faucet/mldsa.sk
-      Environment=GSX_FAUCET_PK_PATH=/var/lib/gsx-faucet/mldsa.pk
-      Environment=GSX_FAUCET_BIND=0.0.0.0:8080
-      ExecStart=/opt/gsx/gsx-faucet
+      User=suwappu
+      Group=suwappu
+      Environment=RUST_LOG=suwappu_faucet=info,axum=warn
+      Environment=SUWAPPU_FAUCET_RPC_URL=${rpc_url}
+      Environment=SUWAPPU_FAUCET_NETWORK_ID=${network_id}
+      Environment=SUWAPPU_FAUCET_SK_PATH=/var/lib/suwappu-faucet/mldsa.sk
+      Environment=SUWAPPU_FAUCET_PK_PATH=/var/lib/suwappu-faucet/mldsa.pk
+      Environment=SUWAPPU_FAUCET_BIND=0.0.0.0:8080
+      ExecStart=/opt/suwappu/suwappu-faucet
       Restart=on-failure
       RestartSec=3
-      StandardOutput=append:/var/log/gsx-faucet/stdout.log
-      StandardError=append:/var/log/gsx-faucet/stderr.log
+      StandardOutput=append:/var/log/suwappu-faucet/stdout.log
+      StandardError=append:/var/log/suwappu-faucet/stderr.log
 
       [Install]
       WantedBy=multi-user.target
 
-  - path: /etc/systemd/system/gsx-faucet-bootstrap.service
+  - path: /etc/systemd/system/suwappu-faucet-bootstrap.service
     content: |
       [Unit]
-      Description=Pull gsx-faucet binary + keys
+      Description=Pull suwappu-faucet binary + keys
       After=network-online.target
       Wants=network-online.target
 
       [Service]
       Type=oneshot
       RemainAfterExit=yes
-      ExecStart=/opt/gsx/faucet-bootstrap.sh
-      StandardOutput=append:/var/log/gsx-faucet/bootstrap.log
-      StandardError=append:/var/log/gsx-faucet/bootstrap.log
+      ExecStart=/opt/suwappu/faucet-bootstrap.sh
+      StandardOutput=append:/var/log/suwappu-faucet/bootstrap.log
+      StandardError=append:/var/log/suwappu-faucet/bootstrap.log
 
-  - path: /opt/gsx/faucet-bootstrap.sh
+  - path: /opt/suwappu/faucet-bootstrap.sh
     permissions: '0755'
     content: |
       #!/bin/bash
       set -euo pipefail
       BUCKET="${artifact_bucket}"
       SECRET_ARN="${secret_arn}"
-      mkdir -p /opt/gsx /var/lib/gsx-faucet /var/log/gsx-faucet
-      aws s3 cp "s3://$BUCKET/bin/gsx-faucet" /opt/gsx/gsx-faucet
-      chmod +x /opt/gsx/gsx-faucet
-      aws s3 cp "s3://$BUCKET/keys/faucet/mldsa.pk" /var/lib/gsx-faucet/mldsa.pk
+      mkdir -p /opt/suwappu /var/lib/suwappu-faucet /var/log/suwappu-faucet
+      aws s3 cp "s3://$BUCKET/bin/suwappu-faucet" /opt/suwappu/suwappu-faucet
+      chmod +x /opt/suwappu/suwappu-faucet
+      aws s3 cp "s3://$BUCKET/keys/faucet/mldsa.pk" /var/lib/suwappu-faucet/mldsa.pk
       aws secretsmanager get-secret-value \
           --secret-id "$SECRET_ARN" \
           --query SecretBinary \
           --output text \
-        | base64 -d > /var/lib/gsx-faucet/mldsa.sk
-      chmod 600 /var/lib/gsx-faucet/mldsa.sk
-      chown -R gsx:gsx /opt/gsx /var/lib/gsx-faucet /var/log/gsx-faucet
+        | base64 -d > /var/lib/suwappu-faucet/mldsa.sk
+      chmod 600 /var/lib/suwappu-faucet/mldsa.sk
+      chown -R suwappu:suwappu /opt/suwappu /var/lib/suwappu-faucet /var/log/suwappu-faucet
 
 runcmd:
-  - groupadd --system gsx
-  - useradd --system --gid gsx --no-create-home --shell /usr/sbin/nologin gsx
-  - mkdir -p /var/log/gsx-faucet
-  - chown gsx:gsx /var/log/gsx-faucet
+  - groupadd --system suwappu
+  - useradd --system --gid suwappu --no-create-home --shell /usr/sbin/nologin suwappu
+  - mkdir -p /var/log/suwappu-faucet
+  - chown suwappu:suwappu /var/log/suwappu-faucet
   - systemctl daemon-reload
-  - systemctl enable gsx-faucet-bootstrap.service gsx-faucet.service
-  - systemctl start gsx-faucet-bootstrap.service
-  - systemctl start gsx-faucet.service
+  - systemctl enable suwappu-faucet-bootstrap.service suwappu-faucet.service
+  - systemctl start suwappu-faucet-bootstrap.service
+  - systemctl start suwappu-faucet.service

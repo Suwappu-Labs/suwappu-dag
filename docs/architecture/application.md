@@ -1,9 +1,9 @@
 # Application — precompiles (DID, registered-issuer, reserve-coverage)
 
-**Paper §**: 8 — Application layer ([`gsx-papers/papers/dag-l1`](https://github.com/GlobalSettlementNetwork/gsx-papers))
-**Code**: `crates/gsx-precompiles/src/`
+**Paper §**: 8 — Application layer ([`suwappu-papers/papers/dag-l1`](https://github.com/Suwappu-Labs/suwappu-papers))
+**Code**: `crates/suwappu-precompiles/src/`
 **IQs**: —
-**Visuals**: covered in [`docs/visuals/gsx-dag.html`](../visuals/gsx-dag.html) (right panel "Applications")
+**Visuals**: covered in [`docs/visuals/suwappu-dag.html`](../visuals/suwappu-dag.html) (right panel "Applications")
 **Sprint**: DAG-S12 (DID resolver) ✅ Closed · DAG-S13 (issuer mint/burn) ✅ Closed · DAG-S14 (reserve-coverage breaker) ✅ Closed
 
 ## What it does
@@ -13,7 +13,7 @@ exposing identity (DID), regulated issuance, and a reserve-coverage circuit
 breaker. Each precompile is a deterministic, post-quantum-correct gate
 between user-level intents and the canonical balance map.
 
-- **DID resolver (S12):** `did:gsx:<id>` → ML-DSA-65 + ML-KEM-768 keys,
+- **DID resolver (S12):** `did:suwappu:<id>` → ML-DSA-65 + ML-KEM-768 keys,
   with rotation proofs.
 - **Registered-issuer mint/burn (S13):** an Authority-Ring-seated issuer
   can mint or burn registered assets; mint without coverage is rejected by
@@ -35,11 +35,11 @@ between user-level intents and the canonical balance map.
 
 ## Cross-references
 
-- **Engineering:** `crates/gsx-precompiles/src/did.rs`, `.../issuer.rs`,
+- **Engineering:** `crates/suwappu-precompiles/src/did.rs`, `.../issuer.rs`,
   `.../reserve.rs` (one module per S12/S13/S14).
 - **Spec:** Paper §8.
 - **Design decisions:** none ratified; pre-compile choices were spec'd.
-- **Visual:** the right panel of [gsx-dag.html](../visuals/gsx-dag.html)
+- **Visual:** the right panel of [suwappu-dag.html](../visuals/suwappu-dag.html)
   lists the precompile set; a dedicated diagram is not yet drawn.
 - **Issuance studio + compliance hooks:** Phase-G governance machinery
   uses these precompiles — see [governance-phasing.md](governance-phasing.md).

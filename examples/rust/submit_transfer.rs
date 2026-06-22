@@ -15,16 +15,16 @@
 //! To actually land an intent, the example would need a key whose
 //! `blake3(public_key_bytes)` matches a seated Authority. That
 //! requires regenerating the devnet genesis with the example's
-//! public key seated; a `gsx-keygen` helper that automates this
+//! public key seated; a `suwappu-keygen` helper that automates this
 //! is tracked as a follow-up. Until then this example is
 //! "demonstrate the wire shape" not "demonstrate working submission."
 
 use anyhow::Result;
-use gsx_execution::Intent;
+use suwappu_execution::Intent;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let network_id = "gsx-devnet-local";
+    let network_id = "suwappu-devnet-local";
     let rpc_url = "http://127.0.0.1:9092";
 
     // 1. Build the intent. A Transfer is the simplest variant —
@@ -54,8 +54,8 @@ async fn main() -> Result<()> {
     //    operator's HSM / encrypted file; here we generate fresh so
     //    the example is self-contained. See the header note on the
     //    devnet "UnknownSigner" rejection that follows.
-    let (pubkey, secret_key) = gsx_crypto::mldsa::keypair();
-    let signature = gsx_crypto::mldsa::sign(&digest, &secret_key)
+    let (pubkey, secret_key) = suwappu_crypto::mldsa::keypair();
+    let signature = suwappu_crypto::mldsa::sign(&digest, &secret_key)
         .map_err(|e| anyhow::anyhow!("sign failed: {:?}", e))?;
 
     // 5. Compute the signer_pubkey_hash that the validator uses to
@@ -75,7 +75,7 @@ async fn main() -> Result<()> {
 
     // 6. Submit via the Rust SDK's raw submit path. Expect
     //    `UnknownSigner` (see header) on a fresh devnet.
-    let client = gsx_client::Client::new(rpc_url);
+    let client = suwappu_client::Client::new(rpc_url);
     match client
         .submit_intent_raw(
             intent_bincode,

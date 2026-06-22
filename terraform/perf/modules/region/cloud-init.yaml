@@ -1,6 +1,6 @@
 #cloud-config
 #
-# Bootstrap a GSX perf validator. Pulls the gsx-node binary from S3, writes
+# Bootstrap a SUWAPPU perf validator. Pulls the suwappu-node binary from S3, writes
 # a systemd unit, and starts the daemon. The node.toml itself is uploaded by
 # scripts/perf/render-configs.sh after `terraform apply` (since peer IPs
 # aren't known until the EIPs allocate).
@@ -12,42 +12,42 @@ packages:
   - jq
 
 write_files:
-  - path: /etc/systemd/system/gsx-node.service
+  - path: /etc/systemd/system/suwappu-node.service
     content: |
       [Unit]
-      Description=GSX DAG validator (perf testnet)
-      After=network-online.target gsx-bootstrap.service
-      Requires=gsx-bootstrap.service
+      Description=SUWAPPU DAG validator (perf testnet)
+      After=network-online.target suwappu-bootstrap.service
+      Requires=suwappu-bootstrap.service
 
       [Service]
       Type=simple
-      User=gsx
-      Group=gsx
+      User=suwappu
+      Group=suwappu
       Environment=RUST_LOG=info
-      ExecStart=/opt/gsx/gsx-node --config /etc/gsx/node.toml
+      ExecStart=/opt/suwappu/suwappu-node --config /etc/suwappu/node.toml
       Restart=on-failure
       RestartSec=3
-      StandardOutput=append:/var/log/gsx/stdout.log
-      StandardError=append:/var/log/gsx/stderr.log
+      StandardOutput=append:/var/log/suwappu/stdout.log
+      StandardError=append:/var/log/suwappu/stderr.log
 
       [Install]
       WantedBy=multi-user.target
 
-  - path: /etc/systemd/system/gsx-bootstrap.service
+  - path: /etc/systemd/system/suwappu-bootstrap.service
     content: |
       [Unit]
-      Description=Pull GSX binaries + config from S3
+      Description=Pull SUWAPPU binaries + config from S3
       After=network-online.target
       Wants=network-online.target
 
       [Service]
       Type=oneshot
       RemainAfterExit=yes
-      ExecStart=/opt/gsx/bootstrap.sh
-      StandardOutput=append:/var/log/gsx/bootstrap.log
-      StandardError=append:/var/log/gsx/bootstrap.log
+      ExecStart=/opt/suwappu/bootstrap.sh
+      StandardOutput=append:/var/log/suwappu/bootstrap.log
+      StandardError=append:/var/log/suwappu/bootstrap.log
 
-  - path: /opt/gsx/bootstrap.sh
+  - path: /opt/suwappu/bootstrap.sh
     permissions: '0755'
     content: |
       #!/bin/bash
@@ -55,23 +55,23 @@ write_files:
       BUCKET="${artifact_bucket}"
       REGION="${region_label}"
       AUTHORITY="${authority_id}"
-      mkdir -p /opt/gsx /etc/gsx /var/lib/gsx /var/log/gsx
+      mkdir -p /opt/suwappu /etc/suwappu /var/lib/suwappu /var/log/suwappu
       # Pull binary + genesis + per-region node.toml.
-      aws s3 cp "s3://$BUCKET/bin/gsx-node" /opt/gsx/gsx-node
-      chmod +x /opt/gsx/gsx-node
-      aws s3 cp "s3://$BUCKET/genesis/genesis.toml" /etc/gsx/genesis.toml
-      aws s3 cp "s3://$BUCKET/configs/$REGION/node.toml" /etc/gsx/node.toml
-      aws s3 cp "s3://$BUCKET/keys/$REGION/mldsa.sk" /var/lib/gsx/mldsa.sk
-      aws s3 cp "s3://$BUCKET/keys/$REGION/bls.sk" /var/lib/gsx/bls.sk
-      chmod 600 /var/lib/gsx/mldsa.sk /var/lib/gsx/bls.sk
-      chown -R gsx:gsx /opt/gsx /etc/gsx /var/lib/gsx /var/log/gsx
+      aws s3 cp "s3://$BUCKET/bin/suwappu-node" /opt/suwappu/suwappu-node
+      chmod +x /opt/suwappu/suwappu-node
+      aws s3 cp "s3://$BUCKET/genesis/genesis.toml" /etc/suwappu/genesis.toml
+      aws s3 cp "s3://$BUCKET/configs/$REGION/node.toml" /etc/suwappu/node.toml
+      aws s3 cp "s3://$BUCKET/keys/$REGION/mldsa.sk" /var/lib/suwappu/mldsa.sk
+      aws s3 cp "s3://$BUCKET/keys/$REGION/bls.sk" /var/lib/suwappu/bls.sk
+      chmod 600 /var/lib/suwappu/mldsa.sk /var/lib/suwappu/bls.sk
+      chown -R suwappu:suwappu /opt/suwappu /etc/suwappu /var/lib/suwappu /var/log/suwappu
 
 runcmd:
-  - groupadd --system gsx
-  - useradd --system --gid gsx --no-create-home --shell /usr/sbin/nologin gsx
-  - mkdir -p /var/log/gsx
-  - chown gsx:gsx /var/log/gsx
+  - groupadd --system suwappu
+  - useradd --system --gid suwappu --no-create-home --shell /usr/sbin/nologin suwappu
+  - mkdir -p /var/log/suwappu
+  - chown suwappu:suwappu /var/log/suwappu
   - systemctl daemon-reload
-  - systemctl enable gsx-bootstrap.service gsx-node.service
-  - systemctl start gsx-bootstrap.service
-  - systemctl start gsx-node.service
+  - systemctl enable suwappu-bootstrap.service suwappu-node.service
+  - systemctl start suwappu-bootstrap.service
+  - systemctl start suwappu-node.service

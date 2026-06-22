@@ -1,19 +1,19 @@
 <div align="center">
 
-# gsx-dag
+# suwappu-dag
 
 The **post-quantum settlement chain**. Joint-quorum BFT safety on a
 Mysticeti-C certificate-DAG, constant-size cross-chain attestation,
 and an execution substrate built to settle regulated assets.
 
-[![CI](https://img.shields.io/github/actions/workflow/status/GlobalSettlementNetwork/gsx-dag/ci.yml?branch=main&label=CI)](https://github.com/GlobalSettlementNetwork/gsx-dag/actions)
-[![Latest release](https://img.shields.io/github/v/release/GlobalSettlementNetwork/gsx-dag?include_prereleases&label=release)](https://github.com/GlobalSettlementNetwork/gsx-dag/releases)
+[![CI](https://img.shields.io/github/actions/workflow/status/Suwappu-Labs/suwappu-dag/ci.yml?branch=main&label=CI)](https://github.com/Suwappu-Labs/suwappu-dag/actions)
+[![Latest release](https://img.shields.io/github/v/release/Suwappu-Labs/suwappu-dag?include_prereleases&label=release)](https://github.com/Suwappu-Labs/suwappu-dag/releases)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.78%2B-orange.svg)](./Cargo.toml)
 
 [Quickstart](#quickstart) · [Architecture](#architecture) ·
 [Repository map](#repository-map) · [Roadmap](./ROADMAP.md) ·
-[Paper](https://github.com/GlobalSettlementNetwork/gsx-papers) ·
+[Paper](https://github.com/Suwappu-Labs/suwappu-papers) ·
 [Changelog](./CHANGELOG.md) · [Security](./SECURITY.md) ·
 [Contributing](./CONTRIBUTING.md)
 
@@ -21,9 +21,9 @@ and an execution substrate built to settle regulated assets.
 
 ---
 
-## Why gsx-dag
+## Why suwappu-dag
 
-`gsx-dag` is the L1 of the **Global Settlement Network** — purpose-built
+`suwappu-dag` is the L1 of the **Suwappu Labs** — purpose-built
 to clear cross-chain transfers under cryptography that survives the
 post-quantum transition, with safety properties that survive single-ring
 Byzantine corruption.
@@ -32,7 +32,7 @@ Byzantine corruption.
   uses NIST-standardized post-quantum primitives: **ML-DSA-65**
   (FIPS 204) for intent signing, **ML-KEM-768** (FIPS 203) for
   confidential transfer encryption. Classical-only chains migrate
-  later; gsx-dag ships PQ from day one.
+  later; suwappu-dag ships PQ from day one.
 - **Safety that survives a single-ring compromise.** Joint-quorum
   AND-gate (paper Theorem 2) requires Byzantine corruption of **both**
   a 40-slot Authority Ring **and** a 200-slot Validator Ring to fork
@@ -54,9 +54,9 @@ Byzantine corruption.
 
 - **Not on mainnet.** Current line is `0.x`; mainnet GA targets v1.0
   in the M18–M24 window (see [`ROADMAP.md`](./ROADMAP.md)).
-- **No live token.** Devnet GSX is fungible test currency.
+- **No live token.** Devnet SUWAPPU is fungible test currency.
 - **The execution substrate lives elsewhere.**
-  [`gsx-db`](https://github.com/GlobalSettlementNetwork/gsx-db) holds
+  [`suwappu-db`](https://github.com/Suwappu-Labs/suwappu-db) holds
   the polymorphic balance map, OCC scheduler, state tree, and dual-VM
   projectors; this repo is the *consensus + execution-adapter + bridge
   + L2* layer that wires it into a chain.
@@ -73,30 +73,30 @@ validator itself. Full operator + developer details in
 
 | Endpoint | URL |
 |---|---|
-| JSON-RPC | `https://rpc.devnet.gsx.globalsettlement.com` |
-| WebSocket | `wss://ws.devnet.gsx.globalsettlement.com/ws` |
-| Faucet | `https://faucet.devnet.gsx.globalsettlement.com` |
-| Explorer | `https://explorer.devnet.gsx.globalsettlement.com` |
-| Status | `https://status.devnet.gsx.globalsettlement.com` |
+| JSON-RPC | `https://rpc.devnet.suwappu.bot` |
+| WebSocket | `wss://ws.devnet.suwappu.bot/ws` |
+| Faucet | `https://faucet.devnet.suwappu.bot` |
+| Explorer | `https://explorer.devnet.suwappu.bot` |
+| Status | `https://status.devnet.suwappu.bot` |
 
 ```bash
-# Drip 100 GSX to a fresh address (max 5 drips/hour per IP).
+# Drip 100 SUWAPPU to a fresh address (max 5 drips/hour per IP).
 ADDR="0x$(openssl rand -hex 20)"
 curl -X POST -H 'Content-Type: application/json' \
   -d "{\"address\":\"$ADDR\"}" \
-  https://faucet.devnet.gsx.globalsettlement.com/faucet
+  https://faucet.devnet.suwappu.bot/faucet
 
 # Read epoch via JSON-RPC.
-curl -sX POST https://rpc.devnet.gsx.globalsettlement.com \
+curl -sX POST https://rpc.devnet.suwappu.bot \
   -H 'content-type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"gsx_getEpoch","params":null}'
+  -d '{"jsonrpc":"2.0","id":1,"method":"suwappu_getEpoch","params":null}'
 ```
 
 ### 2. Run a local 4-node devnet (Docker)
 
 ```bash
-git clone https://github.com/GlobalSettlementNetwork/gsx-dag.git
-cd gsx-dag
+git clone https://github.com/Suwappu-Labs/suwappu-dag.git
+cd suwappu-dag
 ./scripts/devnet-local.sh up
 ```
 
@@ -106,23 +106,23 @@ exposed on `127.0.0.1:9092`. Tear down with `./scripts/devnet-local.sh down`.
 
 ```bash
 curl -sX POST http://127.0.0.1:9092 -H 'content-type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"gsx_getEpoch","params":null}'
+  -d '{"jsonrpc":"2.0","id":1,"method":"suwappu_getEpoch","params":null}'
 ```
 
 The full RPC surface is documented in
-[`crates/gsx-rpc/`](./crates/gsx-rpc).
+[`crates/suwappu-rpc/`](./crates/suwappu-rpc).
 
 ### SDKs
 
 - Rust: [`clients/rust-sdk/`](./clients/rust-sdk)
 - TypeScript: [`clients/ts-sdk/`](./clients/ts-sdk)
-- End-to-end example: `cargo run -p gsx-client --example submit_transfer`
+- End-to-end example: `cargo run -p suwappu-client --example submit_transfer`
 
 ---
 
 ## Architecture
 
-gsx-dag separates **consensus**, **execution**, and **cross-chain
+suwappu-dag separates **consensus**, **execution**, and **cross-chain
 attestation** into three crisply-bounded surfaces, then wires them
 together with a single rule: every commit is the joint product of two
 independently-bonded validator rings.
@@ -136,8 +136,8 @@ equivocation binding — any Authority Node that double-signs forfeits
 100% of bond.
 
 **Execution (paper §7).** Each committed intent is applied to the
-[`gsx-db`](https://github.com/GlobalSettlementNetwork/gsx-db) substrate
-via the `gsx-execution` adapter. The substrate owns the polymorphic
+[`suwappu-db`](https://github.com/Suwappu-Labs/suwappu-db) substrate
+via the `suwappu-execution` adapter. The substrate owns the polymorphic
 balance map, OCC scheduler, state tree, and dual-VM projectors; this
 repo owns the Intent surface that calls into it. Tokenomics (§3 / §4 /
 §8) — inflation, delegation, slashing waterfall, withdrawal cooldown
@@ -146,7 +146,7 @@ repo owns the Intent surface that calls into it. Tokenomics (§3 / §4 /
 **Cross-chain (paper §10).** Every checkpoint is jointly co-signed by
 the Authority and Validator Rings, then committed to LTP super-nodes
 as a constant-size attestation. Other settlement venues observe these
-attestations to recognize gsx-dag state without re-running consensus.
+attestations to recognize suwappu-dag state without re-running consensus.
 
 ```mermaid
 flowchart LR
@@ -155,22 +155,22 @@ flowchart LR
     Mempool --> Validator["Validator Ring<br/>200 slots"]
     Authority -.->|joint co-sign| DAG[("Mysticeti-C DAG")]
     Validator -.->|joint co-sign| DAG
-    DAG --> Executor["gsx-execution → gsx-db"]
+    DAG --> Executor["suwappu-execution → suwappu-db"]
     Executor --> LTP["LTP attestation<br/>≈1,600 B constant"]
 ```
 
 Deep-dive visuals (interactive Mermaid + HTML, rendered from spec
 numbers, not scaffolded charts):
 
-- [DAG L1 internals](docs/visuals/gsx-dag.html) ·
-  [Substrate (gsx-db)](docs/visuals/gsx-db.html) ·
+- [DAG L1 internals](docs/visuals/suwappu-dag.html) ·
+  [Substrate (suwappu-db)](docs/visuals/suwappu-db.html) ·
   [LTP attestation](docs/visuals/ltp.html)
 - [Commit rule](docs/visuals/commit-rule.html) ·
   [Fast path + slashing](docs/visuals/fast-path-and-slashing.html) ·
   [Dual-VM projection](docs/visuals/dual-vm.html)
 - [Governance flow](docs/visuals/governance-flow.html) ·
   [SCION transport](docs/visuals/scion-transport.html) ·
-  [Ecosystem atlas](docs/visuals/gsx-ecosystem-atlas.html)
+  [Ecosystem atlas](docs/visuals/suwappu-ecosystem-atlas.html)
 
 ---
 
@@ -183,51 +183,51 @@ implements where applicable.
 
 | Crate | Paper § | Owns |
 |---|---|---|
-| `gsx-crypto` | §3.3, §10, §12 | ML-DSA-65, ML-KEM-768, BLS12-381, SHA3-256, Poseidon2 |
-| `gsx-consensus` | §6 | Mysticeti-C integration, certificate DAG, BFT linearization |
-| `gsx-fastpath` | §6.4 | Single-owner lane, K=4 equivocation binding |
-| `gsx-authority` | §5.1 | Authority Ring registry + certificate production |
-| `gsx-validator` | §5.2 | Validator Ring registry + ratification + slashing |
+| `suwappu-crypto` | §3.3, §10, §12 | ML-DSA-65, ML-KEM-768, BLS12-381, SHA3-256, Poseidon2 |
+| `suwappu-consensus` | §6 | Mysticeti-C integration, certificate DAG, BFT linearization |
+| `suwappu-fastpath` | §6.4 | Single-owner lane, K=4 equivocation binding |
+| `suwappu-authority` | §5.1 | Authority Ring registry + certificate production |
+| `suwappu-validator` | §5.2 | Validator Ring registry + ratification + slashing |
 
 ### Execution
 
 | Crate | Paper § | Owns |
 |---|---|---|
-| `gsx-execution` | §7 | Wires `gsx-db` substrate into the DAG executor; Intent surface |
-| `gsx-precompiles` | §8 | Registered-issuer, DID, policy-vocabulary, reserve-coverage |
-| `gsx-mempool` | §7.2 | Mempool + tx-hash dedup + per-IP rate limit |
+| `suwappu-execution` | §7 | Wires `suwappu-db` substrate into the DAG executor; Intent surface |
+| `suwappu-precompiles` | §8 | Registered-issuer, DID, policy-vocabulary, reserve-coverage |
+| `suwappu-mempool` | §7.2 | Mempool + tx-hash dedup + per-IP rate limit |
 
 ### Track G — L2 / ZK rollup (in flight)
 
 | Crate | Paper § | Owns |
 |---|---|---|
-| `gsx-l2-bridge` | §11 | L1 ↔ L2 deposit / withdraw / proof-verified state |
-| `gsx-l2-confidential` | §11.3 | Confidential-balance L2 surface (Track H integration) |
-| `gsx-l2-sequencer` | §11.2 | Sequencer mempool + batch builder + force-include |
-| `gsx-l2-verifier-precompile` | §11.4 | SP1 Groth16 BN254 verifier for L2 state-root commits |
+| `suwappu-l2-bridge` | §11 | L1 ↔ L2 deposit / withdraw / proof-verified state |
+| `suwappu-l2-confidential` | §11.3 | Confidential-balance L2 surface (Track H integration) |
+| `suwappu-l2-sequencer` | §11.2 | Sequencer mempool + batch builder + force-include |
+| `suwappu-l2-verifier-precompile` | §11.4 | SP1 Groth16 BN254 verifier for L2 state-root commits |
 
 ### Cross-chain
 
 | Crate | Paper § | Owns |
 |---|---|---|
-| `gsx-ltp` | §10 | LTP attestation pipeline + super-node integration |
+| `suwappu-ltp` | §10 | LTP attestation pipeline + super-node integration |
 
 ### Network, interface, operator
 
 | Crate | Paper § | Owns |
 |---|---|---|
-| `gsx-transport` | §6.3 | SCION path-authenticated gossip + RaptorQ shred/reconstruct |
-| `gsx-rpc` | — | JSON-RPC + WebSocket API |
-| `gsx-indexer` | — | Streaming Postgres indexer |
-| `gsx-faucet` | — | Devnet / testnet faucet service |
-| `gsx-validator-program` | — | Operator points-accumulator daemon |
-| `gsx-node` | — | Top-level binary, config, telemetry |
+| `suwappu-transport` | §6.3 | SCION path-authenticated gossip + RaptorQ shred/reconstruct |
+| `suwappu-rpc` | — | JSON-RPC + WebSocket API |
+| `suwappu-indexer` | — | Streaming Postgres indexer |
+| `suwappu-faucet` | — | Devnet / testnet faucet service |
+| `suwappu-validator-program` | — | Operator points-accumulator daemon |
+| `suwappu-node` | — | Top-level binary, config, telemetry |
 
 ---
 
 ## Bridge attestation (source side)
 
-When a GSX-DAG validator commits a round, the `gsx-consensus` bridge-header
+When a SUWAPPU-DAG validator commits a round, the `suwappu-consensus` bridge-header
 module captures the committed `(round, post_root)` and produces a
 **validator-quorum side-attestation** — a signed claim that this validator's
 local execution produced `state_root` at `block_number`. The destination bridge
@@ -245,29 +245,29 @@ HEADER_DOMAIN (32)  ||  networkId (32)  ||  oracle (20)
   ||  blockNumber-as-uint256-BE (32)  ||  stateRoot (32)
 ```
 
-`HEADER_DOMAIN = keccak256("SUWAPPU_GSXDAG_HEADER_V1")` is hard-pinned as a
+`HEADER_DOMAIN = keccak256("SUWAPPU_SUWAPPUDAG_HEADER_V1")` is hard-pinned as a
 cross-language constant verified by tests on both the Rust and Solidity sides.
-`stateRoot` is the gsx-dag BLAKE3 L1 state root (`ExecutionReport::post_root`);
+`stateRoot` is the suwappu-dag BLAKE3 L1 state root (`ExecutionReport::post_root`);
 it is **not** an EVM-MPT root and is therefore **not** storage-provable — the
 header is an opaque finalized-round anchor.
 
 ### Signing
 
 Each validator holds an ML-DSA-65 (FIPS 204) keypair registered in genesis.
-`HeaderAttestation::create` in `crates/gsx-consensus/src/bridge_header.rs`
+`HeaderAttestation::create` in `crates/suwappu-consensus/src/bridge_header.rs`
 computes the digest and produces a detached ML-DSA-65 signature. The
 `suwappu-mldsa-precompile` crate (in `crates/suwappu-mldsa-precompile/`) is
-the ML-DSA-65 verify core used by the destination EVM (see `gsx-revm`'s
+the ML-DSA-65 verify core used by the destination EVM (see `suwappu-revm`'s
 `suwappu-revm` crate, address `0x0101`).
 
 ### RPC
 
-The daemon (`crates/gsx-node/src/daemon.rs`) exposes a
-`gsx_getHeaderAttestation` JSON-RPC that signs on demand and caches the latest
+The daemon (`crates/suwappu-node/src/daemon.rs`) exposes a
+`suwappu_getHeaderAttestation` JSON-RPC that signs on demand and caches the latest
 `HeaderAttestation` for the most recently committed round. An off-chain relayer
 polls every validator's RPC endpoint, collects a set whose cumulative stake
 exceeds the on-chain `>2/3` threshold, and submits the aggregated attestations
-to the destination `GsxDagQuorumHeaderOracle`.
+to the destination `SuwappuDagQuorumHeaderOracle`.
 
 > **Honest framing.** The oracle/registry wiring into the mint path is not yet
 > live; validators can produce and serve attestations via RPC, but the
@@ -285,11 +285,11 @@ flowchart LR
     Capture --> Digest["BLAKE3\nHEADER_DOMAIN || networkId || oracle\n|| blockNumber || stateRoot\n-> 32-byte digest"]
     Digest --> Sign["ML-DSA-65 sign\n(validator secret key)"]
     Sign --> Attest["HeaderAttestation\n{block_number, state_root,\n authority_id, pubkey, sig}"]
-    Attest --> RPC["gsx_getHeaderAttestation\nJSON-RPC"]
+    Attest --> RPC["suwappu_getHeaderAttestation\nJSON-RPC"]
     RPC --> Relayer["Off-chain relayer\ncollects >2/3-stake\nquorum of attestations"]
 ```
 
-The destination-side quorum verifier (in `gsx-revm/crates/suwappu-revm/`) uses
+The destination-side quorum verifier (in `suwappu-revm/crates/suwappu-revm/`) uses
 native EVM precompiles `0x0102` (BLAKE3) and `0x0101` (ML-DSA-65) to verify
 each attestation and finalize the header — the only configuration that is both
 trust-minimized and post-quantum.
@@ -342,7 +342,7 @@ gates are in
 - **Mainnet GA** targets v1.0 in the M18–M24 window.
 
 Released versions:
-[Releases page](https://github.com/GlobalSettlementNetwork/gsx-dag/releases).
+[Releases page](https://github.com/Suwappu-Labs/suwappu-dag/releases).
 Per-release scope: [`CHANGELOG.md`](./CHANGELOG.md).
 
 ---
@@ -350,10 +350,10 @@ Per-release scope: [`CHANGELOG.md`](./CHANGELOG.md).
 ## Specs & research
 
 - **Academic specifications**:
-  [`gsx-papers`](https://github.com/GlobalSettlementNetwork/gsx-papers)
+  [`suwappu-papers`](https://github.com/Suwappu-Labs/suwappu-papers)
   (private repo — available on request). v8 DAG L1 paper
-  (`gsx_dag_l1_academic_v7.pdf`) + companion LTP paper
-  (`gsx_ltp_academic_v7.pdf`).
+  (`suwappu_dag_l1_academic_v7.pdf`) + companion LTP paper
+  (`suwappu_ltp_academic_v7.pdf`).
 - **Architecture diagrams**: [`docs/visuals/`](docs/visuals/) —
   interactive Mermaid + HTML for the DAG, substrate, LTP commitment
   surface, fast path, dual-VM, governance flow, SCION transport, and
@@ -371,10 +371,10 @@ Per-release scope: [`CHANGELOG.md`](./CHANGELOG.md).
 
 | Repo | Role |
 |---|---|
-| [`gsx-papers`](https://github.com/GlobalSettlementNetwork/gsx-papers) | v8 academic specs (DAG L1 + LTP) |
-| [`gsx-db`](https://github.com/GlobalSettlementNetwork/gsx-db) | Execution substrate (consumed here as workspace dep) |
-| [`gsx-lattice-protocol`](https://github.com/GlobalSettlementNetwork/gsx-lattice-protocol) | LTP bridge gateway |
-| [`op-stack-reth`](https://github.com/GlobalSettlementNetwork/op-stack-reth) | OP-stack reference fork (historical — Track G's L2 proof system has since moved to SP1 Groth16 BN254) |
+| [`suwappu-papers`](https://github.com/Suwappu-Labs/suwappu-papers) | v8 academic specs (DAG L1 + LTP) |
+| [`suwappu-db`](https://github.com/Suwappu-Labs/suwappu-db) | Execution substrate (consumed here as workspace dep) |
+| [`suwappu-lattice-protocol`](https://github.com/Suwappu-Labs/suwappu-lattice-protocol) | LTP bridge gateway |
+| [`op-stack-reth`](https://github.com/Suwappu-Labs/op-stack-reth) | OP-stack reference fork (historical — Track G's L2 proof system has since moved to SP1 Groth16 BN254) |
 
 ---
 

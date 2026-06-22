@@ -1,7 +1,7 @@
 # LTP integration — Commit / Lattice / Materialize
 
-**Paper §**: 10 — Lattice Transfer Protocol ([`gsx-papers/papers/dag-l1`](https://github.com/GlobalSettlementNetwork/gsx-papers))
-**Code**: `crates/gsx-ltp/src/` (attestation, anchor)
+**Paper §**: 10 — Lattice Transfer Protocol ([`suwappu-papers/papers/dag-l1`](https://github.com/Suwappu-Labs/suwappu-papers))
+**Code**: `crates/suwappu-ltp/src/` (attestation, anchor)
 **IQs**: —
 **Visuals**: [`docs/visuals/mermaid/ltp.md`](../visuals/mermaid/ltp.md) · [`docs/visuals/ltp.html`](../visuals/ltp.html)
 **Sprint**: DAG-S15 (LTP 7-of-9 attestation) ✅ Closed · DAG-S16 (DA SLA) ✅ Closed · DAG-S17 (DID STARK) ✅ Closed
@@ -33,12 +33,12 @@ ciphertext ~1,568 B + BLS aggregate sig ~96 B + SHA3-256 payload root
 
 ## Cross-references
 
-- **Engineering:** `crates/gsx-ltp/src/attestation.rs` (envelope construction),
-  `crates/gsx-ltp/src/anchor.rs` (state-anchor handoff to gsx-db's
+- **Engineering:** `crates/suwappu-ltp/src/attestation.rs` (envelope construction),
+  `crates/suwappu-ltp/src/anchor.rs` (state-anchor handoff to suwappu-db's
   `AnchorDispatcher`).
 - **Spec:** Paper §10 — the v8 paper has the full LTP construction.
 - **Sister-repo integration:** the LTP runtime + corridor wire-mirror lives
-  in [`gsx-lattice-protocol`](https://github.com/GlobalSettlementNetwork/gsx-lattice-protocol);
+  in [`suwappu-lattice-protocol`](https://github.com/Suwappu-Labs/suwappu-lattice-protocol);
   bit-for-bit corridor parity (BLS DST + length-prefixed SHA3) is enforced
   by tests in both repos.
 - **Visual:** [`docs/visuals/mermaid/ltp.md`](../visuals/mermaid/ltp.md) and

@@ -1,7 +1,7 @@
 # Per-region devnet validator.
 #
 # Diff vs. terraform/perf/modules/region/main.tf:
-#   * Persistent gp3 EBS attached at /dev/sdf and mounted at /var/lib/gsx
+#   * Persistent gp3 EBS attached at /dev/sdf and mounted at /var/lib/suwappu
 #     so consensus state + events.ndjson survive an instance replacement.
 #   * RPC port (9092) open to 0.0.0.0/0 in the security group.
 #   * Metrics port (9093) NOT exposed externally — security group does
@@ -55,7 +55,7 @@ data "aws_ami" "ubuntu" {
 resource "aws_vpc" "this" {
   cidr_block           = "10.43.0.0/16" # /16 picked to avoid colliding with perf testnet's 10.42.0.0/16
   enable_dns_hostnames = true
-  tags                 = { Name = "gsx-devnet-${var.region_label}-vpc" }
+  tags                 = { Name = "suwappu-devnet-${var.region_label}-vpc" }
 }
 
 resource "aws_subnet" "public" {
@@ -63,12 +63,12 @@ resource "aws_subnet" "public" {
   cidr_block              = "10.43.1.0/24"
   map_public_ip_on_launch = true
   availability_zone       = sort(data.aws_ec2_instance_type_offerings.supported.locations)[0]
-  tags                    = { Name = "gsx-devnet-${var.region_label}-subnet" }
+  tags                    = { Name = "suwappu-devnet-${var.region_label}-subnet" }
 }
 
 resource "aws_internet_gateway" "this" {
   vpc_id = aws_vpc.this.id
-  tags   = { Name = "gsx-devnet-${var.region_label}-igw" }
+  tags   = { Name = "suwappu-devnet-${var.region_label}-igw" }
 }
 
 resource "aws_route_table" "public" {
@@ -77,7 +77,7 @@ resource "aws_route_table" "public" {
     cidr_block = "0.0.0.0/0"
     gateway_id = aws_internet_gateway.this.id
   }
-  tags = { Name = "gsx-devnet-${var.region_label}-rt" }
+  tags = { Name = "suwappu-devnet-${var.region_label}-rt" }
 }
 
 resource "aws_route_table_association" "public" {
@@ -88,12 +88,12 @@ resource "aws_route_table_association" "public" {
 # Security group:
 # - SSH from operator IPs only (fallback path; SSM is primary).
 # - Consensus + client + RPC ports open to 0.0.0.0/0. Auth is at the
-#   message layer; the per-IP rate limit in gsx-rpc keeps abuse bounded.
+#   message layer; the per-IP rate limit in suwappu-rpc keeps abuse bounded.
 # - Metrics port (9093) intentionally NOT in this list — only the local
 #   CloudWatch agent reads it.
 resource "aws_security_group" "this" {
-  name        = "gsx-devnet-${var.region_label}-sg"
-  description = "GSX devnet - validator ingress"
+  name        = "suwappu-devnet-${var.region_label}-sg"
+  description = "SUWAPPU devnet - validator ingress"
   vpc_id      = aws_vpc.this.id
 
   ingress {
@@ -132,11 +132,11 @@ resource "aws_security_group" "this" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  tags = { Name = "gsx-devnet-${var.region_label}-sg" }
+  tags = { Name = "suwappu-devnet-${var.region_label}-sg" }
 }
 
 resource "aws_key_pair" "operator" {
-  key_name   = "gsx-devnet-${var.region_label}"
+  key_name   = "suwappu-devnet-${var.region_label}"
   public_key = var.ssh_public_key
 }
 
@@ -144,7 +144,7 @@ resource "aws_key_pair" "operator" {
 # event logs back. CloudWatchAgentServerPolicy lets the local agent
 # forward metrics to CloudWatch.
 resource "aws_iam_role" "ec2" {
-  name = "gsx-devnet-${var.region_label}-ec2"
+  name = "suwappu-devnet-${var.region_label}-ec2"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -192,12 +192,12 @@ resource "aws_iam_role_policy_attachment" "cloudwatch_agent" {
 }
 
 resource "aws_iam_instance_profile" "this" {
-  name = "gsx-devnet-${var.region_label}"
+  name = "suwappu-devnet-${var.region_label}"
   role = aws_iam_role.ec2.name
 }
 
 # Persistent state volume — separate gp3 EBS attached at /dev/sdf,
-# mounted at /var/lib/gsx by cloud-init. Surviving instance replacement
+# mounted at /var/lib/suwappu by cloud-init. Surviving instance replacement
 # is the whole point of a long-lived devnet; without this, every AMI
 # refresh or instance type change would wipe consensus state.
 resource "aws_ebs_volume" "state" {
@@ -207,7 +207,7 @@ resource "aws_ebs_volume" "state" {
   encrypted         = true
 
   tags = {
-    Name                  = "gsx-devnet-${var.region_label}-state"
+    Name                  = "suwappu-devnet-${var.region_label}-state"
     "devnet:role"         = "state-volume"
     "devnet:region"       = var.region_label
     "devnet:authority_id" = tostring(var.authority_id)
@@ -249,7 +249,7 @@ resource "aws_instance" "validator" {
   })
 
   tags = {
-    Name                  = "gsx-devnet-${var.region_label}"
+    Name                  = "suwappu-devnet-${var.region_label}"
     "devnet:role"         = "validator"
     "devnet:region"       = var.region_label
     "devnet:authority_id" = tostring(var.authority_id)
@@ -259,5 +259,5 @@ resource "aws_instance" "validator" {
 resource "aws_eip" "this" {
   instance = aws_instance.validator.id
   domain   = "vpc"
-  tags     = { Name = "gsx-devnet-${var.region_label}-eip" }
+  tags     = { Name = "suwappu-devnet-${var.region_label}-eip" }
 }

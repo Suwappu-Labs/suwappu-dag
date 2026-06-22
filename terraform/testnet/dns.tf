@@ -2,12 +2,12 @@
 #
 # Same shape as terraform/devnet/dns.tf — different subdomain.
 # Apex zone delegation: publish the NS records output below into
-# whichever account hosts globalsettlement.com. One-time step.
+# whichever account hosts suwappu.bot. One-time step.
 
 resource "aws_route53_zone" "testnet" {
   provider = aws.us_east_1
   name     = "${var.testnet_subdomain}.${var.apex_domain}"
-  tags     = { Name = "gsx-testnet-zone" }
+  tags     = { Name = "suwappu-testnet-zone" }
 
   lifecycle {
     prevent_destroy = true
@@ -67,7 +67,7 @@ resource "aws_route53_record" "program" {
   records  = [aws_eip.program.public_ip]
 }
 
-# explorer.testnet.gsx + status.testnet.gsx land in follow-up PRs
+# explorer.testnet.suwappu + status.testnet.suwappu land in follow-up PRs
 # (forks of terraform/devnet/{explorer,status}.tf).
 
 output "testnet_nameservers" {
