@@ -9,6 +9,8 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
+use http_body_util::BodyExt;
+use serde_json::{json, Value};
 use suwappu_rpc::{
     context::{
         AuthorityMemberView, BlockView, EpochView, IntentView, RpcContext, StateView,
@@ -16,8 +18,6 @@ use suwappu_rpc::{
     },
     router,
 };
-use http_body_util::BodyExt;
-use serde_json::{json, Value};
 use tower::ServiceExt;
 
 /// Deterministic in-memory state for the test.
@@ -83,7 +83,9 @@ impl StateView for MockState {
         let hash = blake3::hash(&intent_bincode);
         Ok(*hash.as_bytes())
     }
-    fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<suwappu_rpc::context::EventView> {
+    fn subscribe_events(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<suwappu_rpc::context::EventView> {
         self.event_tx.subscribe()
     }
 }

@@ -30,8 +30,8 @@
 //! sprint close runs `PROPTEST_CASES=10000 cargo test -p suwappu-node
 //! --release`.
 
-use suwappu_node::{run_genesis_flow_with_keys, seed_registry};
 use proptest::prelude::*;
+use suwappu_node::{run_genesis_flow_with_keys, seed_registry};
 
 proptest! {
     #![proptest_config(ProptestConfig {

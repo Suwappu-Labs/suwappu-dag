@@ -9,8 +9,8 @@
 //! `suwappu-consensus` and is consumed by this adapter once the suwappu-db tag
 //! is cut.
 
-use suwappu_consensus::Round;
 use serde::{Deserialize, Serialize};
+use suwappu_consensus::Round;
 
 use crate::{
     error::ExecutionError,

@@ -24,6 +24,7 @@
 
 use std::{collections::HashMap, io, net::SocketAddr, sync::Arc, time::Duration};
 
+use serde::{Deserialize, Serialize};
 use suwappu_consensus::{
     cert::{CertHash, Certificate},
     joint::Vote,
@@ -31,7 +32,6 @@ use suwappu_consensus::{
 use suwappu_execution::Intent;
 use suwappu_fastpath::cert::FastPathCert;
 use suwappu_ltp::attestation::CorridorAttestation;
-use serde::{Deserialize, Serialize};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},

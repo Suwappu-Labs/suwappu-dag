@@ -10,6 +10,7 @@ use axum::{
     Router,
 };
 use clap::Parser;
+use sqlx::postgres::PgPoolOptions;
 use suwappu_validator_program::{
     admin::{
         handle_award, handle_list_awards, handle_list_operators, handle_record_certs,
@@ -19,7 +20,6 @@ use suwappu_validator_program::{
     leaderboard::handle_leaderboard,
     probe, score,
 };
-use sqlx::postgres::PgPoolOptions;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 

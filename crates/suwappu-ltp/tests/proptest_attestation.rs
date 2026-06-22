@@ -19,13 +19,13 @@
 
 use std::collections::BTreeSet;
 
+use proptest::prelude::*;
+use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 use suwappu_crypto::bls;
 use suwappu_ltp::{
     attest, verify_attestation, AttestationPayload, AuthorityId, Corridor, CorridorAttestation,
     LtpError, SuperNode, WitnessSignature,
 };
-use proptest::prelude::*;
-use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 
 fn build_corridor(seed: u64) -> (Corridor, Vec<blst::min_pk::SecretKey>) {
     let mut members = Vec::with_capacity(9);

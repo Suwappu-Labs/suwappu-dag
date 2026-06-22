@@ -25,11 +25,11 @@
 //!
 //! Tracks `docs/iq/IQ-004-decide-slot-orphan-window.md`.
 
+use proptest::prelude::*;
 use suwappu_consensus::{
     cert_at, decide_slot, leader, try_direct_decide, AuthorityId, CertHash, Certificate,
     CommitteeSize, DagStore, LeaderStatus, Round,
 };
-use proptest::prelude::*;
 
 /// Build a `Certificate` with the given author, round, parents, and a
 /// payload digest derived from `seed`.

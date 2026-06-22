@@ -20,12 +20,12 @@
 
 use std::collections::BTreeSet;
 
+use proptest::prelude::*;
 use suwappu_consensus::{AuthorityId, CertHash, Round};
 use suwappu_fastpath::{
     certify, fast_path_quorum_size, is_main_lane_consistent, FastPathTx, MainLaneTx, OwnedObjectId,
     OwnerAddress, FAST_PATH_CONFIRMATION_K,
 };
-use proptest::prelude::*;
 
 fn build_tx(object_seed: u8, lineage_round: Round, payload_seed: u8) -> FastPathTx {
     FastPathTx {

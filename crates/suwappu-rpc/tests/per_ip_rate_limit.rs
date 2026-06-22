@@ -13,6 +13,8 @@ use axum::{
     extract::ConnectInfo,
     http::{Request, StatusCode},
 };
+use http_body_util::BodyExt;
+use serde_json::{json, Value};
 use suwappu_rpc::{
     context::{
         AuthorityMemberView, BlockView, EpochView, RpcContext, StateView, SubmitIntentError,
@@ -20,8 +22,6 @@ use suwappu_rpc::{
     },
     router_with_limits, RouterLimits,
 };
-use http_body_util::BodyExt;
-use serde_json::{json, Value};
 use tower::ServiceExt;
 
 /// Minimal `StateView` — every method returns trivial data; we only
@@ -63,7 +63,9 @@ impl StateView for MockState {
     ) -> Result<[u8; 32], SubmitIntentError> {
         Ok([0u8; 32])
     }
-    fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<suwappu_rpc::context::EventView> {
+    fn subscribe_events(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<suwappu_rpc::context::EventView> {
         // Unused in this test; return a fresh broadcast pair.
         let (tx, rx) = tokio::sync::broadcast::channel(1);
         // Keep tx alive so the receiver doesn't immediately error.

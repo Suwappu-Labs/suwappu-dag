@@ -22,9 +22,9 @@
 //! Run at default 256 cases under CI; sprint close runs at
 //! `PROPTEST_CASES=10000 cargo test -p suwappu-transport --release`.
 
-use suwappu_transport::{reconstruct, shred, Shred};
 use proptest::prelude::*;
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
+use suwappu_transport::{reconstruct, shred, Shred};
 
 proptest! {
     #![proptest_config(ProptestConfig {

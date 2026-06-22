@@ -18,8 +18,10 @@
 //! Run at default 256 cases under CI; sprint close runs
 //! `PROPTEST_CASES=10000 cargo test -p suwappu-execution --release`.
 
-use suwappu_execution::{execute_block, Address, Balance, Block, InMemorySubstrate, Intent, Substrate};
 use proptest::prelude::*;
+use suwappu_execution::{
+    execute_block, Address, Balance, Block, InMemorySubstrate, Intent, Substrate,
+};
 
 /// Strategy for an `Address` keyed on a small u8 seed, so that random
 /// transfers have a realistic collision rate. We use 4 distinct address

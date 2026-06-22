@@ -29,9 +29,9 @@
 //!
 //! Property tests verify the round-trip semantics at 10,000 cases.
 
+use serde::{Deserialize, Serialize};
 use suwappu_crypto::{hash, mldsa};
 use suwappu_precompiles::{Did, DidDocument, VerificationMethodId, VerificationRelationship};
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::attestation::ChainId;

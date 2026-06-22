@@ -30,14 +30,17 @@ use axum::{
     Router,
 };
 use clap::Parser;
+use serde::{Deserialize, Serialize};
 use suwappu_crypto::mldsa;
 use suwappu_faucet::{Faucet, FaucetError};
-use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug, Clone)]
-#[command(name = "suwappu-faucet", about = "Devnet test-token faucet HTTP service")]
+#[command(
+    name = "suwappu-faucet",
+    about = "Devnet test-token faucet HTTP service"
+)]
 struct Args {
     /// JSON-RPC URL of the devnet (e.g.
     /// `https://rpc.devnet.suwappu.bot`).
@@ -64,7 +67,11 @@ struct Args {
 
     /// Network identifier baked into the signing digest. MUST match
     /// the devnet genesis's `network_id`.
-    #[arg(long, default_value = "suwappu-devnet", env = "SUWAPPU_FAUCET_NETWORK_ID")]
+    #[arg(
+        long,
+        default_value = "suwappu-devnet",
+        env = "SUWAPPU_FAUCET_NETWORK_ID"
+    )]
     network_id: String,
 
     /// Amount in SUWAPPU (u128) handed out per drip. Default: 100 SUWAPPU —
@@ -81,7 +88,11 @@ struct Args {
 
     /// Per-IP refill rate in tokens per hour. Default: 5/hour — at
     /// steady state, one IP gets ~120 drips/day max.
-    #[arg(long, default_value_t = 5, env = "SUWAPPU_FAUCET_BUCKET_REFILL_PER_HOUR")]
+    #[arg(
+        long,
+        default_value_t = 5,
+        env = "SUWAPPU_FAUCET_BUCKET_REFILL_PER_HOUR"
+    )]
     bucket_refill_per_hour: u64,
 
     /// TCP bind address.
@@ -93,8 +104,9 @@ struct Args {
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("suwappu_faucet=info,axum=warn,tower_http=info")),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                EnvFilter::new("suwappu_faucet=info,axum=warn,tower_http=info")
+            }),
         )
         .init();
 

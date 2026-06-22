@@ -2,8 +2,8 @@
 
 use std::collections::BTreeSet;
 
-use suwappu_consensus::{AuthorityId, CertHash, Round};
 use serde::{Deserialize, Serialize};
+use suwappu_consensus::{AuthorityId, CertHash, Round};
 
 /// Move object identifier — the unit on which fast-path eligibility is
 /// gated. Paper §6.4: "read-write footprint is a single owned Move object."

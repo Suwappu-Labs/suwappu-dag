@@ -40,6 +40,15 @@ ignore = [
     # added precisely to make this future migration detectable.
     # Re-check: 2026-Q4.
     "RUSTSEC-2025-0141",
+    # pqcrypto-{mlkem,traits,internals,mldsa} unmaintained: upstream PQClean
+    # archived (2026). No vulnerability — these are the ML-KEM-768 / ML-DSA-65
+    # (FIPS 203/204) bindings central to the chain's PQ consensus + LTP. The
+    # pure-Rust `ml-dsa`/`ml-kem` (RustCrypto) crates are the migration target;
+    # until they're production-ready, the PQClean-backed impls are the reference.
+    "RUSTSEC-2026-0161",
+    "RUSTSEC-2026-0162",
+    "RUSTSEC-2026-0163",
+    "RUSTSEC-2026-0166",
 ]
 
 [licenses]

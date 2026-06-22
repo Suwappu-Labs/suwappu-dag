@@ -22,12 +22,12 @@
 
 use std::collections::BTreeSet;
 
+use proptest::prelude::*;
 use suwappu_crypto::mldsa;
 use suwappu_precompiles::{
     Did, DidDocument, DidError, InMemoryDidResolver, KeyAlgorithm, VerificationMethod,
     VerificationMethodId, VerificationRelationship,
 };
-use proptest::prelude::*;
 
 /// Strategy for a non-null DID. Phase-1 forbids the `[0; 32]` sentinel.
 fn did_strategy() -> impl Strategy<Value = Did> {

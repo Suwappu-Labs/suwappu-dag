@@ -18,9 +18,9 @@
 
 use std::collections::HashSet;
 
-use suwappu_consensus::{AuthorityId, CertHash, Certificate, DagStore, Round};
 use proptest::prelude::*;
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
+use suwappu_consensus::{AuthorityId, CertHash, Certificate, DagStore, Round};
 
 /// Build a valid random DAG: `n_rounds` rounds, `n_authorities` authors
 /// per round. Each non-genesis certificate references *all* certificates

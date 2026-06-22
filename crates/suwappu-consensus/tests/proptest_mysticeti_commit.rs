@@ -16,11 +16,11 @@
 //! Run at default 256 cases under CI; sprint close runs
 //! `PROPTEST_CASES=10000 cargo test -p suwappu-consensus --release`.
 
+use proptest::prelude::*;
 use suwappu_consensus::{
     commit_leader, finalize, leader, quorum_threshold, AuthorityId, CertHash, Certificate,
     CommitteeSize, DagStore, Round,
 };
-use proptest::prelude::*;
 
 /// Build a valid dense DAG of `n_rounds` rounds with `n_authorities`
 /// authors per round, where each non-genesis cert references every

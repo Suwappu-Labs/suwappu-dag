@@ -16,8 +16,8 @@
 //! responsibility; the main-lane Mysticeti commit rule of DAG-S4
 //! linearizes them.
 
-use suwappu_consensus::{CertHash, Round};
 use serde::{Deserialize, Serialize};
+use suwappu_consensus::{CertHash, Round};
 
 use crate::cert::{FastPathCert, OwnedObjectId};
 

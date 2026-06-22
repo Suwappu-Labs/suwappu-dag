@@ -19,12 +19,12 @@
 //! Run at default 256 cases under CI; sprint close runs
 //! `PROPTEST_CASES=10000 cargo test -p suwappu-execution --release`.
 
+use proptest::prelude::*;
 use suwappu_authority::{AuthorityMember, AuthorityRegistry, AUTHORITY_STAKE_THRESHOLD_SUWAPPU};
 use suwappu_crypto::mldsa;
 use suwappu_execution::{
     ratify_checkpoint, sign_checkpoint, Checkpoint, CheckpointError, Checkpointer,
 };
-use proptest::prelude::*;
 
 /// Build a registry of `n` authorities each with a freshly-generated
 /// ML-DSA-65 keypair. Returns the registry plus the secret keys aligned

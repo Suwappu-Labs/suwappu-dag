@@ -39,8 +39,8 @@
 use std::collections::VecDeque;
 
 use blake3::Hasher;
-use suwappu_l2_verifier_precompile::{public_inputs, L2_PUBLIC_INPUTS_BYTES};
 use serde::{Deserialize, Serialize};
+use suwappu_l2_verifier_precompile::{public_inputs, L2_PUBLIC_INPUTS_BYTES};
 use thiserror::Error;
 
 /// Maximum L2 transactions in a single batch. Matches the

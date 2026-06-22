@@ -20,6 +20,7 @@
 //! Run at default 256 cases under CI; sprint close runs
 //! `PROPTEST_CASES=10000 cargo test -p suwappu-validator --release`.
 
+use proptest::prelude::*;
 use suwappu_authority::{
     slash_authority, AuthorityMember, AuthorityRegistry, AUTHORITY_STAKE_THRESHOLD_SUWAPPU,
 };
@@ -31,7 +32,6 @@ use suwappu_validator::{
     slash_validator_double_vote, Stake, ValidatorMember, ValidatorRegistry,
     VALIDATOR_STAKE_THRESHOLD_SUWAPPU,
 };
-use proptest::prelude::*;
 
 proptest! {
     #![proptest_config(ProptestConfig {

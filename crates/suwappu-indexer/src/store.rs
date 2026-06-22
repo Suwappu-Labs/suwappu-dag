@@ -6,8 +6,8 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
-use suwappu_rpc::context::EventView;
 use serde::{Deserialize, Serialize};
+use suwappu_rpc::context::EventView;
 use tokio::sync::RwLock;
 
 /// One committed block as seen by the indexer.

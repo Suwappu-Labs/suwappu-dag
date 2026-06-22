@@ -27,11 +27,11 @@
 //!
 //! Tracks `docs/iq/IQ-002-indirect-commit.md`.
 
+use proptest::prelude::*;
 use suwappu_consensus::{
     cert_at, decide_slot, leader, quorum_threshold, try_direct_decide, AuthorityId, CertHash,
     Certificate, CommitteeSize, DagStore, LeaderStatus, Round,
 };
-use proptest::prelude::*;
 
 /// Build a valid topo-ordered DAG of `n_rounds` rounds with the
 /// following sparsity profile at the chosen `sparse_round`:

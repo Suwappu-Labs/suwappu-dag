@@ -312,7 +312,9 @@ impl StateView for NodeStateView {
             .mempool
             .submit(intent, /* priority */ 0, None, now_ms)
             .map_err(|e| match e {
-                suwappu_mempool::MempoolError::DuplicateIntent { .. } => SubmitIntentError::EnqueueFull,
+                suwappu_mempool::MempoolError::DuplicateIntent { .. } => {
+                    SubmitIntentError::EnqueueFull
+                }
                 suwappu_mempool::MempoolError::BelowFloor { .. } => SubmitIntentError::EnqueueFull,
                 suwappu_mempool::MempoolError::RateLimited { .. } => SubmitIntentError::EnqueueFull,
                 suwappu_mempool::MempoolError::Encode(_) => SubmitIntentError::EnqueueFull,

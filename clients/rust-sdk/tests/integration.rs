@@ -7,11 +7,11 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use axum::{routing::post, Json, Router};
+use serde_json::{json, Value};
 use suwappu_client::{
     AuthorityMemberView, BalanceView, BlockView, Client, EpochView, Error, StakeEntry,
     TransactionView, ValidatorMemberView,
 };
-use serde_json::{json, Value};
 use tokio::net::TcpListener;
 
 /// Spawn a mock JSON-RPC server that recognizes the four suwappu_*

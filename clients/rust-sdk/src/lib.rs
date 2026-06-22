@@ -67,12 +67,12 @@ mod error;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub use error::Error;
+use serde::{de::DeserializeOwned, Deserialize};
+use serde_json::{json, Value};
 pub use suwappu_rpc::context::{
     AuthorityMemberView, BalanceView, BlockView, EpochView, IntentView, TransactionView,
     ValidatorMemberView,
 };
-use serde::{de::DeserializeOwned, Deserialize};
-use serde_json::{json, Value};
 
 /// JSON-RPC client targeting a single suwappu-dag node's RPC endpoint.
 ///

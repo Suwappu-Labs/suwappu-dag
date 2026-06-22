@@ -12,8 +12,8 @@
 use std::time::Duration;
 
 use futures_util::StreamExt;
-use suwappu_rpc::context::EventView;
 use serde::Deserialize;
+use suwappu_rpc::context::EventView;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, info, warn};
 

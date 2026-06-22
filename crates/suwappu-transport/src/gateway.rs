@@ -22,8 +22,8 @@
 //! signed by the gateway. Tampering with any byte of the envelope or
 //! response invalidates the signature.
 
-use suwappu_crypto::{hash, mldsa};
 use serde::{Deserialize, Serialize};
+use suwappu_crypto::{hash, mldsa};
 use thiserror::Error;
 
 use crate::scion::{verify_path, AsId, IsdId, Path, ScionError, TrustRootConfig};

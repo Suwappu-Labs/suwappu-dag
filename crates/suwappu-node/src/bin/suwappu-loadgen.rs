@@ -37,10 +37,10 @@ use std::{
 
 use anyhow::{bail, Context};
 use clap::Parser;
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use suwappu_crypto::mldsa;
 use suwappu_execution::Intent;
 use suwappu_node::client::LoadGenClient;
-use rand::{rngs::StdRng, Rng, SeedableRng};
 
 #[derive(Parser, Debug)]
 #[command(

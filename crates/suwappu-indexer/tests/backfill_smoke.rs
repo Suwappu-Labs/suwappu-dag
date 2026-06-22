@@ -10,12 +10,12 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use axum::{extract::State, routing::post, Json, Router};
+use serde_json::{json, Value};
 use suwappu_indexer::{
     backfill::catch_up,
     store::{InMemoryStore, IndexedBlock, Store},
 };
 use suwappu_rpc::context::{BlockView, EpochView};
-use serde_json::{json, Value};
 use tokio::net::TcpListener;
 
 #[derive(Clone)]

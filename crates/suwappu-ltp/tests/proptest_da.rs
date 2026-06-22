@@ -18,8 +18,8 @@
 //! Run at default 256 cases under CI; sprint close runs
 //! `PROPTEST_CASES=10000 cargo test -p suwappu-ltp --release`.
 
-use suwappu_ltp::{verify_sla, Cid, CommitmentNetwork, DaError, DaSla};
 use proptest::prelude::*;
+use suwappu_ltp::{verify_sla, Cid, CommitmentNetwork, DaError, DaSla};
 
 proptest! {
     #![proptest_config(ProptestConfig {

@@ -27,10 +27,10 @@
 
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
 use suwappu_authority::{AuthorityId, AuthorityRegistry};
 use suwappu_consensus::Round;
 use suwappu_crypto::mldsa;
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Sequence number of a checkpoint. Increments monotonically from 0.

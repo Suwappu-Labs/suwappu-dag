@@ -27,8 +27,8 @@
 use std::collections::BTreeSet;
 
 use blst::min_pk::{PublicKey as BlsPublicKey, Signature as BlsSignature};
-use suwappu_crypto::{bls, hash};
 use serde::{Deserialize, Serialize};
+use suwappu_crypto::{bls, hash};
 use thiserror::Error;
 
 use crate::{LTP_ATTESTATION_QUORUM_SIZE, LTP_ATTESTATION_QUORUM_THRESHOLD};

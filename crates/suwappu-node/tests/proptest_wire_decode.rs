@@ -17,8 +17,8 @@
 //! contract still holds for arbitrary input — including inputs that
 //! omit the version byte or carry an unknown one.
 
-use suwappu_node::{client::ClientMessage, codec, wire::WireMessage};
 use proptest::prelude::*;
+use suwappu_node::{client::ClientMessage, codec, wire::WireMessage};
 
 proptest! {
     #![proptest_config(ProptestConfig {

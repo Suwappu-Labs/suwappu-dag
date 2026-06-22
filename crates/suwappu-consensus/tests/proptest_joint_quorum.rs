@@ -20,11 +20,11 @@
 
 use std::collections::BTreeSet;
 
+use proptest::prelude::*;
 use suwappu_consensus::{
     authority_equivocators, commit_leader, joint_commit, quorum_threshold, validator_quorum_met,
     AuthorityId, CertHash, Certificate, DagStore, StakeTable, ValidatorId, Vote,
 };
-use proptest::prelude::*;
 
 /// Build a DAG where authors in `dishonest_set` author *two* round-1
 /// certs (one supporting `cand_a`, one supporting `cand_b`). Honest

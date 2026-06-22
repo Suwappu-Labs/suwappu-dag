@@ -156,7 +156,8 @@ mod tests {
     #[test]
     fn admit_above_floor_succeeds() {
         let mut r = AuthorityRegistry::new();
-        r.admit(member(0, AUTHORITY_STAKE_THRESHOLD_SUWAPPU)).unwrap();
+        r.admit(member(0, AUTHORITY_STAKE_THRESHOLD_SUWAPPU))
+            .unwrap();
         assert_eq!(r.len(), 1);
         assert!(r.contains(0));
     }
@@ -171,7 +172,8 @@ mod tests {
     #[test]
     fn admit_duplicate_fails() {
         let mut r = AuthorityRegistry::new();
-        r.admit(member(0, AUTHORITY_STAKE_THRESHOLD_SUWAPPU)).unwrap();
+        r.admit(member(0, AUTHORITY_STAKE_THRESHOLD_SUWAPPU))
+            .unwrap();
         let err = r.admit(member(0, AUTHORITY_STAKE_THRESHOLD_SUWAPPU));
         assert_eq!(err, Err(AdmissionError::DuplicateMember(0)));
     }
@@ -180,7 +182,8 @@ mod tests {
     fn admit_full_ring_fails() {
         let mut r = AuthorityRegistry::new();
         for i in 0..AUTHORITY_RING_MAX as u32 {
-            r.admit(member(i, AUTHORITY_STAKE_THRESHOLD_SUWAPPU)).unwrap();
+            r.admit(member(i, AUTHORITY_STAKE_THRESHOLD_SUWAPPU))
+                .unwrap();
         }
         let err = r.admit(member(
             AUTHORITY_RING_MAX as u32,
@@ -193,7 +196,8 @@ mod tests {
     fn remove_decreases_size() {
         let mut r = AuthorityRegistry::new();
         for i in 0..4 {
-            r.admit(member(i, AUTHORITY_STAKE_THRESHOLD_SUWAPPU)).unwrap();
+            r.admit(member(i, AUTHORITY_STAKE_THRESHOLD_SUWAPPU))
+                .unwrap();
         }
         let removed = r.remove(2).unwrap();
         assert_eq!(removed.id, 2);
@@ -206,13 +210,15 @@ mod tests {
         let mut r = AuthorityRegistry::new();
         // 30 authorities: n − ⌊29/3⌋ = 30 − 9 = 21 (unchanged from paper).
         for i in 0..30 {
-            r.admit(member(i, AUTHORITY_STAKE_THRESHOLD_SUWAPPU)).unwrap();
+            r.admit(member(i, AUTHORITY_STAKE_THRESHOLD_SUWAPPU))
+                .unwrap();
         }
         assert_eq!(r.quorum_threshold(), 21);
 
         // 50 authorities: n − ⌊49/3⌋ = 50 − 16 = 34 (was 35 under paper).
         for i in 30..50 {
-            r.admit(member(i, AUTHORITY_STAKE_THRESHOLD_SUWAPPU)).unwrap();
+            r.admit(member(i, AUTHORITY_STAKE_THRESHOLD_SUWAPPU))
+                .unwrap();
         }
         assert_eq!(r.quorum_threshold(), 34);
     }

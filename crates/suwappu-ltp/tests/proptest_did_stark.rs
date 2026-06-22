@@ -22,12 +22,12 @@
 
 use std::collections::BTreeSet;
 
+use proptest::prelude::*;
 use suwappu_crypto::mldsa;
 use suwappu_ltp::{prove_rotation, verify_rotation_proof, DidRotationStatement, DidStarkError};
 use suwappu_precompiles::{
     Did, DidDocument, KeyAlgorithm, VerificationMethod, VerificationRelationship,
 };
-use proptest::prelude::*;
 
 fn build_doc_with_ci_key(did_seed: u8) -> (DidDocument, mldsa::SecretKey) {
     let did = Did([did_seed; 32]);

@@ -22,8 +22,8 @@
 
 use std::time::Instant;
 
-use suwappu_client::Client;
 use sqlx::PgPool;
+use suwappu_client::Client;
 use tracing::{debug, warn};
 
 use crate::PROBE_INTERVAL;

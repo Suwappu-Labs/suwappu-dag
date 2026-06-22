@@ -75,7 +75,8 @@ mod tests {
     #[test]
     fn slash_removes_member_and_returns_full_stake() {
         let mut r = AuthorityRegistry::new();
-        r.admit(member(0, AUTHORITY_STAKE_THRESHOLD_SUWAPPU)).unwrap();
+        r.admit(member(0, AUTHORITY_STAKE_THRESHOLD_SUWAPPU))
+            .unwrap();
         let slash = slash_authority(&mut r, 0).unwrap();
         assert_eq!(slash.stake_lost, AUTHORITY_STAKE_THRESHOLD_SUWAPPU);
         assert!(slash.expelled);
@@ -85,7 +86,8 @@ mod tests {
     #[test]
     fn slash_is_idempotent() {
         let mut r = AuthorityRegistry::new();
-        r.admit(member(0, AUTHORITY_STAKE_THRESHOLD_SUWAPPU)).unwrap();
+        r.admit(member(0, AUTHORITY_STAKE_THRESHOLD_SUWAPPU))
+            .unwrap();
         slash_authority(&mut r, 0).unwrap();
         let again = slash_authority(&mut r, 0);
         assert!(again.is_none());
@@ -100,7 +102,8 @@ mod tests {
     #[test]
     fn readmit_after_slash_requires_fresh_stake() {
         let mut r = AuthorityRegistry::new();
-        r.admit(member(0, AUTHORITY_STAKE_THRESHOLD_SUWAPPU)).unwrap();
+        r.admit(member(0, AUTHORITY_STAKE_THRESHOLD_SUWAPPU))
+            .unwrap();
         slash_authority(&mut r, 0).unwrap();
         readmit_authority(&mut r, 0, AUTHORITY_STAKE_THRESHOLD_SUWAPPU, vec![0; 32]).unwrap();
         assert!(r.contains(0));

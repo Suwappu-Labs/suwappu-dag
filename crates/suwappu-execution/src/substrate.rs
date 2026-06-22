@@ -2055,10 +2055,14 @@ impl Substrate for InMemorySubstrate {
 
                 // Verifier format gate (proof = 260 B,
                 // public_inputs = 240 B, vk_hash != all-zeros).
-                suwappu_l2_verifier_precompile::verify_l2_batch(proof_bytes, public_inputs, vk_hash)
-                    .map_err(|e| ExecutionError::L2VerifierRejected {
-                        reason: e.to_string(),
-                    })?;
+                suwappu_l2_verifier_precompile::verify_l2_batch(
+                    proof_bytes,
+                    public_inputs,
+                    vk_hash,
+                )
+                .map_err(|e| ExecutionError::L2VerifierRejected {
+                    reason: e.to_string(),
+                })?;
 
                 let registry_addr = reserved::l2_registry_address();
                 let existing_bytes = self.read_bytes(&registry_addr).unwrap_or_default();

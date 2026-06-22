@@ -181,10 +181,14 @@ impl Substrate for SuwappuDbSubstrate {
                 vk_hash,
                 ..
             } => {
-                suwappu_l2_verifier_precompile::verify_l2_batch(proof_bytes, public_inputs, vk_hash)
-                    .map_err(|e| ExecutionError::L2VerifierRejected {
-                        reason: e.to_string(),
-                    })?;
+                suwappu_l2_verifier_precompile::verify_l2_batch(
+                    proof_bytes,
+                    public_inputs,
+                    vk_hash,
+                )
+                .map_err(|e| ExecutionError::L2VerifierRejected {
+                    reason: e.to_string(),
+                })?;
                 Ok(())
             }
             // `SetL2VerifyingKey` chain-state storage lands with

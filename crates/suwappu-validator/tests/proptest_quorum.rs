@@ -19,14 +19,15 @@
 //! Run at default 256 cases under CI; sprint close runs
 //! `PROPTEST_CASES=10000 cargo test -p suwappu-validator --release`.
 
+use proptest::prelude::*;
 use suwappu_authority::{
     AuthorityMember, AuthorityRegistry, AUTHORITY_RING_MAX, AUTHORITY_STAKE_THRESHOLD_SUWAPPU,
 };
 use suwappu_consensus::{quorum_threshold as consensus_authority_threshold, StakeTable};
 use suwappu_validator::{
-    Stake, ValidatorMember, ValidatorRegistry, VALIDATOR_RING_MAX, VALIDATOR_STAKE_THRESHOLD_SUWAPPU,
+    Stake, ValidatorMember, ValidatorRegistry, VALIDATOR_RING_MAX,
+    VALIDATOR_STAKE_THRESHOLD_SUWAPPU,
 };
-use proptest::prelude::*;
 
 fn auth(id: u32, stake: u64) -> AuthorityMember {
     AuthorityMember {

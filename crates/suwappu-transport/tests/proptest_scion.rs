@@ -19,10 +19,10 @@
 
 use std::collections::BTreeMap;
 
+use proptest::prelude::*;
 use suwappu_transport::{
     hop_mac, seal_path, verify_path, AsId, HopField, IsdId, Path, ScionError, TrustRootConfig,
 };
-use proptest::prelude::*;
 
 fn build_trc(isd: IsdId, n_ases: u32, valid_until: u64) -> (TrustRootConfig, Vec<AsId>) {
     let mut as_keys = BTreeMap::new();

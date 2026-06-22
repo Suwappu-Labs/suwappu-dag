@@ -20,8 +20,8 @@
 
 use std::collections::BTreeMap;
 
-use suwappu_crypto::hash;
 use serde::{Deserialize, Serialize};
+use suwappu_crypto::hash;
 use thiserror::Error;
 
 /// Content identifier — SHA3-256 of the payload bytes with a

@@ -8,8 +8,8 @@ use std::{
     sync::Mutex,
 };
 
-use suwappu_execution::Intent;
 use serde::{Deserialize, Serialize};
+use suwappu_execution::Intent;
 use thiserror::Error;
 
 use crate::bucket::LeakyBucket;

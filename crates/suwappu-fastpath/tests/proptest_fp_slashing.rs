@@ -21,13 +21,13 @@
 
 use std::collections::BTreeSet;
 
+use proptest::prelude::*;
 use suwappu_authority::{AuthorityMember, AuthorityRegistry, AUTHORITY_STAKE_THRESHOLD_SUWAPPU};
 use suwappu_consensus::{AuthorityId, CertHash};
 use suwappu_fastpath::{
     certify, detect_fast_path_equivocation, fast_path_quorum_size, slash_fast_path_signers,
     FastPathTx, MainLaneTx, OwnedObjectId, OwnerAddress, FAST_PATH_CONFIRMATION_K,
 };
-use proptest::prelude::*;
 
 fn build_tx(object_seed: u8, lineage_round: u64, payload_seed: u8) -> FastPathTx {
     FastPathTx {

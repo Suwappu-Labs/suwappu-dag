@@ -40,7 +40,9 @@ use suwappu_fastpath::{
     cert::{FastPathCert, FastPathTx, OwnedObjectId},
     quorum::fast_path_quorum_size,
 };
-use suwappu_ltp::{AttestationPayload, ChainId, Corridor, CorridorAttestation, CorridorId, SuperNode};
+use suwappu_ltp::{
+    AttestationPayload, ChainId, Corridor, CorridorAttestation, CorridorId, SuperNode,
+};
 use suwappu_validator::{ValidatorMember, ValidatorRegistry};
 use tracing::debug;
 
@@ -2176,7 +2178,8 @@ mod tests {
                 mldsa_secret_key_path: "/dev/null".into(),
                 bls_secret_key_path: "/dev/null".into(),
                 genesis_manifest_path: "/dev/null".into(),
-                event_log_path: std::env::temp_dir().join(format!("suwappu-daemon-test-v{}.ndjson", i)),
+                event_log_path: std::env::temp_dir()
+                    .join(format!("suwappu-daemon-test-v{}.ndjson", i)),
 
                 max_client_connections: 256,
                 client_idle_timeout_ms: 30_000,
@@ -2318,7 +2321,8 @@ mod tests {
                 mldsa_secret_key_path: "/dev/null".into(),
                 bls_secret_key_path: "/dev/null".into(),
                 genesis_manifest_path: "/dev/null".into(),
-                event_log_path: std::env::temp_dir().join(format!("suwappu-phaseg-test-v{}.ndjson", i)),
+                event_log_path: std::env::temp_dir()
+                    .join(format!("suwappu-phaseg-test-v{}.ndjson", i)),
 
                 max_client_connections: 256,
                 client_idle_timeout_ms: 30_000,
@@ -3090,9 +3094,10 @@ mod tests {
             corridors: Vec::new(),
             rounds_per_epoch: 1024,
         };
-        let (log, _log_task) = EventLog::start(&std::env::temp_dir().join("suwappu-ltp-test.ndjson"))
-            .await
-            .unwrap();
+        let (log, _log_task) =
+            EventLog::start(&std::env::temp_dir().join("suwappu-ltp-test.ndjson"))
+                .await
+                .unwrap();
         let state = Arc::new(State::new(&manifest, None));
 
         let payload = suwappu_ltp::AttestationPayload {
@@ -3190,9 +3195,10 @@ mod tests {
             corridors: Vec::new(),
             rounds_per_epoch: 1024,
         };
-        let (log, _log_task) = EventLog::start(&std::env::temp_dir().join("suwappu-ltp-unreg.ndjson"))
-            .await
-            .unwrap();
+        let (log, _log_task) =
+            EventLog::start(&std::env::temp_dir().join("suwappu-ltp-unreg.ndjson"))
+                .await
+                .unwrap();
         let state = Arc::new(State::new(&manifest, None));
         assert!(state.inner.lock().await.corridors.is_empty());
 

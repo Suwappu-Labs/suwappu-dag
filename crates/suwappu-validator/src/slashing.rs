@@ -124,7 +124,8 @@ mod tests {
         // The validator remains seated for historical accounting; new
         // admission would fail, but existing members are not evicted.
         let mut r = ValidatorRegistry::new();
-        r.admit(member(0, VALIDATOR_STAKE_THRESHOLD_SUWAPPU)).unwrap();
+        r.admit(member(0, VALIDATOR_STAKE_THRESHOLD_SUWAPPU))
+            .unwrap();
         let slash = slash_validator_double_vote(&mut r, 0).unwrap();
         assert!(slash.remaining_stake < VALIDATOR_STAKE_THRESHOLD_SUWAPPU);
         // Direct readmission path is disabled below floor; this is by

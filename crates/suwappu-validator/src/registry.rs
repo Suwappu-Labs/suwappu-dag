@@ -151,7 +151,8 @@ mod tests {
     #[test]
     fn admit_above_floor_succeeds() {
         let mut r = ValidatorRegistry::new();
-        r.admit(member(0, VALIDATOR_STAKE_THRESHOLD_SUWAPPU)).unwrap();
+        r.admit(member(0, VALIDATOR_STAKE_THRESHOLD_SUWAPPU))
+            .unwrap();
         assert_eq!(r.len(), 1);
     }
 
@@ -165,7 +166,8 @@ mod tests {
     #[test]
     fn admit_duplicate_fails() {
         let mut r = ValidatorRegistry::new();
-        r.admit(member(0, VALIDATOR_STAKE_THRESHOLD_SUWAPPU)).unwrap();
+        r.admit(member(0, VALIDATOR_STAKE_THRESHOLD_SUWAPPU))
+            .unwrap();
         assert_eq!(
             r.admit(member(0, VALIDATOR_STAKE_THRESHOLD_SUWAPPU)),
             Err(AdmissionError::DuplicateMember(0)),
@@ -176,7 +178,8 @@ mod tests {
     fn admit_full_ring_fails() {
         let mut r = ValidatorRegistry::new();
         for i in 0..VALIDATOR_RING_MAX as u32 {
-            r.admit(member(i, VALIDATOR_STAKE_THRESHOLD_SUWAPPU)).unwrap();
+            r.admit(member(i, VALIDATOR_STAKE_THRESHOLD_SUWAPPU))
+                .unwrap();
         }
         let err = r.admit(member(
             VALIDATOR_RING_MAX as u32,
@@ -189,7 +192,8 @@ mod tests {
     fn total_stake_sums_members() {
         let mut r = ValidatorRegistry::new();
         for i in 0..5 {
-            r.admit(member(i, VALIDATOR_STAKE_THRESHOLD_SUWAPPU)).unwrap();
+            r.admit(member(i, VALIDATOR_STAKE_THRESHOLD_SUWAPPU))
+                .unwrap();
         }
         assert_eq!(r.total_stake(), 5 * VALIDATOR_STAKE_THRESHOLD_SUWAPPU);
     }
@@ -200,7 +204,8 @@ mod tests {
         // 9 validators each at the floor (25,000 SUWAPPU). Total stake
         // 225,000; 2/3 = 150,000; threshold > 150,000 → 150,001.
         for i in 0..9 {
-            r.admit(member(i, VALIDATOR_STAKE_THRESHOLD_SUWAPPU)).unwrap();
+            r.admit(member(i, VALIDATOR_STAKE_THRESHOLD_SUWAPPU))
+                .unwrap();
         }
         assert_eq!(r.quorum_threshold_stake(), 150_001);
     }

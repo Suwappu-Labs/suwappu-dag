@@ -179,8 +179,8 @@ impl HeaderAttestation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use suwappu_crypto::mldsa::{keypair, verify, Signature};
     use sha3::{Digest, Keccak256};
+    use suwappu_crypto::mldsa::{keypair, verify, Signature};
 
     /// The cross-language golden preimage emitted by the forge side, as the
     /// literal `abi.encodePacked` hex string (148 bytes). This is the

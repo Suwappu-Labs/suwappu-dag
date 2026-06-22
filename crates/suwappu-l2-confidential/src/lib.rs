@@ -53,11 +53,11 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+use serde::{Deserialize, Serialize};
 use suwappu_crypto::hash::{
     sha3_256_domain, SUWAPPU_L2_ADDRESS_V1, SUWAPPU_L2_NF_KEY_V1, SUWAPPU_L2_NOTE_COMMIT_V1,
     SUWAPPU_L2_NULLIFIER_V1,
 };
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Length of an ML-DSA-65 public key in bytes (FIPS 204 mldsa65 spec).

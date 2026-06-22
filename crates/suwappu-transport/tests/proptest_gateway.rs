@@ -22,12 +22,12 @@
 
 use std::collections::BTreeMap;
 
+use proptest::prelude::*;
 use suwappu_crypto::mldsa;
 use suwappu_transport::{
     seal_path, sign_response, verify_response, GatewayConfig, GatewayEnvelope, GatewayError,
     HopField, IpPacket, TrustRootConfig,
 };
-use proptest::prelude::*;
 
 fn build_config(seed: u64) -> (GatewayConfig, mldsa::SecretKey) {
     let mut as_keys = BTreeMap::new();

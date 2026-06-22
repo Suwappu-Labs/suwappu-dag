@@ -38,10 +38,10 @@ pub mod eject_registry;
 pub mod equivocation_registry;
 pub mod error;
 pub mod force_include;
-pub mod suwappu_db_substrate;
 pub mod l2_state;
 pub mod reserved;
 pub mod substrate;
+pub mod suwappu_db_substrate;
 pub mod validator_registry;
 
 pub use block::{execute_block, Block, ExecutionReport};
@@ -50,8 +50,8 @@ pub use checkpoint::{
     CheckpointSignature, Checkpointer, CoSignedCheckpoint,
 };
 pub use error::ExecutionError;
-pub use suwappu_db_substrate::SuwappuDbSubstrate;
 pub use substrate::{Address, Balance, InMemorySubstrate, Intent, RewardsRing, Substrate};
+pub use suwappu_db_substrate::SuwappuDbSubstrate;
 
 /// Checkpoint cadence C — the rate at which the Authority Ring co-signs a
 /// (Σ_EVM, Σ_Move) snapshot. Configured per testnet/mainnet; default below

@@ -18,10 +18,10 @@
 //! Run at default 256 cases under CI; sprint close runs
 //! `PROPTEST_CASES=10000 cargo test -p suwappu-precompiles --release`.
 
+use proptest::prelude::*;
 use suwappu_precompiles::{
     AssetId, Did, Issuer, IssuerError, IssuerRegistry, PaymentReceiptAttestation,
 };
-use proptest::prelude::*;
 
 fn build_issuer(id: u32, cap: u128) -> Issuer {
     Issuer {

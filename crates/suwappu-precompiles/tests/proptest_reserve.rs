@@ -18,11 +18,11 @@
 //! Run at default 256 cases under CI; sprint close runs
 //! `PROPTEST_CASES=10000 cargo test -p suwappu-precompiles --release`.
 
+use proptest::prelude::*;
 use suwappu_precompiles::{
     predicate_satisfied, AssetId, CoverageError, CoverageRule, DisclosureTier, ReserveAttestation,
     ReserveCoverageChecker,
 };
-use proptest::prelude::*;
 
 fn rule_strategy() -> impl Strategy<Value = CoverageRule> {
     prop_oneof![

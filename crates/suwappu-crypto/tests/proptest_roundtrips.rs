@@ -16,8 +16,8 @@
 //! - SHA3-256: domain-separated digest is deterministic, distinguishes
 //!   tag/payload boundary, and matches FIPS 202 KATs (in unit tests).
 
-use suwappu_crypto::{bls, hash, mldsa, mlkem};
 use proptest::prelude::*;
+use suwappu_crypto::{bls, hash, mldsa, mlkem};
 
 proptest! {
     #![proptest_config(ProptestConfig {

@@ -22,7 +22,9 @@
 //! cases in its own sprint; S20 confirms they compose without seams.
 
 use suwappu_authority::{AuthorityMember, AuthorityRegistry, AUTHORITY_STAKE_THRESHOLD_SUWAPPU};
-use suwappu_consensus::{cert_at, commit_leader, AuthorityId, CertHash, Certificate, DagStore, Round};
+use suwappu_consensus::{
+    cert_at, commit_leader, AuthorityId, CertHash, Certificate, DagStore, Round,
+};
 use suwappu_crypto::mldsa;
 use suwappu_execution::{
     execute_block, ratify_checkpoint, sign_checkpoint, Block, Checkpoint, CheckpointSignature,

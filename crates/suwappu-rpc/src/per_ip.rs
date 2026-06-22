@@ -34,8 +34,8 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use suwappu_mempool::LeakyBucket;
 use serde_json::Value;
+use suwappu_mempool::LeakyBucket;
 
 use crate::{error::RpcError, types::JsonRpcResponse};
 
