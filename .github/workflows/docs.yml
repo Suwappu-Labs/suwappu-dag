@@ -2,9 +2,9 @@ name: docs
 
 # Publish rustdoc + TypeDoc to GitHub Pages on every push to main.
 # The Pages site lives at:
-#   https://globalsettlementnetwork.github.io/gsx-dag/
+#   https://suwappu-labs.github.io/suwappu-dag/
 #     rust/         — cargo doc output (workspace, no private items)
-#     ts/           — TypeDoc for @gsx/client
+#     ts/           — TypeDoc for @suwappu/client
 #
 # Pre-req: org-admin enabled GitHub Pages with source = GitHub Actions.
 on:
@@ -33,12 +33,12 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Setup gsx-db deploy key
+      - name: Setup suwappu-db deploy key
         env:
-          GSX_DB_DEPLOY_KEY: ${{ secrets.GSX_DB_DEPLOY_KEY }}
+          SUWAPPU_DB_DEPLOY_KEY: ${{ secrets.SUWAPPU_DB_DEPLOY_KEY }}
         run: |
           mkdir -p ~/.ssh
-          echo "$GSX_DB_DEPLOY_KEY" > ~/.ssh/id_ed25519
+          echo "$SUWAPPU_DB_DEPLOY_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan github.com >> ~/.ssh/known_hosts
 
@@ -56,16 +56,16 @@ jobs:
         run: |
           cargo doc --workspace --no-deps
           # Pages root convention: an index page that redirects to the
-          # main crate doc. `gsx-node` is the integration crate; pick
+          # main crate doc. `suwappu-node` is the integration crate; pick
           # that as the default.
           mkdir -p target/pages/rust
           cp -r target/doc/* target/pages/rust/
           cat > target/pages/rust/index.html <<'EOF'
           <!doctype html>
           <meta charset="utf-8">
-          <title>gsx-dag rustdoc</title>
-          <meta http-equiv="refresh" content="0; url=gsx_node/index.html">
-          <p>Redirecting to <a href="gsx_node/index.html">gsx_node</a>...</p>
+          <title>suwappu-dag rustdoc</title>
+          <meta http-equiv="refresh" content="0; url=suwappu_node/index.html">
+          <p>Redirecting to <a href="suwappu_node/index.html">suwappu_node</a>...</p>
           EOF
 
       - uses: actions/setup-node@v6
@@ -78,7 +78,7 @@ jobs:
           npm install --no-audit --no-fund
           npx typedoc --out ../../target/pages/ts src/index.ts \
               --readme README.md \
-              --name '@gsx/client'
+              --name '@suwappu/client'
 
       - name: Landing page
         run: |
@@ -86,19 +86,19 @@ jobs:
           cat > target/pages/index.html <<'EOF'
           <!doctype html>
           <meta charset="utf-8">
-          <title>gsx-dag documentation</title>
+          <title>suwappu-dag documentation</title>
           <style>
             body { font: 16px system-ui; max-width: 640px; margin: 4em auto; padding: 0 1em; line-height: 1.6; }
             code { background: #f4f4f4; padding: 0.1em 0.4em; border-radius: 3px; }
             a { color: #06c; }
           </style>
-          <h1>gsx-dag — generated documentation</h1>
-          <p>Auto-published from <a href="https://github.com/GlobalSettlementNetwork/gsx-dag">main</a> on every merge.</p>
+          <h1>suwappu-dag — generated documentation</h1>
+          <p>Auto-published from <a href="https://github.com/Suwappu-Labs/suwappu-dag">main</a> on every merge.</p>
           <ul>
             <li><a href="rust/">Rust API docs</a> — every workspace crate, public surface only.</li>
-            <li><a href="ts/">TypeScript SDK docs</a> — @gsx/client.</li>
+            <li><a href="ts/">TypeScript SDK docs</a> — @suwappu/client.</li>
           </ul>
-          <p>See also: the <a href="https://github.com/GlobalSettlementNetwork/gsx-dag#readme">project README</a>, the <a href="https://github.com/GlobalSettlementNetwork/gsx-dag/blob/main/DEVNET.md">devnet quickstart</a>, and the <a href="https://github.com/GlobalSettlementNetwork/gsx-dag/tree/main/docs">full docs tree</a>.</p>
+          <p>See also: the <a href="https://github.com/Suwappu-Labs/suwappu-dag#readme">project README</a>, the <a href="https://github.com/Suwappu-Labs/suwappu-dag/blob/main/DEVNET.md">devnet quickstart</a>, and the <a href="https://github.com/Suwappu-Labs/suwappu-dag/tree/main/docs">full docs tree</a>.</p>
           EOF
 
       - uses: actions/upload-pages-artifact@v3

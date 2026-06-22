@@ -14,8 +14,8 @@ if [[ $# -lt 2 ]]; then
     cat <<EOF
 usage: $(basename "$0") <authority_id> <operator_label>
 
-Creates an IAM user gsx-testnet-operator-<label> with write access
-to s3://gsx-dag-testnet-validator-uploads/uploads/<authority_id>/.
+Creates an IAM user suwappu-testnet-operator-<label> with write access
+to s3://suwappu-dag-testnet-validator-uploads/uploads/<authority_id>/.
 
 The operator runs their validator on their own hardware, configures
 it to upload rotated events.ndjson to that prefix every hour, and
@@ -42,9 +42,9 @@ if ! [[ "$LABEL" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
     exit 1
 fi
 
-USER_NAME="gsx-testnet-operator-${LABEL}"
-POLICY_NAME="gsx-testnet-operator-${LABEL}-upload"
-BUCKET="gsx-dag-testnet-validator-uploads"
+USER_NAME="suwappu-testnet-operator-${LABEL}"
+POLICY_NAME="suwappu-testnet-operator-${LABEL}-upload"
+BUCKET="suwappu-dag-testnet-validator-uploads"
 
 # Render the policy from the template (which has AUTHORITY_ID_PLACEHOLDER).
 POLICY_DOC=$(cat <<EOF
@@ -92,7 +92,7 @@ let us read it back.
 
   Next steps for the operator:
     1. Read docs/testnet/VALIDATOR-OPERATORS.md
-    2. Configure their gsx-node to rotate events.ndjson hourly
+    2. Configure their suwappu-node to rotate events.ndjson hourly
     3. Configure the upload sidecar with the credentials above
 ================================================================
 EOF

@@ -15,17 +15,17 @@ PR for `terraform/devnet/{dns,alb,acm,waf}.tf`].
   - `sa-east-1` (authority_id = 3)
 - Per-instance:
   - Public EIP (validators reach each other by EIP).
-  - 50 GB gp3 EBS attached at `/dev/sdf`, mounted at `/var/lib/gsx`.
+  - 50 GB gp3 EBS attached at `/dev/sdf`, mounted at `/var/lib/suwappu`.
     Carries consensus state + `events.ndjson` + the per-region
     ML-DSA/BLS secret keys. `prevent_destroy = true` — accidental
     `terraform destroy` cannot wipe it.
   - Security group opens ports 9090 (peer), 9091 (client), 9092
     (RPC) to `0.0.0.0/0`. Port 9093 (Prometheus metrics) is
     LOCALHOST-ONLY.
-  - IAM role with S3 read access to `gsx-dag-devnet-artifacts`,
+  - IAM role with S3 read access to `suwappu-dag-devnet-artifacts`,
     `s3:PutObject` to the `logs/` prefix, SSM Session Manager,
     and CloudWatch agent push.
-- Shared `gsx-dag-devnet-artifacts` S3 bucket (us-east-1) with
+- Shared `suwappu-dag-devnet-artifacts` S3 bucket (us-east-1) with
   lifecycle rules for CodeBuild sources + log tiering.
 - CloudWatch billing alarm at `$500/mo` published to an SNS topic;
   ops email is the only subscriber.
@@ -48,7 +48,7 @@ Prerequisites:
 ```sh
 # 1. Real ML-DSA-65 faucet keypair — only the faucet authority uses a
 #    real key. Validator-side keys stay as placeholders for now.
-cargo build --release -p gsx-crypto --bin gsx-keygen  # if not yet built
+cargo build --release -p suwappu-crypto --bin suwappu-keygen  # if not yet built
 ./scripts/devnet/gen-genesis.py --out-dir ./target/devnet/keys
 
 # 2. Upload genesis + keys to S3. After `terraform apply` runs at least
@@ -59,19 +59,19 @@ cargo build --release -p gsx-crypto --bin gsx-keygen  # if not yet built
 #       d. Uncomment cloud-init and re-apply (forces user-data update +
 #          instance replacement; persistent EBS survives).
 #    OR run the bootstrap once manually:
-aws s3 cp ./target/<arch>/release/gsx-node \
-    s3://gsx-dag-devnet-artifacts/bin/gsx-node \
+aws s3 cp ./target/<arch>/release/suwappu-node \
+    s3://suwappu-dag-devnet-artifacts/bin/suwappu-node \
     --profile gsn
-aws s3 sync ./target/devnet/keys/ s3://gsx-dag-devnet-artifacts/keys/ \
+aws s3 sync ./target/devnet/keys/ s3://suwappu-dag-devnet-artifacts/keys/ \
     --profile gsn
 aws s3 cp ./target/devnet/keys/genesis.toml \
-    s3://gsx-dag-devnet-artifacts/genesis/genesis.toml --profile gsn
+    s3://suwappu-dag-devnet-artifacts/genesis/genesis.toml --profile gsn
 ```
 
 Apply:
 
 ```sh
-BILLING_ALARM_EMAIL=ops@globalsettlement.com \
+BILLING_ALARM_EMAIL=ops@suwappu.bot \
   ./scripts/devnet/deploy.sh apply
 ```
 
@@ -87,7 +87,7 @@ Post-apply:
 # Verify mesh is up.
 for ip in $(./scripts/devnet/deploy.sh output -json validators | jq -r '.[].public_ip'); do
   curl -fsS -X POST -H 'Content-Type: application/json' \
-       -d '{"jsonrpc":"2.0","id":1,"method":"gsx_getEpoch"}' \
+       -d '{"jsonrpc":"2.0","id":1,"method":"suwappu_getEpoch"}' \
        "http://$ip:9092/" | jq -r '.result.latest_committed_round'
 done
 ```

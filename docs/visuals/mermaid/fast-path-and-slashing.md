@@ -1,7 +1,7 @@
 # Fast path + equivocation slashing
 
-Covers `crates/gsx-fastpath/` and the daemon-side handler at
-`crates/gsx-node/src/daemon.rs::handle_fastpath_cert` (~lines 499-820).
+Covers `crates/suwappu-fastpath/` and the daemon-side handler at
+`crates/suwappu-node/src/daemon.rs::handle_fastpath_cert` (~lines 499-820).
 Paper §6.4. Sprint exit gates: DAG-S8 (lane), DAG-S9 (slashing).
 
 ```mermaid

@@ -1,4 +1,4 @@
-# cargo-deny config for gsx-dag
+# cargo-deny config for suwappu-dag
 # Enforces dependency hygiene at the workspace level.
 
 [graph]
@@ -21,11 +21,11 @@ ignore = [
     # Re-check: 2026-Q3.
     "RUSTSEC-2024-0436",
     # `rustls-pemfile` is unmaintained; pulled in transitively by
-    # `reqwest 0.11` via `gsxdb-bridge`. No known vulnerabilities.
-    # Gate: gsx-db's gsxdb-bridge bumps to reqwest 0.12 (which uses
+    # `reqwest 0.11` via `suwappudb-bridge`. No known vulnerabilities.
+    # Gate: suwappu-db's suwappudb-bridge bumps to reqwest 0.12 (which uses
     # rustls-pki-types instead). Tracked at
     # https://github.com/rustls/pemfile/issues/61.
-    # Re-check: when gsx-db releases v0.2.0.
+    # Re-check: when suwappu-db releases v0.2.0.
     "RUSTSEC-2025-0134",
     # `bincode` (the entire crate, all versions) is unmaintained. The
     # advisory was filed against bincode 1.x and ALSO covers 2.x — F4
@@ -40,6 +40,15 @@ ignore = [
     # added precisely to make this future migration detectable.
     # Re-check: 2026-Q4.
     "RUSTSEC-2025-0141",
+    # pqcrypto-{mlkem,traits,internals,mldsa} unmaintained: upstream PQClean
+    # archived (2026). No vulnerability — these are the ML-KEM-768 / ML-DSA-65
+    # (FIPS 203/204) bindings central to the chain's PQ consensus + LTP. The
+    # pure-Rust `ml-dsa`/`ml-kem` (RustCrypto) crates are the migration target;
+    # until they're production-ready, the PQClean-backed impls are the reference.
+    "RUSTSEC-2026-0161",
+    "RUSTSEC-2026-0162",
+    "RUSTSEC-2026-0163",
+    "RUSTSEC-2026-0166",
 ]
 
 [licenses]
@@ -57,7 +66,7 @@ allow = [
     "Zlib",
     # webpki-roots ships the Mozilla CA root list under CDLA-Permissive-2.0,
     # which is the OSI/SPDX-listed Community Data License. Pulled in via
-    # reqwest/ureq -> gsxdb-bridge.
+    # reqwest/ureq -> suwappudb-bridge.
     "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.8
@@ -78,7 +87,7 @@ unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = [
-    # gsx-db state substrate (paper §7.4). Consumed at v0.1.0 by
-    # gsx-execution's GsxDbSubstrate adapter.
-    "https://github.com/GlobalSettlementNetwork/gsx-db",
+    # suwappu-db state substrate (paper §7.4). Consumed at v0.1.0 by
+    # suwappu-execution's SuwappuDbSubstrate adapter.
+    "https://github.com/Suwappu-Labs/suwappu-db",
 ]

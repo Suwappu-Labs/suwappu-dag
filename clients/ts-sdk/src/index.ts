@@ -1,8 +1,8 @@
 /**
- * `@gsx/client` — TypeScript client SDK for the gsx-dag JSON-RPC query API.
+ * `@suwappu/client` — TypeScript client SDK for the suwappu-dag JSON-RPC query API.
  *
- * Wraps the JSON-RPC 2.0 methods exposed by `gsx-rpc` (bound into the
- * daemon by `crates/gsx-node/src/rpc_adapter.rs`). The current method
+ * Wraps the JSON-RPC 2.0 methods exposed by `suwappu-rpc` (bound into the
+ * daemon by `crates/suwappu-node/src/rpc_adapter.rs`). The current method
  * surface is read-only (Phase 2.1 MVP):
  *
  * - {@link Client.getEpoch}
@@ -14,7 +14,7 @@
  *
  * @example
  * ```ts
- * import { Client } from "@gsx/client";
+ * import { Client } from "@suwappu/client";
  *
  * const client = new Client("http://127.0.0.1:9092");
  * const epoch = await client.getEpoch();
@@ -136,7 +136,7 @@ export interface ClientOptions {
 }
 
 /**
- * JSON-RPC client targeting a single gsx-dag node's RPC endpoint.
+ * JSON-RPC client targeting a single suwappu-dag node's RPC endpoint.
  *
  * Construction is cheap (no I/O); transport errors surface from the
  * first method call as {@link TransportError}. The auto-incrementing
@@ -164,17 +164,17 @@ export class Client {
 
   /** Current epoch snapshot. */
   async getEpoch(): Promise<EpochView> {
-    return this.call<EpochView>("gsx_getEpoch");
+    return this.call<EpochView>("suwappu_getEpoch");
   }
 
   /** Ordered list of seated Authority Ring members. */
   async getAuthorityRegistry(): Promise<AuthorityMemberView[]> {
-    return this.call<AuthorityMemberView[]>("gsx_getAuthorityRegistry");
+    return this.call<AuthorityMemberView[]>("suwappu_getAuthorityRegistry");
   }
 
   /** Ordered list of seated Validator Ring members. */
   async getValidatorRegistry(): Promise<ValidatorMemberView[]> {
-    return this.call<ValidatorMemberView[]>("gsx_getValidatorRegistry");
+    return this.call<ValidatorMemberView[]>("suwappu_getValidatorRegistry");
   }
 
   /**
@@ -184,7 +184,7 @@ export class Client {
    */
   async getStake(authorityId: number): Promise<StakeEntry | null> {
     try {
-      return await this.call<StakeEntry>("gsx_getStake", {
+      return await this.call<StakeEntry>("suwappu_getStake", {
         authority_id: authorityId,
       });
     } catch (err) {
@@ -209,7 +209,7 @@ export class Client {
           ? address
           : `0x${address}`
         : `0x${bytesToHex(address)}`;
-    return this.call<BalanceView>("gsx_getBalance", { address: hexAddr });
+    return this.call<BalanceView>("suwappu_getBalance", { address: hexAddr });
   }
 
   /**
@@ -219,7 +219,7 @@ export class Client {
    */
   async getBlock(round: number): Promise<BlockView | null> {
     try {
-      return await this.call<BlockView>("gsx_getBlock", { round });
+      return await this.call<BlockView>("suwappu_getBlock", { round });
     } catch (err) {
       if (err instanceof RpcError && err.code === -32000) return null;
       throw err;
@@ -235,7 +235,7 @@ export class Client {
    *      This SDK doesn't bundle bincode (a Rust serde wire format)
    *      yet; a typed helper that wraps this lands in a follow-up.
    *   2. Computing the signing digest
-   *      `blake3(b"GSX_INTENT_V1" || network_id_bytes || intent_bincode)`
+   *      `blake3(b"SUWAPPU_INTENT_V1" || network_id_bytes || intent_bincode)`
    *      and signing it with ML-DSA-65.
    *   3. Computing `blake3(public_key_bytes)` for `signerPubkeyHash`.
    *
@@ -254,7 +254,7 @@ export class Client {
       signer_pubkey_hash: hexParam(signerPubkeyHash),
     };
     const ack = await this.call<{ tx_hash: string }>(
-      "gsx_submitIntent",
+      "suwappu_submitIntent",
       params,
     );
     return hexToBytes(ack.tx_hash);
@@ -278,7 +278,7 @@ export class Client {
           : `0x${txHash}`
         : `0x${bytesToHex(txHash)}`;
     try {
-      return await this.call<TransactionView>("gsx_getTransaction", {
+      return await this.call<TransactionView>("suwappu_getTransaction", {
         tx_hash: hexHash,
       });
     } catch (err) {
@@ -476,7 +476,7 @@ export class Client {
 
 /**
  * Lower-case hex encoder for `Uint8Array`. No `0x` prefix.
- * Hand-rolled to keep `@gsx/client` zero-runtime-dep — `Buffer` is
+ * Hand-rolled to keep `@suwappu/client` zero-runtime-dep — `Buffer` is
  * Node-only and we want browser compatibility.
  */
 function bytesToHex(bytes: Uint8Array): string {

@@ -1,7 +1,7 @@
 # Testnet points formula
 
 The points-accumulator daemon (foundation-operated; lands in a
-follow-up PR as `crates/gsx-validator-program/`) computes
+follow-up PR as `crates/suwappu-validator-program/`) computes
 per-validator weekly points from event logs uploaded to S3 + the
 foundation's own uptime probes.
 
@@ -54,7 +54,7 @@ whitepaper (see `docs/whitepaper/`).
 ### Audit
 
 - Weekly leaderboard published at
-  `https://testnet.gsx.globalsettlement.com/leaderboard`.
+  `https://testnet.suwappu.bot/leaderboard`.
 - Per-operator detail page: `/leaderboard/<authority_id>`.
   Includes the raw counts that fed the formula so any operator
   can sanity-check their own.
@@ -85,9 +85,9 @@ whitepaper (see `docs/whitepaper/`).
 
 ## Reference implementation
 
-`crates/gsx-validator-program/` (forthcoming) is the daemon. It
+`crates/suwappu-validator-program/` (forthcoming) is the daemon. It
 runs on the EC2 in `terraform/testnet/validator-program.tf`,
-reads from `s3://gsx-dag-testnet-validator-uploads/`, writes to
+reads from `s3://suwappu-dag-testnet-validator-uploads/`, writes to
 the program RDS. The leaderboard HTTP server reads from the
 RDS.
 

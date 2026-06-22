@@ -8,7 +8,7 @@
  * a fresh devnet — useful as a smoke test).
  */
 
-import { Client } from "@gsx/client";
+import { Client } from "@suwappu/client";
 
 const addrArg =
   process.argv[2] ?? "0x0000000000000000000000000000000000000000";

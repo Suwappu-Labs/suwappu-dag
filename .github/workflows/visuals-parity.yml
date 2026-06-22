@@ -17,23 +17,23 @@ on:
 
 jobs:
   parity:
-    name: docs/visuals/ parity vs gsx-lattice-protocol
+    name: docs/visuals/ parity vs suwappu-lattice-protocol
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - name: Checkout gsx-dag
+      - name: Checkout suwappu-dag
         uses: actions/checkout@v5
         with:
-          path: gsx-dag
+          path: suwappu-dag
 
-      - name: Checkout gsx-lattice-protocol (sibling layout)
+      - name: Checkout suwappu-lattice-protocol (sibling layout)
         uses: actions/checkout@v5
         with:
-          repository: GlobalSettlementNetwork/gsx-lattice-protocol
-          path: gsx-lattice-protocol
+          repository: Suwappu-Labs/suwappu-lattice-protocol
+          path: suwappu-lattice-protocol
           # If the LTP repo is private, set a GH_PAT secret and uncomment:
           # token: ${{ secrets.GH_PAT }}
 
       - name: Run parity check
-        working-directory: gsx-dag
-        run: ./scripts/check-visuals-parity.sh ../gsx-lattice-protocol
+        working-directory: suwappu-dag
+        run: ./scripts/check-visuals-parity.sh ../suwappu-lattice-protocol

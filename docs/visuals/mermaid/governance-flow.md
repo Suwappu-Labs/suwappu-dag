@@ -1,6 +1,6 @@
 # Governance flow — Phase G2 (current)
 
-Covers `crates/gsx-node/src/daemon.rs::apply_governance_intent` end-to-end,
+Covers `crates/suwappu-node/src/daemon.rs::apply_governance_intent` end-to-end,
 the `pending_governance` queue (#18), and the `pending_stake` deferred-
 activation site (#32). Paper §14. Closed in DAG-S25 + the post-S25 hot-fix
 chain.

@@ -1,4 +1,4 @@
-# Local 4-node gsx-dag devnet.
+# Local 4-node suwappu-dag devnet.
 #
 # Driven by `scripts/devnet-local.sh up`, which first runs
 # `scripts/gen-devnet-genesis.py` to populate ./target/devnet/ with
@@ -11,18 +11,18 @@
 #
 # Once up, exercise it from the host:
 #   curl -sX POST http://127.0.0.1:9092 -H 'content-type: application/json' \
-#     -d '{"jsonrpc":"2.0","id":1,"method":"gsx_getEpoch","params":null}'
+#     -d '{"jsonrpc":"2.0","id":1,"method":"suwappu_getEpoch","params":null}'
 # Or run an example:
-#   cargo run -p gsx-client --example submit_transfer
+#   cargo run -p suwappu-client --example submit_transfer
 # (Track C2 ships the examples.)
 
 services:
   v0:
     build: .
-    image: gsx-dag:devnet
-    container_name: gsx-devnet-v0
+    image: suwappu-dag:devnet
+    container_name: suwappu-devnet-v0
     networks:
-      gsxnet:
+      suwappunet:
         ipv4_address: 172.30.0.10
     ports:
       # Host-exposed JSON-RPC + client-listen on v0 only (so an
@@ -30,58 +30,58 @@ services:
       - "9092:9092"   # JSON-RPC
       - "9091:9091"   # TCP client-listen
     volumes:
-      - ./target/devnet/v0:/etc/gsx:ro
-      - ./target/devnet/genesis.toml:/etc/gsx/genesis.toml:ro
-      - v0-logs:/var/log/gsx
-    command: ["--config", "/etc/gsx/node.toml"]
+      - ./target/devnet/v0:/etc/suwappu:ro
+      - ./target/devnet/genesis.toml:/etc/suwappu/genesis.toml:ro
+      - v0-logs:/var/log/suwappu
+    command: ["--config", "/etc/suwappu/node.toml"]
     healthcheck:
       test: ["CMD", "curl", "-fsS", "-X", "POST",
              "http://127.0.0.1:9092",
              "-H", "content-type: application/json",
-             "-d", '{"jsonrpc":"2.0","id":1,"method":"gsx_getEpoch","params":null}']
+             "-d", '{"jsonrpc":"2.0","id":1,"method":"suwappu_getEpoch","params":null}']
       interval: 5s
       timeout: 2s
       retries: 12
 
   v1:
-    image: gsx-dag:devnet
-    container_name: gsx-devnet-v1
+    image: suwappu-dag:devnet
+    container_name: suwappu-devnet-v1
     networks:
-      gsxnet:
+      suwappunet:
         ipv4_address: 172.30.0.11
     volumes:
-      - ./target/devnet/v1:/etc/gsx:ro
-      - ./target/devnet/genesis.toml:/etc/gsx/genesis.toml:ro
-      - v1-logs:/var/log/gsx
-    command: ["--config", "/etc/gsx/node.toml"]
+      - ./target/devnet/v1:/etc/suwappu:ro
+      - ./target/devnet/genesis.toml:/etc/suwappu/genesis.toml:ro
+      - v1-logs:/var/log/suwappu
+    command: ["--config", "/etc/suwappu/node.toml"]
     depends_on:
       - v0
 
   v2:
-    image: gsx-dag:devnet
-    container_name: gsx-devnet-v2
+    image: suwappu-dag:devnet
+    container_name: suwappu-devnet-v2
     networks:
-      gsxnet:
+      suwappunet:
         ipv4_address: 172.30.0.12
     volumes:
-      - ./target/devnet/v2:/etc/gsx:ro
-      - ./target/devnet/genesis.toml:/etc/gsx/genesis.toml:ro
-      - v2-logs:/var/log/gsx
-    command: ["--config", "/etc/gsx/node.toml"]
+      - ./target/devnet/v2:/etc/suwappu:ro
+      - ./target/devnet/genesis.toml:/etc/suwappu/genesis.toml:ro
+      - v2-logs:/var/log/suwappu
+    command: ["--config", "/etc/suwappu/node.toml"]
     depends_on:
       - v0
 
   v3:
-    image: gsx-dag:devnet
-    container_name: gsx-devnet-v3
+    image: suwappu-dag:devnet
+    container_name: suwappu-devnet-v3
     networks:
-      gsxnet:
+      suwappunet:
         ipv4_address: 172.30.0.13
     volumes:
-      - ./target/devnet/v3:/etc/gsx:ro
-      - ./target/devnet/genesis.toml:/etc/gsx/genesis.toml:ro
-      - v3-logs:/var/log/gsx
-    command: ["--config", "/etc/gsx/node.toml"]
+      - ./target/devnet/v3:/etc/suwappu:ro
+      - ./target/devnet/genesis.toml:/etc/suwappu/genesis.toml:ro
+      - v3-logs:/var/log/suwappu
+    command: ["--config", "/etc/suwappu/node.toml"]
     depends_on:
       - v0
 
@@ -89,35 +89,35 @@ services:
     # Backing store for the indexer (A5). Not started by default —
     # bring up with `docker compose --profile indexer up`.
     image: postgres:16-alpine
-    container_name: gsx-devnet-postgres
+    container_name: suwappu-devnet-postgres
     profiles: [indexer]
     networks:
-      gsxnet:
+      suwappunet:
         ipv4_address: 172.30.0.20
     environment:
-      POSTGRES_USER: gsx
-      POSTGRES_PASSWORD: gsx
-      POSTGRES_DB: gsx_indexer
+      POSTGRES_USER: suwappu
+      POSTGRES_PASSWORD: suwappu
+      POSTGRES_DB: suwappu_indexer
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
 
   indexer:
-    # gsx-indexer (A5). Tails v0's WebSocket subscription and
+    # suwappu-indexer (A5). Tails v0's WebSocket subscription and
     # persists committed blocks to Postgres. Bring up alongside
     # postgres via `docker compose --profile indexer up`.
-    image: gsx-dag:devnet
-    container_name: gsx-devnet-indexer
+    image: suwappu-dag:devnet
+    container_name: suwappu-devnet-indexer
     profiles: [indexer]
     networks:
-      gsxnet:
+      suwappunet:
         ipv4_address: 172.30.0.21
-    entrypoint: ["/usr/local/bin/gsx-indexer"]
+    entrypoint: ["/usr/local/bin/suwappu-indexer"]
     command: [
       "--ws-url", "ws://172.30.0.10:9092/ws",
       "--listen", "0.0.0.0:9093",
-      "--database-url", "postgres://gsx:gsx@172.30.0.20:5432/gsx_indexer",
+      "--database-url", "postgres://suwappu:suwappu@172.30.0.20:5432/suwappu_indexer",
     ]
     ports:
       - "9093:9093"
@@ -126,7 +126,7 @@ services:
       - postgres
 
 networks:
-  gsxnet:
+  suwappunet:
     driver: bridge
     ipam:
       config:

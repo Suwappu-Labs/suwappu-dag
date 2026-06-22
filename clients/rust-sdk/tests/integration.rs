@@ -1,20 +1,20 @@
-//! Integration tests for the gsx-client SDK.
+//! Integration tests for the suwappu-client SDK.
 //!
 //! Stand up a real axum JSON-RPC server on a loopback port that mimics
-//! the gsx-rpc method surface, then drive `Client` against it. No
+//! the suwappu-rpc method surface, then drive `Client` against it. No
 //! `mockito` / wiremock dep — keeps the dep graph minimal.
 
 use std::{net::SocketAddr, sync::Arc};
 
 use axum::{routing::post, Json, Router};
-use gsx_client::{
+use serde_json::{json, Value};
+use suwappu_client::{
     AuthorityMemberView, BalanceView, BlockView, Client, EpochView, Error, StakeEntry,
     TransactionView, ValidatorMemberView,
 };
-use serde_json::{json, Value};
 use tokio::net::TcpListener;
 
-/// Spawn a mock JSON-RPC server that recognizes the four gsx_*
+/// Spawn a mock JSON-RPC server that recognizes the four suwappu_*
 /// methods. Returns the bound address.
 async fn spawn_mock_server() -> SocketAddr {
     let app = Router::new().route(
@@ -23,24 +23,24 @@ async fn spawn_mock_server() -> SocketAddr {
             let method = req["method"].as_str().unwrap_or("");
             let id = req["id"].clone();
             let result = match method {
-                "gsx_getEpoch" => Some(json!({
+                "suwappu_getEpoch" => Some(json!({
                     "current": 7,
                     "last_boundary_round": 7168,
                     "rounds_per_epoch": 1024,
                 })),
-                "gsx_getAuthorityRegistry" => Some(json!([
-                    {"id": 0, "stake_gsx": 150_000u64, "public_key_hex": "deadbeef"},
-                    {"id": 1, "stake_gsx": 150_000u64, "public_key_hex": "cafef00d"},
+                "suwappu_getAuthorityRegistry" => Some(json!([
+                    {"id": 0, "stake_suwappu": 150_000u64, "public_key_hex": "deadbeef"},
+                    {"id": 1, "stake_suwappu": 150_000u64, "public_key_hex": "cafef00d"},
                 ])),
-                "gsx_getValidatorRegistry" => Some(json!([
-                    {"id": 0, "stake_gsx": "30000"},
-                    {"id": 1, "stake_gsx": "30000"},
+                "suwappu_getValidatorRegistry" => Some(json!([
+                    {"id": 0, "stake_suwappu": "30000"},
+                    {"id": 1, "stake_suwappu": "30000"},
                 ])),
-                "gsx_getStake" => {
+                "suwappu_getStake" => {
                     let params = &req["params"];
                     let auth_id = params["authority_id"].as_u64().unwrap_or(u64::MAX);
                     if auth_id == 0 || auth_id == 1 {
-                        Some(json!({"id": auth_id, "stake_gsx": "30000"}))
+                        Some(json!({"id": auth_id, "stake_suwappu": "30000"}))
                     } else {
                         return Json(json!({
                             "jsonrpc": "2.0",
@@ -52,7 +52,7 @@ async fn spawn_mock_server() -> SocketAddr {
                         }));
                     }
                 }
-                "gsx_getBalance" => {
+                "suwappu_getBalance" => {
                     let params = &req["params"];
                     let addr_hex = params["address"].as_str().unwrap_or("");
                     let bal = if addr_hex == format!("0x{}", "aa".repeat(20)) {
@@ -62,7 +62,7 @@ async fn spawn_mock_server() -> SocketAddr {
                     };
                     Some(json!({"address": addr_hex, "balance": bal}))
                 }
-                "gsx_getBlock" => {
+                "suwappu_getBlock" => {
                     let params = &req["params"];
                     let round = params["round"].as_u64().unwrap_or(u64::MAX);
                     if round == 42 {
@@ -86,7 +86,7 @@ async fn spawn_mock_server() -> SocketAddr {
                         }));
                     }
                 }
-                "gsx_getTransaction" => {
+                "suwappu_getTransaction" => {
                     let params = &req["params"];
                     let h = params["tx_hash"].as_str().unwrap_or("");
                     if h == format!("0x{}", "cd".repeat(32)) {
@@ -110,7 +110,7 @@ async fn spawn_mock_server() -> SocketAddr {
                         }));
                     }
                 }
-                "gsx_submitIntent" => {
+                "suwappu_submitIntent" => {
                     let params = &req["params"];
                     let pkh = params["signer_pubkey_hash"].as_str().unwrap_or("");
                     if pkh == format!("0x{}", "00".repeat(32)) {
@@ -193,9 +193,9 @@ async fn get_validator_registry_round_trip() {
 
     let vals: Vec<ValidatorMemberView> = client.get_validator_registry().await.unwrap();
     assert_eq!(vals.len(), 2);
-    // u128 round-trips as a decimal string per gsx-rpc's
+    // u128 round-trips as a decimal string per suwappu-rpc's
     // ValidatorMemberView contract.
-    assert_eq!(vals[0].stake_gsx, "30000");
+    assert_eq!(vals[0].stake_suwappu, "30000");
 }
 
 #[tokio::test]
@@ -208,7 +208,7 @@ async fn get_stake_some() {
         s,
         Some(StakeEntry {
             id: 1,
-            stake_gsx: "30000".into()
+            stake_suwappu: "30000".into()
         })
     );
 }
@@ -289,7 +289,7 @@ async fn method_not_found_surfaces_rpc_error() {
     let client = client_for(addr);
 
     let err = client
-        .call::<Value>("gsx_bogus", Value::Null)
+        .call::<Value>("suwappu_bogus", Value::Null)
         .await
         .expect_err("bogus method should error");
     match err {

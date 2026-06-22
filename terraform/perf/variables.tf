@@ -17,9 +17,9 @@ variable "ssh_public_key" {
 }
 
 variable "artifact_bucket" {
-  description = "S3 bucket holding gsx-node musl binary + genesis manifest. Created in this stack."
+  description = "S3 bucket holding suwappu-node musl binary + genesis manifest. Created in this stack."
   type        = string
-  default     = "gsx-dag-perf-artifacts"
+  default     = "suwappu-dag-perf-artifacts"
 }
 
 variable "consensus_port" {
@@ -37,5 +37,5 @@ variable "client_port" {
 variable "network_id" {
   description = "Cluster identifier baked into the genesis manifest."
   type        = string
-  default     = "gsx-perf-7r"
+  default     = "suwappu-perf-7r"
 }

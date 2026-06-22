@@ -6,10 +6,10 @@
 
 resource "aws_s3_bucket" "status" {
   provider      = aws.us_east_1
-  bucket        = "gsx-dag-testnet-status"
+  bucket        = "suwappu-dag-testnet-status"
   force_destroy = false
 
-  tags = { Name = "gsx-testnet-status" }
+  tags = { Name = "suwappu-testnet-status" }
 }
 
 resource "aws_s3_bucket_public_access_block" "status" {
@@ -23,7 +23,7 @@ resource "aws_s3_bucket_public_access_block" "status" {
 
 resource "aws_cloudfront_origin_access_control" "status" {
   provider                          = aws.us_east_1
-  name                              = "gsx-testnet-status-oac"
+  name                              = "suwappu-testnet-status-oac"
   origin_access_control_origin_type = "s3"
   signing_behavior                  = "always"
   signing_protocol                  = "sigv4"
@@ -33,7 +33,7 @@ resource "aws_cloudfront_distribution" "status" {
   provider            = aws.us_east_1
   enabled             = true
   is_ipv6_enabled     = true
-  comment             = "gsx-testnet status page"
+  comment             = "suwappu-testnet status page"
   default_root_object = "index.html"
   aliases             = ["status.${var.testnet_subdomain}.${var.apex_domain}"]
   price_class         = "PriceClass_100"
@@ -65,7 +65,7 @@ resource "aws_cloudfront_distribution" "status" {
     minimum_protocol_version = "TLSv1.2_2021"
   }
 
-  tags = { Name = "gsx-testnet-status" }
+  tags = { Name = "suwappu-testnet-status" }
 }
 
 resource "aws_s3_bucket_policy" "status" {

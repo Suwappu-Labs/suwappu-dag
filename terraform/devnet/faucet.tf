@@ -10,7 +10,7 @@ resource "aws_vpc" "faucet" {
   provider             = aws.us_east_1
   cidr_block           = "10.43.10.0/24"
   enable_dns_hostnames = true
-  tags                 = { Name = "gsx-devnet-faucet-vpc" }
+  tags                 = { Name = "suwappu-devnet-faucet-vpc" }
 }
 
 resource "aws_subnet" "faucet_public" {
@@ -19,13 +19,13 @@ resource "aws_subnet" "faucet_public" {
   cidr_block              = "10.43.10.0/26"
   map_public_ip_on_launch = true
   availability_zone       = "us-east-1a"
-  tags                    = { Name = "gsx-devnet-faucet-subnet" }
+  tags                    = { Name = "suwappu-devnet-faucet-subnet" }
 }
 
 resource "aws_internet_gateway" "faucet" {
   provider = aws.us_east_1
   vpc_id   = aws_vpc.faucet.id
-  tags     = { Name = "gsx-devnet-faucet-igw" }
+  tags     = { Name = "suwappu-devnet-faucet-igw" }
 }
 
 resource "aws_route_table" "faucet_public" {
@@ -35,7 +35,7 @@ resource "aws_route_table" "faucet_public" {
     cidr_block = "0.0.0.0/0"
     gateway_id = aws_internet_gateway.faucet.id
   }
-  tags = { Name = "gsx-devnet-faucet-rt" }
+  tags = { Name = "suwappu-devnet-faucet-rt" }
 }
 
 resource "aws_route_table_association" "faucet_public" {
@@ -50,8 +50,8 @@ resource "aws_route_table_association" "faucet_public" {
 #   per-IP token bucket gates abuse at the app layer.
 resource "aws_security_group" "faucet" {
   provider    = aws.us_east_1
-  name        = "gsx-devnet-faucet-sg"
-  description = "GSX devnet - faucet ingress"
+  name        = "suwappu-devnet-faucet-sg"
+  description = "SUWAPPU devnet - faucet ingress"
   vpc_id      = aws_vpc.faucet.id
 
   ingress {
@@ -76,12 +76,12 @@ resource "aws_security_group" "faucet" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  tags = { Name = "gsx-devnet-faucet-sg" }
+  tags = { Name = "suwappu-devnet-faucet-sg" }
 }
 
 resource "aws_key_pair" "faucet_operator" {
   provider   = aws.us_east_1
-  key_name   = "gsx-devnet-faucet"
+  key_name   = "suwappu-devnet-faucet"
   public_key = var.ssh_public_key
 }
 
@@ -89,7 +89,7 @@ resource "aws_key_pair" "faucet_operator" {
 # *value* is uploaded out-of-band via:
 #
 #   aws secretsmanager put-secret-value \
-#     --secret-id gsx-devnet/faucet/mldsa-secret-key \
+#     --secret-id suwappu-devnet/faucet/mldsa-secret-key \
 #     --secret-binary fileb://target/devnet/keys/faucet/mldsa.sk \
 #     --profile gsn --region us-east-1
 #
@@ -98,15 +98,15 @@ resource "aws_key_pair" "faucet_operator" {
 # docs/devnet/faucet-key-ceremony.md.
 resource "aws_secretsmanager_secret" "faucet_sk" {
   provider                = aws.us_east_1
-  name                    = "gsx-devnet/faucet/mldsa-secret-key"
-  description             = "ML-DSA-65 secret key for the gsx-devnet faucet authority. Rotate via faucet-key-ceremony.md."
+  name                    = "suwappu-devnet/faucet/mldsa-secret-key"
+  description             = "ML-DSA-65 secret key for the suwappu-devnet faucet authority. Rotate via faucet-key-ceremony.md."
   recovery_window_in_days = 30
-  tags                    = { Name = "gsx-devnet-faucet-mldsa-sk" }
+  tags                    = { Name = "suwappu-devnet-faucet-mldsa-sk" }
 }
 
 resource "aws_iam_role" "faucet" {
   provider = aws.us_east_1
-  name     = "gsx-devnet-faucet-ec2"
+  name     = "suwappu-devnet-faucet-ec2"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -144,7 +144,7 @@ resource "aws_iam_role_policy" "faucet_s3_read" {
       Resource = [
         # The faucet binary + its public-key file ship via the same
         # artifact bucket as the validators.
-        "arn:aws:s3:::${aws_s3_bucket.artifacts.id}/bin/gsx-faucet",
+        "arn:aws:s3:::${aws_s3_bucket.artifacts.id}/bin/suwappu-faucet",
         "arn:aws:s3:::${aws_s3_bucket.artifacts.id}/keys/faucet/mldsa.pk",
       ]
     }]
@@ -165,7 +165,7 @@ resource "aws_iam_role_policy_attachment" "faucet_cw_agent" {
 
 resource "aws_iam_instance_profile" "faucet" {
   provider = aws.us_east_1
-  name     = "gsx-devnet-faucet"
+  name     = "suwappu-devnet-faucet"
   role     = aws_iam_role.faucet.name
 }
 
@@ -212,7 +212,7 @@ resource "aws_instance" "faucet" {
   })
 
   tags = {
-    Name            = "gsx-devnet-faucet"
+    Name            = "suwappu-devnet-faucet"
     "devnet:role"   = "faucet"
     "devnet:region" = "us-east-1"
   }
@@ -222,5 +222,5 @@ resource "aws_eip" "faucet" {
   provider = aws.us_east_1
   instance = aws_instance.faucet.id
   domain   = "vpc"
-  tags     = { Name = "gsx-devnet-faucet-eip" }
+  tags     = { Name = "suwappu-devnet-faucet-eip" }
 }

@@ -1,7 +1,7 @@
 # Authority Ring resilience + standby program
 
 **Status:** Architectural spec ratified from code audit + the
-`gsx-strategy/docs/mainnet-plan.md` Track E + the sale-model
+`suwappu-strategy/docs/mainnet-plan.md` Track E + the sale-model
 Risk Factor §20 ("40 super nodes is a concentrated set; loss of
 multiple participants could impair authority quorum").
 
@@ -9,12 +9,12 @@ multiple participants could impair authority quorum").
 Authority Super Node operators.
 
 **Authoritative inputs:**
-- `crates/gsx-authority/src/lib.rs:35-38` — `AUTHORITY_RING_MIN = 30`,
+- `crates/suwappu-authority/src/lib.rs:35-38` — `AUTHORITY_RING_MIN = 30`,
   `AUTHORITY_RING_MAX = 50`
-- `crates/gsx-consensus/src/commit.rs:61-66` — `quorum_threshold(n)`
-- `crates/gsx-ltp/src/lib.rs:41-43` — `LTP_ATTESTATION_QUORUM_THRESHOLD = 7`,
+- `crates/suwappu-consensus/src/commit.rs:61-66` — `quorum_threshold(n)`
+- `crates/suwappu-ltp/src/lib.rs:41-43` — `LTP_ATTESTATION_QUORUM_THRESHOLD = 7`,
   `LTP_ATTESTATION_QUORUM_SIZE = 9`
-- `crates/gsx-ltp/src/attestation.rs:61-69` — `Corridor` struct
+- `crates/suwappu-ltp/src/attestation.rs:61-69` — `Corridor` struct
   requires exactly 9 members
 - `docs/iq/IQ-001-quorum-formula.md` — ratified quorum formula
 
@@ -25,7 +25,7 @@ Authority Super Node operators.
 The Authority Ring's safety + liveness depends on a **canonical
 2f+1 BFT quorum** computed by
 `quorum_threshold(n) = n - (n - 1) / 3` (line 65 of
-`crates/gsx-consensus/src/commit.rs`).
+`crates/suwappu-consensus/src/commit.rs`).
 
 For the production active-set sizes:
 
@@ -43,7 +43,7 @@ in §6.
 
 The **LTP cross-chain corridor** is a **separate 9-member subset**
 of the Authority Ring (`Corridor` struct at
-`crates/gsx-ltp/src/attestation.rs:61-69`), with its own 7-of-9
+`crates/suwappu-ltp/src/attestation.rs:61-69`), with its own 7-of-9
 threshold. Loss of 3+ corridor members halts that specific corridor
 but does **not** halt the L1 chain. Multiple corridors run in
 parallel; each is its own 9-of-N selection from the Ring.
@@ -57,13 +57,13 @@ enforced in code:
 
 | Invariant | Source | Status |
 |---|---|---|
-| Ring size 30 ≤ n ≤ 50 | `crates/gsx-authority/src/lib.rs:35-38` | Hardcoded `const` |
-| Quorum formula = 2f+1 (`n - (n-1)/3`) | `crates/gsx-consensus/src/commit.rs:65` | Ratified per IQ-001 |
-| Corridor size = exactly 9 | `crates/gsx-ltp/src/lib.rs:43` + `attestation.rs:142-147` | `BadCorridorSize` error rejects ≠ 9 |
-| Corridor threshold = 7 | `crates/gsx-ltp/src/lib.rs:41` + `attestation.rs:150-156` | `BelowQuorum` error rejects < 7 signers |
-| Corridor is `Vec<SuperNode>`, `SuperNode.authority: AuthorityId` | `crates/gsx-ltp/src/attestation.rs:48-69` | Corridor is structurally a subset of the Ring |
-| Authority Ring stake threshold = 100,000 GSX | `crates/gsx-authority/src/lib.rs:32` | Per Paper §5.1 |
-| Tier A self-stake = 15,000,000 GSX (sale model) | `gsx-strategy/docs/sources/GSX-Node-Validator-Sale-Model-v2.0.xlsx` Sale Structure | 150× the Paper §5.1 minimum; commitments to "skin in the game" |
+| Ring size 30 ≤ n ≤ 50 | `crates/suwappu-authority/src/lib.rs:35-38` | Hardcoded `const` |
+| Quorum formula = 2f+1 (`n - (n-1)/3`) | `crates/suwappu-consensus/src/commit.rs:65` | Ratified per IQ-001 |
+| Corridor size = exactly 9 | `crates/suwappu-ltp/src/lib.rs:43` + `attestation.rs:142-147` | `BadCorridorSize` error rejects ≠ 9 |
+| Corridor threshold = 7 | `crates/suwappu-ltp/src/lib.rs:41` + `attestation.rs:150-156` | `BelowQuorum` error rejects < 7 signers |
+| Corridor is `Vec<SuperNode>`, `SuperNode.authority: AuthorityId` | `crates/suwappu-ltp/src/attestation.rs:48-69` | Corridor is structurally a subset of the Ring |
+| Authority Ring stake threshold = 100,000 SUWAPPU | `crates/suwappu-authority/src/lib.rs:32` | Per Paper §5.1 |
+| Tier A self-stake = 15,000,000 SUWAPPU (sale model) | `suwappu-strategy/docs/sources/SUWAPPU-Node-Validator-Sale-Model-v2.0.xlsx` Sale Structure | 150× the Paper §5.1 minimum; commitments to "skin in the game" |
 
 **No code change is required to support n=40 at TGE** — the
 production code paths already operate over `n` as a parameter; the
@@ -197,7 +197,7 @@ since they're foundation-internal until activated):
 - 5 standbys: ~$1M/yr
 - 10 standbys: ~$2M/yr
 
-Annual budget allocated from Treasury (20% of 10B GSX = 2B GSX at
+Annual budget allocated from Treasury (20% of 10B SUWAPPU = 2B SUWAPPU at
 $0.10 TGE = $200M reserve, so $1-2M/yr is < 1% of the Treasury and
 sustainable for the full M18-M24+ runway).
 
@@ -268,19 +268,19 @@ in the foundation board's emergency-procedure handbook.
 ## 7. What changes if Authority Ring grows past 50
 
 The `AUTHORITY_RING_MAX = 50` constant at
-`crates/gsx-authority/src/lib.rs:38` is a Paper §5.1 ceiling, NOT
+`crates/suwappu-authority/src/lib.rs:38` is a Paper §5.1 ceiling, NOT
 a Mysticeti-C protocol constraint. The consensus paths handle
 arbitrary `n`.
 
 To raise the ceiling:
 1. Update the `AUTHORITY_RING_MAX` constant (single-line code change)
 2. Foundation governance vote (separate IQ document)
-3. Coordinate with paper revision (gsx-papers)
+3. Coordinate with paper revision (suwappu-papers)
 4. Sale-model update + investor disclosure (Track C C.7)
 
 **Recommendation**: do not raise the ceiling in v1. The 30-50 range
 captures the institutional-infra positioning; raising it to e.g. 100
-shifts gsx-dag toward Cosmos-validator-set shape and weakens the
+shifts suwappu-dag toward Cosmos-validator-set shape and weakens the
 "Canton-grade institutional participation" pitch. Revisit in v1.1+
 based on demand signal.
 
@@ -310,11 +310,11 @@ based on demand signal.
 - **Validator SLA + slashing**: `docs/validator-sla-slashing.md`
   (this doc + slashing doc together cover the full operator-facing
   surface)
-- **Sale model concentration risk**: `gsx-strategy/docs/sources/
-  GSX-Node-Validator-Sale-Model-v2.0.xlsx` Risk Factor §20
-- **Authority Ring code**: `crates/gsx-authority/`
-- **Consensus code**: `crates/gsx-consensus/{commit,joint}.rs`
-- **LTP corridor code**: `crates/gsx-ltp/src/attestation.rs`
+- **Sale model concentration risk**: `suwappu-strategy/docs/sources/
+  SUWAPPU-Node-Validator-Sale-Model-v2.0.xlsx` Risk Factor §20
+- **Authority Ring code**: `crates/suwappu-authority/`
+- **Consensus code**: `crates/suwappu-consensus/{commit,joint}.rs`
+- **LTP corridor code**: `crates/suwappu-ltp/src/attestation.rs`
 - **Track A audit scope**: Trail of Bits consensus audit (A.2, #114)
   is the primary owner of this surface
 

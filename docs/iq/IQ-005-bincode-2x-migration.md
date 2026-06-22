@@ -40,7 +40,7 @@ Per-PR scope:
 1. **`Cargo.toml` + `fuzz/Cargo.toml`**: bump to `bincode = "2"`
    with `features = ["serde", "std"]`,
    `default-features = false`.
-2. **New `crates/gsx-node/src/codec.rs`**: thin shim with
+2. **New `crates/suwappu-node/src/codec.rs`**: thin shim with
    `encode` / `decode` / `encode_frame` / `decode_frame` helpers
    over `bincode::config::legacy()`. Centralizes the codec choice
    so a future cutover is a single change, not a 40-site grep.
@@ -109,7 +109,7 @@ all peers have upgraded, the v1 arm is removed.
 
 ## See also
 
-- [`crates/gsx-node/src/codec.rs`](../../crates/gsx-node/src/codec.rs)
-- [`crates/gsx-node/tests/proptest_wire_decode.rs`](../../crates/gsx-node/tests/proptest_wire_decode.rs) —
+- [`crates/suwappu-node/src/codec.rs`](../../crates/suwappu-node/src/codec.rs)
+- [`crates/suwappu-node/tests/proptest_wire_decode.rs`](../../crates/suwappu-node/tests/proptest_wire_decode.rs) —
   panic-freedom contract extended to the framed surface.
 - [bincode 2.x migration guide](https://github.com/bincode-org/bincode/blob/trunk/docs/migration_guide.md)

@@ -1,4 +1,4 @@
-# Multi-region provider aliases for the gsx-testnet.
+# Multi-region provider aliases for the suwappu-testnet.
 #
 # Diff vs. terraform/devnet/:
 #   - 7 seed regions instead of 4. The set matches the paper's
@@ -23,10 +23,10 @@ terraform {
 
 locals {
   common_tags = {
-    Project    = "gsx-dag"
+    Project    = "suwappu-dag"
     Component  = "testnet"
     ManagedBy  = "terraform"
-    Repository = "GlobalSettlementNetwork/gsx-dag"
+    Repository = "Suwappu-Labs/suwappu-dag"
   }
 }
 

@@ -1,20 +1,20 @@
 # IQ-002 — Indirect (retroactive) commit rule
 
-**Status:** Ratified 2026-05-14 via [gsx-papers#1](https://github.com/GlobalSettlementNetwork/gsx-papers/pull/1)
+**Status:** Ratified 2026-05-14 via [suwappu-papers#1](https://github.com/Suwappu-Labs/suwappu-papers/pull/1)
 **Owner:** consensus
 **Date:** 2026-05-13 (ratified 2026-05-14)
 **Sprint:** DAG-S21.2 ✅
 
 ## Question
 
-Should `gsx-consensus` implement only the direct commit rule (one-round
+Should `suwappu-consensus` implement only the direct commit rule (one-round
 support check) as currently shipped, or also implement the indirect
 (causal-closure / retroactive) commit rule that resolves undecided leader
 slots via later anchors?
 
 ## Background
 
-Current `crates/gsx-consensus/src/commit.rs:93-102`:
+Current `crates/suwappu-consensus/src/commit.rs:93-102`:
 
 ```rust
 pub fn commit_leader(dag: &DagStore, round: Round, n: CommitteeSize) -> Option<CertHash> {
@@ -95,22 +95,22 @@ total-order on the DAG, and the causal-closure walk is monotone.
 
 ## Decision
 
-- [x] Approved by: tomagsx (operator)
+- [x] Approved by: tomasuwappu (operator)
 - [x] Date: 2026-05-14
-- [x] Paper Theorem 2 amendment landed in gsx-papers PR: [GlobalSettlementNetwork/gsx-papers#1](https://github.com/GlobalSettlementNetwork/gsx-papers/pull/1)
+- [x] Paper Theorem 2 amendment landed in suwappu-papers PR: [Suwappu-Labs/suwappu-papers#1](https://github.com/Suwappu-Labs/suwappu-papers/pull/1)
 - [x] Property test `indirect_commit_resolves_undecided_slots` added (10k cases)
 
-**Ratification context.** Code shipped at `crates/gsx-consensus/src/commit.rs:107-202`
+**Ratification context.** Code shipped at `crates/suwappu-consensus/src/commit.rs:107-202`
 (`LeaderStatus`, `try_direct_decide`, `try_indirect_decide`, `decide_slot`,
 `finalize`) with unit tests at lines 388 (inherited-Direct) and 465
 (permanent-Skip). Paper Theorem 2 proof sketch extended to cover both
 direct and indirect decision rules with a monotonicity argument.
-Ratified alongside IQ-001 in the same gsx-papers PR. Tracked at
-[GlobalSettlementNetwork/gsx-dag#24](https://github.com/GlobalSettlementNetwork/gsx-dag/issues/24).
+Ratified alongside IQ-001 in the same suwappu-papers PR. Tracked at
+[Suwappu-Labs/suwappu-dag#24](https://github.com/Suwappu-Labs/suwappu-dag/issues/24).
 
 ## Implementation
 
-- New module `gsx-consensus/src/wave.rs` for the 3-round wave machinery.
+- New module `suwappu-consensus/src/wave.rs` for the 3-round wave machinery.
 - Refactor `commit_leader` into `try_direct_decide`.
 - Add `try_indirect_decide` + `decide_slot`.
 - New proptest `indirect_commit_resolves_undecided_slots` (10k cases).

@@ -1,17 +1,17 @@
-# Cargo workspace configuration for gsx-dag.
+# Cargo workspace configuration for suwappu-dag.
 #
 # `net.git-fetch-with-cli = true` tells cargo to shell out to the
 # system `git` binary for fetching, instead of libgit2. This is
 # required because:
 #
 # - The workspace depends on private repos
-#   (`GlobalSettlementNetwork/gsx-db`).
+#   (`Suwappu-Labs/suwappu-db`).
 # - libgit2 inside cargo does NOT honour the `gh` credential helper or
 #   most credential-store integrations on macOS / Linux.
 # - The system `git` binary, configured by `gh auth login`, succeeds.
 #
 # CI runners get the same treatment: see `.github/workflows/ci.yml`
-# which uses `webfactory/ssh-agent` to register the gsx-db deploy key
+# which uses `webfactory/ssh-agent` to register the suwappu-db deploy key
 # before any cargo invocation.
 
 [net]

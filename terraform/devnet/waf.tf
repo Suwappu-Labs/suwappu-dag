@@ -1,7 +1,7 @@
 # G2 — AWS WAF in front of the public RPC + faucet ALBs.
 #
 # Defense in depth on top of the application-layer per-IP rate
-# limiter (F1, `crates/gsx-rpc/src/per_ip.rs`). WAF gates:
+# limiter (F1, `crates/suwappu-rpc/src/per_ip.rs`). WAF gates:
 #   * Rate-limit per IP at the edge (separate from the app limiter
 #     so a flood doesn't even reach the validator).
 #   * Block obvious abuse — oversize request, malformed
@@ -14,7 +14,7 @@
 
 resource "aws_wafv2_web_acl" "devnet" {
   provider = aws.us_east_1
-  name     = "gsx-devnet-waf"
+  name     = "suwappu-devnet-waf"
   scope    = "REGIONAL"
 
   default_action {
@@ -40,7 +40,7 @@ resource "aws_wafv2_web_acl" "devnet" {
 
     visibility_config {
       cloudwatch_metrics_enabled = true
-      metric_name                = "gsx-devnet-rate-limit-per-ip"
+      metric_name                = "suwappu-devnet-rate-limit-per-ip"
       sampled_requests_enabled   = true
     }
   }
@@ -65,7 +65,7 @@ resource "aws_wafv2_web_acl" "devnet" {
 
     visibility_config {
       cloudwatch_metrics_enabled = true
-      metric_name                = "gsx-devnet-common-rules"
+      metric_name                = "suwappu-devnet-common-rules"
       sampled_requests_enabled   = true
     }
   }
@@ -89,18 +89,18 @@ resource "aws_wafv2_web_acl" "devnet" {
 
     visibility_config {
       cloudwatch_metrics_enabled = true
-      metric_name                = "gsx-devnet-ip-reputation"
+      metric_name                = "suwappu-devnet-ip-reputation"
       sampled_requests_enabled   = true
     }
   }
 
   visibility_config {
     cloudwatch_metrics_enabled = true
-    metric_name                = "gsx-devnet-waf"
+    metric_name                = "suwappu-devnet-waf"
     sampled_requests_enabled   = true
   }
 
-  tags = { Name = "gsx-devnet-waf" }
+  tags = { Name = "suwappu-devnet-waf" }
 }
 
 resource "aws_wafv2_web_acl_association" "rpc" {

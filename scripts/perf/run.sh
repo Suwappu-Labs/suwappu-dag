@@ -28,7 +28,7 @@ OUT="$ROOT/target/perf/run/loadgen-$(date -u +%Y%m%dT%H%M%S).csv"
 echo "[run] target=$TARGET_REGION ($TARGET_IP:$CLIENT_PORT) rate=$RATE dur=${DURATION}s"
 echo "[run] writing $OUT"
 
-"$ROOT/target/perf/gsx-loadgen" \
+"$ROOT/target/perf/suwappu-loadgen" \
   --target "$TARGET_IP:$CLIENT_PORT" \
   --rate "$RATE" \
   --duration "$DURATION" \

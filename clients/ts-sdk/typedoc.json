@@ -2,15 +2,15 @@
   "$schema": "https://typedoc.org/schema.json",
   "entryPoints": ["src/index.ts"],
   "out": "docs-out",
-  "name": "@gsx/client",
+  "name": "@suwappu/client",
   "readme": "README.md",
   "includeVersion": true,
   "excludePrivate": true,
   "excludeInternal": true,
   "githubPages": false,
   "navigationLinks": {
-    "GitHub": "https://github.com/GlobalSettlementNetwork/gsx-dag",
-    "Rust SDK": "https://globalsettlementnetwork.github.io/gsx-dag/rust/gsx_client/",
-    "DEVNET": "https://github.com/GlobalSettlementNetwork/gsx-dag/blob/main/DEVNET.md"
+    "GitHub": "https://github.com/Suwappu-Labs/suwappu-dag",
+    "Rust SDK": "https://suwappu-labs.github.io/suwappu-dag/rust/suwappu_client/",
+    "DEVNET": "https://github.com/Suwappu-Labs/suwappu-dag/blob/main/DEVNET.md"
   }
 }

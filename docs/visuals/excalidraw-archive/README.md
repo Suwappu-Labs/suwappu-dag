@@ -1,6 +1,6 @@
 # Excalidraw archive
 
-Historical hand-drawn dark-mode canvases for the three core GSX layers
+Historical hand-drawn dark-mode canvases for the three core SUWAPPU layers
 (DAG, DB, LTP). **These are retained for reference and live-editing
 workflows only — Mermaid is the canonical visual source going forward.**
 
@@ -14,8 +14,8 @@ renders natively on GitHub + GitBook; Excalidraw requires the web app).
 
 ## What lives here
 
-- `gsx-dag.excalidraw` — hand-drawn variant of the chain stack flow.
-- `gsx-db.excalidraw` — hand-drawn variant of the substrate lattice.
+- `suwappu-dag.excalidraw` — hand-drawn variant of the chain stack flow.
+- `suwappu-db.excalidraw` — hand-drawn variant of the substrate lattice.
 - `ltp.excalidraw` — hand-drawn variant of the transfer lifecycle.
 
 ## Why we don't sync these with Mermaid

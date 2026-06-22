@@ -1,4 +1,4 @@
-# Terraform — gsx-dag AWS infrastructure
+# Terraform — suwappu-dag AWS infrastructure
 
 Targets the **gsn** AWS profile (account `492042618949`, region `us-east-1`).
 
@@ -25,15 +25,15 @@ The S3 state bucket and DynamoDB lock table are created out-of-band before
 
 ```bash
 AWS_PROFILE=gsn aws s3api create-bucket \
-    --bucket gsx-dag-tf-state \
+    --bucket suwappu-dag-tf-state \
     --region us-east-1
 
 AWS_PROFILE=gsn aws s3api put-bucket-versioning \
-    --bucket gsx-dag-tf-state \
+    --bucket suwappu-dag-tf-state \
     --versioning-configuration Status=Enabled
 
 AWS_PROFILE=gsn aws dynamodb create-table \
-    --table-name gsx-dag-tf-locks \
+    --table-name suwappu-dag-tf-locks \
     --attribute-definitions AttributeName=LockID,AttributeType=S \
     --key-schema AttributeName=LockID,KeyType=HASH \
     --billing-mode PAY_PER_REQUEST \

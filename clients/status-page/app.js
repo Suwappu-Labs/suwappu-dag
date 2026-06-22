@@ -1,14 +1,14 @@
-// gsx-devnet status page — vanilla JS, no framework.
+// suwappu-devnet status page — vanilla JS, no framework.
 //
 // Polls every 5 seconds:
-//   - https://rpc.devnet.gsx.globalsettlement.com → gsx_getEpoch
+//   - https://rpc.devnet.suwappu.suwappu.bot → suwappu_getEpoch
 //     (chain head + last-commit-timestamp via the explorer's lens).
-//   - https://faucet.devnet.gsx.globalsettlement.com/health → 200 = up.
+//   - https://faucet.devnet.suwappu.suwappu.bot/health → 200 = up.
 //
 // We don't have per-region tip-round from a single RPC call (the ALB
 // load-balances across the 4 validators). For per-region visibility
 // the status page falls back to the AWS CloudWatch GetMetricData
-// public proxy at status-api.devnet.gsx.globalsettlement.com (G6's
+// public proxy at status-api.devnet.suwappu.suwappu.bot (G6's
 // metrics endpoint; not wired in this v0.1). For now we show:
 //   - One "Cluster tip" tile (cluster-wide, scraped via the ALB).
 //   - One tile per faucet endpoint (alive/down).
@@ -21,8 +21,8 @@
 
 "use strict";
 
-const RPC_URL    = "https://rpc.devnet.gsx.globalsettlement.com";
-const FAUCET_URL = "https://faucet.devnet.gsx.globalsettlement.com";
+const RPC_URL    = "https://rpc.devnet.suwappu.suwappu.bot";
+const FAUCET_URL = "https://faucet.devnet.suwappu.suwappu.bot";
 const POLL_MS    = 5000;
 const TIP_FLAT_THRESHOLD_MS = 60_000;
 
@@ -51,11 +51,11 @@ async function rpcCall(method) {
 async function refresh() {
   const now = Date.now();
 
-  // RPC poll. gsx_getEpoch is cheap; ALB load-balances across the
+  // RPC poll. suwappu_getEpoch is cheap; ALB load-balances across the
   // 4 validators so we see whichever responds first — for overall
   // health, that's what matters.
   try {
-    const epoch = await rpcCall("gsx_getEpoch");
+    const epoch = await rpcCall("suwappu_getEpoch");
     state.epoch = epoch;
     state.lastRpcError = null;
     const tip = epoch.latest_committed_round ?? 0;

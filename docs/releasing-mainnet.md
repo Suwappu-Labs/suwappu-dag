@@ -11,7 +11,7 @@ release artifacts pre-bootstrap, security auditors (Track A),
 exchange-listing reviewers.
 
 **Authoritative inputs:**
-- `gsx-strategy/docs/mainnet-plan.md` Track F.2
+- `suwappu-strategy/docs/mainnet-plan.md` Track F.2
 - Existing `RELEASING.md` (testnet-grade)
 - SLSA Build L3 + in-toto attestation specs
   ([slsa.dev/spec/v1.0/levels](https://slsa.dev/spec/v1.0/levels))
@@ -47,10 +47,10 @@ Mainnet releases publish 4 binaries × 2 target triples =
 
 | Binary | Source crate | Purpose |
 |---|---|---|
-| `gsx-node` | `crates/gsx-node` | Consensus validator daemon |
-| `gsx-l2-sequencer` | `crates/gsx-l2-sequencer` (Track G G4.2) | L2 batch sequencer (post-G4) |
-| `gsx-l2-prover` | `crates/gsx-l2-prover` (Track G G4.1) | SP1 prover daemon (post-G4) |
-| `gsx-bridge-relayer` | `crates/gsx-bridge-relayer` (Track I I.3) | Foundation relayer for the LTP↔Ethereum/Solana bridges (post-I.3) |
+| `suwappu-node` | `crates/suwappu-node` | Consensus validator daemon |
+| `suwappu-l2-sequencer` | `crates/suwappu-l2-sequencer` (Track G G4.2) | L2 batch sequencer (post-G4) |
+| `suwappu-l2-prover` | `crates/suwappu-l2-prover` (Track G G4.1) | SP1 prover daemon (post-G4) |
+| `suwappu-bridge-relayer` | `crates/suwappu-bridge-relayer` (Track I I.3) | Foundation relayer for the LTP↔Ethereum/Solana bridges (post-I.3) |
 
 Target triples (matches existing testnet workflow):
 
@@ -68,11 +68,11 @@ glibc requirements; runs on any modern Linux kernel.
 Every mainnet artifact gets four companion files:
 
 ```
-gsx-node-v1.0.0-aarch64-linux-musl
-gsx-node-v1.0.0-aarch64-linux-musl.sig         ← cosign signature
-gsx-node-v1.0.0-aarch64-linux-musl.intoto.jsonl ← SLSA L3 provenance
-gsx-node-v1.0.0-aarch64-linux-musl.sbom.json   ← CycloneDX SBOM
-gsx-node-v1.0.0-aarch64-linux-musl.sha256       ← legacy hash digest
+suwappu-node-v1.0.0-aarch64-linux-musl
+suwappu-node-v1.0.0-aarch64-linux-musl.sig         ← cosign signature
+suwappu-node-v1.0.0-aarch64-linux-musl.intoto.jsonl ← SLSA L3 provenance
+suwappu-node-v1.0.0-aarch64-linux-musl.sbom.json   ← CycloneDX SBOM
+suwappu-node-v1.0.0-aarch64-linux-musl.sha256       ← legacy hash digest
 ```
 
 ### 3.1 Sigstore cosign
@@ -93,10 +93,10 @@ Verifier-side:
 
 ```sh
 cosign verify-blob \
-    --signature gsx-node-v1.0.0-aarch64-linux-musl.sig \
-    --certificate-identity-regexp "^https://github.com/GlobalSettlementNetwork/gsx-dag/" \
+    --signature suwappu-node-v1.0.0-aarch64-linux-musl.sig \
+    --certificate-identity-regexp "^https://github.com/Suwappu-Labs/suwappu-dag/" \
     --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-    gsx-node-v1.0.0-aarch64-linux-musl
+    suwappu-node-v1.0.0-aarch64-linux-musl
 ```
 
 ### 3.2 SLSA L3 in-toto attestation
@@ -126,9 +126,9 @@ The `.intoto.jsonl` carries:
 Verifier-side:
 
 ```sh
-slsa-verifier verify-artifact gsx-node-v1.0.0-aarch64-linux-musl \
-    --provenance-path gsx-node-v1.0.0-aarch64-linux-musl.intoto.jsonl \
-    --source-uri github.com/GlobalSettlementNetwork/gsx-dag \
+slsa-verifier verify-artifact suwappu-node-v1.0.0-aarch64-linux-musl \
+    --provenance-path suwappu-node-v1.0.0-aarch64-linux-musl.intoto.jsonl \
+    --source-uri github.com/Suwappu-Labs/suwappu-dag \
     --source-tag v1.0.0
 ```
 
@@ -174,12 +174,12 @@ A reproducibility verifier re-runs the build and compares
 hashes:
 
 ```sh
-git clone https://github.com/GlobalSettlementNetwork/gsx-dag
-cd gsx-dag
+git clone https://github.com/Suwappu-Labs/suwappu-dag
+cd suwappu-dag
 git checkout v1.0.0
-cargo build --release --locked -p gsx-node \
+cargo build --release --locked -p suwappu-node \
     --target aarch64-unknown-linux-musl
-sha256sum target/aarch64-unknown-linux-musl/release/gsx-node
+sha256sum target/aarch64-unknown-linux-musl/release/suwappu-node
 # Compare to the published .sha256 file
 ```
 
@@ -212,7 +212,7 @@ jobs:
   build:
     strategy:
       matrix:
-        binary: [gsx-node, gsx-l2-sequencer, gsx-l2-prover, gsx-bridge-relayer]
+        binary: [suwappu-node, suwappu-l2-sequencer, suwappu-l2-prover, suwappu-bridge-relayer]
         target: [aarch64-unknown-linux-musl, x86_64-unknown-linux-musl]
     runs-on: ubuntu-latest
     outputs:
@@ -271,7 +271,7 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
-            **/gsx-*-*
+            **/suwappu-*-*
             **/*.sig
             **/*.sbom.json
             **/*.intoto.jsonl
@@ -287,7 +287,7 @@ Compared to the existing testnet workflow:
 - Sigstore cosign signing step
 - SLSA L3 provenance via the official generator
 - SBOM generation via cargo-cyclonedx
-- Multi-binary matrix (testnet only ships gsx-node)
+- Multi-binary matrix (testnet only ships suwappu-node)
 - No mac-os runner (the source-of-cost in testnet); musl-only
   Linux targets
 
@@ -310,21 +310,21 @@ binary, the operator MUST run:
 # 1. Download artifact + companions.
 RELEASE=v1.0.0
 TARGET=aarch64-unknown-linux-musl
-BIN=gsx-node-${RELEASE}-${TARGET}
-gh release download $RELEASE --repo GlobalSettlementNetwork/gsx-dag \
+BIN=suwappu-node-${RELEASE}-${TARGET}
+gh release download $RELEASE --repo Suwappu-Labs/suwappu-dag \
     --pattern "$BIN*"
 
 # 2. Verify the Sigstore signature.
 cosign verify-blob \
     --signature "${BIN}.sig" \
-    --certificate-identity-regexp "^https://github.com/GlobalSettlementNetwork/gsx-dag/" \
+    --certificate-identity-regexp "^https://github.com/Suwappu-Labs/suwappu-dag/" \
     --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
     "$BIN"
 
 # 3. Verify the SLSA provenance.
 slsa-verifier verify-artifact "$BIN" \
     --provenance-path "${BIN}.intoto.jsonl" \
-    --source-uri github.com/GlobalSettlementNetwork/gsx-dag \
+    --source-uri github.com/Suwappu-Labs/suwappu-dag \
     --source-tag "$RELEASE"
 
 # 4. Verify the legacy SHA256 (defensive).
@@ -332,15 +332,15 @@ sha256sum -c "${BIN}.sha256"
 
 # 5. Optionally re-build to verify reproducibility.
 git clone --depth 1 --branch $RELEASE \
-    https://github.com/GlobalSettlementNetwork/gsx-dag
-cd gsx-dag
-cargo build --release --locked -p gsx-node --target $TARGET
-diff <(sha256sum target/$TARGET/release/gsx-node | awk '{print $1}') \
+    https://github.com/Suwappu-Labs/suwappu-dag
+cd suwappu-dag
+cargo build --release --locked -p suwappu-node --target $TARGET
+diff <(sha256sum target/$TARGET/release/suwappu-node | awk '{print $1}') \
      <(awk '{print $1}' ../${BIN}.sha256)
 ```
 
 Any of steps 2-4 failing means **do not bootstrap with this
-binary**. Operators report the failure to security@globalsettlement.com
+binary**. Operators report the failure to security@suwappu.bot
 within 1 hour; foundation triggers emergency response (this is
 a supply-chain attack candidate).
 

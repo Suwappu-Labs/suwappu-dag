@@ -16,8 +16,8 @@ This document records:
 ## Initial minting
 
 ```sh
-# Build the gsx-keygen CLI helper (lives in gsx-crypto):
-cargo build --release -p gsx-crypto --bin gsx-keygen
+# Build the suwappu-keygen CLI helper (lives in suwappu-crypto):
+cargo build --release -p suwappu-crypto --bin suwappu-keygen
 
 # Generate the genesis bundle (validators + faucet authority):
 ./scripts/devnet/gen-genesis.py --out-dir ./target/devnet/keys
@@ -25,7 +25,7 @@ cargo build --release -p gsx-crypto --bin gsx-keygen
 # Output:
 #   target/devnet/keys/
 #     genesis.toml           ← validator + faucet authority entries
-#     prebalances.toml       ← faucet's initial GSX balance
+#     prebalances.toml       ← faucet's initial SUWAPPU balance
 #     us-east-1/{mldsa.sk,bls.sk}  ← placeholder validator keys
 #     eu-west-1/...
 #     ap-southeast-1/...
@@ -34,7 +34,7 @@ cargo build --release -p gsx-crypto --bin gsx-keygen
 #     faucet/mldsa.pk        ← REAL ML-DSA-65 public
 ```
 
-If `gsx-keygen` isn't on PATH, the script emits a placeholder faucet
+If `suwappu-keygen` isn't on PATH, the script emits a placeholder faucet
 key and logs a loud warning. The faucet binary will reject every
 drip until a real keypair is dropped in.
 
@@ -46,9 +46,9 @@ GetSecretValue` for exactly that secret ARN and nothing else.
 
 | Resource | Path |
 |---|---|
-| Secrets Manager secret | `gsx-devnet/faucet/mldsa-secret-key` |
-| Secrets Manager pubkey ref | `gsx-devnet/faucet/mldsa-public-key` (for verification, not strictly secret) |
-| S3 fallback (encrypted at rest) | `s3://gsx-dag-devnet-artifacts/keys/faucet/mldsa.{sk,pk}` |
+| Secrets Manager secret | `suwappu-devnet/faucet/mldsa-secret-key` |
+| Secrets Manager pubkey ref | `suwappu-devnet/faucet/mldsa-public-key` (for verification, not strictly secret) |
+| S3 fallback (encrypted at rest) | `s3://suwappu-dag-devnet-artifacts/keys/faucet/mldsa.{sk,pk}` |
 
 The S3 fallback exists because the same artifact-bucket bootstrap
 that delivers per-region validator keys also delivers the faucet
@@ -66,8 +66,8 @@ authority_id = 4
 label = "faucet"
 mldsa_public_key_hex = "<full ML-DSA-65 pubkey hex, 3904 bytes encoded as 7808 hex chars>"
 bls_public_key_hex = "<placeholder; faucet doesn't sign BLS>"
-validator_stake_gsx = 1
-authority_stake_gsx = 1
+validator_stake_suwappu = 1
+authority_stake_suwappu = 1
 ```
 
 `docs/devnet/prebalances.toml` (committed) declares the faucet's
@@ -76,12 +76,12 @@ genesis balance:
 ```toml
 [[balances]]
 address = "0x<faucet 20-byte address>"
-balance_gsx = 1000000000   # 1 billion GSX
+balance_suwappu = 1000000000   # 1 billion SUWAPPU
 role = "faucet"
 ```
 
 The address derivation is `blake3(public_key_bytes)[..20]` — see
-`gsx_faucet::address_from_pubkey` and
+`suwappu_faucet::address_from_pubkey` and
 `scripts/devnet/gen-genesis.py` for the matching recipe.
 
 ## Rolling the key
@@ -91,7 +91,7 @@ A faucet key roll is a four-stage operation. See OPERATIONS.md § 4
 
 1. **Mint a new keypair** off-host (NOT on the faucet EC2):
    ```sh
-   cargo run --release -p gsx-crypto --bin gsx-keygen -- \
+   cargo run --release -p suwappu-crypto --bin suwappu-keygen -- \
      --algo mldsa --sk ./new/mldsa.sk --pk ./new/mldsa.pk
    ```
 
@@ -107,7 +107,7 @@ A faucet key roll is a four-stage operation. See OPERATIONS.md § 4
 
 4. **Reconfigure the faucet service** to load the new key. Upload
    the new `mldsa.sk` to Secrets Manager, restart the
-   `gsx-faucet.service` systemd unit on the EC2 instance.
+   `suwappu-faucet.service` systemd unit on the EC2 instance.
 
 The window between step 2 (eject) and step 3 (drain) MUST be
 strictly ordered — if drain races with eject, the drain can fail
@@ -119,11 +119,11 @@ verify each step's commit before proceeding to the next.
 The devnet's faucet handing out free tokens to anyone is *intentional*.
 Threats we accept:
 
-- **Spam.** The per-IP rate limit (`GSX_FAUCET_BUCKET_CAPACITY`,
-  default 5 / `GSX_FAUCET_BUCKET_REFILL_PER_HOUR`, default 5/hour)
+- **Spam.** The per-IP rate limit (`SUWAPPU_FAUCET_BUCKET_CAPACITY`,
+  default 5 / `SUWAPPU_FAUCET_BUCKET_REFILL_PER_HOUR`, default 5/hour)
   caps per-source abuse at ~120 drips/day per IP. An attacker
   rotating IPs across a botnet can drain the faucet faster, but
-  the faucet wallet's 1B GSX balance covers ~10M drips before
+  the faucet wallet's 1B SUWAPPU balance covers ~10M drips before
   empty.
 - **Key exfiltration.** If an attacker steals the `mldsa.sk`,
   they can sign drip transfers anywhere they want. Mitigation: the

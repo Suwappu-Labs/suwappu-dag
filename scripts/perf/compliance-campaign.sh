@@ -2,7 +2,7 @@
 # DAG-S26.6 — end-to-end bank-compliance campaign orchestrator.
 #
 # Assumes:
-#  - gsx-loadgen.service is already running on one host (DAG-S26.3)
+#  - suwappu-loadgen.service is already running on one host (DAG-S26.3)
 #    so the cluster has sustained load. If not, the campaign will
 #    still complete but TPS and e2e metrics will be empty.
 #  - Validators in all configured regions are reachable via SSM.
@@ -14,7 +14,7 @@
 #   3. Record end_ms.
 #   4. Collect events.ndjson from every validator via SSM (parallel).
 #   5. Collect loadgen.csv from the loadgen host.
-#   6. Run gsx-metrics in each mode (cert/e2e/pair/tps/recovery).
+#   6. Run suwappu-metrics in each mode (cert/e2e/pair/tps/recovery).
 #   7. Run report.py to produce report.json + report.html.
 #   8. Upload the campaign artifacts to S3.
 #
@@ -26,7 +26,7 @@
 #                        cert.csv, e2e.csv, pair.csv, tps.csv,
 #                        recovery.csv, meta.json, report.json,
 #                        report.html}
-#   s3://gsx-dag-perf-artifacts/reports/<id>/
+#   s3://suwappu-dag-perf-artifacts/reports/<id>/
 
 set -euo pipefail
 
@@ -77,7 +77,7 @@ echo "[$(date -u +%FT%TZ)] observation window closed"
 # main.tf:165-172), so we instruct each validator to gzip its events
 # file and `aws s3 cp` it into `s3://<bucket>/logs/<campaign>/<region>.
 # ndjson.gz`, then download locally from S3 with no truncation.
-BUCKET="${ARTIFACT_BUCKET:-gsx-dag-perf-artifacts}"
+BUCKET="${ARTIFACT_BUCKET:-suwappu-dag-perf-artifacts}"
 S3_PREFIX="logs/$CAMPAIGN_ID"
 echo "[$(date -u +%FT%TZ)] collecting events.ndjson via S3 push -> s3://$BUCKET/$S3_PREFIX/"
 
@@ -91,7 +91,7 @@ for v in "${VALIDATORS[@]}"; do
     --region "$region" \
     --instance-ids "$iid" \
     --document-name AWS-RunShellScript \
-    --parameters "commands=[\"set -e\",\"sudo cp /var/log/gsx/events.ndjson /tmp/e-$CAMPAIGN_ID.ndjson\",\"sudo chmod 644 /tmp/e-$CAMPAIGN_ID.ndjson\",\"gzip -f /tmp/e-$CAMPAIGN_ID.ndjson\",\"aws s3 cp /tmp/e-$CAMPAIGN_ID.ndjson.gz s3://$BUCKET/$S3_PREFIX/$region.ndjson.gz --region us-east-1\",\"rm -f /tmp/e-$CAMPAIGN_ID.ndjson.gz\",\"echo uploaded $region\"]" \
+    --parameters "commands=[\"set -e\",\"sudo cp /var/log/suwappu/events.ndjson /tmp/e-$CAMPAIGN_ID.ndjson\",\"sudo chmod 644 /tmp/e-$CAMPAIGN_ID.ndjson\",\"gzip -f /tmp/e-$CAMPAIGN_ID.ndjson\",\"aws s3 cp /tmp/e-$CAMPAIGN_ID.ndjson.gz s3://$BUCKET/$S3_PREFIX/$region.ndjson.gz --region us-east-1\",\"rm -f /tmp/e-$CAMPAIGN_ID.ndjson.gz\",\"echo uploaded $region\"]" \
     --query Command.CommandId --output text)
   SSM_CMDS_PAIRS+=("$region:$cmd_id")
 done
@@ -138,7 +138,7 @@ if [[ -n "$LOADGEN_IID" ]]; then
     --region "$LOADGEN_HOST_REGION" \
     --instance-ids "$LOADGEN_IID" \
     --document-name AWS-RunShellScript \
-    --parameters "commands=[\"set -e\",\"if [ -f /var/log/gsx/loadgen.csv ]; then sudo cp /var/log/gsx/loadgen.csv /tmp/lg-$CAMPAIGN_ID.csv; sudo chmod 644 /tmp/lg-$CAMPAIGN_ID.csv; gzip -f /tmp/lg-$CAMPAIGN_ID.csv; aws s3 cp /tmp/lg-$CAMPAIGN_ID.csv.gz s3://$BUCKET/$S3_PREFIX/loadgen.csv.gz --region us-east-1; rm -f /tmp/lg-$CAMPAIGN_ID.csv.gz; echo uploaded loadgen; else echo no loadgen.csv; fi\"]" \
+    --parameters "commands=[\"set -e\",\"if [ -f /var/log/suwappu/loadgen.csv ]; then sudo cp /var/log/suwappu/loadgen.csv /tmp/lg-$CAMPAIGN_ID.csv; sudo chmod 644 /tmp/lg-$CAMPAIGN_ID.csv; gzip -f /tmp/lg-$CAMPAIGN_ID.csv; aws s3 cp /tmp/lg-$CAMPAIGN_ID.csv.gz s3://$BUCKET/$S3_PREFIX/loadgen.csv.gz --region us-east-1; rm -f /tmp/lg-$CAMPAIGN_ID.csv.gz; echo uploaded loadgen; else echo no loadgen.csv; fi\"]" \
     --query Command.CommandId --output text)
   until aws ssm get-command-invocation \
           --region "$LOADGEN_HOST_REGION" --command-id "$cmd_id" --instance-id "$LOADGEN_IID" \
@@ -157,43 +157,43 @@ if [[ -n "$LOADGEN_IID" ]]; then
   fi
 fi
 
-# Step 6: run gsx-metrics in each mode (DAG-S28.4 — resolve in order:
-#   1. $GSX_METRICS_BIN env var if explicitly set
-#   2. ./target/release/gsx-metrics relative to repo root
-#   3. on-demand `cargo build --release -p gsx-node --bin gsx-metrics`
+# Step 6: run suwappu-metrics in each mode (DAG-S28.4 — resolve in order:
+#   1. $SUWAPPU_METRICS_BIN env var if explicitly set
+#   2. ./target/release/suwappu-metrics relative to repo root
+#   3. on-demand `cargo build --release -p suwappu-node --bin suwappu-metrics`
 #   4. PATH fallback (CI containers / docker)
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
-if [[ -n "${GSX_METRICS_BIN:-}" ]] && [[ -x "$GSX_METRICS_BIN" ]]; then
-  METRICS="$GSX_METRICS_BIN"
-elif [[ -x "$ROOT_DIR/target/release/gsx-metrics" ]]; then
-  METRICS="$ROOT_DIR/target/release/gsx-metrics"
+if [[ -n "${SUWAPPU_METRICS_BIN:-}" ]] && [[ -x "$SUWAPPU_METRICS_BIN" ]]; then
+  METRICS="$SUWAPPU_METRICS_BIN"
+elif [[ -x "$ROOT_DIR/target/release/suwappu-metrics" ]]; then
+  METRICS="$ROOT_DIR/target/release/suwappu-metrics"
 elif command -v cargo >/dev/null 2>&1; then
-  echo "[$(date -u +%FT%TZ)] building gsx-metrics (native, one-shot)"
-  ( cd "$ROOT_DIR" && cargo build --release -p gsx-node --bin gsx-metrics 2>&1 | tail -2 )
-  METRICS="$ROOT_DIR/target/release/gsx-metrics"
-elif command -v gsx-metrics >/dev/null 2>&1; then
-  METRICS="gsx-metrics"
+  echo "[$(date -u +%FT%TZ)] building suwappu-metrics (native, one-shot)"
+  ( cd "$ROOT_DIR" && cargo build --release -p suwappu-node --bin suwappu-metrics 2>&1 | tail -2 )
+  METRICS="$ROOT_DIR/target/release/suwappu-metrics"
+elif command -v suwappu-metrics >/dev/null 2>&1; then
+  METRICS="suwappu-metrics"
 else
-  echo "error: gsx-metrics not found. Set GSX_METRICS_BIN=/path/to/gsx-metrics," >&2
-  echo "       run \`cargo build --release -p gsx-node --bin gsx-metrics\` first," >&2
-  echo "       or run this script from a container with gsx-metrics on PATH." >&2
+  echo "error: suwappu-metrics not found. Set SUWAPPU_METRICS_BIN=/path/to/suwappu-metrics," >&2
+  echo "       run \`cargo build --release -p suwappu-node --bin suwappu-metrics\` first," >&2
+  echo "       or run this script from a container with suwappu-metrics on PATH." >&2
   exit 1
 fi
-echo "[$(date -u +%FT%TZ)] gsx-metrics: $METRICS"
+echo "[$(date -u +%FT%TZ)] suwappu-metrics: $METRICS"
 
 LOG_ARGS=()
 for r in "${REGIONS[@]}"; do
   LOG_ARGS+=(--logs "$r=$CAMPAIGN_DIR/events/$r.ndjson")
 done
 
-echo "[$(date -u +%FT%TZ)] running gsx-metrics in 5 modes"
+echo "[$(date -u +%FT%TZ)] running suwappu-metrics in 5 modes"
 "$METRICS" "${LOG_ARGS[@]}" --mode cert > "$CAMPAIGN_DIR/cert.csv"
 "$METRICS" "${LOG_ARGS[@]}" --mode pair > "$CAMPAIGN_DIR/pair.csv"
 "$METRICS" "${LOG_ARGS[@]}" --mode tps  > "$CAMPAIGN_DIR/tps.csv"
 "$METRICS" "${LOG_ARGS[@]}" --mode recovery > "$CAMPAIGN_DIR/recovery.csv"
 
 if [[ -s "$CAMPAIGN_DIR/loadgen.csv" ]]; then
-  # DAG-S30.4: pass the campaign window so gsx-metrics e2e can drop
+  # DAG-S30.4: pass the campaign window so suwappu-metrics e2e can drop
   # stale committed events from prior runs that share intent hashes.
   "$METRICS" "${LOG_ARGS[@]}" --mode e2e \
       --loadgen-csv "$CAMPAIGN_DIR/loadgen.csv" \
@@ -224,13 +224,13 @@ python3 "$REPORT_PY" --input-dir "$CAMPAIGN_DIR" --output-dir "$CAMPAIGN_DIR"
 if [[ -n "${SKIP_S3_UPLOAD:-}" ]]; then
   echo "[$(date -u +%FT%TZ)] SKIP_S3_UPLOAD set — local artifacts only"
 else
-  echo "[$(date -u +%FT%TZ)] uploading to s3://gsx-dag-perf-artifacts/reports/$CAMPAIGN_ID/"
-  aws s3 cp --recursive "$CAMPAIGN_DIR" "s3://gsx-dag-perf-artifacts/reports/$CAMPAIGN_ID/" \
+  echo "[$(date -u +%FT%TZ)] uploading to s3://suwappu-dag-perf-artifacts/reports/$CAMPAIGN_ID/"
+  aws s3 cp --recursive "$CAMPAIGN_DIR" "s3://suwappu-dag-perf-artifacts/reports/$CAMPAIGN_ID/" \
     --region us-east-1 \
     || echo "  (s3 upload failed — local artifacts still at $CAMPAIGN_DIR)"
 fi
 
 echo "[$(date -u +%FT%TZ)] campaign $CAMPAIGN_ID complete"
 echo "  local:  $CAMPAIGN_DIR"
-echo "  s3:     s3://gsx-dag-perf-artifacts/reports/$CAMPAIGN_ID/"
+echo "  s3:     s3://suwappu-dag-perf-artifacts/reports/$CAMPAIGN_ID/"
 echo "  open:   $CAMPAIGN_DIR/report.html"

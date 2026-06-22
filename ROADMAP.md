@@ -1,6 +1,6 @@
 # Roadmap
 
-The pre-mainnet roadmap for **gsx-dag**. This document tracks the
+The pre-mainnet roadmap for **suwappu-dag**. This document tracks the
 public-facing milestones; `docs/architecture/sprint-map.md` is the
 internal dependency graph + per-sprint exit gates.
 
@@ -27,8 +27,8 @@ and [`CHANGELOG.md`](./CHANGELOG.md) (released versions).
 ## Phase 0 — Specification (closed)
 
 - v8 academic paper ratified in
-  `GlobalSettlementNetwork/gsx-papers/papers/dag-l1` (`gsx_dag_l1_academic_v7.pdf`).
-- Companion LTP paper in `gsx_ltp_academic_v7.pdf`.
+  `Suwappu-Labs/suwappu-papers/papers/dag-l1` (`suwappu_dag_l1_academic_v7.pdf`).
+- Companion LTP paper in `suwappu_ltp_academic_v7.pdf`.
 - Repo bootstrap: workspace layout, crate skeletons, CI matrix
   (rustfmt / clippy / test / cargo-deny), collaboration contract in
   `CLAUDE.md`.
@@ -86,10 +86,10 @@ Hosting-program letter tracks from the existing devnet README:
 |---|---|---|
 | **G1** | Devnet hosting infrastructure (4-region terraform, persistent EBS, public RPC) | ✅ Apply-ready |
 | **G2** | Public RPC endpoint (DNS + TLS + ALB + WAF) | ⏳ |
-| **G3** | `gsx-faucet` service | ⏳ |
-| **G4** | Release-binary workflow (multi-target `gsx-node` / `gsx-loadgen` / `gsx-indexer` / `gsx-faucet` tarballs on tag) | ✅ Live |
+| **G3** | `suwappu-faucet` service | ⏳ |
+| **G4** | Release-binary workflow (multi-target `suwappu-node` / `suwappu-loadgen` / `suwappu-indexer` / `suwappu-faucet` tarballs on tag) | ✅ Live |
 | **G5** | `OPERATIONS.md` runbook (devnet + testnet sections) | 🟡 Partial |
-| **G6** | Prometheus `/metrics` on `gsx-node` + CloudWatch dashboard + alarms | ⏳ |
+| **G6** | Prometheus `/metrics` on `suwappu-node` + CloudWatch dashboard + alarms | ⏳ |
 | **G7** | Block explorer SPA | ⏳ |
 | **G8** | Status page | ⏳ |
 
@@ -107,7 +107,7 @@ Headline scope:
 - 7 seed validators (us-east-1, us-west-2, eu-west-1, eu-central-1,
   ap-southeast-1, ap-northeast-1, sa-east-1).
 - External operator onboarding (`scripts/testnet/onboard-operator.sh`).
-- Points-accumulator daemon (`crates/gsx-validator-program/`, TBD).
+- Points-accumulator daemon (`crates/suwappu-validator-program/`, TBD).
 - Points-to-mainnet-token conversion published in `docs/testnet/POINTS.md`.
 - `terraform/testnet/l2.tf` follow-up: L2 sequencer + zk-prover on top of
   the L1 (Track G).
@@ -128,7 +128,7 @@ Pre-genesis gates:
 ## Mainnet GA (v1.0)
 
 - Genesis ceremony executes.
-- `gsx-mainnet-v1` chain-id reserved.
+- `suwappu-mainnet-v1` chain-id reserved.
 - Validator set transitions from testnet to mainnet via the dual-ring
   joint-quorum hand-off documented in
   `docs/architecture/governance-phasing.md`.
@@ -138,9 +138,9 @@ Pre-genesis gates:
 
 ## How to contribute to the roadmap
 
-- File a [discussion](https://github.com/GlobalSettlementNetwork/gsx-dag/discussions)
+- File a [discussion](https://github.com/Suwappu-Labs/suwappu-dag/discussions)
   for any phase-level proposal.
-- File an [issue](https://github.com/GlobalSettlementNetwork/gsx-dag/issues)
+- File an [issue](https://github.com/Suwappu-Labs/suwappu-dag/issues)
   for a concrete sub-sprint that fits an existing phase.
 - See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the development
   workflow + sprint cadence.

@@ -1,8 +1,8 @@
-# Auth dispatch — Anchor hybrid AND-gate (gsx-db IQ-7)
+# Auth dispatch — Anchor hybrid AND-gate (suwappu-db IQ-7)
 
 Diagrams the `verify_credential` dispatch for the anchor authentication
 scheme — Blake3 MAC / Sp1 / Ecdsa / Hybrid (ECDSA + ML-DSA-65 AND-gate)
-— landed by `gsx-db` PR #4 (`anchor/iq7-scheme-alignment`).
+— landed by `suwappu-db` PR #4 (`anchor/iq7-scheme-alignment`).
 
 ## AuthScheme + credential envelope
 
@@ -93,7 +93,7 @@ flowchart TD
 | `MlDsa65Hybrid`    | 3  (new) |
 
 Pinned by `auth_scheme_discriminants_are_stable` in
-`crates/gsxdb-bridge/src/anchor/types.rs`. Renaming a variant or
+`crates/suwappudb-bridge/src/anchor/types.rs`. Renaming a variant or
 reordering would break wire-format compatibility with serialized
 anchors.
 

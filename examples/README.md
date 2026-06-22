@@ -1,4 +1,4 @@
-# gsx-dag examples
+# suwappu-dag examples
 
 Minimal end-to-end examples against a running local devnet (see
 [`../DEVNET.md`](../DEVNET.md) to bring one up).
@@ -12,7 +12,7 @@ Minimal end-to-end examples against a running local devnet (see
 ## Running the Rust examples
 
 The `examples/rust/` directory is a standalone Cargo project that
-depends on `gsx-client`, `gsx-execution`, and `gsx-crypto` via path
+depends on `suwappu-client`, `suwappu-execution`, and `suwappu-crypto` via path
 references. Bring up the devnet first, then:
 
 ```sh
@@ -32,7 +32,7 @@ source.
 ## Running the TypeScript examples
 
 The `examples/typescript/` directory is a standalone npm project
-that depends on `@gsx/client` from the local workspace.
+that depends on `@suwappu/client` from the local workspace.
 
 ```sh
 cd examples/typescript
@@ -69,11 +69,11 @@ modes:
    but you can see the full client → wire → reject path.
 2. **Real-key mode:** points the example at a real ML-DSA-65
    secret-key file. To produce one matching the devnet's seated
-   set, run `cargo run -p gsx-node --bin gsx-keygen` and **regenerate
+   set, run `cargo run -p suwappu-node --bin suwappu-keygen` and **regenerate
    the devnet** with the produced public key (a one-line edit to
    `target/devnet/genesis.toml`'s `mldsa_public_key_hex`).
 
-The `gsx-keygen` helper is a follow-up — it doesn't ship in C2.
+The `suwappu-keygen` helper is a follow-up — it doesn't ship in C2.
 Until then, `submit_transfer.rs` runs in mock-key mode by default.
 
 ## See also

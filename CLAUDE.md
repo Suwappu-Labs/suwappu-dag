@@ -1,4 +1,4 @@
-# gsx-dag — Claude Code project context
+# suwappu-dag — Claude Code project context
 
 This file is loaded automatically at the start of every Claude Code session in
 this repo. It is the entry point for orienting Claude Code on conventions,
@@ -6,15 +6,15 @@ current sprint state, load-bearing invariants, and how to collaborate.
 
 ## Project
 
-`gsx-dag` is the implementation of the **GSX DAG Layer 1**: a Mysticeti-style
+`suwappu-dag` is the implementation of the **SUWAPPU DAG Layer 1**: a Mysticeti-style
 certificate-DAG settlement chain with a dual-ring validator set, co-resident
 dual VM, and post-quantum cross-chain attestation under the Lattice Transfer
-Protocol. The reference design is `gsx-papers/papers/dag-l1` (formerly
-`gsx_dag_l1_academic_v7.pdf`).
+Protocol. The reference design is `suwappu-papers/papers/dag-l1` (formerly
+`suwappu_dag_l1_academic_v7.pdf`).
 
 The execution substrate (polymorphic balance map, OCC scheduler, state tree,
 anchor pipeline, recovery replay) is implemented in
-[`GlobalSettlementNetwork/gsx-db`](https://github.com/GlobalSettlementNetwork/gsx-db)
+[`Suwappu-Labs/suwappu-db`](https://github.com/Suwappu-Labs/suwappu-db)
 and consumed here as a workspace dependency from DAG-S10 onward.
 
 ## Load-bearing invariants
@@ -37,7 +37,7 @@ These are non-negotiable. Code that weakens them does not ship.
    BLS12-381 aggregate signature (≈96 B) + SHA3-256 payload root (32 B). Changes
    that add per-payload bytes to the on-chain commitment surface are rejected.
 
-4. **Substrate invariants inherited from gsx-db** — lane separation, dual-VM
+4. **Substrate invariants inherited from suwappu-db** — lane separation, dual-VM
    projection equality, schedule determinism, bundle atomicity, tree determinism,
    cross-chain parity, replay equivalence. The DAG executor wires these through;
    it cannot weaken them.
@@ -73,26 +73,26 @@ Between sessions, you resume via:
 
 | Sprint | Scope                                                     | Status      | Exit gate |
 |--------|-----------------------------------------------------------|-------------|-----------|
-| DAG-S1 | `gsx-crypto` — ML-DSA-65, ML-KEM-768, BLS12-381, SHA3-256 | ✅ Closed    | 7 properties × 10k cases (`tests/proptest_roundtrips.rs`) |
-| DAG-S2 | `gsx-transport` — RaptorQ shred/reconstruct (in-mem)      | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_reconstruction.rs`) |
-| DAG-S3 | `gsx-consensus` — DAG store, certificate types, voting   | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_dag_order.rs`) |
-| DAG-S4 | `gsx-consensus` — Mysticeti-C commit rule                | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_mysticeti_commit.rs`) |
-| DAG-S5 | `gsx-consensus` — joint-quorum AND-gate (Theorem 2)     | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_joint_quorum.rs`) |
-| DAG-S6 | `gsx-authority` + `gsx-validator` — registries & quorum  | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_quorum.rs`) |
+| DAG-S1 | `suwappu-crypto` — ML-DSA-65, ML-KEM-768, BLS12-381, SHA3-256 | ✅ Closed    | 7 properties × 10k cases (`tests/proptest_roundtrips.rs`) |
+| DAG-S2 | `suwappu-transport` — RaptorQ shred/reconstruct (in-mem)      | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_reconstruction.rs`) |
+| DAG-S3 | `suwappu-consensus` — DAG store, certificate types, voting   | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_dag_order.rs`) |
+| DAG-S4 | `suwappu-consensus` — Mysticeti-C commit rule                | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_mysticeti_commit.rs`) |
+| DAG-S5 | `suwappu-consensus` — joint-quorum AND-gate (Theorem 2)     | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_joint_quorum.rs`) |
+| DAG-S6 | `suwappu-authority` + `suwappu-validator` — registries & quorum  | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_quorum.rs`) |
 | DAG-S7 | Equivocation detection + slashing                         | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_slashing.rs`) |
-| DAG-S8 | `gsx-fastpath` — single-owner lane + K=4 binding         | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_fast_path.rs`) |
+| DAG-S8 | `suwappu-fastpath` — single-owner lane + K=4 binding         | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_fast_path.rs`) |
 | DAG-S9 | Fast-path equivocation slashing                          | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_fp_slashing.rs`) |
-| DAG-S10 | `gsx-execution` — block executor adapter (Substrate trait) | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_block_execution.rs`) |
+| DAG-S10 | `suwappu-execution` — block executor adapter (Substrate trait) | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_block_execution.rs`) |
 | DAG-S11 | Checkpoint cadence + Authority joint co-signature       | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_checkpoint.rs`) |
-| DAG-S12 | `gsx-precompiles` — DID resolver                         | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_did.rs`) |
+| DAG-S12 | `suwappu-precompiles` — DID resolver                         | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_did.rs`) |
 | DAG-S13 | Registered-issuer precompile (mint/burn)                | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_issuer.rs`) |
 | DAG-S14 | Reserve-coverage circuit breaker (predicate)             | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_reserve.rs`) |
-| DAG-S15 | `gsx-ltp` — super-node 7-of-9 attestation                | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_attestation.rs`) |
+| DAG-S15 | `suwappu-ltp` — super-node 7-of-9 attestation                | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_attestation.rs`) |
 | DAG-S16 | LTP Commitment Node DA SLA                                | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_da.rs`) |
 | DAG-S17 | Cross-chain DID STARK pipeline (SP1/Plonky3)             | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_did_stark.rs`) |
-| DAG-S18 | `gsx-transport` — SCION path-authenticated routing       | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_scion.rs`) |
+| DAG-S18 | `suwappu-transport` — SCION path-authenticated routing       | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_scion.rs`) |
 | DAG-S19 | SCION-IP-Gateway fallback                                | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_gateway.rs`) |
-| DAG-S20 | `gsx-node` — full validator composition (E2E)            | ✅ Closed    | 3 properties × 10k cases (`tests/proptest_genesis_flow.rs`) |
+| DAG-S20 | `suwappu-node` — full validator composition (E2E)            | ✅ Closed    | 3 properties × 10k cases (`tests/proptest_genesis_flow.rs`) |
 
 Update this table when a sprint closes.
 
@@ -101,7 +101,7 @@ Update this table when a sprint closes.
 ### Build tools
 
 - **Rust:** `cargo` for everything. Workspace at repo root.
-- **Solidity:** none in this repo (LTPAnchorRegistry lives in `gsx-db/contracts`).
+- **Solidity:** none in this repo (LTPAnchorRegistry lives in `suwappu-db/contracts`).
 - **Infra:** `terraform`. Lives in `terraform/`. AWS profile `gsn`
   (account 492042618949, us-east-1). Apply via `scripts/deploy-aws.sh`,
   never raw `terraform apply` (that's denied).
@@ -113,8 +113,8 @@ Update this table when a sprint closes.
   workspace-wide commands hang, thrash, or saturate CPU and starve other
   work. Push to a feature branch and let GHA's CI matrix (rustfmt /
   clippy / test / cargo-deny) validate. Iteration loop = CI cycle, not
-  local cargo. See `~/.claude/projects/-Users-mongolraider/memory/2-patterns/gsx-dag-no-local-cargo-test.md`.
-- Single-binary local builds are fine: `cargo build --release -p gsx-node --bin gsx-metrics`.
+  local cargo. See `~/.claude/projects/-Users-mongolraider/memory/2-patterns/suwappu-dag-no-local-cargo-test.md`.
+- Single-binary local builds are fine: `cargo build --release -p suwappu-node --bin suwappu-metrics`.
 - `cargo fmt -p <crate>` is cheap; run it locally before pushing to avoid
   trivial rustfmt CI failures.
 - When changing a public enum's exhaustiveness (`#[non_exhaustive]`,
@@ -122,8 +122,8 @@ Update this table when a sprint closes.
   misses matches in downstream consumer crates — `#[non_exhaustive]`
   doesn't apply within the defining crate but DOES across the workspace.
   Explicitly include every consumer in the `-p` set, e.g.
-  `cargo check -p gsx-execution -p gsx-node -p gsx-rpc -p gsx-fastpath
-  -p gsx-mempool`. CI catches this; local per-crate check does not.
+  `cargo check -p suwappu-execution -p suwappu-node -p suwappu-rpc -p suwappu-fastpath
+  -p suwappu-mempool`. CI catches this; local per-crate check does not.
 
 ### Branch naming
 
@@ -149,7 +149,7 @@ Update this table when a sprint closes.
 - Integration tests in `tests/`
 - Property tests use `proptest` — minimum 10k iterations for sprint exit gates
 - NIST ACVP vectors integrated for ML-DSA-65 and ML-KEM-768 (DAG-S1.1,
-  pending — see `gsx-crypto/tests/acvp_vectors/`)
+  pending — see `suwappu-crypto/tests/acvp_vectors/`)
 
 ## Specialist subagents
 
@@ -157,10 +157,10 @@ Invoke these proactively per the rules below.
 
 | Trigger | Subagent | Why |
 |---|---|---|
-| Changes to `gsx-crypto` | `crypto-reviewer` | PQ correctness + side-channels |
-| Changes to `gsx-consensus` | `consensus-reviewer` | DAG topology + Mysticeti commit rule |
-| Changes to `gsx-fastpath` | `fastpath-auditor` | Equivocation proof completeness |
-| Changes to `gsx-transport` | `transport-auditor` | SCION path auth + RaptorQ |
+| Changes to `suwappu-crypto` | `crypto-reviewer` | PQ correctness + side-channels |
+| Changes to `suwappu-consensus` | `consensus-reviewer` | DAG topology + Mysticeti commit rule |
+| Changes to `suwappu-fastpath` | `fastpath-auditor` | Equivocation proof completeness |
+| Changes to `suwappu-transport` | `transport-auditor` | SCION path auth + RaptorQ |
 | Changes touching joint-quorum logic | `consensus-reviewer` + `crypto-reviewer` | Theorem 2 dependence |
 
 Subagent definitions live in `claude-code/`.
@@ -178,7 +178,7 @@ Subagent definitions live in `claude-code/`.
 
 ## Permissions
 
-`claude-code/settings.json` defines three tiers (mirrors `gsx-db`):
+`claude-code/settings.json` defines three tiers (mirrors `suwappu-db`):
 
 - **Allowed silently** — read-only ops, local builds/tests, file ops
 - **Asked** — anything that mutates remote state (push, tag, PR creation, AWS deploys)

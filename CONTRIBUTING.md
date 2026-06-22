@@ -1,4 +1,4 @@
-# Contributing to gsx-dag
+# Contributing to suwappu-dag
 
 Thanks for considering a contribution. This guide covers what we
 need from external contributors before reviewing a PR.
@@ -10,7 +10,7 @@ need from external contributors before reviewing a PR.
   - [`DEVNET.md`](DEVNET.md) brings up a 4-node local cluster you can
     submit transactions to.
   - [`docs/README.md`](docs/README.md) is the full documentation index.
-- **Check existing issues + PRs.** Search [GitHub issues](https://github.com/GlobalSettlementNetwork/gsx-dag/issues)
+- **Check existing issues + PRs.** Search [GitHub issues](https://github.com/Suwappu-Labs/suwappu-dag/issues)
   to make sure the work isn't already in flight.
 - **Open an issue first** for non-trivial changes. The
   [`bug_report`](.github/ISSUE_TEMPLATE/bug_report.md) and
@@ -19,7 +19,7 @@ need from external contributors before reviewing a PR.
 
 ## License + sign-off
 
-gsx-dag is licensed under **Apache 2.0**
+suwappu-dag is licensed under **Apache 2.0**
 ([`LICENSE`](LICENSE)). Every commit must be signed off under the
 [Developer Certificate of Origin](https://developercertificate.org/):
 
@@ -72,7 +72,7 @@ PR. We do **not** require a CLA.
   proptests (default 256 cases; sprint exit gates run 10k).
 - `cargo deny check` — license + advisory + source allowlist.
 - `visuals-parity` (non-blocking) — verifies `docs/visuals/`
-  bit-identity against gsx-lattice-protocol's mirror.
+  bit-identity against suwappu-lattice-protocol's mirror.
 - Path-targeted: `ts-sdk` (npm typecheck + build + test) if you
   touched `clients/ts-sdk/`.
 - Path-targeted (scheduled, not per-PR): `fuzz` runs three cargo-fuzz
@@ -85,10 +85,10 @@ based on the files you touched:
 
 | You touched | Reviewer |
 |---|---|
-| `crates/gsx-crypto/**` | `crypto-reviewer` |
-| `crates/gsx-consensus/**` | `consensus-reviewer` |
-| `crates/gsx-fastpath/**` | `fastpath-auditor` |
-| `crates/gsx-transport/**` | `transport-auditor` |
+| `crates/suwappu-crypto/**` | `crypto-reviewer` |
+| `crates/suwappu-consensus/**` | `consensus-reviewer` |
+| `crates/suwappu-fastpath/**` | `fastpath-auditor` |
+| `crates/suwappu-transport/**` | `transport-auditor` |
 | Joint-quorum logic | `consensus-reviewer` + `crypto-reviewer` |
 | Anything else | maintainer rotation |
 

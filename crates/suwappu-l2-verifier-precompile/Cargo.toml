@@ -1,0 +1,16 @@
+[package]
+name = "suwappu-l2-verifier-precompile"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+description = "SUWAPPU DAG L1-side verifier precompile for the SP1-zkVM L2 (Track G Phase G2 #97). Stateless function: verify_l2_batch(proof, public_inputs, vk_hash) -> Result<()>. Filecoin/op-succinct shape."
+
+[dependencies]
+thiserror.workspace = true
+
+[dev-dependencies]
+hex.workspace = true

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Local-devnet bootstrap for gsx-dag.
+# Local-devnet bootstrap for suwappu-dag.
 #
 # Subcommands:
 #   up      build the docker image + generate genesis + start 4 nodes
@@ -36,10 +36,10 @@ client_listen = "0.0.0.0:9091"
 rpc_listen = "0.0.0.0:9092"
 round_ms = 250
 checkpoint_cadence_rounds = 1
-mldsa_secret_key_path = "/etc/gsx/mldsa.sk"
-bls_secret_key_path = "/etc/gsx/bls.sk"
-genesis_manifest_path = "/etc/gsx/genesis.toml"
-event_log_path = "/var/log/gsx/events.ndjson"
+mldsa_secret_key_path = "/etc/suwappu/mldsa.sk"
+bls_secret_key_path = "/etc/suwappu/bls.sk"
+genesis_manifest_path = "/etc/suwappu/genesis.toml"
+event_log_path = "/var/log/suwappu/events.ndjson"
 
 # Track-B (B1) hardening defaults — overridable per-deployment.
 max_client_connections = 256
@@ -59,7 +59,7 @@ EOF
       done
     done
     echo
-    echo "==> building gsx-dag:devnet image (cold builds take ~10 min)..."
+    echo "==> building suwappu-dag:devnet image (cold builds take ~10 min)..."
     docker compose build
     echo
     echo "==> starting cluster..."
@@ -69,7 +69,7 @@ EOF
     for _ in $(seq 1 30); do
       if curl -sfX POST http://127.0.0.1:9092 \
            -H 'content-type: application/json' \
-           -d '{"jsonrpc":"2.0","id":1,"method":"gsx_getEpoch","params":null}' \
+           -d '{"jsonrpc":"2.0","id":1,"method":"suwappu_getEpoch","params":null}' \
            > /dev/null 2>&1; then
         echo "    v0 JSON-RPC live at http://127.0.0.1:9092"
         break
@@ -101,7 +101,7 @@ EOF
   curl)
     curl -sX POST http://127.0.0.1:9092 \
       -H 'content-type: application/json' \
-      -d '{"jsonrpc":"2.0","id":1,"method":"gsx_getEpoch","params":null}' \
+      -d '{"jsonrpc":"2.0","id":1,"method":"suwappu_getEpoch","params":null}' \
       | python3 -m json.tool
     ;;
 

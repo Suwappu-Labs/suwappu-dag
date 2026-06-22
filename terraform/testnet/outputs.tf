@@ -73,7 +73,7 @@ output "billing_alarm_topic_arn" {
 }
 
 output "faucet" {
-  description = "Faucet handle. public_ip is the EIP behind the ALB; the public URL is faucet.testnet.gsx.globalsettlement.com."
+  description = "Faucet handle. public_ip is the EIP behind the ALB; the public URL is faucet.testnet.suwappu.suwappu.bot."
   value = {
     public_ip   = aws_eip.faucet.public_ip
     instance_id = aws_instance.faucet.id

@@ -1,5 +1,5 @@
 [package]
-name = "gsx-client"
+name = "suwappu-client"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,14 +7,14 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 publish.workspace = true
-description = "Rust client SDK for the gsx-dag JSON-RPC query API."
+description = "Rust client SDK for the suwappu-dag JSON-RPC query API."
 
 [dependencies]
-# Share view types so an SDK consumer gets the same shape gsx-node serves.
-gsx-rpc = { workspace = true }
+# Share view types so an SDK consumer gets the same shape suwappu-node serves.
+suwappu-rpc = { workspace = true }
 
 # Use native-tls (default-tls) instead of rustls — matches what the
-# rest of the workspace already pulls in via gsxdb-bridge → reqwest,
+# rest of the workspace already pulls in via suwappudb-bridge → reqwest,
 # avoids dragging in a second TLS stack with webpki-related advisories
 # (RUSTSEC name-constraints family) that cargo-deny would reject.
 reqwest = { version = "0.11", features = ["json"] }

@@ -39,10 +39,10 @@ for region in $regions; do
     echo "client_listen = \"0.0.0.0:$CLIENT_PORT\""
     echo "round_ms = $ROUND_MS"
     echo "checkpoint_cadence_rounds = 1"
-    echo "mldsa_secret_key_path = \"/var/lib/gsx/mldsa.sk\""
-    echo "bls_secret_key_path = \"/var/lib/gsx/bls.sk\""
-    echo "genesis_manifest_path = \"/etc/gsx/genesis.toml\""
-    echo "event_log_path = \"/var/log/gsx/events.ndjson\""
+    echo "mldsa_secret_key_path = \"/var/lib/suwappu/mldsa.sk\""
+    echo "bls_secret_key_path = \"/var/lib/suwappu/bls.sk\""
+    echo "genesis_manifest_path = \"/etc/suwappu/genesis.toml\""
+    echo "event_log_path = \"/var/log/suwappu/events.ndjson\""
     echo ""
 
     # Peer list = every region except this one.

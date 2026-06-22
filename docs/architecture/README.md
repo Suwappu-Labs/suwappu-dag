@@ -1,8 +1,8 @@
 # Architecture
 
-Section-mapped engineering documentation for the GSX DAG Layer 1
+Section-mapped engineering documentation for the SUWAPPU DAG Layer 1
 implementation. Every document here corresponds to one section of the v8
-academic paper (`gsx-papers/papers/dag-l1`); the paper is the design spec,
+academic paper (`suwappu-papers/papers/dag-l1`); the paper is the design spec,
 this directory is the engineering view.
 
 ## Visuals
@@ -10,9 +10,9 @@ this directory is the engineering view.
 Inline-rendered diagrams (Mermaid, native on GitHub + GitBook) sit in
 [`../visuals/README.md`](../visuals/README.md). Standalone HTML
 presentations: [Visual Index](../visuals/index.html) ·
-[Ecosystem Atlas](../visuals/gsx-ecosystem-atlas.html) ·
-[GSX DAG](../visuals/gsx-dag.html) ·
-[GSX DB](../visuals/gsx-db.html) ·
+[Ecosystem Atlas](../visuals/suwappu-ecosystem-atlas.html) ·
+[SUWAPPU DAG](../visuals/suwappu-dag.html) ·
+[SUWAPPU DB](../visuals/suwappu-db.html) ·
 [LTP](../visuals/ltp.html). Sources:
 [Mermaid](../visuals/mermaid/), [Excalidraw](../visuals/excalidraw/).
 
@@ -26,7 +26,7 @@ presentations: [Visual Index](../visuals/index.html) ·
 | [transport.md](transport.md) | §6.3 | SCION + RaptorQ inter-validator transport |
 | [fast-path.md](fast-path.md) | §6.4 | FastPay-style single-owner fast-path lane |
 | [execution.md](execution.md) | §7 | Co-resident dual VM over polymorphic balance map |
-| [gsx-db-bridge.md](gsx-db-bridge.md) | §7 | Workspace-dep boundary to the `gsx-db` substrate |
+| [suwappu-db-bridge.md](suwappu-db-bridge.md) | §7 | Workspace-dep boundary to the `suwappu-db` substrate |
 | [application.md](application.md) | §8 | Precompiles: DID, registered-issuer, reserve-coverage |
 | [super-node.md](super-node.md) | §9 | Consolidated 6-of-9 Authority super-node role |
 | [ltp-integration.md](ltp-integration.md) | §10 | Lattice Transfer Protocol cross-chain settlement |
@@ -38,29 +38,29 @@ presentations: [Visual Index](../visuals/index.html) ·
 Investigation Questions (design decisions under ratification) live alongside the
 architecture docs in [`../iq/`](../iq/). Cross-repo: the substrate's own
 architecture docs are in
-[`GlobalSettlementNetwork/gsx-db/docs/`](https://github.com/GlobalSettlementNetwork/gsx-db/tree/main/docs);
+[`Suwappu-Labs/suwappu-db/docs/`](https://github.com/Suwappu-Labs/suwappu-db/tree/main/docs);
 LTP runtime details are in
-[`GlobalSettlementNetwork/gsx-lattice-protocol/docs/`](https://github.com/GlobalSettlementNetwork/gsx-lattice-protocol/tree/main/docs).
+[`Suwappu-Labs/suwappu-lattice-protocol/docs/`](https://github.com/Suwappu-Labs/suwappu-lattice-protocol/tree/main/docs).
 
 ## Generated API docs
 
 Auto-published from `main` on every merge by
 [`.github/workflows/docs.yml`](../../.github/workflows/docs.yml):
 
-- **Rust:** <https://globalsettlementnetwork.github.io/gsx-dag/rust/> — every
+- **Rust:** <https://suwappu-labs.github.io/suwappu-dag/rust/> — every
   workspace crate, public surface only (`cargo doc --no-deps`,
-  `RUSTDOCFLAGS=-D warnings`). The landing page redirects to `gsx_node` (the
+  `RUSTDOCFLAGS=-D warnings`). The landing page redirects to `suwappu_node` (the
   integration crate); browse to other crates via the sidebar. The Rust SDK
-  ([`gsx_client`](https://globalsettlementnetwork.github.io/gsx-dag/rust/gsx_client/))
+  ([`suwappu_client`](https://suwappu-labs.github.io/suwappu-dag/rust/suwappu_client/))
   is the recommended entrypoint for external developers building Rust clients.
-- **TypeScript:** <https://globalsettlementnetwork.github.io/gsx-dag/ts/> —
-  TypeDoc for [`@gsx/client`](../../clients/ts-sdk/). The SDK README is rendered
+- **TypeScript:** <https://suwappu-labs.github.io/suwappu-dag/ts/> —
+  TypeDoc for [`@suwappu/client`](../../clients/ts-sdk/). The SDK README is rendered
   on the index page.
 
-External-facing enums (`gsx_execution::Intent`, `gsx_rpc::error::RpcError`) are
+External-facing enums (`suwappu_execution::Intent`, `suwappu_rpc::error::RpcError`) are
 marked `#[non_exhaustive]` so adding new variants is a non-breaking change for
 downstream crates; consumers must include a wildcard arm when matching.
-`gsx_consensus::commit::LeaderStatus` is deliberately exhaustive — its three
+`suwappu_consensus::commit::LeaderStatus` is deliberately exhaustive — its three
 states (Direct / Skip / Undecided) are the paper's canonical commit-rule
 outcomes (paper §6 + Theorem 2), so a fourth state would be a paper-level
 amendment and a major-version bump. See

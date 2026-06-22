@@ -1,6 +1,6 @@
 # Testnet re-genesis runbook
 
-**Status:** Spec ratified from `gsx-strategy/docs/mainnet-plan.md`
+**Status:** Spec ratified from `suwappu-strategy/docs/mainnet-plan.md`
 Track B §"Re-genesis cadence" + the existing devnet wipe+regenesis
 procedure in `OPERATIONS.md`. Companion to `docs/testnet/POINTS.md`
 (points-program continuity across re-genesis events).
@@ -10,7 +10,7 @@ authorization), Tier B Validator-Operators (cluster restart),
 external testnet developers (announcement window).
 
 **Authoritative inputs:**
-- `gsx-strategy/docs/mainnet-plan.md` Track B §"Re-genesis cadence"
+- `suwappu-strategy/docs/mainnet-plan.md` Track B §"Re-genesis cadence"
 - `OPERATIONS.md` § "Devnet wipe+regenesis"
 - `docs/architecture/authority-ring-resilience.md` §6.4 — the
   catastrophic-recovery option for mainnet (this doc covers
@@ -71,10 +71,10 @@ critical-severity emergency flag.
 
 - [ ] Foundation board ratifies the re-genesis via IQ
 - [ ] Foundation publishes the announcement on:
-  - `https://status.testnet.gsx.globalsettlement.com`
-  - `https://blog.gsx.globalsettlement.com/announcements/`
+  - `https://status.testnet.suwappu.bot`
+  - `https://blog.suwappu.bot/announcements/`
   - Discord `#announcements` channel
-  - X account (@globalsettlementdotcom)
+  - X account (@suwappubot)
   - Email to all registered Tier B Validator-Operators
 - [ ] Announcement includes: rationale, target re-genesis
   time, expected downtime, state-snapshot URL, point-program
@@ -87,12 +87,12 @@ critical-severity emergency flag.
   snapshot
 - [ ] Validator-program leaderboard snapshot: full points
   table per operator, archived to
-  `s3://gsx-dag-testnet-archive/leaderboard/<re-genesis-id>/`
+  `s3://suwappu-dag-testnet-archive/leaderboard/<re-genesis-id>/`
 - [ ] L1 state snapshot: last committed checkpoint's full
   state-tree (balances + delegation registry once v1.1 ships
   + auth/validator registries) published as a downloadable
   `.bincode` artifact under
-  `https://testnet.gsx.globalsettlement.com/snapshots/`
+  `https://testnet.suwappu.bot/snapshots/`
 - [ ] L2 state snapshot: same shape for the L2 MPT root +
   cert registry + nullifier set (once Track G lands)
 - [ ] Per-operator events.ndjson archive cutoff (operators
@@ -103,7 +103,7 @@ critical-severity emergency flag.
 - [ ] Faucet drip rate halved (signals approaching wind-down)
 - [ ] Public RPC layer flips to read-only mode for new
   sessions (existing sessions allowed to finish; new
-  `gsx_submitIntent` calls rejected with 503 + the
+  `suwappu_submitIntent` calls rejected with 503 + the
   re-genesis announcement URL in the error body)
 - [ ] Status page updates to "RE-GENESIS WINDOW"
 
@@ -111,7 +111,7 @@ critical-severity emergency flag.
 
 - [ ] All 7 seed validators receive the new genesis manifest
   via the existing
-  `https://testnet.gsx.globalsettlement.com/genesis.toml`
+  `https://testnet.suwappu.bot/genesis.toml`
   endpoint (rotated to a new path so old endpoint stays
   serving the current genesis for last-minute readers)
 - [ ] All Tier B Validator-Operators receive the new
@@ -172,7 +172,7 @@ At `target_genesis_at`:
    checkpoint at `last_round_before_genesis`. This checkpoint's
    hash is published as the chain's terminal state for
    historical-proof purposes
-3. **All seed validators stop their gsx-node systemd unit**
+3. **All seed validators stop their suwappu-node systemd unit**
    (via the existing `deploy.sh stop` flow)
 4. **All Tier B Validator-Operators stop their nodes** within
    the 30-minute cutover window (per the announcement)
@@ -208,7 +208,7 @@ re-genesis events:
   the NEW chain's first epoch. No cross-genesis correlation
 - **Points conversion at TGE** uses the cumulative total
   across all re-genesis events
-- **The `gsx-validator-program` daemon doesn't auto-reset**:
+- **The `suwappu-validator-program` daemon doesn't auto-reset**:
   the foundation MUST manually flush the `epoch_points` and
   `uptime_samples` tables for samples taken after the
   re-genesis boundary (a `POST /admin/regenesis` endpoint
@@ -219,7 +219,7 @@ re-genesis events:
 The last **4 re-genesis epoch snapshots** are retained
 indefinitely in S3 for forensic + historical proof purposes:
 
-- Path: `s3://gsx-dag-testnet-archive/snapshots/<re-genesis-id>/`
+- Path: `s3://suwappu-dag-testnet-archive/snapshots/<re-genesis-id>/`
 - Contents: full state-tree, validator registry, leaderboard,
   CloudWatch metrics, announcement record, IQ ratification,
   `Intent::ReGenesis` payload + signatures
@@ -235,10 +235,10 @@ be auditable for at least 12 months post-event.
 
 ### 8.1 T-14 day announcement (public)
 
-> **GSX Testnet Re-Genesis: <Date> <Time UTC>**
+> **SUWAPPU Testnet Re-Genesis: <Date> <Time UTC>**
 >
-> The Global Settlement Network foundation will perform a
-> scheduled re-genesis of the GSX testnet on **<date>** at
+> The Suwappu Labs foundation will perform a
+> scheduled re-genesis of the SUWAPPU testnet on **<date>** at
 > **<time> UTC**. This event is governance-ratified under
 > IQ-<NNN> with the rationale: **<one-paragraph rationale>**.
 >
@@ -248,7 +248,7 @@ be auditable for at least 12 months post-event.
 >   contract state, and pending transactions on the existing
 >   testnet will not carry over.
 > - **Cumulative validator-program points are preserved.**
->   See [docs/testnet/POINTS.md](https://github.com/GlobalSettlementNetwork/gsx-dag/blob/main/docs/testnet/POINTS.md).
+>   See [docs/testnet/POINTS.md](https://github.com/Suwappu-Labs/suwappu-dag/blob/main/docs/testnet/POINTS.md).
 > - **The faucet drip rate will halve at <T-72h>** and the
 >   public RPC will enter read-only mode at <T-72h>.
 > - **Validator-Operators will receive the new genesis
@@ -258,29 +258,29 @@ be auditable for at least 12 months post-event.
 > Tier B Validator-Operators: please ensure your event-log
 > uploads are flushed before <T-24h>.
 >
-> Questions: support@globalsettlement.com.
+> Questions: support@suwappu.bot.
 
 ### 8.2 T-0 cutover notice (validator-operators)
 
-> **GSX Testnet Re-Genesis cutover beginning now.**
+> **SUWAPPU Testnet Re-Genesis cutover beginning now.**
 >
 > All foundation seed validators are stopping their nodes.
 > The new genesis manifest is available at
-> `https://testnet.gsx.globalsettlement.com/genesis-<re-genesis-id>.toml`.
+> `https://testnet.suwappu.bot/genesis-<re-genesis-id>.toml`.
 >
 > ### Operator action
 >
-> 1. Stop your gsx-node systemd unit:
->    `sudo systemctl stop gsx-node`
+> 1. Stop your suwappu-node systemd unit:
+>    `sudo systemctl stop suwappu-node`
 > 2. Backup your current state directory:
->    `mv /var/lib/gsx/state /var/lib/gsx/state.pre-<re-genesis-id>`
+>    `mv /var/lib/suwappu/state /var/lib/suwappu/state.pre-<re-genesis-id>`
 > 3. Download the new genesis manifest and peers list:
->    `curl -fsS https://testnet.gsx.globalsettlement.com/genesis-<re-genesis-id>.toml > /etc/gsx/genesis.toml`
->    `curl -fsS https://testnet.gsx.globalsettlement.com/peers-<re-genesis-id>.txt > /etc/gsx/peers.txt`
-> 4. Restart: `sudo systemctl start gsx-node`
+>    `curl -fsS https://testnet.suwappu.bot/genesis-<re-genesis-id>.toml > /etc/suwappu/genesis.toml`
+>    `curl -fsS https://testnet.suwappu.bot/peers-<re-genesis-id>.txt > /etc/suwappu/peers.txt`
+> 4. Restart: `sudo systemctl start suwappu-node`
 > 5. Confirm `latest_committed_round` advances past 50
 >    within 30 min: see the validator dashboard at
->    `https://explorer.testnet.gsx.globalsettlement.com/validator/<your-id>`
+>    `https://explorer.testnet.suwappu.bot/validator/<your-id>`
 >
 > Foundation primary on-call: <pagerduty-link>.
 
@@ -335,7 +335,7 @@ this exact procedure as its rehearsal target.
 - **Operations runbooks**: `OPERATIONS.md` § "Devnet
   wipe+regenesis" — the precursor pattern this runbook
   generalizes
-- **Sale model**: `gsx-strategy/docs/sources/GSX-Node-Validator-Sale-Model-v2.0.xlsx`
+- **Sale model**: `suwappu-strategy/docs/sources/SUWAPPU-Node-Validator-Sale-Model-v2.0.xlsx`
   Risk Factor (operational risk) — names testnet re-genesis
   as a known recoverable event class
 - **Substrate Intent variant**: `Intent::ReGenesis` lands in

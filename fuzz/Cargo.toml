@@ -1,5 +1,5 @@
 [package]
-name = "gsx-dag-fuzz"
+name = "suwappu-dag-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2021"
@@ -12,8 +12,8 @@ libfuzzer-sys = "0.4"
 bincode = { version = "2", features = ["serde", "std"], default-features = false }
 
 # Workspace crates under test. Pull only what each fuzz target needs.
-gsx-node = { path = "../crates/gsx-node" }
-gsx-consensus = { path = "../crates/gsx-consensus" }
+suwappu-node = { path = "../crates/suwappu-node" }
+suwappu-consensus = { path = "../crates/suwappu-consensus" }
 
 [[bin]]
 name = "wire_decode"

@@ -1,12 +1,12 @@
 name: status-page
 
-# Deploy the gsx-devnet status page on every push to main that
+# Deploy the suwappu-devnet status page on every push to main that
 # touches it. The page is vanilla HTML+JS (no build step), so the
 # job is just: sync to S3 + invalidate CloudFront.
 #
 # Pre-reqs (one-time, set by an operator):
 #   - `STATUS_DEPLOY_ROLE` repo secret: an IAM role ARN with
-#     s3:PutObject on `gsx-dag-devnet-status/*` and
+#     s3:PutObject on `suwappu-dag-devnet-status/*` and
 #     cloudfront:CreateInvalidation on the status distribution.
 #   - terraform/devnet/ already applied so the bucket + distro exist.
 
@@ -50,15 +50,15 @@ jobs:
         env:
           STATUS_DEPLOY_ROLE: ${{ secrets.STATUS_DEPLOY_ROLE }}
         run: |
-          aws s3 sync ./clients/status-page/ s3://gsx-dag-devnet-status/ \
+          aws s3 sync ./clients/status-page/ s3://suwappu-dag-devnet-status/ \
               --delete \
               --exclude "README.md" \
               --cache-control "public, max-age=60, must-revalidate"
           # index.html + app.js are the entry points; no-cache so a
           # fresh deploy is visible on the next page load.
-          aws s3 cp ./clients/status-page/index.html s3://gsx-dag-devnet-status/index.html \
+          aws s3 cp ./clients/status-page/index.html s3://suwappu-dag-devnet-status/index.html \
               --cache-control "no-cache, no-store, must-revalidate"
-          aws s3 cp ./clients/status-page/app.js s3://gsx-dag-devnet-status/app.js \
+          aws s3 cp ./clients/status-page/app.js s3://suwappu-dag-devnet-status/app.js \
               --cache-control "no-cache, no-store, must-revalidate"
 
       - name: Invalidate CloudFront
@@ -67,7 +67,7 @@ jobs:
           STATUS_DEPLOY_ROLE: ${{ secrets.STATUS_DEPLOY_ROLE }}
         run: |
           DIST_ID=$(aws cloudfront list-distributions \
-              --query "DistributionList.Items[?Aliases.Items[?contains(@, 'status.devnet.gsx')]].Id | [0]" \
+              --query "DistributionList.Items[?Aliases.Items[?contains(@, 'status.devnet.suwappu')]].Id | [0]" \
               --output text)
           aws cloudfront create-invalidation \
               --distribution-id "$DIST_ID" \

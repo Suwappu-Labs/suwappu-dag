@@ -1,11 +1,11 @@
 # Track B — points accumulator infrastructure.
 #
 # The points-accumulator daemon (lands in a follow-up PR as
-# `crates/gsx-validator-program/`) runs on this EC2, reads from
+# `crates/suwappu-validator-program/`) runs on this EC2, reads from
 # the external-uploads S3 bucket on a 5-minute schedule, computes
 # the weekly leaderboard, writes results into the RDS instance,
 # and exposes a public read API at
-# `program.testnet.gsx.globalsettlement.com/leaderboard`.
+# `program.testnet.suwappu.suwappu.bot/leaderboard`.
 #
 # For this terraform PR we provision the INFRASTRUCTURE only —
 # the daemon binary itself lands separately so a fresh foundation
@@ -17,14 +17,14 @@
 # minute + ~50 read QPS from the public API.
 resource "aws_db_subnet_group" "program" {
   provider   = aws.us_east_1
-  name       = "gsx-testnet-program-subnets"
+  name       = "suwappu-testnet-program-subnets"
   subnet_ids = aws_subnet.program_private.*.id
-  tags       = { Name = "gsx-testnet-program-subnets" }
+  tags       = { Name = "suwappu-testnet-program-subnets" }
 }
 
 resource "aws_security_group" "program_db" {
   provider    = aws.us_east_1
-  name        = "gsx-testnet-program-db-sg"
+  name        = "suwappu-testnet-program-db-sg"
   description = "RDS access — only the program EC2 can reach the DB."
   vpc_id      = aws_vpc.program.id
 
@@ -43,7 +43,7 @@ resource "aws_security_group" "program_db" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  tags = { Name = "gsx-testnet-program-db-sg" }
+  tags = { Name = "suwappu-testnet-program-db-sg" }
 }
 
 resource "random_password" "program_db" {
@@ -53,7 +53,7 @@ resource "random_password" "program_db" {
 
 resource "aws_secretsmanager_secret" "program_db_password" {
   provider                = aws.us_east_1
-  name                    = "gsx-testnet/program/db-password"
+  name                    = "suwappu-testnet/program/db-password"
   recovery_window_in_days = 7
 }
 
@@ -65,7 +65,7 @@ resource "aws_secretsmanager_secret_version" "program_db_password" {
 
 resource "aws_db_instance" "program" {
   provider                  = aws.us_east_1
-  identifier                = "gsx-testnet-program"
+  identifier                = "suwappu-testnet-program"
   engine                    = "postgres"
   engine_version            = "16.4"
   instance_class            = "db.t4g.small"
@@ -80,13 +80,13 @@ resource "aws_db_instance" "program" {
   vpc_security_group_ids    = [aws_security_group.program_db.id]
   publicly_accessible       = false
   skip_final_snapshot       = false
-  final_snapshot_identifier = "gsx-testnet-program-final-snapshot"
+  final_snapshot_identifier = "suwappu-testnet-program-final-snapshot"
   backup_retention_period   = 7
   backup_window             = "03:00-04:00"
   maintenance_window        = "sun:04:00-sun:05:00"
   deletion_protection       = true
 
-  tags = { Name = "gsx-testnet-program-db" }
+  tags = { Name = "suwappu-testnet-program-db" }
 }
 
 # Program EC2 — runs the points-accumulator daemon.
@@ -95,7 +95,7 @@ resource "aws_db_instance" "program" {
 # leaderboard read API gets traffic.
 resource "aws_security_group" "program_ec2" {
   provider    = aws.us_east_1
-  name        = "gsx-testnet-program-ec2-sg"
+  name        = "suwappu-testnet-program-ec2-sg"
   description = "Points-accumulator EC2 ingress."
   vpc_id      = aws_vpc.program.id
 
@@ -114,12 +114,12 @@ resource "aws_security_group" "program_ec2" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  tags = { Name = "gsx-testnet-program-ec2-sg" }
+  tags = { Name = "suwappu-testnet-program-ec2-sg" }
 }
 
 resource "aws_iam_role" "program_ec2" {
   provider = aws.us_east_1
-  name     = "gsx-testnet-program-ec2"
+  name     = "suwappu-testnet-program-ec2"
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
@@ -177,7 +177,7 @@ resource "aws_iam_role_policy_attachment" "program_cw_agent" {
 
 resource "aws_iam_instance_profile" "program" {
   provider = aws.us_east_1
-  name     = "gsx-testnet-program"
+  name     = "suwappu-testnet-program"
   role     = aws_iam_role.program_ec2.name
 }
 
@@ -206,12 +206,12 @@ resource "aws_instance" "program" {
 
   # No user-data here — the daemon binary lands via a follow-up PR
   # + SSM deployment. For now the instance comes up bare; ops uses
-  # SSM Session Manager to install the gsx-validator-program
+  # SSM Session Manager to install the suwappu-validator-program
   # systemd unit when the binary is ready.
   user_data_replace_on_change = false
 
   tags = {
-    Name           = "gsx-testnet-program"
+    Name           = "suwappu-testnet-program"
     "testnet:role" = "validator-program"
   }
 }
@@ -220,7 +220,7 @@ resource "aws_eip" "program" {
   provider = aws.us_east_1
   instance = aws_instance.program.id
   domain   = "vpc"
-  tags     = { Name = "gsx-testnet-program-eip" }
+  tags     = { Name = "suwappu-testnet-program-eip" }
 }
 
 # Program VPC — isolated from validator + faucet VPCs so the
@@ -229,7 +229,7 @@ resource "aws_vpc" "program" {
   provider             = aws.us_east_1
   cidr_block           = "10.44.0.0/24"
   enable_dns_hostnames = true
-  tags                 = { Name = "gsx-testnet-program-vpc" }
+  tags                 = { Name = "suwappu-testnet-program-vpc" }
 }
 
 resource "aws_subnet" "program_public" {
@@ -238,7 +238,7 @@ resource "aws_subnet" "program_public" {
   cidr_block              = "10.44.0.0/26"
   map_public_ip_on_launch = true
   availability_zone       = "us-east-1a"
-  tags                    = { Name = "gsx-testnet-program-subnet-public" }
+  tags                    = { Name = "suwappu-testnet-program-subnet-public" }
 }
 
 # Two private subnets in different AZs — RDS requires ≥ 2.
@@ -248,13 +248,13 @@ resource "aws_subnet" "program_private" {
   vpc_id            = aws_vpc.program.id
   cidr_block        = cidrsubnet(aws_vpc.program.cidr_block, 2, count.index + 1)
   availability_zone = ["us-east-1a", "us-east-1b"][count.index]
-  tags              = { Name = "gsx-testnet-program-subnet-private-${count.index}" }
+  tags              = { Name = "suwappu-testnet-program-subnet-private-${count.index}" }
 }
 
 resource "aws_internet_gateway" "program" {
   provider = aws.us_east_1
   vpc_id   = aws_vpc.program.id
-  tags     = { Name = "gsx-testnet-program-igw" }
+  tags     = { Name = "suwappu-testnet-program-igw" }
 }
 
 resource "aws_route_table" "program_public" {
@@ -264,7 +264,7 @@ resource "aws_route_table" "program_public" {
     cidr_block = "0.0.0.0/0"
     gateway_id = aws_internet_gateway.program.id
   }
-  tags = { Name = "gsx-testnet-program-rt" }
+  tags = { Name = "suwappu-testnet-program-rt" }
 }
 
 resource "aws_route_table_association" "program_public" {
