@@ -19,7 +19,7 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "node --test --experimental-test-coverage test/*.test.ts",
+    "test": "node --import tsx --test --experimental-test-coverage test/*.test.ts",
     "docs": "typedoc",
     "clean": "rm -rf dist docs-out"
   },
@@ -42,6 +42,7 @@
   },
   "devDependencies": {
     "@types/node": "^22",
+    "tsx": "^4.22.4",
     "typedoc": "^0.26",
     "typescript": "^5.6"
   },
