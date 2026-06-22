@@ -315,7 +315,7 @@ mod tests {
             bincode::serde::encode_to_vec(&intent, bincode::config::legacy()).unwrap();
         let mut h = blake3::Hasher::new();
         h.update(INTENT_DOMAIN_TAG);
-        h.update(b"gsx-devnet");
+        h.update(b"suwappu-devnet");
         h.update(&intent_bytes);
         let expected: [u8; 32] = *h.finalize().as_bytes();
         assert_eq!(digest, expected);
