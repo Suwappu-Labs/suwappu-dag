@@ -3061,7 +3061,7 @@ impl Substrate for InMemorySubstrate {
         // Child 1: balances root.
         let balances_root = {
             let mut h = blake3::Hasher::new();
-            h.update(b"GSX-BALANCES-V1");
+            h.update(b"SUWAPPU-BALANCES-V1");
             for (addr, balance) in &self.balances {
                 h.update(addr);
                 h.update(&balance.to_be_bytes());
@@ -3078,7 +3078,7 @@ impl Substrate for InMemorySubstrate {
         // suwappu-crypto::hash).
         let bytes_state_root = {
             let mut h = blake3::Hasher::new();
-            h.update(b"GSX-BYTES-STATE-V1");
+            h.update(b"SUWAPPU-BYTES-STATE-V1");
             for (addr, data) in &self.bytes_state {
                 h.update(addr);
                 h.update(&(data.len() as u32).to_be_bytes());
@@ -3091,7 +3091,7 @@ impl Substrate for InMemorySubstrate {
 
         // Top-level combination.
         let mut h = blake3::Hasher::new();
-        h.update(b"GSX-STATE-ROOT-V2");
+        h.update(b"SUWAPPU-STATE-ROOT-V2");
         h.update(&balances_root);
         h.update(&bytes_state_root);
         let mut out = [0u8; 32];

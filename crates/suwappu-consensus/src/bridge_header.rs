@@ -39,7 +39,7 @@ pub const HEADER_PREIMAGE_LEN: usize = 148;
 
 /// Domain-separation tag for the bridge-header attestation surface.
 ///
-/// This is `keccak256("SUWAPPU_SUWAPPUDAG_HEADER_V1")` (the ASCII string, no
+/// This is `keccak256("SUWAPPU_DAG_HEADER_V1")` (the ASCII string, no
 /// trailing NUL), hard-pinned here as the 32-byte literal so this crate
 /// carries no runtime keccak dependency. The value is verified to equal the
 /// Solidity constant `HEADER_DOMAIN` by the `domain_matches_keccak256`
@@ -47,8 +47,8 @@ pub const HEADER_PREIMAGE_LEN: usize = 148;
 /// asserts equality. The first 32 bytes of the cross-language golden
 /// preimage (`forge_golden_preimage_matches`) are also exactly this value.
 pub const HEADER_DOMAIN: [u8; 32] = [
-    0xc7, 0x0c, 0x21, 0xeb, 0xc7, 0x9f, 0x8a, 0x20, 0x43, 0x34, 0x57, 0xa7, 0x0c, 0xf2, 0x98, 0x5f,
-    0x05, 0xe7, 0x0b, 0x01, 0x7c, 0xbd, 0x95, 0xf3, 0x28, 0xe3, 0xb2, 0xa8, 0x72, 0x1e, 0xbd, 0x3a,
+    0x7b, 0xea, 0x45, 0x3e, 0xa9, 0xa9, 0x2b, 0xb4, 0x6a, 0x6a, 0x6e, 0xcb, 0xcb, 0xa6, 0x70, 0xfd,
+    0x52, 0xd3, 0x84, 0x88, 0x65, 0x7c, 0x9a, 0x93, 0x73, 0x78, 0x6e, 0xcb, 0x2b, 0x5c, 0x35, 0xf0,
 ];
 
 /// Build the bridge-header attestation preimage.
@@ -187,7 +187,7 @@ mod tests {
     /// load-bearing ground truth: the Rust packing must reproduce these exact
     /// bytes, so this string is embedded verbatim and decoded, NOT
     /// regenerated from the scalars.
-    const FORGE_GOLDEN_PREIMAGE_HEX: &str = "c70c21ebc79f8a20433457a70cf2985f05e70b017cbd95f328e3b2a8721ebd3aff431b3851ff00be6b5a4bd9b67e7d4118300693937865dfe75847dfd7cdd78a00000000000000000000000000000000000000a10000000000000000000000000000000000000000000000000000000000001092b33d996c809e9a90d13c6a64fec28295f01c27d356843d9defc491bfda42f692";
+    const FORGE_GOLDEN_PREIMAGE_HEX: &str = "7bea453ea9a92bb46a6a6ecbcba670fd52d38488657c9a9373786ecb2b5c35f0ff431b3851ff00be6b5a4bd9b67e7d4118300693937865dfe75847dfd7cdd78a00000000000000000000000000000000000000a10000000000000000000000000000000000000000000000000000000000001092b33d996c809e9a90d13c6a64fec28295f01c27d356843d9defc491bfda42f692";
 
     /// Golden-vector scalars (the same values the forge side packed).
     fn golden_scalars() -> ([u8; 32], [u8; 20], u64, [u8; 32]) {
@@ -234,11 +234,11 @@ mod tests {
     }
 
     /// The hard-pinned `HEADER_DOMAIN` literal must equal
-    /// `keccak256("SUWAPPU_SUWAPPUDAG_HEADER_V1")` recomputed at test time.
+    /// `keccak256("SUWAPPU_DAG_HEADER_V1")` recomputed at test time.
     #[test]
     fn domain_matches_keccak256() {
         let mut hasher = Keccak256::new();
-        hasher.update(b"SUWAPPU_GSXDAG_HEADER_V1");
+        hasher.update(b"SUWAPPU_DAG_HEADER_V1");
         let computed: [u8; 32] = hasher.finalize().into();
         assert_eq!(
             computed, HEADER_DOMAIN,

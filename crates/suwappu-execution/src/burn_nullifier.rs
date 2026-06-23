@@ -65,7 +65,7 @@ pub fn burn_id(
     asset_id: &Option<[u8; 32]>,
 ) -> [u8; 32] {
     let mut h = Hasher::new();
-    h.update(b"gsx-burn-v1");
+    h.update(b"suwappu-burn-v1");
     h.update(l2_chain_id_hash);
     h.update(&batch_id.to_be_bytes());
     h.update(recipient);

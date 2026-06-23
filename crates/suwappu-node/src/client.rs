@@ -26,10 +26,10 @@
 //! public key. The signing payload binds:
 //!
 //! ```text
-//! blake3( b"GSX_INTENT_V1" || network_id_bytes || bincode(intent) )
+//! blake3( b"SUWAPPU_INTENT_V1" || network_id_bytes || bincode(intent) )
 //! ```
 //!
-//! - `b"GSX_INTENT_V1"` — domain separator (prevents cross-protocol replay).
+//! - `b"SUWAPPU_INTENT_V1"` — domain separator (prevents cross-protocol replay).
 //! - `network_id_bytes` — UTF-8 bytes of the manifest's `network_id`
 //!   (prevents cross-network replay, e.g. perf-1 sig replayed against perf-2).
 //! - `bincode(intent)` — canonical serialization of the intent.
@@ -81,7 +81,7 @@ pub const CLIENT_WIRE_VERSION: u32 = 2;
 /// Domain-separation tag mixed into every signed intent payload. Bound
 /// alongside the genesis `network_id` and the bincoded intent to bind
 /// the signature to this protocol and this network.
-pub const INTENT_DOMAIN_TAG: &[u8] = b"GSX_INTENT_V1";
+pub const INTENT_DOMAIN_TAG: &[u8] = b"SUWAPPU_INTENT_V1";
 
 /// Compute the canonical signing digest for an intent under `network_id`.
 ///
@@ -780,7 +780,7 @@ mod tests {
         let network_id = "n";
         let intent_bytes = crate::codec::encode(&intent).unwrap();
         let mut h = blake3::Hasher::new();
-        h.update(b"GSX_INTENT_V1");
+        h.update(b"SUWAPPU_INTENT_V1");
         h.update(network_id.as_bytes());
         h.update(&intent_bytes);
         let expected = *h.finalize().as_bytes();

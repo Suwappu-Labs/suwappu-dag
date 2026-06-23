@@ -186,7 +186,7 @@ impl BridgeHeaderSigner {
         // by the registry's registered pk) — silently halting this validator's
         // bridge contribution. Probe once at startup and fail LOUD (ERROR +
         // disable) instead of silently on-chain.
-        let probe = b"gsx-bridge-header-keypair-probe";
+        let probe = b"suwappu-bridge-header-keypair-probe";
         let matches = suwappu_crypto::mldsa::sign(probe, &sk)
             .ok()
             .is_some_and(|sig| suwappu_crypto::mldsa::verify(probe, &sig, &pubkey).is_ok());
@@ -1908,7 +1908,7 @@ mod tests {
         // sk↔pk correspondence probe (the guard `from_config` runs at startup):
         // a signature by `sk` verifies under its own `pk` but NOT under an
         // unrelated key — so a mismatched (file-sk, genesis-pk) pair is caught.
-        let probe = b"gsx-bridge-header-keypair-probe";
+        let probe = b"suwappu-bridge-header-keypair-probe";
         let sig = suwappu_crypto::mldsa::sign(probe, &sk).unwrap();
         assert!(suwappu_crypto::mldsa::verify(probe, &sig, &pk).is_ok());
         let (other_pk, _other_sk) = suwappu_crypto::mldsa::keypair();

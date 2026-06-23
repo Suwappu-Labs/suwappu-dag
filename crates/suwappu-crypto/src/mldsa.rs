@@ -116,7 +116,7 @@ mod tests {
     #[test]
     fn roundtrip_basic() {
         let (pk, sk) = keypair();
-        let msg = b"gsx dag l1 attestation";
+        let msg = b"suwappu dag l1 attestation";
         let sig = sign(msg, &sk).unwrap();
         verify(msg, &sig, &pk).unwrap();
     }
@@ -139,7 +139,7 @@ mod tests {
     #[test]
     fn attached_roundtrip() {
         let (pk, sk) = keypair();
-        let msg = b"gsx-dag attached";
+        let msg = b"suwappu-dag attached";
         let signed = sign_attached(msg, &sk).unwrap();
         let recovered = open_attached(&signed, &pk).unwrap();
         assert_eq!(recovered, msg);

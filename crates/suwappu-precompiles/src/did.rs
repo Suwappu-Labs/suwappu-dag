@@ -134,7 +134,7 @@ impl DidDocument {
     /// specific revision.
     pub fn canonical_hash(&self) -> [u8; 32] {
         let mut hasher = blake3::Hasher::new();
-        hasher.update(b"GSX-DID-DOC-V1");
+        hasher.update(b"SUWAPPU-DID-DOC-V1");
         hasher.update(&self.id.0);
         hasher.update(&(self.verification_methods.len() as u32).to_be_bytes());
         for vm in &self.verification_methods {

@@ -185,7 +185,7 @@ impl Client {
     ///    yet so the encoding stays on the caller side; a typed helper
     ///    `submit_signed(Intent, &SecretKey, &str)` lands in a follow-up.
     /// 2. Computing the signing digest:
-    ///    `blake3(b"GSX_INTENT_V1" || network_id_bytes || intent_bincode)`
+    ///    `blake3(b"SUWAPPU_INTENT_V1" || network_id_bytes || intent_bincode)`
     ///    and signing it with ML-DSA-65.
     /// 3. Computing `blake3(public_key_bytes)` for `signer_pubkey_hash`.
     ///

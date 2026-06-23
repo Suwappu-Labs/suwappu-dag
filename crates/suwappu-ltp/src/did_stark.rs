@@ -64,7 +64,7 @@ impl DidRotationStatement {
         blob.extend_from_slice(&self.source_chain.to_be_bytes());
         blob.extend_from_slice(&self.target_chain.to_be_bytes());
         blob.extend_from_slice(&self.source_height.to_be_bytes());
-        hash::sha3_256_domain(b"GSX-DID-STARK-V1", &blob)
+        hash::sha3_256_domain(b"SUWAPPU-DID-STARK-V1", &blob)
     }
 }
 

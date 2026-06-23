@@ -57,7 +57,7 @@ impl Checkpoint {
     /// || state_root || prev_checkpoint)`.
     pub fn hash(&self) -> [u8; 32] {
         let mut hasher = blake3::Hasher::new();
-        hasher.update(b"GSX-CHECKPOINT-V1");
+        hasher.update(b"SUWAPPU-CHECKPOINT-V1");
         hasher.update(&self.height.to_be_bytes());
         hasher.update(&self.round.to_be_bytes());
         hasher.update(&self.state_root);

@@ -168,7 +168,7 @@ proptest! {
         let key = trc.as_keys.get(&ases[0]).unwrap();
         let seed = {
             let mut hasher = blake3::Hasher::new();
-            hasher.update(b"GSX-SCION-PATH-SEED-V1");
+            hasher.update(b"SUWAPPU-SCION-PATH-SEED-V1");
             hasher.update(&isd.to_be_bytes());
             hasher.update(&created_at.to_be_bytes());
             let mut out = [0u8; 16];

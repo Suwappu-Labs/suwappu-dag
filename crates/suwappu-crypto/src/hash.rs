@@ -18,24 +18,24 @@ pub const SHA3_256_BYTES: usize = 32;
 /// Domain-separation tag for L2 note commitments
 /// `cm = SHA3-256-domain(SUWAPPU_L2_NOTE_COMMIT_V1, v_le ‖ r ‖ pk_owner)`.
 /// See Track H confidential-transfer construction.
-pub const SUWAPPU_L2_NOTE_COMMIT_V1: &[u8] = b"gsx-l2-note-commit-v1";
+pub const SUWAPPU_L2_NOTE_COMMIT_V1: &[u8] = b"suwappu-l2-note-commit-v1";
 
 /// Domain-separation tag for L2 nullifiers
 /// `nf = SHA3-256-domain(SUWAPPU_L2_NULLIFIER_V1, nk ‖ cm ‖ position_le)`.
-pub const SUWAPPU_L2_NULLIFIER_V1: &[u8] = b"gsx-l2-nullifier-v1";
+pub const SUWAPPU_L2_NULLIFIER_V1: &[u8] = b"suwappu-l2-nullifier-v1";
 
 /// Domain-separation tag for L2 nullifier-key derivation
 /// `nk = SHA3-256-domain(SUWAPPU_L2_NF_KEY_V1, sk_seed)`.
-pub const SUWAPPU_L2_NF_KEY_V1: &[u8] = b"gsx-l2-nf-key-v1";
+pub const SUWAPPU_L2_NF_KEY_V1: &[u8] = b"suwappu-l2-nf-key-v1";
 
 /// Domain-separation tag for L2 viewing-key seed derivation
 /// `viewing_seed = SHA3-256-domain(SUWAPPU_L2_VIEWING_KEY_V1, sk_seed)`;
 /// `(ek_view, dk_view) = ML-KEM-768.KeyGen(viewing_seed)`.
-pub const SUWAPPU_L2_VIEWING_KEY_V1: &[u8] = b"gsx-l2-viewing-key-v1";
+pub const SUWAPPU_L2_VIEWING_KEY_V1: &[u8] = b"suwappu-l2-viewing-key-v1";
 
 /// Domain-separation tag for L2 confidential-account address derivation
 /// `addr = SHA3-256-domain(SUWAPPU_L2_ADDRESS_V1, pk_owner_mldsa)[..20]`.
-pub const SUWAPPU_L2_ADDRESS_V1: &[u8] = b"gsx-l2-address-v1";
+pub const SUWAPPU_L2_ADDRESS_V1: &[u8] = b"suwappu-l2-address-v1";
 
 /// HKDF-SHA3-256 multi-output key derivation (RFC 5869).
 ///
@@ -55,8 +55,8 @@ pub const SUWAPPU_L2_ADDRESS_V1: &[u8] = b"gsx-l2-address-v1";
 ///
 /// let seed = b"\xab\xcd\xef\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\
 ///              \x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d";
-/// let nf_key = hkdf_sha3_256(b"gsx-l2-derive", seed, b"nullifier-key", 32);
-/// let view_seed = hkdf_sha3_256(b"gsx-l2-derive", seed, b"viewing-key", 32);
+/// let nf_key = hkdf_sha3_256(b"suwappu-l2-derive", seed, b"nullifier-key", 32);
+/// let view_seed = hkdf_sha3_256(b"suwappu-l2-derive", seed, b"viewing-key", 32);
 /// assert_ne!(nf_key, view_seed);
 /// assert_eq!(nf_key.len(), 32);
 /// ```
@@ -142,7 +142,7 @@ mod tests {
 
     #[test]
     fn determinism() {
-        assert_eq!(sha3_256(b"gsx"), sha3_256(b"gsx"));
+        assert_eq!(sha3_256(b"suwappu"), sha3_256(b"suwappu"));
     }
 
     /// HKDF-SHA3-256 is deterministic over the same inputs.
@@ -160,9 +160,9 @@ mod tests {
     #[test]
     fn hkdf_info_label_independence() {
         let seed = [0xabu8; 32];
-        let nf = hkdf_sha3_256(b"gsx-l2-derive", &seed, b"nullifier-key", 32);
-        let view = hkdf_sha3_256(b"gsx-l2-derive", &seed, b"viewing-key", 32);
-        let spend = hkdf_sha3_256(b"gsx-l2-derive", &seed, b"spend-key", 32);
+        let nf = hkdf_sha3_256(b"suwappu-l2-derive", &seed, b"nullifier-key", 32);
+        let view = hkdf_sha3_256(b"suwappu-l2-derive", &seed, b"viewing-key", 32);
+        let spend = hkdf_sha3_256(b"suwappu-l2-derive", &seed, b"spend-key", 32);
         assert_ne!(nf, view);
         assert_ne!(nf, spend);
         assert_ne!(view, spend);

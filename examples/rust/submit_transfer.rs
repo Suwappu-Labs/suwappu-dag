@@ -40,11 +40,11 @@ async fn main() -> Result<()> {
     let intent_bincode = bincode::serialize(&intent)?;
 
     // 3. Compute the signing digest:
-    //      blake3( b"GSX_INTENT_V1" || network_id_bytes || intent_bincode )
+    //      blake3( b"SUWAPPU_INTENT_V1" || network_id_bytes || intent_bincode )
     //    Both submitter and validator MUST compute the digest the
     //    same way; any divergence rejects the signature.
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"GSX_INTENT_V1");
+    hasher.update(b"SUWAPPU_INTENT_V1");
     hasher.update(network_id.as_bytes());
     hasher.update(&intent_bincode);
     let digest = *hasher.finalize().as_bytes();

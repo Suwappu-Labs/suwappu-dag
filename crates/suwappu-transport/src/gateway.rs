@@ -86,7 +86,7 @@ impl GatewayEnvelope {
             blob.extend_from_slice(&hop.mac);
         }
         blob.extend_from_slice(&self.created_at.to_be_bytes());
-        hash::sha3_256_domain(b"GSX-GATEWAY-ENV-V1", &blob)
+        hash::sha3_256_domain(b"SUWAPPU-GATEWAY-ENV-V1", &blob)
     }
 }
 
@@ -117,7 +117,7 @@ fn response_signing_digest(
     blob.extend_from_slice(&(response_payload.len() as u32).to_be_bytes());
     blob.extend_from_slice(response_payload);
     blob.extend_from_slice(&created_at.to_be_bytes());
-    hash::sha3_256_domain(b"GSX-GATEWAY-RESP-V1", &blob)
+    hash::sha3_256_domain(b"SUWAPPU-GATEWAY-RESP-V1", &blob)
 }
 
 /// Errors emitted by the gateway pipeline.
