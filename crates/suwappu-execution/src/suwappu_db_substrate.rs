@@ -45,39 +45,23 @@ impl SuwappuDbSubstrate {
     where
         I: IntoIterator<Item = (Address, Balance)>,
     {
-        let s = Self::new();
-        for (addr, balance) in entries {
-            if balance == 0 {
-                continue;
+        let mut s = Self::new();
+        {
+            // Protocol-owned credit via the suwappu-db v0.4.0 `Bridge::credit`
+            // primitive — the durable analogue of
+            // `InMemorySubstrate::credit_unchecked`. This replaces the
+            // phase-1 no-op: the adapter can now construct realistic test
+            // fixtures (and any protocol-owned seed flow) without a
+            // minter/self-transfer dance, while still routing through the
+            // capability-gated `State::apply` (only a `Bridge` holding the
+            // `BridgeToken` can mutate state). Zero balances are no-ops in
+            // `credit` itself.
+            let mut bridge = Bridge::new(&mut s.state);
+            for (addr, balance) in entries {
+                bridge
+                    .credit(SuwappuAddress(addr), balance)
+                    .expect("from_balances: credit on a fresh state cannot overflow");
             }
-            // Seed via Bridge::submit with a self-mint-style flow.
-            // suwappu-db's Bridge only exposes Transfer; we seed by giving
-            // the address a transfer from itself — which is a no-op
-            // when from == to (suwappu-db's self-transfer guard). So we
-            // instead bypass Bridge for the seed by writing directly
-            // through State's test-helper path: in phase-1 we use the
-            // workaround of two-step transfers from a fixed minter
-            // address. For the integration tests the simpler approach
-            // is to seed via Bridge::submit from a minter that holds a
-            // very large initial balance — but State has no public
-            // mutation API outside Bridge.
-            //
-            // Pragmatic choice: suwappu-db's State exposes
-            // `apply(BridgeToken, StateChange)`, and BridgeToken can
-            // only be constructed by suwappudb-bridge. Since we can't mint
-            // a token here, the from_balances helper is currently a
-            // no-op for non-zero balances. The integration test
-            // exercises balance flow through Bridge::submit starting
-            // from a pre-seeded minter, which we get by constructing a
-            // suwappudb-bridge::Bridge over a state that already holds the
-            // initial supply.
-            //
-            // Phase-1 carry-forward: extend suwappudb-state with a
-            // test-only `State::seed_for_tests(addr, balance)` (gated
-            // by `#[cfg(any(test, feature = "test-helpers"))]`) so the
-            // adapter can construct realistic test fixtures without
-            // routing through Bridge.
-            let _ = addr;
         }
         s
     }
@@ -317,5 +301,52 @@ mod tests {
         });
         // Amount = 0 is a no-op in both substrates.
         assert!(err.is_ok());
+    }
+
+    /// `from_balances` now actually seeds via the suwappu-db v0.4.0
+    /// `Bridge::credit` primitive (it was a silent no-op before v0.4.0).
+    #[test]
+    fn from_balances_seeds_real_balances() {
+        let s = SuwappuDbSubstrate::from_balances([(addr(1), 100), (addr(2), 250)]);
+        assert_eq!(s.balance(&addr(1)), 100);
+        assert_eq!(s.balance(&addr(2)), 250);
+        assert_eq!(s.balance(&addr(3)), 0);
+    }
+
+    /// End-to-end on the durable substrate: seed → Transfer → balances
+    /// settle. This flow was impossible pre-v0.4.0 because the substrate
+    /// could not be seeded outside a minter dance.
+    #[test]
+    fn seeded_transfer_settles_on_durable_substrate() {
+        let mut s = SuwappuDbSubstrate::from_balances([(addr(1), 100)]);
+        s.apply_intent(&Intent::Transfer {
+            from: addr(1),
+            to: addr(2),
+            amount: 30,
+        })
+        .unwrap();
+        assert_eq!(s.balance(&addr(1)), 70);
+        assert_eq!(s.balance(&addr(2)), 30);
+    }
+
+    /// Balance parity with the in-memory reference substrate for the
+    /// seed→transfer flow: both produce identical final balances.
+    #[test]
+    fn balances_match_in_memory_reference() {
+        let seed = [(addr(1), 100u128), (addr(2), 5u128)];
+        let mut durable = SuwappuDbSubstrate::from_balances(seed);
+        let mut reference = crate::substrate::InMemorySubstrate::from_balances(seed);
+        let xfer = Intent::Transfer {
+            from: addr(1),
+            to: addr(2),
+            amount: 40,
+        };
+        assert_eq!(
+            durable.apply_intent(&xfer).is_ok(),
+            reference.apply_intent(&xfer).is_ok()
+        );
+        for a in [addr(1), addr(2), addr(3)] {
+            assert_eq!(durable.balance(&a), reference.balance(&a), "addr {a:?}");
+        }
     }
 }
