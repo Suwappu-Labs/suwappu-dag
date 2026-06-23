@@ -40,30 +40,30 @@ use blake3::Hasher;
 use crate::substrate::Address;
 
 /// Domain tag for the L2 state-root registry account.
-pub const L2_REGISTRY_DOMAIN: &[u8] = b"gsx-l2-registry-v1";
+pub const L2_REGISTRY_DOMAIN: &[u8] = b"suwappu-l2-registry-v1";
 
 /// Domain tag for the insurance-pool registry account.
-pub const INSURANCE_POOL_DOMAIN: &[u8] = b"gsx-insurance-pool-v1";
+pub const INSURANCE_POOL_DOMAIN: &[u8] = b"suwappu-insurance-pool-v1";
 
 /// Domain tag for the protocol-treasury registry account.
-pub const TREASURY_DOMAIN: &[u8] = b"gsx-treasury-v1";
+pub const TREASURY_DOMAIN: &[u8] = b"suwappu-treasury-v1";
 
 /// Domain tag for the L1↔L2 bridge-escrow account.
 ///
 /// The escrow holds locked L1 SUWAPPU while equivalent value is
 /// credited on L2. Bridge accounting invariant: at every block
 /// boundary, `balance(bridge_escrow_address) == sum_of_unwithdrawn_L2_deposits`.
-pub const BRIDGE_ESCROW_DOMAIN: &[u8] = b"gsx-bridge-escrow-v1";
+pub const BRIDGE_ESCROW_DOMAIN: &[u8] = b"suwappu-bridge-escrow-v1";
 
 /// Domain tag for the force-include obligation registry.
 /// Stores `obligation_id → ForceIncludeObligation` records via
 /// the substrate's bytes_state surface (Track G G3.4, #103).
-pub const FORCE_INCLUDE_REGISTRY_DOMAIN: &[u8] = b"gsx-force-include-registry-v1";
+pub const FORCE_INCLUDE_REGISTRY_DOMAIN: &[u8] = b"suwappu-force-include-registry-v1";
 
 /// Domain tag for the sequencer's liveness bond. 3,000,000
 /// SUWAPPU per Track G "Sequencer bonding"; drains 5% per
 /// missed-force-include slash. Refundable.
-pub const SEQUENCER_BOND_DOMAIN: &[u8] = b"gsx-sequencer-bond-v1";
+pub const SEQUENCER_BOND_DOMAIN: &[u8] = b"suwappu-sequencer-bond-v1";
 
 /// Domain tag for the sequencer's safety bond. 15,000,000
 /// SUWAPPU per Track G "Sequencer bonding"; 100% forfeit on
@@ -71,12 +71,12 @@ pub const SEQUENCER_BOND_DOMAIN: &[u8] = b"gsx-sequencer-bond-v1";
 /// Separate from the liveness bond so the partial-drain
 /// model for missed-force-include can't accidentally drain
 /// equivocation collateral.
-pub const SAFETY_BOND_DOMAIN: &[u8] = b"gsx-safety-bond-v1";
+pub const SAFETY_BOND_DOMAIN: &[u8] = b"suwappu-safety-bond-v1";
 
 /// Domain tag for the bridge-asset registry account.
 /// Stores `asset_id → AssetRecord` records via the substrate's
 /// bytes_state surface (Track I I.5, #166).
-pub const ASSET_REGISTRY_DOMAIN: &[u8] = b"gsx-asset-registry-v1";
+pub const ASSET_REGISTRY_DOMAIN: &[u8] = b"suwappu-asset-registry-v1";
 
 /// Domain tag for the sequencer-ejection registry account.
 /// Stores `obligation_id → EjectionRecord` records via the
@@ -84,14 +84,14 @@ pub const ASSET_REGISTRY_DOMAIN: &[u8] = b"gsx-asset-registry-v1";
 /// permissionless-fallback path). One record per Slashed
 /// obligation that's been ejected past the 10k-block
 /// fallback window.
-pub const EJECTION_REGISTRY_DOMAIN: &[u8] = b"gsx-ejection-registry-v1";
+pub const EJECTION_REGISTRY_DOMAIN: &[u8] = b"suwappu-ejection-registry-v1";
 
 /// Domain tag for the L2 burn-nullifier registry account.
 /// Stores the set of claimed `burn_id`s — one per
 /// successful `Intent::L2BurnProven` — to prevent
 /// double-spending a single L2 burn against the bridge
 /// escrow (Track G G3.2 hardening).
-pub const BURN_NULLIFIER_REGISTRY_DOMAIN: &[u8] = b"gsx-burn-nullifier-registry-v1";
+pub const BURN_NULLIFIER_REGISTRY_DOMAIN: &[u8] = b"suwappu-burn-nullifier-registry-v1";
 
 /// Domain tag for the equivocation registry account.
 /// Stores the set of slashed proof_hashes — one per
@@ -99,55 +99,55 @@ pub const BURN_NULLIFIER_REGISTRY_DOMAIN: &[u8] = b"gsx-burn-nullifier-registry-
 /// Equivocation | InvalidBatch, .. }` — to prevent
 /// re-slashing the same offense after a safety-bond
 /// refill (Track G G3.4 hardening).
-pub const EQUIVOCATION_REGISTRY_DOMAIN: &[u8] = b"gsx-equivocation-registry-v1";
+pub const EQUIVOCATION_REGISTRY_DOMAIN: &[u8] = b"suwappu-equivocation-registry-v1";
 
 /// Domain tag for the Authority Ring registry account.
 /// Stores `authority_id → AuthorityRecord` mappings:
 /// active/exiting/ejected status, pubkey material, and
 /// declared stake. Mutated by AdmitAuthority/
 /// ExitAuthority/EjectAuthority.
-pub const AUTHORITY_REGISTRY_DOMAIN: &[u8] = b"gsx-authority-registry-v1";
+pub const AUTHORITY_REGISTRY_DOMAIN: &[u8] = b"suwappu-authority-registry-v1";
 
 /// Domain tag for the Validator Ring registry account.
 /// Mirror of the Authority Ring registry for the Tier B
 /// Validator set. Stores `validator_id → ValidatorRecord`
 /// mappings, mutated by AdmitValidator/ExitValidator/
 /// EjectValidator.
-pub const VALIDATOR_REGISTRY_DOMAIN: &[u8] = b"gsx-validator-registry-v1";
+pub const VALIDATOR_REGISTRY_DOMAIN: &[u8] = b"suwappu-validator-registry-v1";
 
 /// Domain tag for the Authority Ring stake pool. Holds
 /// protocol-locked SUWAPPU backing Authority Ring slots;
 /// credited by `Intent::DepositAuthorityStake`.
-pub const AUTHORITY_STAKE_POOL_DOMAIN: &[u8] = b"gsx-authority-stake-pool-v1";
+pub const AUTHORITY_STAKE_POOL_DOMAIN: &[u8] = b"suwappu-authority-stake-pool-v1";
 
 /// Domain tag for the Validator Ring stake pool. Mirror
 /// of `authority_stake_pool` for the Tier B Validator set.
-pub const VALIDATOR_STAKE_POOL_DOMAIN: &[u8] = b"gsx-validator-stake-pool-v1";
+pub const VALIDATOR_STAKE_POOL_DOMAIN: &[u8] = b"suwappu-validator-stake-pool-v1";
 
 /// Domain tag for the Authority Ring rewards pool. Receives
 /// freshly-minted SUWAPPU from `Intent::MintInflation`; drained
 /// by per-epoch reward distribution.
-pub const AUTHORITY_REWARDS_POOL_DOMAIN: &[u8] = b"gsx-authority-rewards-pool-v1";
+pub const AUTHORITY_REWARDS_POOL_DOMAIN: &[u8] = b"suwappu-authority-rewards-pool-v1";
 
 /// Domain tag for the Validator Ring rewards pool. Mirror
 /// of `authority_rewards_pool` for Tier B.
-pub const VALIDATOR_REWARDS_POOL_DOMAIN: &[u8] = b"gsx-validator-rewards-pool-v1";
+pub const VALIDATOR_REWARDS_POOL_DOMAIN: &[u8] = b"suwappu-validator-rewards-pool-v1";
 
 /// Domain tag for the inflation registry. Stores the last
 /// minted epoch number (`u64::BE`) so `Intent::MintInflation`
 /// can replay-defend its own emission.
-pub const INFLATION_REGISTRY_DOMAIN: &[u8] = b"gsx-inflation-registry-v1";
+pub const INFLATION_REGISTRY_DOMAIN: &[u8] = b"suwappu-inflation-registry-v1";
 
 /// Domain tag for the rewards-distribution registry. Stores
 /// per-ring last-distributed-epoch (16 BE bytes: 8 for
 /// authority, 8 for validator) so `Intent::DistributeRewards`
 /// can replay-defend its own emission per ring.
-pub const REWARDS_DISTRIBUTION_REGISTRY_DOMAIN: &[u8] = b"gsx-rewards-distribution-registry-v1";
+pub const REWARDS_DISTRIBUTION_REGISTRY_DOMAIN: &[u8] = b"suwappu-rewards-distribution-registry-v1";
 
 /// Domain tag for the validator-delegation registry. Stores
 /// `(validator_id, delegator_address) → amount` records for
 /// `Intent::Delegate` (Tokenomics §4 delegated PoS).
-pub const VALIDATOR_DELEGATION_REGISTRY_DOMAIN: &[u8] = b"gsx-validator-delegation-registry-v1";
+pub const VALIDATOR_DELEGATION_REGISTRY_DOMAIN: &[u8] = b"suwappu-validator-delegation-registry-v1";
 
 /// Compute the reserved address corresponding to `domain` —
 /// `BLAKE3(domain)[..20]`. Used by the three exposed helpers below.

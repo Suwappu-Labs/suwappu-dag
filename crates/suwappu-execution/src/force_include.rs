@@ -133,7 +133,7 @@ pub fn obligation_id(
     l2_nonce: u64,
 ) -> [u8; 32] {
     let mut h = Hasher::new();
-    h.update(b"gsx-force-include-v1");
+    h.update(b"suwappu-force-include-v1");
     h.update(&(tx.len() as u32).to_be_bytes());
     h.update(tx);
     h.update(&deadline_l1_height.to_be_bytes());

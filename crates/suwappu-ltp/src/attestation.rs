@@ -105,7 +105,7 @@ impl AttestationPayload {
         blob.extend_from_slice(&self.source_height.to_be_bytes());
         blob.extend_from_slice(&self.state_root);
         blob.extend_from_slice(&self.timestamp_round.to_be_bytes());
-        hash::sha3_256_domain(b"GSX-LTP-ATTEST-V1", &blob)
+        hash::sha3_256_domain(b"SUWAPPU-LTP-ATTEST-V1", &blob)
     }
 }
 

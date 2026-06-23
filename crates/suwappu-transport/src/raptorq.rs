@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn roundtrip_small_payload() {
-        let payload = b"gsx-transport raptorq smoke test";
+        let payload = b"suwappu-transport raptorq smoke test";
         let set = shred(payload, 64, 4);
         let out = reconstruct(set.oti, &set.packets).unwrap();
         assert_eq!(out.as_slice(), payload.as_slice());

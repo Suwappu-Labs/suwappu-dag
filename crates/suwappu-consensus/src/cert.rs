@@ -65,7 +65,7 @@ impl Certificate {
     /// (4 BE) || parents[0..n] || payload_digest`.
     pub fn hash(&self) -> CertHash {
         let mut hasher = blake3::Hasher::new();
-        hasher.update(b"GSX-CERT-V1");
+        hasher.update(b"SUWAPPU-CERT-V1");
         hasher.update(&self.author.to_be_bytes());
         hasher.update(&self.round.to_be_bytes());
         hasher.update(&(self.parents.len() as u32).to_be_bytes());

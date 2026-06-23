@@ -136,7 +136,7 @@ pub struct AssetRecord {
 ///         u32_be(source_contract.len()) || source_contract)`.
 pub fn asset_id(source_chain: u64, source_contract: &[u8]) -> [u8; 32] {
     let mut h = Hasher::new();
-    h.update(b"gsx-asset-v1");
+    h.update(b"suwappu-asset-v1");
     h.update(&source_chain.to_be_bytes());
     h.update(&(source_contract.len() as u32).to_be_bytes());
     h.update(source_contract);

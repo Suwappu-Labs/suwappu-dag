@@ -35,7 +35,7 @@ pub mod mlkem;
 pub use error::CryptoError;
 
 /// Cryptographic suite identifier embedded in domain separation tags.
-pub const DOMAIN_TAG: &[u8] = b"GSX-DAG-L1/v1";
+pub const DOMAIN_TAG: &[u8] = b"SUWAPPU-DAG-L1/v1";
 
 #[cfg(test)]
 mod tests {
@@ -43,6 +43,6 @@ mod tests {
 
     #[test]
     fn domain_tag_is_versioned() {
-        assert_eq!(DOMAIN_TAG, b"GSX-DAG-L1/v1");
+        assert_eq!(DOMAIN_TAG, b"SUWAPPU-DAG-L1/v1");
     }
 }

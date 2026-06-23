@@ -39,7 +39,7 @@ use tracing::{debug, info, warn};
 
 /// Domain separation tag for ML-DSA-65 signing of intents.
 /// MUST match `suwappu_node::client::INTENT_DOMAIN_TAG` byte-for-byte.
-pub const INTENT_DOMAIN_TAG: &[u8] = b"GSX_INTENT_V1";
+pub const INTENT_DOMAIN_TAG: &[u8] = b"SUWAPPU_INTENT_V1";
 
 /// Devnet faucet errors. The HTTP layer maps each variant to a status
 /// code in `main.rs`.

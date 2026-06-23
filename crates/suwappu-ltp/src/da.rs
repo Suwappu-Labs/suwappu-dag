@@ -32,7 +32,7 @@ pub struct Cid(pub [u8; 32]);
 impl Cid {
     /// Compute the CID of `payload`.
     pub fn of(payload: &[u8]) -> Self {
-        Cid(hash::sha3_256_domain(b"GSX-LTP-CID-V1", payload))
+        Cid(hash::sha3_256_domain(b"SUWAPPU-LTP-CID-V1", payload))
     }
 }
 

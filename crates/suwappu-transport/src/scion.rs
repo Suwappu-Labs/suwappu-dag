@@ -162,7 +162,7 @@ pub fn hop_mac(as_key: &[u8; 32], prev_mac: HopMac, hop: &HopField) -> HopMac {
 /// path cannot be lifted into another.
 fn path_seed_mac(path: &Path) -> HopMac {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"GSX-SCION-PATH-SEED-V1");
+    hasher.update(b"SUWAPPU-SCION-PATH-SEED-V1");
     hasher.update(&path.isd.to_be_bytes());
     hasher.update(&path.created_at.to_be_bytes());
     let mut out = [0u8; 16];
