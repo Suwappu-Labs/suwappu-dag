@@ -44,8 +44,8 @@ publish = false
 
 [workspace.dependencies]
 # External: suwappu-db state substrate (paper §7.4)
-suwappudb-bridge = { git = "https://github.com/Suwappu-Labs/suwappu-db.git", tag = "v0.4.0" }
-suwappudb-state = { git = "https://github.com/Suwappu-Labs/suwappu-db.git", tag = "v0.4.0" }
+suwappudb-bridge = { git = "https://github.com/Suwappu-Labs/suwappu-db.git", tag = "v0.6.0" }
+suwappudb-state = { git = "https://github.com/Suwappu-Labs/suwappu-db.git", tag = "v0.6.0" }
 
 # Internal
 suwappu-crypto = { path = "crates/suwappu-crypto", default-features = false }

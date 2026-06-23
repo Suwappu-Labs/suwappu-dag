@@ -884,6 +884,59 @@ pub trait Substrate {
     fn state_root(&self) -> [u8; 32];
 }
 
+/// Canonical **V2 state root** — the single source of truth shared by every
+/// [`Substrate`] impl so they are byte-for-byte interchangeable. A
+/// `SuwappuDbSubstrate` is a valid drop-in for `InMemorySubstrate` only if
+/// their roots match for the same logical state, so both route through here.
+///
+/// Recipe:
+/// `BLAKE3("SUWAPPU-STATE-ROOT-V2" || balances_root || bytes_state_root)` with
+/// `balances_root    = BLAKE3("SUWAPPU-BALANCES-V1"   || ∀asc(addr || u128::BE(bal)))`
+/// `bytes_state_root = BLAKE3("SUWAPPU-BYTES-STATE-V1" || ∀asc(addr || u32::BE(len) || data))`
+///
+/// Callers MUST pass entries ascending by address, with no zero-value balances
+/// and no empty-value bytes records (zero-is-absent), matching the in-memory
+/// map invariants.
+pub(crate) fn compute_state_root_v2<'a>(
+    balances: impl Iterator<Item = (&'a Address, u128)>,
+    bytes: impl Iterator<Item = (&'a Address, &'a [u8])>,
+) -> [u8; 32] {
+    fn finalize(h: blake3::Hasher) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        out.copy_from_slice(h.finalize().as_bytes());
+        out
+    }
+
+    let balances_root = {
+        let mut h = blake3::Hasher::new();
+        h.update(b"SUWAPPU-BALANCES-V1");
+        for (addr, balance) in balances {
+            h.update(addr);
+            h.update(&balance.to_be_bytes());
+        }
+        finalize(h)
+    };
+
+    // Length-prefix each variable-length record (`u32::BE(len) || data`) so
+    // the encoding is unambiguous across records.
+    let bytes_state_root = {
+        let mut h = blake3::Hasher::new();
+        h.update(b"SUWAPPU-BYTES-STATE-V1");
+        for (addr, data) in bytes {
+            h.update(addr);
+            h.update(&(data.len() as u32).to_be_bytes());
+            h.update(data);
+        }
+        finalize(h)
+    };
+
+    let mut h = blake3::Hasher::new();
+    h.update(b"SUWAPPU-STATE-ROOT-V2");
+    h.update(&balances_root);
+    h.update(&bytes_state_root);
+    finalize(h)
+}
+
 /// Phase-1 in-memory substrate adapter.
 ///
 /// Two parallel state maps:
@@ -3053,50 +3106,13 @@ impl Substrate for InMemorySubstrate {
     }
 
     fn state_root(&self) -> [u8; 32] {
-        // V2 recipe: hash the balances + bytes-state with
-        // domain-separated child hashes, then combine. See the
-        // Substrate trait state_root doc for the byte-by-byte
-        // recipe.
-
-        // Child 1: balances root.
-        let balances_root = {
-            let mut h = blake3::Hasher::new();
-            h.update(b"SUWAPPU-BALANCES-V1");
-            for (addr, balance) in &self.balances {
-                h.update(addr);
-                h.update(&balance.to_be_bytes());
-            }
-            let mut out = [0u8; 32];
-            out.copy_from_slice(h.finalize().as_bytes());
-            out
-        };
-
-        // Child 2: bytes-state root. Length-prefix each record
-        // so the encoding is unambiguous across the variable-
-        // length records (`u32::BE(len) || data` matches the
-        // sha3_256_domain length-prefix pattern from
-        // suwappu-crypto::hash).
-        let bytes_state_root = {
-            let mut h = blake3::Hasher::new();
-            h.update(b"SUWAPPU-BYTES-STATE-V1");
-            for (addr, data) in &self.bytes_state {
-                h.update(addr);
-                h.update(&(data.len() as u32).to_be_bytes());
-                h.update(data);
-            }
-            let mut out = [0u8; 32];
-            out.copy_from_slice(h.finalize().as_bytes());
-            out
-        };
-
-        // Top-level combination.
-        let mut h = blake3::Hasher::new();
-        h.update(b"SUWAPPU-STATE-ROOT-V2");
-        h.update(&balances_root);
-        h.update(&bytes_state_root);
-        let mut out = [0u8; 32];
-        out.copy_from_slice(h.finalize().as_bytes());
-        out
+        // Canonical V2 recipe via the shared helper. Both maps are BTreeMaps
+        // (ascending order) and hold no zero/empty entries, so they satisfy
+        // compute_state_root_v2's input contract directly.
+        compute_state_root_v2(
+            self.balances.iter().map(|(a, b)| (a, *b)),
+            self.bytes_state.iter().map(|(a, d)| (a, d.as_slice())),
+        )
     }
 }
 
