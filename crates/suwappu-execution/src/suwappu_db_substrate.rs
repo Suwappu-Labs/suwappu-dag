@@ -88,6 +88,13 @@ impl Substrate for SuwappuDbSubstrate {
         self.state.balance_of(&suwappu_addr).0
     }
 
+    fn read_bytes(&self, addr: &Address) -> Option<Vec<u8>> {
+        // Reads the suwappu-db v0.5.0 bytes column (zero-is-absent), matching
+        // InMemorySubstrate::read_bytes. The economic-security arms RMW
+        // registries through this + Bridge::write_bytes.
+        self.state.bytes_of(&SuwappuAddress(*addr))
+    }
+
     fn apply_intent(&mut self, intent: &Intent) -> Result<(), ExecutionError> {
         let mut bridge = Bridge::new(&mut self.state);
         match intent {
@@ -229,18 +236,37 @@ impl Substrate for SuwappuDbSubstrate {
     }
 
     fn state_root(&self) -> [u8; 32] {
-        // suwappu-db computes the state root through suwappudb-state::StateTree
-        // over the balance map. The production tree commitment is
-        // BLAKE3 in phase-1 / IPA-over-banderwagon at launch (paper
-        // §12 Table 1, suwappu-db S10).
+        // The canonical consensus root is the substrate-level **V2 recipe**
+        // (`compute_state_root_v2`), NOT suwappu-db's internal balance trie —
+        // so this substrate is a byte-for-byte drop-in for InMemorySubstrate
+        // (a state_root parity test pins this). suwappu-db's trie root remains
+        // its own internal commitment and is intentionally unused here.
         //
-        // suwappudb-state exposes `StateTree::from_state(&state).root()` —
-        // a deterministic function of the canonical state. We use the
-        // 32-byte form directly.
-        use suwappudb_state::StateTree;
-        let tree = StateTree::from_state(&self.state);
-        // `Commitment(pub [u8; 32])` — unwrap via .0
-        tree.root().0
+        // Normalise to the helper's input contract: ascending by address,
+        // zero balances dropped (suwappu-db's balance store is NOT
+        // remove-on-zero, unlike the in-memory map's zero-is-absent
+        // invariant). The bytes column is already zero-is-absent.
+        let mut balances: Vec<(Address, u128)> = self
+            .state
+            .entries()
+            .into_iter()
+            .map(|(a, slot)| (a.0, slot.canonical()))
+            .filter(|(_, bal)| *bal != 0)
+            .collect();
+        balances.sort_by(|x, y| x.0.cmp(&y.0));
+
+        let mut bytes: Vec<(Address, Vec<u8>)> = self
+            .state
+            .bytes_entries()
+            .into_iter()
+            .map(|(a, d)| (a.0, d))
+            .collect();
+        bytes.sort_by(|x, y| x.0.cmp(&y.0));
+
+        crate::substrate::compute_state_root_v2(
+            balances.iter().map(|(a, b)| (a, *b)),
+            bytes.iter().map(|(a, d)| (a, d.as_slice())),
+        )
     }
 }
 
@@ -348,5 +374,65 @@ mod tests {
         for a in [addr(1), addr(2), addr(3)] {
             assert_eq!(durable.balance(&a), reference.balance(&a), "addr {a:?}");
         }
+    }
+
+    // ── state_root parity: SuwappuDbSubstrate is a drop-in for InMemorySubstrate ──
+
+    #[test]
+    fn state_root_matches_in_memory_reference() {
+        // The keystone of this rework: identical logical state → identical
+        // canonical V2 root across both substrates. Pre-v0.6.0 this FAILED —
+        // SuwappuDb used suwappu-db's balance trie, InMemory the V2 recipe.
+        let seed = [(addr(1), 100u128), (addr(2), 250u128)];
+        let mut durable = SuwappuDbSubstrate::from_balances(seed);
+        let mut reference = crate::substrate::InMemorySubstrate::from_balances(seed);
+
+        // (a) Balances-only — proves balances_root + top combination match.
+        assert_eq!(
+            durable.state_root(),
+            reference.state_root(),
+            "balances-only state_root parity"
+        );
+
+        // (b) Put identical bytes-state on both at the same reserved address,
+        // then re-check — proves the bytes_state_root path matches too.
+        reference.pin_l2_verifying_key([0xab; 32], [0xcd; 32]).unwrap();
+        let reg = crate::reserved::l2_registry_address();
+        let raw = reference.read_bytes(&reg).expect("reference wrote bytes");
+        {
+            let mut bridge = Bridge::new(durable.state_mut());
+            bridge.write_bytes(SuwappuAddress(reg), raw.clone());
+        }
+        assert_eq!(durable.read_bytes(&reg), Some(raw), "durable mirrors the bytes");
+        assert_eq!(
+            durable.state_root(),
+            reference.state_root(),
+            "balances + bytes state_root parity"
+        );
+    }
+
+    #[test]
+    fn state_root_drops_zero_balance_to_match_in_memory() {
+        // suwappu-db's balance store is NOT remove-on-zero; the in-memory map
+        // is zero-is-absent. SuwappuDbSubstrate.state_root() must filter zeros
+        // so a stray zero entry can't shift the consensus root.
+        use suwappudb_state::{Balance, BridgeToken, StateChange};
+        let mut durable = SuwappuDbSubstrate::from_balances([(addr(1), 100)]);
+        {
+            let token = BridgeToken::__for_bridge_only();
+            durable.state_mut().apply(
+                &token,
+                &StateChange::SetBalance {
+                    addr: SuwappuAddress(addr(2)),
+                    to: Balance(0),
+                },
+            );
+        }
+        let reference = crate::substrate::InMemorySubstrate::from_balances([(addr(1), 100)]);
+        assert_eq!(
+            durable.state_root(),
+            reference.state_root(),
+            "a zero-balance entry must not change the root"
+        );
     }
 }
