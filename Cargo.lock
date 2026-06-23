@@ -2955,7 +2955,7 @@ dependencies = [
 [[package]]
 name = "suwappudb-bridge"
 version = "0.1.0-pre"
-source = "git+https://github.com/Suwappu-Labs/suwappu-db.git?tag=v0.3.0#c75011fe8b558fb27de01ed31618637b5b55bc24"
+source = "git+https://github.com/Suwappu-Labs/suwappu-db.git?tag=v0.4.0#26f201ca264cfdc1d40565b4eeaf797128871088"
 dependencies = [
  "blake3",
  "hex",
@@ -2973,7 +2973,7 @@ dependencies = [
 [[package]]
 name = "suwappudb-state"
 version = "0.1.0-pre"
-source = "git+https://github.com/Suwappu-Labs/suwappu-db.git?tag=v0.3.0#c75011fe8b558fb27de01ed31618637b5b55bc24"
+source = "git+https://github.com/Suwappu-Labs/suwappu-db.git?tag=v0.4.0#26f201ca264cfdc1d40565b4eeaf797128871088"
 dependencies = [
  "blake3",
  "hex",
