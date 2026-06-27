@@ -8,7 +8,16 @@ disclosure.
 
 ### Preferred channel
 
-Email **`security@suwappu.bot`** with:
+Use **[GitHub Private Vulnerability Reporting](https://github.com/Suwappu-Labs/suwappu-dag/security/advisories/new)**
+(Security → Report a vulnerability). This is the fastest way to reach
+the maintainers privately.
+
+If you can't use GitHub PVR, email **`layerinfinite@gmail.com`**.
+(Note: `security@suwappu.bot` is an aspirational alias that is **not yet
+live** — mail sent there may not route. Use the address above until the
+alias is stood up.)
+
+Whichever channel you use, please include:
 
 - A description of the issue.
 - The affected component(s) — crate path, RPC method, wire variant,
@@ -72,7 +81,8 @@ report substrate issues there.
 - **Third-party deps:** RUSTSEC advisories already tracked in
   [`deny.toml`](deny.toml) (and re-checked quarterly). If you find a
   new advisory affecting our dep tree, please report it via the
-  same `security@` email so we can prioritize the bump.
+  same channel (GitHub PVR, or `layerinfinite@gmail.com`) so we can
+  prioritize the bump.
 - **Production cluster configurations:** the public perf testnet's
   AWS infrastructure is managed by the operator team. Report cluster
   issues via the channels in
