@@ -383,26 +383,23 @@ Per-release scope: [`CHANGELOG.md`](./CHANGELOG.md).
 We practice continuous open-source dependency scanning and ship a
 checked-in Software Bill of Materials (SBOM).
 
-- **Checked-in SBOM.** A [CycloneDX](https://cyclonedx.org/) 1.5 SBOM of
-  the whole Cargo workspace lives under [`sbom/`](./sbom/):
-  - [`sbom/suwappu-dag.cdx.json`](./sbom/suwappu-dag.cdx.json) — the
-    workspace-aggregate SBOM (every dependency across all member crates,
-    deduplicated).
-  - [`sbom/crates/`](./sbom/crates/) — one SBOM per workspace member
-    crate, for fine-grained per-component provenance.
+- **Checked-in SBOM.** A [CycloneDX](https://cyclonedx.org/) 1.5
+  workspace-aggregate SBOM lives at
+  [`sbom/suwappu-dag.cdx.json`](./sbom/suwappu-dag.cdx.json) — every
+  dependency across all member crates, deduplicated.
 
   Every component is derived from `Cargo.lock` via
   [`cargo-cyclonedx`](https://github.com/CycloneDX/cyclonedx-rust-cargo);
   nothing is hand-authored. Each component carries a
   `pkg:cargo/<name>@<version>` purl.
 
-  Regenerate the per-crate SBOMs:
+  Regenerate the SBOM:
 
   ```sh
   cargo install --locked cargo-cyclonedx
+  # Emits one <crate>.cdx.json next to each member Cargo.toml; the
+  # aggregate sbom/suwappu-dag.cdx.json is the deduplicated union of those.
   cargo cyclonedx --format json --spec-version 1.5 --all --target all
-  # per-crate <crate>.cdx.json files are emitted next to each Cargo.toml;
-  # collect them under sbom/ (the aggregate is rebuilt from those files).
   ```
 
 - **CI workflows (SHA-pinned).** Two additive workflows live under
