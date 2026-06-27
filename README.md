@@ -378,6 +378,44 @@ Per-release scope: [`CHANGELOG.md`](./CHANGELOG.md).
 
 ---
 
+## Supply chain
+
+We practice continuous open-source dependency scanning and ship a
+checked-in Software Bill of Materials (SBOM).
+
+- **Checked-in SBOM.** A [CycloneDX](https://cyclonedx.org/) 1.5
+  workspace-aggregate SBOM lives at
+  [`sbom/suwappu-dag.cdx.json`](./sbom/suwappu-dag.cdx.json) — every
+  dependency across all member crates, deduplicated.
+
+  Every component is derived from `Cargo.lock` via
+  [`cargo-cyclonedx`](https://github.com/CycloneDX/cyclonedx-rust-cargo);
+  nothing is hand-authored. Each component carries a
+  `pkg:cargo/<name>@<version>` purl.
+
+  Regenerate the SBOM:
+
+  ```sh
+  cargo install --locked cargo-cyclonedx
+  # Emits one <crate>.cdx.json next to each member Cargo.toml; the
+  # aggregate sbom/suwappu-dag.cdx.json is the deduplicated union of those.
+  cargo cyclonedx --format json --spec-version 1.5 --all --target all
+  ```
+
+- **CI workflows (SHA-pinned).** Two additive workflows live under
+  `.github/workflows/`:
+  - [`sbom.yml`](./.github/workflows/sbom.yml) — on each published
+    Release, generates a CycloneDX SBOM with
+    [Syft](https://github.com/anchore/syft) (via `anchore/sbom-action`,
+    which reads `Cargo.lock`) and attaches it as a Release asset.
+  - [`scorecard.yml`](./.github/workflows/scorecard.yml) — weekly +
+    on push to `main`, runs [OpenSSF Scorecard](https://securityscorecards.dev/)
+    and uploads SARIF to the repo Security tab.
+
+  Both workflows pin every action to a full commit SHA. GitHub Actions
+  billing is currently disabled for the org, so they are committed
+  ready-to-run and activate automatically once billing is restored.
+
 ## Security
 
 Found a vulnerability? **Don't open a public issue.** See
