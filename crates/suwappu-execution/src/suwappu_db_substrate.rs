@@ -253,7 +253,7 @@ impl Substrate for SuwappuDbSubstrate {
             .map(|(a, slot)| (a.0, slot.canonical()))
             .filter(|(_, bal)| *bal != 0)
             .collect();
-        balances.sort_by(|x, y| x.0.cmp(&y.0));
+        balances.sort_by_key(|x| x.0);
 
         let mut bytes: Vec<(Address, Vec<u8>)> = self
             .state
@@ -261,7 +261,7 @@ impl Substrate for SuwappuDbSubstrate {
             .into_iter()
             .map(|(a, d)| (a.0, d))
             .collect();
-        bytes.sort_by(|x, y| x.0.cmp(&y.0));
+        bytes.sort_by_key(|x| x.0);
 
         crate::substrate::compute_state_root_v2(
             balances.iter().map(|(a, b)| (a, *b)),
@@ -396,14 +396,20 @@ mod tests {
 
         // (b) Put identical bytes-state on both at the same reserved address,
         // then re-check — proves the bytes_state_root path matches too.
-        reference.pin_l2_verifying_key([0xab; 32], [0xcd; 32]).unwrap();
+        reference
+            .pin_l2_verifying_key([0xab; 32], [0xcd; 32])
+            .unwrap();
         let reg = crate::reserved::l2_registry_address();
         let raw = reference.read_bytes(&reg).expect("reference wrote bytes");
         {
             let mut bridge = Bridge::new(durable.state_mut());
             bridge.write_bytes(SuwappuAddress(reg), raw.clone());
         }
-        assert_eq!(durable.read_bytes(&reg), Some(raw), "durable mirrors the bytes");
+        assert_eq!(
+            durable.read_bytes(&reg),
+            Some(raw),
+            "durable mirrors the bytes"
+        );
         assert_eq!(
             durable.state_root(),
             reference.state_root(),
