@@ -43,6 +43,7 @@
 * [Brief — Arc (Circle)](research/briefs/arc.md)
 * [Brief — Robinhood Chain](research/briefs/robinhood-chain.md)
 * [Brief — Payments-chain landscape](research/briefs/landscape.md)
+* [Brief — 2026 new entrants + recent papers (PQ competitors, aggregation literature)](research/briefs/2026-new-entrants-and-papers.md)
 
 ## Audit & Perf
 

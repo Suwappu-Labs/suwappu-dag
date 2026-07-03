@@ -3,8 +3,17 @@
 **Date:** 2026-07-03
 **Companion to:** [`competitive-gap-analysis.md`](competitive-gap-analysis.md) (strategy) ·
 [`briefs/`](briefs/) (sourced competitor facts) ·
+[`briefs/2026-new-entrants-and-papers.md`](briefs/2026-new-entrants-and-papers.md) (the 2026 PQ competitors + papers refresh) ·
 [`compliance-regime-mapping.md`](compliance-regime-mapping.md) ·
 IQ-007…IQ-010 (the decisions each gap needs)
+
+> **2026 refresh (post-initial-matrix):** three direct **post-quantum**
+> competitors emerged/sharpened — **QoreChain** (live PQ L1, ML-DSA-87),
+> **BTQ QSSN** (PQ dual-sign overlay, selling to banks), and an academic
+> **"Lattice" PoW coin** (ML-DSA-44). The F3 (post-quantum) row and the
+> scorecard below are updated to reflect that we are no longer "the only
+> PQ chain" — we are the only PQ **dual-ring joint-quorum BFT settlement
+> L1**, which each rival misses on a different axis. See the refresh brief.
 
 This is the granular, feature-by-feature companion to the gap analysis:
 for every capability dimension, where Tempo (Stripe/Paradigm), Arc
@@ -82,8 +91,8 @@ performance numbers are largely self-reported, and "mainnet-live" beats
 | # | Feature | Tempo | Arc | Robinhood Chain | Best other | suwappu-dag today | Verdict | Move to parity-or-better |
 |---|---|---|---|---|---|---|---|---|
 | F1 | Cross-chain asset mobility | (stablecoin rails) | **CCTP v2 + Gateway (native)** | LayerZero + 0x | CCTP v2 (13+ chains); LayerZero OFT ($70B+) | LTP attestation only; **quorum header → mint not wired** | **BEHIND** | **IQ-010 (INTEROP-1)**: position LTP as the *settlement-attestation* layer (not a bridge) and add a thin OFT-class adapter for asset mobility. Depends on **BRIDGE-1** wiring `submitHeader` → oracle → mint end-to-end first. |
-| F2 | Settlement attestation | (none comparable) | Gateway unified balances | — | Canton sub-tx privacy | **Constant-size ≈1,600 B LTP attestation regardless of payload** (Invariant 3) | **AHEAD** | Unique cost-scaling property. Keep it; it's the natural pitch to the Canton/Kinexys settlement audience. |
-| F3 | **Post-quantum crypto (primary surfaces)** | None | Opt-in PQ *wallets* at mainnet (future) | None | Ethereum leanXMSS (roadmap); QRL (no payments relevance) | **ML-DSA-65 signing + ML-KEM-768 confidentiality on primary surfaces; ML-DSA bridge attestation PQ end-to-end** | **AHEAD** (only one in category) | The single biggest differentiator. **Defend it:** close the one soft spot — the classical BLS12-381 LTP aggregate — via **IQ-009 (PQ-1)** with a published migration target + timeline. CNSA 2.0 (Jan 2027) is the institutional hook. |
+| F2 | Settlement attestation | (none comparable) | Gateway unified balances | — | Canton sub-tx privacy | **Constant-size ≈1,600 B LTP attestation regardless of payload** (Invariant 3) | **AHEAD (byte-count caveat)** | Unique cost-scaling property *today* — but it stays 96-byte-small only because the aggregate is **classical BLS12-381**. No PQ scheme reproduces a ~96 B aggregate (2026 literature); the PQ path is a SNARK-recursed aggregate that's O(1)-in-signers but **tens–hundreds of KB**. IQ-009 must re-state "constant-size" as O(1)-in-participants with an explicit larger PQ budget. Still the natural pitch to the Canton/Kinexys audience — just don't overclaim the byte count survives PQ. |
+| F3 | **Post-quantum crypto (primary surfaces)** | None | Opt-in PQ *wallets* at mainnet (future) | None | **QoreChain** live (ML-DSA-87 full-stack); **BTQ QSSN** (Falcon-512 dual-sign, selling to banks); Algorand (first PQ mainnet tx, Nov 2025); Ethereum EIP-8141 (H2 2026) | **ML-DSA-65 signing + ML-KEM-768 confidentiality on primary surfaces; ML-DSA bridge attestation PQ end-to-end** | **AHEAD, but no longer alone** | Still the biggest differentiator **and no competitor combines it with our shape.** Precise claim: **the only PQ dual-ring joint-quorum BFT settlement L1.** QoreChain = PQ but not joint-quorum/not settlement; BTQ QSSN = PQ admin-overlay, not a chain; Algorand = account-level PQ, not dual-ring settlement; "Lattice" paper = PoW, ML-DSA-44, academic. **Defend it:** (1) close the classical-BLS soft spot via **IQ-009**; (2) a near-term win — threshold ML-DSA (arXiv 2601.20917, standard 3.3 KB sigs) for the Authority-ring checkpoint co-signature; (3) lead with the **EO 14412** two-horizon "why now" (civilian 2030–31 / NSS 2035), stronger than the CNSA-only line. |
 | F4 | Accountability / slashing | Unpublished | Unpublished/absent | Sequencer-operator model | varies | 100% fast-path equivocation slashing, dual bonds, waterfall — **in code, property-tested** | **AHEAD (with caveat)** | Real and tested, but the fast-path `slashed` path is **observability-only** today (no stake moves) — issue #16 gates promoting it to real forfeiture (needs per-signer cert signatures + post-commit signer retention). Don't overclaim live enforcement until #16 lands. |
 
 ## G. Ecosystem, distribution & status
@@ -102,9 +111,11 @@ performance numbers are largely self-reported, and "mainnet-live" beats
 Counting only axes where a fair comparison exists (excluding N/A):
 
 - **AHEAD (defend):** dual-ring joint-quorum safety (A1/A2), constant-size
-  LTP attestation (F2), **PQ on primary surfaces (F3)**, slashing
-  economics (F4, caveated), immutable settlement (D4). These five are the
-  moat. Four of them no competitor in the category has at all.
+  LTP attestation (F2, byte-count caveat under PQ), **PQ on primary
+  surfaces (F3 — now *contested* by QoreChain/BTQ, but no rival matches our
+  shape)**, slashing economics (F4, caveated), immutable settlement (D4).
+  The moat is now the *intersection* — PQ **and** dual-ring-safe **and**
+  institutional-settlement-shaped — not PQ alone.
 - **PARITY (mature/prove):** finality type (A3, unproven), liveness (A5),
   compliance hooks (D2), SDKs (E2), explorer/status/faucet (E3, deploy-gated).
 - **BEHIND (closable, prioritized):**
@@ -120,6 +131,27 @@ Counting only axes where a fair comparison exists (excluding N/A):
      business-led, engineering-ready.
 - **BEHIND (by design — don't chase):** EVM signing surface (E1),
   retail FX (C2), stock-token issuance (C3), reversibility (D4).
+
+## The institutional parity bar (our actual lane)
+
+The retail-payments columns above are the *wrong* yardstick for our
+segment. For the regulated-settlement audience the parity bar is **Canton
+Network** — sub-transaction privacy (Daml), atomic cross-app
+composability, deterministic finality — plus **Fnality's central-bank-money
+settlement**. Two facts from the 2026 refresh:
+
+- **None of the institutional incumbents (Canton, Kinexys, Fnality, Partior,
+  The Clearing House 17-bank network, Cari) has any post-quantum story.**
+  That is the open flank, and the three PQ specialists (QoreChain, BTQ,
+  Lattice-paper) are *not* in the wholesale-bank lane. Our wedge is the
+  intersection nobody else occupies.
+- **The parity gaps that matter for this audience** are not stablecoin-gas
+  or EVM tooling — they are (i) **sub-transaction privacy** (our CONF-1 /
+  Track H must reach Canton-class confidentiality with a regulator viewing
+  path — arXiv 2603.05005 is the reference), (ii) **atomic composability**
+  across settlement apps, and (iii) a **live PQ attestation** to another
+  chain (BRIDGE-1). Prioritize these over the retail table stakes when
+  selling into the Canton/Kinexys adjacency.
 
 ## The honest one-paragraph read
 

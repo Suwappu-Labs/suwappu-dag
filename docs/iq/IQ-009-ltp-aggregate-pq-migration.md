@@ -386,6 +386,58 @@ aggregation) as an optional later step contingent on proof-size
 parity. Groth16/BN254 (Option A1) and non-standardized PQ multisig
 (Option D) are explicitly rejected as targets.
 
+## 2026 literature update (2026-07-03)
+
+A refresh of the PQ-aggregation literature ([`../research/briefs/2026-new-entrants-and-papers.md`](../research/briefs/2026-new-entrants-and-papers.md) §3a)
+**confirms this IQ's direction and adds one upgrade.**
+
+- **The field converged on exactly Option B/A2.** There is *no* 2025–2026
+  PQ construction that reproduces BLS's ~96-byte native aggregate; the
+  realistic PQ paths are (a) SNARK/STARK-recursed hash-based aggregates —
+  constant-but-large (leanXMSS blueprint, IACR
+  [2025/055](https://eprint.iacr.org/2025/055); Loquat ~145 KB, IACR
+  [2024/868](https://eprint.iacr.org/2024/868.pdf); HAPPIER multi-level via
+  Risc0; Flock for fast hash-sig aggregation) or (b) lattice multisig
+  (Lemur ~73 KB/1024 signers, IACR [2026/1161](https://eprint.iacr.org/2026/1161.pdf)).
+  This is direct external validation that Option A1 (Groth16/BN254) and a
+  sub-KB native PQ aggregate (the Option-D hope) are dead ends, and that
+  Option B (small on-chain root + witnesses to DA) then Option A2
+  (FRI/STARK recursion) is the correct sequence.
+- **Reframe "constant-size" explicitly.** Post-quantum, constant-size can
+  mean **O(1)-in-signers** but *not* the 96-byte byte-count. Option B already
+  honors this (32-byte on-chain root, witnesses to DA); the recommendation
+  and `cryptographic-posture.md` should state it in those terms, because it
+  is the precise thing a reviewer probes. Invariant 3 should be read as
+  "constant in payload **and** signer count," not "≤ some fixed byte count
+  that survives the PQ migration unchanged."
+- **Option D upgrade — threshold ML-DSA is now practical for the *checkpoint
+  co-signature*.** Option D surveyed only KB-scale, non-standardized
+  multisigs and correctly rejected them for the LTP super-node aggregate.
+  But **"FIPS 204-Compatible Threshold ML-DSA via Shamir Nonce DKG"**
+  (Kao, arXiv [2601.20917](https://arxiv.org/abs/2601.20917), Jan 2026)
+  emits **standard 3.3 KB signatures verifiable by unmodified FIPS-204
+  verifiers** for an arbitrary t-of-n. This does not help the *LTP*
+  aggregate (still want the 32-byte Merkle root there), but it is a clean
+  near-term fit for the **Authority-ring joint checkpoint co-signature**
+  (`suwappu-execution/src/checkpoint.rs`, DAG-S11) — turning that into a
+  true PQ threshold with no custom verifier and chipping away at any
+  classical dependency on the co-signature surface. Recommend spinning this
+  out as its own IQ (checkpoint co-signature PQ) rather than folding it
+  here, since it touches a different crate and surface.
+- **Timeline hook strengthened by EO 14412.** Executive Order 14412
+  (2026-06-22) adds dated *civilian* federal mandates (key establishment
+  2030-12-31, signatures 2031-12-31) on top of CNSA 2.0's NSS horizon
+  (procurement 2027-01-01, exclusive ~2035). The Phase-0 time-box should
+  cite the **two-horizon** framing; the Phase-1 delivery window (2027–2028)
+  sits comfortably ahead of both. BIS Papers No. 158 (Eurosystem PQC in
+  TARGET2-like transfers) is external proof the wholesale-settlement pipes
+  are migratable — useful supporting citation in the posture doc.
+
+Net: **no change to the recommended phasing** (C → B → A2); the literature
+validates it, the "constant-size = O(1)-in-signers" wording should be made
+explicit, and threshold ML-DSA becomes a new adjacent IQ for the checkpoint
+co-signature.
+
 ## See also
 
 - `docs/architecture/cryptographic-posture.md` — the exception-zone
