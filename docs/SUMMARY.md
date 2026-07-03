@@ -33,6 +33,14 @@
 * [IQ-003 — Fast-path architecture](iq/IQ-003-fast-path-architecture.md)
 * [IQ-004 — decide_slot orphan window](iq/IQ-004-decide-slot-orphan-window.md)
 
+## Research
+
+* [Competitive gap analysis — payments & settlement chains (2026-07)](research/competitive-gap-analysis.md)
+* [Brief — Tempo (Stripe/Paradigm)](research/briefs/tempo.md)
+* [Brief — Arc (Circle)](research/briefs/arc.md)
+* [Brief — Robinhood Chain](research/briefs/robinhood-chain.md)
+* [Brief — Payments-chain landscape](research/briefs/landscape.md)
+
 ## Audit & Perf
 
 * [Mainnet readiness 2026-05-14](audit/mainnet-readiness-2026-05-14.md)
