@@ -54,12 +54,44 @@
 //! receive `ClientResponse::Err("decode: ...")`. Operators must update
 //! `suwappu-loadgen` (rebuilt from this branch) and any external submitters
 //! before rolling validators.
+//!
+//! ### Wire additions (PERF-2, append-only)
+//!
+//! PERF-2 appends `ClientMessage::GetLineage` + `ClientMessage::SubmitFastPath`
+//! and `ClientResponse::Lineage` + `ClientResponse::AckFastPath` at the END
+//! of the respective enums. bincode's legacy config encodes the variant
+//! index, so append-only extension keeps every pre-PERF-2 frame byte-
+//! identical — old clients keep working; new variants sent to an old
+//! validator fail decode (the established "version" signal). Fast-path
+//! submissions sign `fastpath_signing_digest` (distinct domain tag,
+//! `SUWAPPU_FASTPATH_V1`) with the same seated-Authority ML-DSA-65 gate
+//! `Submit` uses.
+//!
+//! ### DoS controls on the PERF-2 messages
+//!
+//! `SubmitFastPath` and `GetLineage` arrive on the same connections as
+//! `Submit`, so the accept-time controls in [`run`] — the global
+//! `max_connections` semaphore and the per-IP connection cap — already
+//! gate them; they are NOT an un-throttled side door. What they do NOT
+//! reuse is the mempool's per-peer leaky bucket, because fast-path txs
+//! never enter the mempool (they gossip as partial certs, not intents)
+//! and `Mempool`'s bucket has no standalone "spend one token" entry
+//! point reachable without enqueuing an intent — and the mempool crate
+//! is out of scope for this change. The fast-path-specific admission
+//! control is therefore the `MAX_FASTPATH_TRACKED` soft cap in
+//! `propose_fastpath_tx` (bounds distinct-key memory growth). RESIDUAL:
+//! a single authorized signer can still burst fast-path submissions up
+//! to the per-connection frame rate; a per-peer token bucket for the
+//! fast-path wire is a follow-up (needs a small `Mempool` API addition
+//! or a dedicated limiter, both outside this PR's blast radius).
 
 use std::{collections::HashMap, io, net::SocketAddr, sync::Arc};
 
 use serde::{Deserialize, Serialize};
+use suwappu_consensus::AuthorityId;
 use suwappu_crypto::mldsa;
 use suwappu_execution::Intent;
+use suwappu_fastpath::FastPathTx;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -69,6 +101,7 @@ use tracing::{debug, info, warn};
 use crate::{
     daemon::State,
     events::{Event, EventLog, Lane},
+    wire::{PeerId, WireMessage},
 };
 
 /// Client wire protocol version. Bumped from 1 → 2 in Phase 2.6 (Issue
@@ -95,6 +128,26 @@ pub fn intent_signing_digest(network_id: &str, intent: &Intent) -> [u8; 32] {
     hasher.update(INTENT_DOMAIN_TAG);
     hasher.update(network_id.as_bytes());
     hasher.update(&intent_bytes);
+    *hasher.finalize().as_bytes()
+}
+
+/// Domain-separation tag mixed into every signed fast-path transaction
+/// payload (PERF-2). Distinct from [`INTENT_DOMAIN_TAG`] so a signature
+/// over an intent can never be replayed as a fast-path authorization
+/// (and vice versa).
+pub const FASTPATH_DOMAIN_TAG: &[u8] = b"SUWAPPU_FASTPATH_V1";
+
+/// Compute the canonical signing digest for a fast-path transaction
+/// under `network_id`. Mirrors [`intent_signing_digest`] with its own
+/// domain tag:
+///
+/// `digest = blake3( FASTPATH_DOMAIN_TAG || network_id_bytes || bincode(tx) )`.
+pub fn fastpath_signing_digest(network_id: &str, tx: &FastPathTx) -> [u8; 32] {
+    let tx_bytes = crate::codec::encode(tx).expect("fastpath tx serialize");
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(FASTPATH_DOMAIN_TAG);
+    hasher.update(network_id.as_bytes());
+    hasher.update(&tx_bytes);
     *hasher.finalize().as_bytes()
 }
 
@@ -146,6 +199,27 @@ pub enum ClientMessage {
     },
     /// No-op liveness probe.
     Ping(u64),
+    /// Ask for the highest committed main-lane `(round, cert_hash)`
+    /// (PERF-2). Fast-path submitters call this to ground each
+    /// `FastPathTx`'s lineage in a cert already linearized on the main
+    /// lane (paper §6.4 eligibility). Appended after `Ping` for bincode
+    /// wire compatibility — never reorder.
+    GetLineage,
+    /// Submit one fast-path transaction (PERF-2). Verified with the
+    /// same seated-Authority ML-DSA-65 gate as `Submit`, but over
+    /// [`fastpath_signing_digest`] (distinct domain tag). Appended
+    /// after `GetLineage` — never reorder.
+    SubmitFastPath {
+        /// The fast-path transaction to propose into the cluster.
+        tx: suwappu_fastpath::FastPathTx,
+        /// ML-DSA-65 detached signature over
+        /// [`fastpath_signing_digest`]`(network_id, &tx)`.
+        signature: Vec<u8>,
+        /// blake3 hash of the signer's ML-DSA-65 public-key bytes,
+        /// resolved against the seated `AuthorityRegistry` exactly
+        /// like `Submit`.
+        signer_pubkey_hash: [u8; 32],
+    },
 }
 
 /// Validator → client messages.
@@ -170,6 +244,25 @@ pub enum ClientResponse {
     Err(String),
     /// Echo of a `Ping`.
     Pong(u64),
+    /// Response to `GetLineage` (PERF-2): the highest committed
+    /// main-lane round and its cert hash. `(0, [0; 32])` when no cert
+    /// has committed yet. Appended after `Pong` for bincode wire
+    /// compatibility — never reorder.
+    Lineage {
+        /// Highest committed main-lane round.
+        round: u64,
+        /// Hash of the cert committed at that round.
+        cert_hash: [u8; 32],
+    },
+    /// Fast-path transaction accepted and proposed (PERF-2). Echoes
+    /// the tx's `payload_digest` — the same value the daemon writes as
+    /// `cert_hash` on its `lane=fastpath` event log lines, so the
+    /// metrics join is uniform with the intent path. Appended after
+    /// `Lineage` — never reorder.
+    AckFastPath {
+        /// `payload_digest` of the accepted fast-path transaction.
+        payload_digest: [u8; 32],
+    },
 }
 
 /// Hardening limits applied to every accepted client connection.
@@ -215,11 +308,14 @@ impl ClientListenLimits {
 ///
 /// Crate-private — only the [`crate::daemon::Daemon`] startup path
 /// invokes this. External callers go through [`LoadGenClient`].
+#[allow(clippy::too_many_arguments)] // daemon-startup plumbing, one call site
 pub(crate) async fn run(
     listen: SocketAddr,
     self_label: String,
+    self_id: AuthorityId,
     log: EventLog,
     state: Arc<State>,
+    outbound: Arc<HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>>,
     network_id: String,
     limits: ClientListenLimits,
 ) -> io::Result<tokio::task::JoinHandle<()>> {
@@ -270,6 +366,7 @@ pub(crate) async fn run(
                     let log = log.clone();
                     let self_label = self_label.clone();
                     let state = state.clone();
+                    let outbound = outbound.clone();
                     let network_id = network_id.clone();
                     let peer_label = addr.to_string();
                     let idle_timeout_ms = limits.idle_timeout_ms;
@@ -278,9 +375,11 @@ pub(crate) async fn run(
                         let result = handle_conn(
                             stream,
                             self_label,
+                            self_id,
                             peer_label,
                             log,
                             state,
+                            outbound,
                             network_id,
                             idle_timeout_ms,
                         )
@@ -346,6 +445,34 @@ pub(crate) async fn verify_signed_intent(
     signature_bytes: &[u8],
     signer_pubkey_hash: &[u8; 32],
 ) -> AuthOutcome {
+    let digest = intent_signing_digest(network_id, intent);
+    verify_authority_signature(state, &digest, signature_bytes, signer_pubkey_hash).await
+}
+
+/// PERF-2: the fast-path twin of [`verify_signed_intent`] — same
+/// seated-Authority lookup + ML-DSA verify, over the fast-path domain
+/// digest. Both wrappers share [`verify_authority_signature`] so the
+/// two submission surfaces can never drift on what "signed" means.
+pub(crate) async fn verify_signed_fastpath(
+    state: &State,
+    network_id: &str,
+    tx: &FastPathTx,
+    signature_bytes: &[u8],
+    signer_pubkey_hash: &[u8; 32],
+) -> AuthOutcome {
+    let digest = fastpath_signing_digest(network_id, tx);
+    verify_authority_signature(state, &digest, signature_bytes, signer_pubkey_hash).await
+}
+
+/// Shared lookup + verify leg of the two `verify_signed_*` wrappers.
+/// Callers compute the domain-separated digest; this resolves the
+/// signer against the seated Authority Ring and checks the signature.
+async fn verify_authority_signature(
+    state: &State,
+    digest: &[u8; 32],
+    signature_bytes: &[u8],
+    signer_pubkey_hash: &[u8; 32],
+) -> AuthOutcome {
     // Authority Ring lookup. Hold the read guard only for the lookup,
     // then drop before the (CPU-heavy) signature verify.
     let pubkey_bytes_opt: Option<Vec<u8>> = {
@@ -369,8 +496,7 @@ pub(crate) async fn verify_signed_intent(
         Ok(s) => s,
         Err(_) => return AuthOutcome::BadSignature,
     };
-    let digest = intent_signing_digest(network_id, intent);
-    match mldsa::verify(&digest, &signature, &pubkey) {
+    match mldsa::verify(digest, &signature, &pubkey) {
         Ok(()) => AuthOutcome::Ok,
         Err(_) => AuthOutcome::BadSignature,
     }
@@ -390,12 +516,15 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+#[allow(clippy::too_many_arguments)] // one task-entry fn mirroring `run`'s plumbing
 async fn handle_conn(
     mut stream: TcpStream,
     self_label: String,
+    self_id: AuthorityId,
     peer_label: String,
     log: EventLog,
     state: Arc<State>,
+    outbound: Arc<HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>>,
     network_id: String,
     idle_timeout_ms: u64,
 ) -> io::Result<()> {
@@ -545,6 +674,149 @@ async fn handle_conn(
             ClientMessage::Ping(t) => {
                 write_response(&mut stream, &ClientResponse::Pong(t)).await?;
             }
+            ClientMessage::GetLineage => {
+                // PERF-2: O(1) read of the committed-head scalar that
+                // `try_commit` maintains. `(0, [0; 32])` sentinel until
+                // the first cert commits.
+                let (round, cert_hash) = state
+                    .inner
+                    .lock()
+                    .await
+                    .highest_committed
+                    .unwrap_or((0, [0u8; 32]));
+                write_response(&mut stream, &ClientResponse::Lineage { round, cert_hash }).await?;
+            }
+            ClientMessage::SubmitFastPath {
+                tx,
+                signature,
+                signer_pubkey_hash,
+            } => {
+                match verify_signed_fastpath(
+                    &state,
+                    &network_id,
+                    &tx,
+                    &signature,
+                    &signer_pubkey_hash,
+                )
+                .await
+                {
+                    AuthOutcome::Ok => {}
+                    AuthOutcome::UnknownSigner => {
+                        let resp = ClientResponse::Err(
+                            "auth: unknown signer (pubkey hash not in Authority Ring)".to_string(),
+                        );
+                        let _ = write_response(&mut stream, &resp).await;
+                        return Ok(());
+                    }
+                    AuthOutcome::BadSignature => {
+                        let resp = ClientResponse::Err("auth: bad ML-DSA-65 signature".to_string());
+                        let _ = write_response(&mut stream, &resp).await;
+                        return Ok(());
+                    }
+                }
+
+                // Owner binding (PERF-2). The owner must be the
+                // submitting authority itself: `owner == blake3(signer
+                // pubkey bytes)`, which — because `signer_pubkey_hash`
+                // is defined as exactly that blake3 — is a byte compare
+                // against the (now signature-verified) `signer_pubkey_hash`.
+                // Without this, a seated authority could author a
+                // fast-path cert that spends an object owned by someone
+                // else. DEVNET SIMPLIFICATION: on mainnet the owner is a
+                // separate account with its own key and the fast-path tx
+                // would carry the owner's signature, not the validator's;
+                // here we collapse owner == submitter so the harness
+                // needs only one keypair.
+                if tx.owner.0 != signer_pubkey_hash {
+                    let resp = ClientResponse::Err(
+                        "fastpath: owner does not match signer (owner must be \
+                         blake3(signer pubkey))"
+                            .to_string(),
+                    );
+                    let _ = write_response(&mut stream, &resp).await;
+                    return Ok(());
+                }
+
+                // Lineage-committed bound (PERF-2, closes the K=4
+                // binding bypass). The tx's lineage must reference a
+                // cert already committed on the main lane: a far-future
+                // `lineage_round` would make the reconciliation window
+                // `(lineage_round, lineage_round + K]` vacuous, so the
+                // main-lane cross-check could never catch an
+                // equivocation. Require `lineage_round <= committed head`
+                // AND `lineage` == the committed cert hash at that round.
+                // With nothing committed yet, only `lineage_round == 0`
+                // (the GetLineage sentinel) is allowed.
+                let (head, want_hash_at_lineage) = {
+                    let inner = state.inner.lock().await;
+                    let committed = state.committed.lock();
+                    let head = inner.highest_committed;
+                    let want = inner
+                        .blocks_by_round
+                        .get(&tx.lineage_round)
+                        .filter(|h| committed.contains(*h))
+                        .map(|h| h.0);
+                    (head, want)
+                };
+                let lineage_ok = match head {
+                    None => tx.lineage_round == 0,
+                    Some((head_round, _)) => {
+                        tx.lineage_round <= head_round && want_hash_at_lineage == Some(tx.lineage.0)
+                    }
+                };
+                if !lineage_ok {
+                    let resp = ClientResponse::Err("fastpath: lineage not committed".to_string());
+                    let _ = write_response(&mut stream, &resp).await;
+                    return Ok(());
+                }
+
+                let payload_digest = tx.payload_digest;
+                // `propose_fastpath_tx` runs the self-equivocation guards
+                // (payload pin-check, main-lane K-binding cross-check,
+                // capacity cap) under its own short inner-lock window and
+                // only signs/broadcasts if all pass. Map each refusal to
+                // a distinct client error rather than a silent no-op.
+                match crate::daemon::propose_fastpath_tx(
+                    &state,
+                    self_id,
+                    tx,
+                    &self_label,
+                    &log,
+                    &outbound,
+                )
+                .await
+                {
+                    crate::daemon::FastPathProposeOutcome::Accepted => {
+                        write_response(
+                            &mut stream,
+                            &ClientResponse::AckFastPath { payload_digest },
+                        )
+                        .await?;
+                    }
+                    crate::daemon::FastPathProposeOutcome::ConflictingPayload => {
+                        let resp = ClientResponse::Err(
+                            "fastpath: conflicting payload for (object,nonce)".to_string(),
+                        );
+                        let _ = write_response(&mut stream, &resp).await;
+                        return Ok(());
+                    }
+                    crate::daemon::FastPathProposeOutcome::MainLaneConflict => {
+                        let resp = ClientResponse::Err(
+                            "fastpath: main-lane conflict in binding window".to_string(),
+                        );
+                        let _ = write_response(&mut stream, &resp).await;
+                        return Ok(());
+                    }
+                    crate::daemon::FastPathProposeOutcome::CapacityExhausted => {
+                        let resp = ClientResponse::Err(
+                            "fastpath: node at fast-path tracking capacity, retry later"
+                                .to_string(),
+                        );
+                        let _ = write_response(&mut stream, &resp).await;
+                        return Ok(());
+                    }
+                }
+            }
         }
     }
 }
@@ -667,7 +939,7 @@ impl LoadGenClient {
         match resp {
             ClientResponse::Ack { intent_hash } => Ok(intent_hash),
             ClientResponse::Err(e) => Err(io::Error::new(io::ErrorKind::InvalidData, e)),
-            ClientResponse::AckBatch { .. } | ClientResponse::Pong(_) => Err(io::Error::new(
+            _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "unexpected response for Submit",
             )),
@@ -705,19 +977,74 @@ impl LoadGenClient {
         match resp {
             ClientResponse::AckBatch { intent_hashes } => Ok(intent_hashes),
             ClientResponse::Err(e) => Err(io::Error::new(io::ErrorKind::InvalidData, e)),
-            ClientResponse::Ack { .. } | ClientResponse::Pong(_) => Err(io::Error::new(
+            _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "unexpected response for SubmitBatch",
             )),
         }
     }
-}
 
-// Suppress dead-code complaints. The `outbound` HashMap import stays around
-// for symmetry with future fast-path/LTP submission paths.
-#[allow(dead_code)]
-fn _shape_hint() -> Option<HashMap<u32, u32>> {
-    None
+    /// PERF-2: fetch the highest committed main-lane `(round, cert_hash)`
+    /// so fast-path transactions can ground their lineage. Returns
+    /// `(0, [0; 32])` before the first commit.
+    pub async fn get_lineage(&mut self) -> io::Result<(u64, [u8; 32])> {
+        self.send_frame(&ClientMessage::GetLineage).await?;
+        let resp = self.read_response().await?;
+        match resp {
+            ClientResponse::Lineage { round, cert_hash } => Ok((round, cert_hash)),
+            ClientResponse::Err(e) => Err(io::Error::new(io::ErrorKind::InvalidData, e)),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unexpected response for GetLineage",
+            )),
+        }
+    }
+
+    /// PERF-2: submit one signed fast-path transaction and wait for the
+    /// `AckFastPath`. Returns the acked `payload_digest` — the value the
+    /// validator writes as `cert_hash` on `lane=fastpath` event lines,
+    /// so callers key their submit-timestamp CSV on it.
+    pub async fn submit_fastpath(&mut self, tx: FastPathTx) -> io::Result<[u8; 32]> {
+        let digest = fastpath_signing_digest(&self.network_id, &tx);
+        let signature = mldsa::sign(&digest, &self.secret_key)
+            .map_err(|e| io::Error::other(format!("sign: {:?}", e)))?;
+        let pkh = self.signer_pubkey_hash();
+        let msg = ClientMessage::SubmitFastPath {
+            tx,
+            signature: signature.as_bytes().to_vec(),
+            signer_pubkey_hash: pkh,
+        };
+        self.send_frame(&msg).await?;
+        let resp = self.read_response().await?;
+        match resp {
+            ClientResponse::AckFastPath { payload_digest } => Ok(payload_digest),
+            ClientResponse::Err(e) => Err(io::Error::new(io::ErrorKind::InvalidData, e)),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unexpected response for SubmitFastPath",
+            )),
+        }
+    }
+
+    /// Frame + flush one `ClientMessage` (shared by the PERF-2 methods;
+    /// the pre-PERF-2 `submit`/`submit_batch` keep their inline framing
+    /// untouched).
+    async fn send_frame(&mut self, msg: &ClientMessage) -> io::Result<()> {
+        let bytes = crate::codec::encode_frame(msg)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        let len = (bytes.len() as u32).to_be_bytes();
+        self.stream.write_all(&len).await?;
+        self.stream.write_all(&bytes).await?;
+        self.stream.flush().await?;
+        Ok(())
+    }
+
+    /// Read + decode one framed `ClientResponse`.
+    async fn read_response(&mut self) -> io::Result<ClientResponse> {
+        let resp_bytes = read_frame(&mut self.stream).await?;
+        crate::codec::decode_frame(&resp_bytes)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
+    }
 }
 
 #[cfg(test)]

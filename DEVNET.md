@@ -207,6 +207,44 @@ let client = Client::new("http://127.0.0.1:9092".into());
 // alongside `subscribe_events.rs` (PR C2).
 ```
 
+## Fast-path latency measurement
+
+PERF-2: measure submit → fast-path-commit latency for the single-owner
+lane (paper §6.4). Three steps — drive load, collect event logs, join:
+
+```sh
+# 1. Drive signed fast-path txs at v0's client wire. stdout is the
+#    per-submission CSV (hash column = payload_digest). The ML-DSA-65
+#    keypair must correspond to a seated Authority in the cluster's
+#    genesis manifest (Issue #28) — same requirement as intent-mode
+#    loadgen. Pass it via --mldsa-secret-key/--mldsa-public-key (files)
+#    or the --mldsa-*-key-hex variants.
+cargo run --release -p suwappu-node --bin suwappu-loadgen -- \
+    --target 127.0.0.1:9091 --fastpath --rate 50 --duration 30 \
+    --network-id suwappu-devnet \
+    --mldsa-secret-key <sk-file> --mldsa-public-key <pk-file> \
+    > fastpath-loadgen.csv
+
+# 2. Collect each validator's NDJSON event log.
+for i in 0 1 2 3; do
+  docker compose cp v$i:/var/log/suwappu/events.ndjson events-v$i.ndjson
+done
+
+# 3. Join submits to lane=fastpath committed events; per-tx CSV on
+#    stdout, p50/p95/p99 summary on stderr.
+cargo run --release -p suwappu-node --bin suwappu-metrics -- \
+    --mode fastpath --loadgen-csv fastpath-loadgen.csv \
+    --logs v0=events-v0.ndjson --logs v1=events-v1.ndjson \
+    --logs v2=events-v2.ndjson --logs v3=events-v3.ndjson \
+    > fastpath-latency.csv
+```
+
+`committed_ms` is a **per-validator local** finality timestamp — the
+earliest `lane=fastpath committed` observation across the logs you
+supply, not a global consensus time — and latencies assume the loadgen
+host and the validators share a synchronized clock (NTP); any clock
+skew between them adds directly to every reported latency.
+
 ## Common operations
 
 | Command | What it does |
