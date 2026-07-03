@@ -85,16 +85,20 @@ Hosting-program letter tracks from the existing devnet README:
 | Track | Scope | Status |
 |---|---|---|
 | **G1** | Devnet hosting infrastructure (4-region terraform, persistent EBS, public RPC) | ✅ Apply-ready |
-| **G2** | Public RPC endpoint (DNS + TLS + ALB + WAF) | ⏳ |
-| **G3** | `suwappu-faucet` service | ⏳ |
+| **G2** | Public RPC endpoint (DNS + TLS + ALB + WAF) | ✅ Apply-ready (`terraform/devnet/{dns,acm,alb,waf}.tf`) |
+| **G3** | `suwappu-faucet` service | ✅ Built (`crates/suwappu-faucet`, `terraform/devnet/faucet.tf`, CI) |
 | **G4** | Release-binary workflow (multi-target `suwappu-node` / `suwappu-loadgen` / `suwappu-indexer` / `suwappu-faucet` tarballs on tag) | ✅ Live |
 | **G5** | `OPERATIONS.md` runbook (devnet + testnet sections) | 🟡 Partial |
-| **G6** | Prometheus `/metrics` on `suwappu-node` + CloudWatch dashboard + alarms | ⏳ |
-| **G7** | Block explorer SPA | ⏳ |
-| **G8** | Status page | ⏳ |
+| **G6** | Prometheus `/metrics` on `suwappu-node` + CloudWatch dashboard + alarms | ✅ Built (`crates/suwappu-node/src/metrics_http.rs`, `terraform/devnet/cloudwatch.tf`) |
+| **G7** | Block explorer SPA | ✅ Built (`clients/explorer`, `terraform/devnet/explorer.tf`, `explorer.yml` CI) |
+| **G8** | Status page | ✅ Built (`clients/status-page`, `terraform/devnet/status.tf`, `status.yml` CI) |
 
-Open infrastructure work: see `terraform/devnet/README.md` and the
-**Unreleased** section of `CHANGELOG.md`.
+The software and infrastructure-as-code for every G-track above are in
+the repo (apply-ready). What remains for each is the operator-run
+`scripts/deploy-aws.sh` apply against the `gsn` AWS account (deployment
+is gated on AWS credentials, not on further engineering). See
+`terraform/devnet/README.md` and the **Unreleased** section of
+`CHANGELOG.md`.
 
 ## Phase 5 — Incentivized testnet
 
