@@ -419,11 +419,17 @@ A refresh of the PQ-aggregation literature ([`../research/briefs/2026-new-entran
   verifiers** for an arbitrary t-of-n. This does not help the *LTP*
   aggregate (still want the 32-byte Merkle root there), but it is a clean
   near-term fit for the **Authority-ring joint checkpoint co-signature**
-  (`suwappu-execution/src/checkpoint.rs`, DAG-S11) — turning that into a
-  true PQ threshold with no custom verifier and chipping away at any
-  classical dependency on the co-signature surface. Recommend spinning this
-  out as its own IQ (checkpoint co-signature PQ) rather than folding it
-  here, since it touches a different crate and surface.
+  (`suwappu-execution/src/checkpoint.rs`, DAG-S11). Note (corrected per
+  IQ-012's grounding): that surface is *already* PQ — it carries **N
+  detached ML-DSA-65 signatures**, no BLS or classical primitive — so
+  threshold ML-DSA does **not** remove a classical dependency here; it
+  **compresses** the q individual signatures (≈69 KB at n=31/q=21) into
+  one ≈3.3 KB signature and q verifies into one, with an accountability
+  tradeoff analyzed in **[IQ-012](./IQ-012-threshold-mldsa-checkpoint-cosignature.md)**
+  (safe for the checkpoint because Theorem-2 accountability is sourced
+  from named certificate authorship in the consensus DAG, not the
+  checkpoint signer set). Spun out as IQ-012 since it touches a different
+  crate and surface.
 - **Timeline hook strengthened by EO 14412.** Executive Order 14412
   (2026-06-22) adds dated *civilian* federal mandates (key establishment
   2030-12-31, signatures 2031-12-31) on top of CNSA 2.0's NSS horizon
