@@ -1664,6 +1664,66 @@ fn f_plus_one(n: u32) -> u32 {
     (n - 1) / 3 + 1
 }
 
+/// Next round this validator should author. Snaps up **to** the DAG
+/// frontier — `max(last_authored + 1, max_observed)` — instead of
+/// advancing strictly sequentially from `last_authored + 1`, clamped
+/// so the snap only climbs through rounds whose predecessor already
+/// has ≥ f+1 distinct authors in the local DAG.
+///
+/// Perf-run 2026-05-13 finding: with strictly-sequential advance, a
+/// validator that falls k rounds behind healthy peers can never catch
+/// up — it keeps authoring rounds the rest of the cluster has already
+/// moved past, so its certs are never referenced as parents, and
+/// `commit_leader` can't assemble a quorum of round-(R+1) supporters
+/// on either side of the gap (`docs/perf-run-2026-05-13/README.md`,
+/// "Why committed TPS was 0"). Snapping lets a slow validator rejoin
+/// immediately; the skipped rounds are simply rounds it never
+/// authored, which the commit rule tolerates (indirect decide covers
+/// leaders it missed).
+///
+/// Two deliberate deviations from the perf report's prescription
+/// (`max(last, observed) + 1`), per consensus review:
+///
+/// - **Snap to the frontier, not past it.** `+ 1` past the observed
+///   round abandons the frontier round itself: with phase-offset
+///   ticks, the first authority to author round R teleports everyone
+///   else to R+1, round R freezes at one author forever, and the
+///   propose gate (quorum, or f+1 under timeout) becomes permanently
+///   unsatisfiable cluster-wide. Matches Sui's threshold clock: a
+///   received round-r block advances you *to* r.
+/// - **Density clamp.** `max_observed_round` is bumped by any inserted
+///   cert, so a single Byzantine authority chaining solo certs (or an
+///   empty-parent future-round cert) could otherwise steer every
+///   honest node's target to a round whose predecessor can never
+///   reach f+1 authors — same permanent stall, one wire message. The
+///   walk stops at the first sparse round, so the target is always a
+///   round the propose gate can actually clear.
+///
+/// `None` (nothing authored yet) starts at round 0 so a fresh
+/// validator anchors its genesis cert before snapping on later ticks.
+/// The result is always `> last_authored` — except at the saturation
+/// point `last_authored == u64::MAX`, where it equals it; that round
+/// is unreachable (the density clamp tethers the target to the honest
+/// frontier, and no chain authors 2^64 rounds), so snap-up can never
+/// re-author an authored round in practice (equivocation guard,
+/// Invariant 5).
+fn next_target_round(
+    last_authored: Option<u64>,
+    max_observed: u64,
+    authors_at: impl Fn(u64) -> u32,
+    f_plus_one: u32,
+) -> u64 {
+    let base = match last_authored {
+        None => return 0,
+        Some(last) => last.saturating_add(1),
+    };
+    let mut target = base;
+    while target < max_observed && authors_at(target) >= f_plus_one {
+        target += 1;
+    }
+    target
+}
+
 /// Round-driver leader timeout (in `round_ms` multiples). If a round
 /// doesn't reach strict quorum within this many ticks, force-propose with
 /// any ≥ f+1 parents. With the indirect commit rule (S21.2), a leader
@@ -1695,6 +1755,9 @@ async fn run_round_driver(
     // permanently stall the cluster. Matches Sui's `leader_timeout`.
     let leader_timeout = Duration::from_millis(round_ms * LEADER_TIMEOUT_ROUNDS as u64);
     let mut round_started_at = tokio::time::Instant::now();
+    // Which target round `round_started_at` was armed for. u64::MAX
+    // sentinel forces the first pass to arm it.
+    let mut timer_round: u64 = u64::MAX;
 
     loop {
         tick.tick().await;
@@ -1717,8 +1780,22 @@ async fn run_round_driver(
             let inner = state.inner.lock().await;
             let n = inner.n_authorities;
             let dag = state.dag.read().await;
-            target_round = inner.last_authored_round.map(|r| r + 1).unwrap_or(0);
+            target_round = next_target_round(
+                inner.last_authored_round,
+                inner.max_observed_round,
+                |r| distinct_authors_at(&dag, r, n),
+                f_plus_one(n),
+            );
             prev_round = target_round.saturating_sub(1);
+            // Leader timeout is per-target-round: snap-up advances
+            // `target_round` between proposes (each ingest can bump
+            // it), so a freshly-snapped target must not inherit a
+            // stale `elapsed` and force-propose immediately with only
+            // f+1 parents.
+            if target_round != timer_round {
+                timer_round = target_round;
+                round_started_at = tokio::time::Instant::now();
+            }
             if inner.last_authored_round.is_some() {
                 let parents_count = distinct_authors_at(&dag, prev_round, n);
                 let elapsed = round_started_at.elapsed();
@@ -1747,7 +1824,10 @@ async fn run_round_driver(
             }
             parents = parents_for_round(&dag, target_round, n);
         }
-        round_started_at = tokio::time::Instant::now();
+        // No unconditional timer reset here: after this propose,
+        // `last_authored_round` advances, so the next tick's
+        // `target_round` differs and the per-target-round arm above
+        // re-arms the timer.
 
         // Phase 2 (unlocked): drain intents from the shared mempool
         // honoring priority ordering, then bincode + blake3 + cert
@@ -1936,6 +2016,55 @@ mod tests {
                 f_plus_one(n),
                 n
             );
+        }
+    }
+
+    #[test]
+    fn next_target_round_snaps_to_frontier() {
+        // n=4 thresholds: f+1 = 2. "Dense" rounds have 3 authors
+        // (everyone but the lagging validator), "sparse" rounds 1.
+        let f1 = f_plus_one(4);
+        let dense = |_r: u64| 3u32;
+        let sparse = |_r: u64| 1u32;
+
+        // Fresh validator: author round 0 regardless of what it has observed.
+        assert_eq!(next_target_round(None, 0, dense, f1), 0);
+        assert_eq!(next_target_round(None, 7, dense, f1), 0);
+
+        // In-step validator: sequential advance is unchanged.
+        assert_eq!(next_target_round(Some(3), 0, dense, f1), 4);
+        assert_eq!(next_target_round(Some(3), 3, dense, f1), 4);
+        assert_eq!(next_target_round(Some(3), 4, dense, f1), 4);
+
+        // Lagging validator (perf-run 2026-05-13 scenario): stuck at
+        // round 3 while peers reached round 10 — snap TO the frontier
+        // (10), not past it: the +1 variant abandons round 10 with one
+        // author and deadlocks the propose gate cluster-wide.
+        assert_eq!(next_target_round(Some(3), 10, dense, f1), 10);
+
+        // Ahead-of-observed (peers lagging us): still sequential.
+        assert_eq!(next_target_round(Some(10), 3, dense, f1), 11);
+
+        // Density clamp: a Byzantine authority chaining solo certs to
+        // round 1000 cannot steer the target — the walk stops at the
+        // first sparse round.
+        assert_eq!(next_target_round(Some(3), 1000, sparse, f1), 4);
+        // Dense prefix through round 5, sparse after: climb to 6, stop.
+        let mixed = |r: u64| if r <= 5 { 3u32 } else { 1u32 };
+        assert_eq!(next_target_round(Some(3), 1000, mixed, f1), 6);
+
+        // Steered max_observed near u64::MAX neither overflows nor
+        // walks unboundedly.
+        assert_eq!(next_target_round(Some(3), u64::MAX - 1, sparse, f1), 4);
+        assert_eq!(next_target_round(Some(u64::MAX), 0, dense, f1), u64::MAX);
+
+        // Snap-up never re-authors an already-authored round
+        // (equivocation guard): target > last_authored always holds.
+        for last in 0u64..50 {
+            for observed in 0u64..50 {
+                assert!(next_target_round(Some(last), observed, dense, f1) > last);
+                assert!(next_target_round(Some(last), observed, sparse, f1) > last);
+            }
         }
     }
 
@@ -2214,6 +2343,115 @@ mod tests {
         let first = state_roots[0];
         for r in &state_roots[1..] {
             assert_eq!(*r, first, "state roots disagree across daemons");
+        }
+    }
+
+    /// Consensus-review regression for the round-driver snap-up: with
+    /// deliberately phase-offset ticks (daemons started 150 ms apart at
+    /// round_ms=100, so no two tick in phase), the cluster must still
+    /// advance rounds and commit. Under the rejected
+    /// `max(last, observed) + 1` variant, the first authority to author
+    /// round R teleports every other node's target to R+1, round R
+    /// freezes at one author, and the propose gate deadlocks
+    /// cluster-wide — this test catches that: no daemon ever commits
+    /// and rounds stall near 1.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn four_node_staggered_ticks_still_commit() {
+        let n = 4u32;
+        // 22_1xx: clear of every other test's listen/client range in
+        // this module (19_8xx would collide with phase_g's client
+        // ports under --include-ignored).
+        let base_port: u16 = 22_100;
+
+        let manifest = GenesisManifest {
+            network_id: "test-4n-staggered".into(),
+            validators: (0..n)
+                .map(|i| GenesisValidator {
+                    authority_id: i,
+                    label: format!("v{}", i),
+                    mldsa_public_key_hex: "00".into(),
+                    bls_public_key_hex: "00".into(),
+                    validator_stake_suwappu: 1_000,
+                    authority_stake_suwappu: 1_000,
+                })
+                .collect(),
+            corridors: Vec::new(),
+            rounds_per_epoch: 1024,
+        };
+
+        let mut daemons = Vec::new();
+        for i in 0..n {
+            let peers: Vec<Peer> = (0..n)
+                .filter(|j| *j != i)
+                .map(|j| Peer {
+                    id: format!("v{}", j),
+                    addr: format!("127.0.0.1:{}", base_port + j as u16)
+                        .parse::<SocketAddr>()
+                        .unwrap(),
+                })
+                .collect();
+            let cfg = NodeConfig {
+                self_id: format!("v{}", i),
+                authority_id: i,
+                listen: format!("127.0.0.1:{}", base_port + i as u16)
+                    .parse::<SocketAddr>()
+                    .unwrap(),
+                client_listen: format!("127.0.0.1:{}", base_port + 100 + i as u16)
+                    .parse::<SocketAddr>()
+                    .unwrap(),
+                rpc_listen: None,
+                peers,
+                round_ms: 100,
+                checkpoint_cadence_rounds: 1,
+                mldsa_secret_key_path: "/dev/null".into(),
+                bls_secret_key_path: "/dev/null".into(),
+                genesis_manifest_path: "/dev/null".into(),
+                event_log_path: std::env::temp_dir()
+                    .join(format!("suwappu-daemon-staggered-test-v{}.ndjson", i)),
+
+                max_client_connections: 256,
+                client_idle_timeout_ms: 30_000,
+                client_per_ip_limit: 8,
+                rpc_per_ip_capacity: 60,
+                rpc_per_ip_refill_per_sec: 10,
+                bridge_oracle_address: None,
+                bridge_network_id: None,
+                metrics_listen: None,
+            };
+            let d = Daemon::start(cfg, manifest.clone()).await.unwrap();
+            daemons.push(d);
+            // 1.5 ticks of stagger: every daemon's round timer is out
+            // of phase with every other's, so each round is authored
+            // first by one node and observed by the rest before their
+            // own tick — the exact interleaving that deadlocks the
+            // snap-past-frontier variant.
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+
+        // Same headroom as the in-phase test, measured from the last
+        // daemon's start.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+
+        let mut state_roots = Vec::new();
+        for (i, d) in daemons.iter().enumerate() {
+            let committed_empty = d.state.committed.lock().is_empty();
+            let inner = d.state.inner.lock().await;
+            assert!(
+                !committed_empty,
+                "staggered daemon v{} did not commit any cert (last_authored={:?}, max_observed={})",
+                i, inner.last_authored_round, inner.max_observed_round
+            );
+            assert!(
+                inner.last_authored_round.unwrap_or(0) >= 3,
+                "staggered daemon v{} stalled at round {:?}",
+                i,
+                inner.last_authored_round
+            );
+            state_roots.push(inner.substrate.state_root());
+        }
+        let first = state_roots[0];
+        for r in &state_roots[1..] {
+            assert_eq!(*r, first, "state roots disagree across staggered daemons");
         }
     }
 
