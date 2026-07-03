@@ -21,3 +21,4 @@ mainnet readiness, see
 | [IQ-008](./IQ-008-evm-developer-surface.md) | EVM developer surface — eth_* compat vs Intent-SDK-only (EVM-1) | Dual-VM projection only; no eth_* RPC | Recommendation, pending sign-off |
 | [IQ-009](./IQ-009-ltp-aggregate-pq-migration.md) | LTP aggregate PQ migration — remove classical BLS12-381 while preserving constant-size (PQ-1 / gap G-8) | BLS12-381 aggregate live in `suwappu-ltp` (documented exception) | Recommendation, pending sign-off |
 | [IQ-010](./IQ-010-cross-chain-interop-adapter.md) | Cross-chain interop — OFT/CCTP-class asset-mobility adapter vs LTP-only (INTEROP-1 / gap G-9) | LTP attestation only; no asset-mobility adapter; mint path not wired | Recommendation, pending sign-off |
+| [IQ-011](./IQ-011-travel-rule-messaging.md) | Travel-rule messaging (originator/beneficiary VASP data) | Spec only — `Intent::Transfer` has no memo/attachment; no travel-rule surface today | Recommendation, pending sign-off |
