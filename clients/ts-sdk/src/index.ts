@@ -156,7 +156,13 @@ export class Client {
    */
   constructor(baseUrl: string, options: ClientOptions = {}) {
     this.#baseUrl = baseUrl;
-    this.#fetch = options.fetch ?? globalThis.fetch;
+    // Bind to the global. Storing an unbound `globalThis.fetch` in a field
+    // and later calling it as `this.#fetch(...)` throws "Illegal invocation"
+    // in browsers (the WHATWG `fetch` requires `this === window`). Node's
+    // undici doesn't enforce this, so it only surfaces in the browser —
+    // which is exactly where the explorer runs. A caller-supplied `fetch`
+    // is used as-is (they own its binding).
+    this.#fetch = options.fetch ?? globalThis.fetch.bind(globalThis);
     this.#timeoutMs = options.timeoutMs;
     this.#headers = options.headers ?? {};
     this.#nextId = 1;

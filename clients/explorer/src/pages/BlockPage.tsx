@@ -2,6 +2,10 @@
 
 import { useEffect, useState } from "react";
 import type { Client, BlockView } from "@suwappu/client";
+import { Card } from "../components/Card.js";
+import { Hash } from "../components/Hash.js";
+import { Loading, EmptyState, ErrorState } from "../components/states.js";
+import { shortHash } from "../lib/format.js";
 
 export function BlockPage({
   client,
@@ -16,16 +20,15 @@ export function BlockPage({
 
   useEffect(() => {
     let cancelled = false;
+    setBlock(null);
+    setError(null);
+    setNotFound(false);
     client
       .getBlock(round)
       .then((b) => {
         if (cancelled) return;
-        if (b === null) {
-          setNotFound(true);
-        } else {
-          setBlock(b);
-          setNotFound(false);
-        }
+        if (b === null) setNotFound(true);
+        else setBlock(b);
       })
       .catch((e) => {
         if (cancelled) return;
@@ -36,96 +39,104 @@ export function BlockPage({
     };
   }, [client, round]);
 
-  if (error) {
-    return (
-      <div className="block-page">
-        <h1>Block {round}</h1>
-        <div className="error">RPC error: {error}</div>
-      </div>
-    );
-  }
-  if (notFound) {
-    return (
-      <div className="block-page">
-        <h1>Block {round}</h1>
-        <div className="not-found">
-          No block committed at round {round}. Either the round is in the
-          future, or the round was skipped (Mysticeti-C <em>Skip</em>{" "}
-          outcome — a legitimate gap; the next round will have a block).
-        </div>
-        <div>
-          <a href={`#/block/${round + 1}`}>Try the next round →</a>
-        </div>
-      </div>
-    );
-  }
-  if (!block) {
-    return (
-      <div className="block-page">
-        <h1>Block {round}</h1>
-        <div className="loading">Loading…</div>
-      </div>
-    );
-  }
-
   return (
-    <div className="block-page">
-      <h1>Block {block.round}</h1>
-      <dl>
-        <dt>Round</dt>
-        <dd>{block.round}</dd>
-        <dt>Cert hash</dt>
-        <dd className="hash">{block.cert_hash}</dd>
-        <dt>Intent count</dt>
-        <dd>{block.intents.length}</dd>
-      </dl>
+    <div className="page block-page">
+      <div className="page-intro">
+        <h1>Block {round.toLocaleString()}</h1>
+      </div>
 
-      <h2>Intents</h2>
-      {block.intents.length === 0 ? (
-        <div className="empty">
-          Empty block — committed but no intents (governance-only or a
-          checkpoint commit).
-        </div>
+      {error ? (
+        <Card>
+          <ErrorState message={error} />
+        </Card>
+      ) : notFound ? (
+        <Card>
+          <EmptyState title={`No block committed at round ${round}.`}>
+            Either the round is in the future, or it was skipped (Mysticeti-C{" "}
+            <em>Skip</em> outcome — a legitimate gap; the next round will have a
+            block).
+            <div className="pager">
+              <span />
+              <a href={`#/block/${round + 1}`}>Try the next round →</a>
+            </div>
+          </EmptyState>
+        </Card>
+      ) : !block ? (
+        <Card>
+          <Loading />
+        </Card>
       ) : (
-        <table>
-          <thead>
-            <tr>
-              <th>Index</th>
-              <th>Kind</th>
-              <th>Tx hash</th>
-              <th>Detail</th>
-            </tr>
-          </thead>
-          <tbody>
-            {block.intents.map((intent, idx) => {
-              const txHash = block.tx_hashes?.[idx] ?? null;
-              return (
-                <tr key={idx}>
-                  <td>{idx}</td>
-                  <td>
-                    <code>{intent.kind}</code>
-                  </td>
-                  <td className="hash">
-                    {txHash ? (
-                      <a href={`#/tx/${txHash}`}>{shortHash(txHash)}</a>
-                    ) : (
-                      <span className="muted">—</span>
-                    )}
-                  </td>
-                  <td>
-                    <IntentSummary intent={intent} />
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      )}
+        <>
+          <Card title="Header">
+            <dl className="detail-grid">
+              <dt>Round</dt>
+              <dd>{block.round.toLocaleString()}</dd>
+              <dt>Cert hash</dt>
+              <dd>
+                <Hash value={block.cert_hash} label="cert hash" />
+              </dd>
+              <dt>Intent count</dt>
+              <dd>{block.intents.length}</dd>
+            </dl>
+          </Card>
 
-      <nav className="pager">
-        {round > 0 && <a href={`#/block/${round - 1}`}>← previous round</a>}
-        <a href={`#/block/${round + 1}`}>next round →</a>
-      </nav>
+          <Card title="Intents">
+            {block.intents.length === 0 ? (
+              <EmptyState title="Empty block.">
+                Committed but carries no intents (governance-only or a
+                checkpoint commit).
+              </EmptyState>
+            ) : (
+              <div className="table-scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th className="num">#</th>
+                      <th>Kind</th>
+                      <th>Tx hash</th>
+                      <th>Detail</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {block.intents.map((intent, idx) => {
+                      const txHash = block.tx_hashes?.[idx] ?? null;
+                      return (
+                        <tr key={idx}>
+                          <td className="num">{idx}</td>
+                          <td>
+                            <code>{intent.kind}</code>
+                          </td>
+                          <td>
+                            {txHash ? (
+                              <a href={`#/tx/${txHash}`} className="mono">
+                                {shortHash(txHash)}
+                              </a>
+                            ) : (
+                              <span className="muted">—</span>
+                            )}
+                          </td>
+                          <td>
+                            <IntentSummary intent={intent} />
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Card>
+
+          <nav className="pager">
+            {round > 0 ? (
+              <a href={`#/block/${round - 1}`}>← previous round</a>
+            ) : (
+              <span />
+            )}
+            <a href={`#/block/${round + 1}`}>next round →</a>
+          </nav>
+        </>
+      )}
     </div>
   );
 }
@@ -134,7 +145,7 @@ function IntentSummary({ intent }: { intent: BlockView["intents"][number] }) {
   switch (intent.kind) {
     case "transfer":
       return (
-        <span>
+        <span className="mono">
           {shortHash(intent.from)} → {shortHash(intent.to)}: {intent.amount}{" "}
           SUWAPPU
         </span>
@@ -153,13 +164,7 @@ function IntentSummary({ intent }: { intent: BlockView["intents"][number] }) {
       );
     default:
       // Forward-compat: a future Intent variant may surface a kind
-      // string this build doesn't recognize. Don't crash; just show
-      // raw JSON.
+      // string this build doesn't recognize. Don't crash; show raw JSON.
       return <code>{JSON.stringify(intent)}</code>;
   }
-}
-
-function shortHash(hex: string): string {
-  if (hex.length <= 18) return hex;
-  return `${hex.slice(0, 10)}…${hex.slice(-8)}`;
 }
