@@ -59,6 +59,19 @@ impl Ciphertext {
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
+    /// Construct from bytes, validating the ML-KEM-768 ciphertext width.
+    ///
+    /// Used to rehydrate a ciphertext that was serialized out (e.g. a
+    /// confidential-memo envelope riding the DA layer) before
+    /// `decapsulate`. A wrong length is rejected here; a right-length but
+    /// tampered ciphertext passes this check and instead fails at
+    /// decapsulation via ML-KEM's implicit rejection (a mismatched shared
+    /// secret), which downstream AEAD verification then catches.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
+        mlkem768::Ciphertext::from_bytes(bytes)
+            .map(|_| Self(bytes.to_vec()))
+            .map_err(|_| CryptoError::MalformedKey("ml-kem-768 ciphertext"))
+    }
 }
 
 impl SharedSecret {

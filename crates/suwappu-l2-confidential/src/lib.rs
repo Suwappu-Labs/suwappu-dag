@@ -20,12 +20,20 @@
 //!   - `derive_nullifier_key()` — nullifier key from seed
 //!   - `compute_nullifier()` — nullifier for a (cm, position) pair
 //!   - `derive_l2_address()` — 20-byte L2 address from ML-DSA pk
-//! - **Phase 2** — primitives that need seeded ML-KEM keygen +
-//!   AEAD (workspace dep choice pending):
-//!   - Viewing-key derivation (per-account ML-KEM-768 keypair
-//!     from `SHA3-256-domain(SUWAPPU_L2_VIEWING_KEY_V1, sk_seed)`)
-//!   - Hybrid encryption envelope (ML-KEM + AES-256-GCM)
-//!   - Memo encrypt/decrypt
+//! - **Phase 2** — the auditable memo envelope (`memo` module).
+//!   Dual-recipient ML-KEM-768 + ChaCha20-Poly1305 hybrid
+//!   encryption giving confidential transfers their
+//!   selective-disclosure property:
+//!   - `MemoEnvelope` / `NotePlaintext` — two independent
+//!     encryptions (recipient + auditor) of a note's secret fields
+//!   - `encrypt_note_memo` / `decrypt_note_memo` — seal / open
+//!   - `ViewingPublicKey` / `ViewingSecretKey` — registered
+//!     per-account ML-KEM-768 viewing keypair (the envelope is
+//!     agnostic to how it is generated)
+//!   - **Follow-ups (NOT built here):** seeded/deterministic
+//!     viewing-key derivation from an account seed via
+//!     `SHA3-256-domain(SUWAPPU_L2_VIEWING_KEY_V1, sk_seed)`, and
+//!     on-chain viewing-key registration. See `memo` module docs.
 //! - **Phase 3** — STARK-of-ML-DSA spend authorization. Lands
 //!   in the L2 STM circuit work (H.3 / G1 / G2 phase 2).
 //!
@@ -52,6 +60,13 @@
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
+
+pub mod memo;
+
+pub use memo::{
+    decrypt_note_memo, encrypt_note_memo, generate_viewing_keypair, MemoEnvelope, MemoSlot,
+    NotePlaintext, ViewingPublicKey, ViewingSecretKey,
+};
 
 use serde::{Deserialize, Serialize};
 use suwappu_crypto::hash::{
@@ -119,7 +134,12 @@ pub struct Note {
     pub position: u64,
 }
 
-/// Errors emitted by the Track H phase-1 primitives.
+/// Errors emitted by the Track H phase-1 primitives and the
+/// phase-2 memo envelope (`memo`).
+///
+/// Crate-local: no downstream crate matches this enum exhaustively
+/// (verified across the workspace), so the phase-2 variants below
+/// are additive and break nothing.
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum ConfidentialError {
     /// `Note.pk_owner` was not the canonical ML-DSA-65 width.
@@ -133,6 +153,35 @@ pub enum ConfidentialError {
         /// Observed width.
         got: usize,
     },
+
+    /// ML-KEM-768 encapsulation to a viewing public key failed
+    /// (a malformed / wrong-width public key). Phase-2 memo path.
+    #[error("ml-kem-768 encapsulation to viewing key failed")]
+    KemEncapsulationFailed,
+
+    /// ChaCha20-Poly1305 sealing of the memo plaintext failed.
+    /// In practice unreachable for well-formed inputs — surfaced
+    /// so the encrypt path never panics. Phase-2 memo path.
+    #[error("memo aead sealing failed")]
+    AeadEncryptionFailed,
+
+    /// No envelope slot authenticated under the supplied viewing
+    /// secret key: neither ML-KEM decapsulation + AEAD tag
+    /// verification succeeded. This is the single opaque failure a
+    /// decryptor observes — it deliberately does not distinguish
+    /// "wrong key" from "tampered ciphertext" from "malformed KEM
+    /// ct", so a caller learns only "you cannot open this memo".
+    /// Phase-2 memo path.
+    #[error("memo decryption failed: no slot authenticated")]
+    MemoDecryptionFailed,
+
+    /// A decrypted-and-authenticated memo payload did not match the
+    /// canonical `NotePlaintext` wire layout (bad length prefix or
+    /// trailing bytes). Distinct from `MemoDecryptionFailed`: the
+    /// AEAD tag verified, so this signals an encoder/version bug,
+    /// not an attacker. Phase-2 memo path.
+    #[error("memo plaintext is not canonical NotePlaintext bytes")]
+    MalformedMemoPlaintext,
 }
 
 /// Compute the note commitment

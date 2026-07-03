@@ -80,6 +80,13 @@ blst = "0.3"
 sha3 = "0.10"
 blake3 = "1.5"
 hkdf = "0.12"
+# AEAD for the Track H Phase-2 confidential-memo envelope (RustCrypto,
+# Apache-2.0 OR MIT). ChaCha20-Poly1305 is a symmetric primitive and is
+# PQ-safe at the 256-bit key width — no classical asymmetric assumption.
+chacha20poly1305 = "0.10.1"
+# Zeroize derived AEAD key material on drop (Track H memo envelope).
+# RustCrypto, Apache-2.0 OR MIT; already in the tree transitively.
+zeroize = "1.8"
 
 # Erasure coding (RFC 6330) — suwappu-transport block shred/reconstruct
 raptorq = "2.0"
