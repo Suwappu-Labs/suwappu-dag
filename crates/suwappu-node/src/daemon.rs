@@ -979,6 +979,7 @@ pub(crate) enum FastPathProposeOutcome {
 ///      `handle_fastpath_cert` runs on receipt, run here at propose
 ///      time so we never AUTHOR the equivocating partial.
 ///   3. Soft capacity cap on new keys (`MAX_FASTPATH_TRACKED`).
+///
 /// The lineage-committed bound lives in the client handler (it needs
 /// the committed-head lookup) — see `client::handle_conn`.
 pub(crate) async fn propose_fastpath_tx(
