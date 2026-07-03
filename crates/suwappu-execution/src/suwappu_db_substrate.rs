@@ -235,6 +235,53 @@ impl Substrate for SuwappuDbSubstrate {
         }
     }
 
+    fn settle_protocol_fee(
+        &mut self,
+        payer: &Address,
+        amount: Balance,
+        refund: bool,
+    ) -> Result<(), ExecutionError> {
+        // FEE-1 Phase 1: mirror the InMemorySubstrate settlement over the
+        // capability-gated `Bridge` — a flat SUWAPPU move between `payer`
+        // and the authority-rewards-pool fee sink, routed through
+        // `Bridge::submit(Transfer)` so it inherits suwappu-db's lane
+        // separation + bundle atomicity. `refund` reverses the direction
+        // for the rollback leg of `apply_intent_with_fee`. The sink is a
+        // reserved registry account; the reserved-address gate lives on
+        // the user `Transfer` arm, not on this protocol-owned path.
+        let sink = reserved::authority_rewards_pool_address();
+        let (from, to) = if refund {
+            (sink, *payer)
+        } else {
+            (*payer, sink)
+        };
+        let mut bridge = Bridge::new(&mut self.state);
+        match bridge.submit(SuwappuIntent::Transfer {
+            from: SuwappuAddress(from),
+            to: SuwappuAddress(to),
+            amount,
+        }) {
+            Ok(()) => Ok(()),
+            Err(RejectReason::InsufficientBalance) => {
+                let have = bridge.balance_of(&SuwappuAddress(from)).0;
+                Err(ExecutionError::InsufficientBalance {
+                    from,
+                    have,
+                    need: amount,
+                })
+            }
+            Err(RejectReason::AmountOverflow) => Err(ExecutionError::BalanceOverflow { to }),
+            // Any other reject reason is unexpected on a Transfer, but the
+            // settlement path (and its rollback leg) MUST NOT panic — a
+            // crash mid-block would take the node down. Surface a hard
+            // accounting error so `apply_intent_with_fee` fails the
+            // intent + fee unit cleanly instead.
+            Err(other) => Err(ExecutionError::FeeSettlementFailed {
+                reason: format!("{other:?}"),
+            }),
+        }
+    }
+
     fn state_root(&self) -> [u8; 32] {
         // The canonical consensus root is the substrate-level **V2 recipe**
         // (`compute_state_root_v2`), NOT suwappu-db's internal balance trie —

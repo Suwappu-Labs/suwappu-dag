@@ -3,10 +3,58 @@
 **Status:** Recommendation, pending sign-off. Phased; Phase 1
 (fee-payer/sender separation) is buildable today, Phase 2
 (stablecoin-denominated fees) is gated on the issuer story (gap G-4).
+**Phase-1 primitive landed** (2026-07-03): the sponsorship signing
+surface, wire envelope, fee-derived mempool priority, and the atomic
+`settle_protocol_fee` / `apply_intent_with_fee` / `execute_block_with_fees`
+substrate primitives are implemented and reviewed (crypto-reviewer +
+lane-auditor **APPROVE-WITH-NITS**). The path is **dormant** —
+`execute_block` still delegates with an empty fee slice, so no funds move
+yet. See "Implementation status" below.
 **Owner:** Execution / payments
 **Date:** 2026-07-03
 **Tracking:** Refs [`../research/competitive-gap-analysis.md`](../research/competitive-gap-analysis.md)
 FEE-1 (gap G-2, §3 register + §6 P1 workstream).
+
+## Implementation status (2026-07-03)
+
+**Landed (Phase 1, reviewed, dormant):**
+
+- Client wire: `ClientMessage::SubmitWithFee` / `SubmitBatchWithFee`
+  (appended variants, bincode-compatible), `FeeAuthorization`,
+  `FEE_DOMAIN_TAG` + `fee_signing_digest` (binds intent content-hash +
+  `max_fee` + `network_id`), `verify_signed_fee` (reuses the audited
+  ML-DSA-65 `verify_authority_signature`).
+- Mempool: fee-derived admission priority replaces `DEFAULT_INTENT_PRIORITY`
+  when a validated `fee_payer` is present.
+- Substrate: `FeeCharge`, `Substrate::{apply_intent_with_fee,
+  settle_protocol_fee}` (atomic fee-first + reverse-transfer rollback;
+  reserved-payer guard; zero-fee guard; fail-closed default),
+  `execute_block_with_fees` (length-aligned; `execute_block` delegates
+  with `&[]`). Fee sink = `authority_rewards_pool`.
+- Tests: unit (reserved-payer reject, zero-fee reject, insufficient-sponsor
+  atomicity, refund-on-intent-failure, misaligned-fees panic) +
+  `proptest_fee_settlement.rs` (fee-less parity, atomicity, supply
+  conservation — InMemory only).
+
+**Hard prerequisites for the settlement PR (before any fee moves real funds):**
+
+1. **Nonce / expiry / revocation** on `FeeAuthorization` (crypto-reviewer
+   MED). Today the authorization is a content-bound bearer token with no
+   replay defense of its own beyond mempool content-hash dedup — acceptable
+   only while dormant.
+2. **Thread the envelope mempool → block** so `execute_block_with_fees`
+   receives real `FeeCharge`s (needs a mempool `Entry` change, out of the
+   Phase-1 blast radius).
+3. **Full 10k-case mock-vs-prod parity proptest** (`InMemorySubstrate` vs
+   `SuwappuDbSubstrate`) — deferred because suwappu-db is unfetchable in the
+   dev sandbox; must run in CI.
+4. **Surface (not swallow) the rollback error** on the SuwappuDb path
+   (`let _ =` → observable) so a suwappu-db Transfer-contract regression
+   can't silently mis-account the fee ledger.
+5. Multi-intent block-level failure-injection proptest.
+
+These are recorded here and as inline `SETTLEMENT-PR-PREREQUISITE`
+comments at the `SubmitWithFee` handler and `apply_intent_with_fee`.
 
 ## Question
 
