@@ -245,8 +245,12 @@ HEADER_DOMAIN (32)  ||  networkId (32)  ||  oracle (20)
   ||  blockNumber-as-uint256-BE (32)  ||  stateRoot (32)
 ```
 
-`HEADER_DOMAIN = keccak256("SUWAPPU_SUWAPPUDAG_HEADER_V1")` is hard-pinned as a
-cross-language constant verified by tests on both the Rust and Solidity sides.
+`HEADER_DOMAIN = keccak256("SUWAPPU_DAG_HEADER_V1")` is hard-pinned as a
+cross-language constant, verified by a Rust-side test that recomputes the
+keccak256 of the same ASCII string. **Known gap:** the `suwappu-revm` Solidity
+oracle (`GsxDagQuorumHeaderOracle`) still hard-codes the pre-rebrand
+`SUWAPPU_GSXDAG_HEADER_V1` string, so the two sides do not currently agree —
+tracked as a coordinated rename + regenesis in `suwappu-revm`.
 `stateRoot` is the suwappu-dag BLAKE3 L1 state root (`ExecutionReport::post_root`);
 it is **not** an EVM-MPT root and is therefore **not** storage-provable — the
 header is an opaque finalized-round anchor.
