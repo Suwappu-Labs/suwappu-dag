@@ -6,7 +6,7 @@ ML-DSA / BLS keypairs + a seeded faucet authority.
 Forked from scripts/devnet/gen-genesis.py with these diffs:
   * 7 seed validator regions instead of 4 (matches paper §10.2's
     7-of-9 LTP corridor).
-  * `network_id = "gsx-testnet-v1"` (devnet is "suwappu-devnet").
+  * `network_id = "suwappu-testnet-v1"` (devnet is "suwappu-devnet").
   * `rounds_per_epoch = 4096` (4× devnet — longer epochs reduce
     governance churn during the 12-month testnet life).
   * Faucet authority_id = 7 (devnet used id=4 with 4 validators).
@@ -100,7 +100,7 @@ def mint_real_faucet_key(out_dir: Path) -> tuple[bytes, bytes]:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out-dir", type=Path, default=Path("./target/testnet/keys"))
-    ap.add_argument("--network-id", default="gsx-testnet-v1")
+    ap.add_argument("--network-id", default="suwappu-testnet-v1")
     ap.add_argument("--validator-stake-suwappu", type=int, default=1_000_000)
     ap.add_argument("--authority-stake-suwappu", type=int, default=1_000_000)
     ap.add_argument(
