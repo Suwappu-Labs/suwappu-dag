@@ -15,6 +15,7 @@ import { Client } from "@suwappu/client";
 import { Home } from "./pages/Home.js";
 import { Validators } from "./pages/Validators.js";
 import { Attestation } from "./pages/Attestation.js";
+import { Capabilities } from "./pages/Capabilities.js";
 import { BlockPage } from "./pages/BlockPage.js";
 import { TxPage } from "./pages/TxPage.js";
 
@@ -22,6 +23,7 @@ type Route =
   | { kind: "home" }
   | { kind: "validators" }
   | { kind: "attestation" }
+  | { kind: "capabilities" }
   | { kind: "block"; round: number }
   | { kind: "tx"; hash: string }
   | { kind: "not-found"; raw: string };
@@ -31,6 +33,7 @@ function parseRoute(hash: string): Route {
   if (path === "" || path === "/") return { kind: "home" };
   if (path === "validators") return { kind: "validators" };
   if (path === "attestation") return { kind: "attestation" };
+  if (path === "capabilities") return { kind: "capabilities" };
   const blockMatch = path.match(/^block\/(\d+)$/);
   if (blockMatch) return { kind: "block", round: Number(blockMatch[1]) };
   const txMatch = path.match(/^tx\/(0x)?([0-9a-fA-F]{64})$/);
@@ -42,6 +45,7 @@ const NAV: Array<{ href: string; label: string; match: Route["kind"] }> = [
   { href: "#/", label: "Overview", match: "home" },
   { href: "#/validators", label: "Validators", match: "validators" },
   { href: "#/attestation", label: "Attestation", match: "attestation" },
+  { href: "#/capabilities", label: "Capabilities", match: "capabilities" },
 ];
 
 export function App({ rpcUrl }: { rpcUrl: string }) {
@@ -115,6 +119,7 @@ export function App({ rpcUrl }: { rpcUrl: string }) {
         {route.kind === "home" && <Home client={client} />}
         {route.kind === "validators" && <Validators client={client} />}
         {route.kind === "attestation" && <Attestation client={client} />}
+        {route.kind === "capabilities" && <Capabilities />}
         {route.kind === "block" && (
           <BlockPage client={client} round={route.round} />
         )}

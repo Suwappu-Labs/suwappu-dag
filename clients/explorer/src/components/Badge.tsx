@@ -1,5 +1,7 @@
 // Badge — a compact labelled pill. `tone` maps to a role token:
 //   - "neutral"  → surface/border (default, factual statements)
+//   - "muted"    → dimmed (an un-measured / not-yet / gated marker; NOT an
+//                  error — distinct from and quieter than "neutral")
 //   - "accent"   → brand accent (differentiators)
 //   - "pq"       → post-quantum marker (accent-tinted, with a lock glyph)
 //   - status tones ("good" | "warning" | "serious" | "critical") are
@@ -9,6 +11,7 @@ import type { ReactNode } from "react";
 
 export type BadgeTone =
   | "neutral"
+  | "muted"
   | "accent"
   | "pq"
   | "good"

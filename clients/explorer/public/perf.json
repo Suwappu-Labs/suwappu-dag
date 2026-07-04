@@ -1,0 +1,52 @@
+{
+  "asOf": "2026-05-13",
+  "campaign": "4-region AWS devnet (us-east-1, us-west-2, eu-west-1, ap-northeast-1)",
+  "source": "docs/perf-run-2026-05-13/",
+  "sourceUrl": "https://github.com/Suwappu-Labs/suwappu-dag/tree/main/docs/perf-run-2026-05-13",
+  "note": "Honest, dated figures from the last published campaign. Values marked 'pending' are not yet measured at scale; nothing here is a marketing target.",
+  "metrics": [
+    {
+      "key": "submission_tps",
+      "label": "Submission throughput",
+      "value": "100",
+      "unit": "/s",
+      "status": "published",
+      "asOf": "2026-05-13",
+      "note": "9,000 intents acked, 0% drops, sustained (target 100). Client-listener round-trip p50 ~10 ms on us-east-1."
+    },
+    {
+      "key": "committed_tps",
+      "label": "Committed TPS",
+      "value": null,
+      "unit": "/s",
+      "status": "pending",
+      "note": "The 2026-05-13 run recorded 0 committed TPS — a loadgen ordering issue plus a round-advance stall. The stall is fixed (PERF-1, CI-green); a multi-region re-run with committed TPS as the headline is pending (needs the AWS campaign)."
+    },
+    {
+      "key": "round_cadence_p50",
+      "label": "Round cadence (p50 gap)",
+      "value": "5.75",
+      "unit": "s",
+      "status": "published",
+      "asOf": "2026-05-13",
+      "note": "us-east-1, pre-PERF-1. Expected to improve materially after the frontier-snap fix; unverified at scale."
+    },
+    {
+      "key": "fastpath_finality",
+      "label": "Fast-path finality",
+      "value": null,
+      "unit": "s",
+      "status": "pending",
+      "note": "Design goal sub-second. The measurement harness is built (PERF-2, suwappu-metrics --mode fastpath); not yet run multi-region."
+    },
+    {
+      "key": "cross_region_p50",
+      "label": "Cross-region cert propagation (p50)",
+      "value": "28–73",
+      "unit": "ms",
+      "status": "published",
+      "asOf": "2026-05-13",
+      "note": "Matches published AWS one-way latency within ~5–10 ms — wire transport + framing overhead is negligible."
+    }
+  ]
+}

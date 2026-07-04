@@ -18,6 +18,7 @@ import { Badge } from "../components/Badge.js";
 import { LineChart } from "../components/LineChart.js";
 import type { LinePoint } from "../components/LineChart.js";
 import { Loading, ErrorState } from "../components/states.js";
+import { PerfCard } from "../components/PerfCard.js";
 import { Hash } from "../components/Hash.js";
 import { fetchRecentBlocks } from "../lib/blocks.js";
 import { shortHash } from "../lib/format.js";
@@ -193,6 +194,8 @@ export function Home({ client }: { client: Client }) {
           />
         )}
       </Card>
+
+      <PerfCard />
 
       <Card title="Recent blocks">
         {recent.length === 0 && !error ? (

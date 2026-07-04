@@ -55,7 +55,40 @@ const state = {
   roundChangedAt: null,   // ms when committedRound last increased
   lastAdvanceIntervalMs: null, // observed gap between two advances
   samples: [],            // [{ t, round }] ring buffer for sparkline
+  // Committed perf.json (published figures). Loaded once at boot; on any
+  // failure we fall back to the static "pending — see perf run" tiles so
+  // the page never breaks.
+  perf: { doc: null, loaded: false, error: false },
 };
+
+// ---------------------------------------------------------------------------
+// Published perf figures. Fetched once from the committed perf.json served
+// alongside this page. We render exactly what it says — a null value shows
+// as the muted "pending" treatment with the metric's note; we never invent
+// a number.
+// ---------------------------------------------------------------------------
+async function loadPerf() {
+  try {
+    const resp = await fetch("./perf.json", { cache: "no-store" });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const doc = await resp.json();
+    if (doc && Array.isArray(doc.metrics)) {
+      state.perf.doc = doc;
+      state.perf.loaded = true;
+    } else {
+      state.perf.error = true;
+    }
+  } catch (_e) {
+    state.perf.error = true;
+  }
+  render();
+}
+
+function perfBadgeCls(status) {
+  if (status === "observed") return "observed";
+  if (status === "published") return "published";
+  return ""; // pending / unknown → base muted badge
+}
 
 // ---------------------------------------------------------------------------
 // Small helpers.
@@ -358,19 +391,6 @@ function renderPerf() {
   const root = $("perf");
   root.textContent = "";
 
-  // LIVE-DERIVED: observed round-advance interval between two successive
-  // commits seen by THIS endpoint. Honest, measured, and scoped.
-  const perfCard = (title, valueHtml, badgeText, badgeCls) => {
-    const card = el("div", "card perf");
-    const name = el("div", "name"); name.textContent = title;
-    card.appendChild(name);
-    const v = el("div", "v"); v.innerHTML = valueHtml;
-    card.appendChild(v);
-    const b = el("div", `badge ${badgeCls}`); b.textContent = badgeText;
-    card.appendChild(b);
-    return card;
-  };
-
   // Round cadence — live if we've seen an advance, else collecting.
   // The pending state uses the `.v.pending` treatment (smaller, muted)
   // like the other perf tiles, so the hero-number font never wraps a
@@ -390,25 +410,57 @@ function renderPerf() {
   cadence.appendChild(cb);
   root.appendChild(cadence);
 
-  // Committed TPS — NOT derivable from getEpoch alone; do not fabricate.
-  const tps = el("div", "stat");
-  tps.innerHTML =
-    `<div class="k">Committed TPS</div>` +
-    `<div class="v pending">pending — see perf run</div>`;
-  const tl = el("a", "badge"); tl.href = DOCS.perfRun; tl.textContent = "docs →";
-  tl.style.textDecoration = "none";
-  tps.appendChild(tl);
-  root.appendChild(tps);
+  // Committed TPS + Fast-path finality — NOT derivable from getEpoch; these
+  // come from the committed perf.json (or fall back to a static placeholder
+  // if that failed to load). We never fabricate a number here.
+  root.appendChild(perfMetricTile("Committed TPS", "committed_tps"));
+  root.appendChild(perfMetricTile("Fast-path finality", "fastpath_finality"));
+}
 
-  // Fast-path finality — needs a live multi-region run; placeholder.
-  const fp = el("div", "stat");
-  fp.innerHTML =
-    `<div class="k">Fast-path finality</div>` +
-    `<div class="v pending">pending — see perf run</div>`;
-  const fl = el("a", "badge"); fl.href = DOCS.perfRun; fl.textContent = "docs →";
-  fl.style.textDecoration = "none";
-  fp.appendChild(fl);
-  root.appendChild(fp);
+// A perf tile driven by perf.json. Shows value+unit with the metric's status
+// badge when the value is non-null; otherwise the muted "pending" treatment
+// with the metric's note. If perf.json is unavailable, falls back to the
+// original static "pending — see perf run" placeholder so the page still works.
+function perfMetricTile(title, key) {
+  const doc = state.perf.doc;
+  const m = state.perf.loaded && doc && Array.isArray(doc.metrics)
+    ? doc.metrics.find((x) => x.key === key)
+    : null;
+
+  const stat = el("div", "stat");
+  const k = el("div", "k"); k.textContent = title;
+  stat.appendChild(k);
+
+  // Fallback: perf.json missing/failed → keep the honest static placeholder.
+  if (!m) {
+    const v = el("div", "v pending"); v.textContent = "pending — see perf run";
+    stat.appendChild(v);
+    const link = el("a", "badge"); link.href = DOCS.perfRun; link.textContent = "docs →";
+    link.style.textDecoration = "none";
+    stat.appendChild(link);
+    return stat;
+  }
+
+  const hasValue = m.value !== null && m.value !== undefined;
+  const v = el("div", hasValue ? "v" : "v pending");
+  if (hasValue) {
+    v.textContent = String(m.value);
+    const unit = el("span", "unit"); unit.textContent = ` ${m.unit || ""}`;
+    v.appendChild(unit);
+  } else {
+    v.textContent = "pending";
+  }
+  stat.appendChild(v);
+
+  const badge = el("div", `badge ${perfBadgeCls(m.status)}`);
+  badge.textContent = m.status;
+  stat.appendChild(badge);
+
+  if (m.note) {
+    const sub = el("div", "sub"); sub.textContent = m.note;
+    stat.appendChild(sub);
+  }
+  return stat;
 }
 
 function renderBanner() {
@@ -457,5 +509,6 @@ function renderBanner() {
 // Boot.
 // ---------------------------------------------------------------------------
 render();      // paint the "checking" scaffold immediately
+loadPerf();    // fetch published perf figures once (non-blocking)
 refresh();
 setInterval(refresh, POLL_MS);
