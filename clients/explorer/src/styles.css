@@ -195,8 +195,24 @@ pre {
   margin-top: 2rem;
 }
 
-.home > section {
+.home > section,
+.validators > section {
   margin-bottom: 2rem;
+}
+
+.nav {
+  display: flex;
+  gap: 1rem;
+  margin-right: auto;
+  margin-left: 1.5rem;
+}
+
+.nav a {
+  opacity: 0.85;
+}
+
+.nav a:hover {
+  opacity: 1;
 }
 
 h1, h2 {

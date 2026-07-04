@@ -156,7 +156,10 @@ export class Client {
    */
   constructor(baseUrl: string, options: ClientOptions = {}) {
     this.#baseUrl = baseUrl;
-    this.#fetch = options.fetch ?? globalThis.fetch;
+    // Bind the global fetch: browsers throw "Illegal invocation" when
+    // window.fetch is called with a receiver other than window (calling
+    // `this.#fetch(...)` sets the receiver to the Client instance).
+    this.#fetch = options.fetch ?? globalThis.fetch.bind(globalThis);
     this.#timeoutMs = options.timeoutMs;
     this.#headers = options.headers ?? {};
     this.#nextId = 1;

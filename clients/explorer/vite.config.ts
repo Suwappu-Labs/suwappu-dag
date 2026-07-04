@@ -13,7 +13,7 @@ export default defineConfig({
   define: {
     __DEFAULT_RPC_URL__: JSON.stringify(
       process.env.VITE_RPC_URL ??
-        "https://rpc.devnet.suwappu.suwappu.bot",
+        "https://rpc.devnet.suwappu.bot",
     ),
   },
   build: {

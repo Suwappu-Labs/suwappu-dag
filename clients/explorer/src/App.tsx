@@ -1,9 +1,11 @@
 // suwappu-devnet explorer — single-page hash-routed app.
 //
 // Routes:
-//   #/                → Home (recent blocks + live tip)
-//   #/block/<round>   → Block detail
-//   #/tx/<hash>       → Transaction detail
+//   #/                  → Home (recent blocks + live tip)
+//   #/block/<round>     → Block detail
+//   #/tx/<hash>         → Transaction detail
+//   #/validators        → Authority + validator rings
+//   #/address/<0x…20B>  → Substrate balance
 //
 // State is intentionally tiny: a polling-based hook re-fetches the
 // active page's data every 3 seconds. No global store, no router
@@ -14,11 +16,15 @@ import { Client } from "@suwappu/client";
 import { Home } from "./pages/Home.js";
 import { BlockPage } from "./pages/BlockPage.js";
 import { TxPage } from "./pages/TxPage.js";
+import { ValidatorsPage } from "./pages/ValidatorsPage.js";
+import { AddressPage } from "./pages/AddressPage.js";
 
 type Route =
   | { kind: "home" }
   | { kind: "block"; round: number }
   | { kind: "tx"; hash: string }
+  | { kind: "validators" }
+  | { kind: "address"; address: string }
   | { kind: "not-found"; raw: string };
 
 function parseRoute(hash: string): Route {
@@ -30,6 +36,10 @@ function parseRoute(hash: string): Route {
   const txMatch = path.match(/^tx\/(0x)?([0-9a-fA-F]{64})$/);
   if (txMatch)
     return { kind: "tx", hash: `0x${txMatch[2]!.toLowerCase()}` };
+  if (path === "validators") return { kind: "validators" };
+  const addrMatch = path.match(/^address\/(0x)?([0-9a-fA-F]{40})$/);
+  if (addrMatch)
+    return { kind: "address", address: `0x${addrMatch[2]!.toLowerCase()}` };
   return { kind: "not-found", raw: path };
 }
 
@@ -51,6 +61,10 @@ export function App({ rpcUrl }: { rpcUrl: string }) {
         <a href="#/" className="logo">
           suwappu-devnet explorer
         </a>
+        <nav className="nav">
+          <a href="#/">Blocks</a>
+          <a href="#/validators">Validators</a>
+        </nav>
         <SearchBox />
         <span className="rpc-url" title="RPC URL the explorer is pointing at">
           {rpcUrl}
@@ -62,11 +76,17 @@ export function App({ rpcUrl }: { rpcUrl: string }) {
           <BlockPage client={client} round={route.round} />
         )}
         {route.kind === "tx" && <TxPage client={client} hash={route.hash} />}
+        {route.kind === "validators" && <ValidatorsPage client={client} />}
+        {route.kind === "address" && (
+          <AddressPage client={client} address={route.address} />
+        )}
         {route.kind === "not-found" && (
           <div className="error">
             Unknown route: <code>{route.raw}</code>. Try{" "}
-            <a href="#/">home</a>, <code>#/block/&lt;round&gt;</code>, or{" "}
-            <code>#/tx/&lt;0x...&gt;</code>.
+            <a href="#/">home</a>, <a href="#/validators">validators</a>,{" "}
+            <code>#/block/&lt;round&gt;</code>,{" "}
+            <code>#/tx/&lt;0x...&gt;</code>, or{" "}
+            <code>#/address/&lt;0x...&gt;</code>.
           </div>
         )}
       </main>
@@ -97,6 +117,9 @@ function SearchBox() {
     } else if (/^(0x)?[0-9a-fA-F]{64}$/.test(trimmed)) {
       const h = trimmed.startsWith("0x") ? trimmed : `0x${trimmed}`;
       window.location.hash = `#/tx/${h.toLowerCase()}`;
+    } else if (/^(0x)?[0-9a-fA-F]{40}$/.test(trimmed)) {
+      const a = trimmed.startsWith("0x") ? trimmed : `0x${trimmed}`;
+      window.location.hash = `#/address/${a.toLowerCase()}`;
     }
     setValue("");
   }
@@ -104,10 +127,10 @@ function SearchBox() {
     <form onSubmit={onSubmit} className="search">
       <input
         type="text"
-        placeholder="Round number or 0x-tx-hash"
+        placeholder="Round, 0x-tx-hash, or 0x-address"
         value={value}
         onChange={(e) => setValue(e.target.value)}
-        aria-label="Search by block round or tx hash"
+        aria-label="Search by block round, tx hash, or address"
       />
       <button type="submit">Go</button>
     </form>
