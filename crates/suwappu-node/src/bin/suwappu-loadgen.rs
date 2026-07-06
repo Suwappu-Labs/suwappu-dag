@@ -18,6 +18,15 @@
 //! and runs until SIGINT / SIGTERM. Useful as a systemd-supervised
 //! service driving sustained load for SLA observation.
 //!
+//! Fast-path mode (PERF-2): `--fastpath` submits signed `FastPathTx`s
+//! (one fresh single-owner object per submission, nonce 0) instead of
+//! transfer intents. Lineage is grounded via `GetLineage` at start and
+//! refreshed once per second per target. The stdout CSV keeps the same
+//! `client_submitted_ms,tx_hash,target_idx` shape — the hash column
+//! carries the tx's `payload_digest`, which is what the validator
+//! writes as `cert_hash` on its `lane=fastpath` event lines, so
+//! `suwappu-metrics --mode fastpath` joins the two streams directly.
+//!
 //! Usage:
 //!
 //! ```text
@@ -27,6 +36,9 @@
 //! # Multi-target, continuous (compliance load):
 //! suwappu-loadgen --targets 10.0.1.1:9091,10.0.2.1:9091,10.0.3.1:9091,10.0.4.1:9091 \
 //!             --rate 400 --continuous
+//!
+//! # Fast-path latency campaign (PERF-2):
+//! suwappu-loadgen --target 127.0.0.1:9091 --fastpath --rate 50 --duration 30
 //! ```
 
 use std::{
@@ -38,8 +50,10 @@ use std::{
 use anyhow::{bail, Context};
 use clap::Parser;
 use rand::{rngs::StdRng, Rng, SeedableRng};
+use suwappu_consensus::CertHash;
 use suwappu_crypto::mldsa;
 use suwappu_execution::Intent;
+use suwappu_fastpath::{FastPathTx, OwnedObjectId, OwnerAddress};
 use suwappu_node::client::LoadGenClient;
 
 #[derive(Parser, Debug)]
@@ -72,6 +86,13 @@ struct Args {
     /// systemd unit (DAG-S26.3) for sustained-load compliance runs.
     #[arg(long, default_value_t = false)]
     continuous: bool,
+
+    /// PERF-2: submit fast-path transactions instead of transfer
+    /// intents. Each submission uses a fresh single-owner object
+    /// (nonce 0) so no two txs contend, isolating pure lane latency.
+    /// `--batch-size` is ignored (the fast-path wire acks per tx).
+    #[arg(long, default_value_t = false)]
+    fastpath: bool,
 
     /// Per-intent transfer amount (constant for the run).
     #[arg(long, default_value_t = 1)]
@@ -267,18 +288,36 @@ async fn main() -> anyhow::Result<()> {
     // overall TPS still matches `--rate`. With batch_size=100 and
     // per_target_rate=200, each task does 2 batches/sec (=200 intents/
     // sec/target × 4 targets = 800 TPS aggregate, RTT-amortised by 100).
+    // PERF-2 fast-path mode has no batch wire (one ack per tx), so the
+    // interval is simply 1/rate per target.
     let batch_size = args.batch_size.max(1) as u64;
     let batches_per_sec = (per_target_rate / batch_size).max(1);
-    let per_target_interval = Duration::from_micros(1_000_000 / batches_per_sec);
+    let per_target_interval = if args.fastpath {
+        Duration::from_micros(1_000_000 / per_target_rate)
+    } else {
+        Duration::from_micros(1_000_000 / batches_per_sec)
+    };
     let per_target_planned = if args.continuous {
         u64::MAX
     } else {
         per_target_rate * args.duration
     };
-    eprintln!(
-        "suwappu-loadgen: per-target {} intents/s in batches of {} ({} batches/s/target)",
-        per_target_rate, batch_size, batches_per_sec
-    );
+    if args.fastpath {
+        eprintln!(
+            "suwappu-loadgen: fast-path mode — per-target {} txs/s (one ack per tx)",
+            per_target_rate
+        );
+    } else {
+        eprintln!(
+            "suwappu-loadgen: per-target {} intents/s in batches of {} ({} batches/s/target)",
+            per_target_rate, batch_size, batches_per_sec
+        );
+    }
+
+    // PERF-2 fast-path mode: owner address = blake3 of the signer's
+    // ML-DSA public key. One owner for the whole campaign; per-tx
+    // uniqueness comes from the derived object ids.
+    let fastpath_owner = OwnerAddress(*blake3::hash(signer_pk.as_bytes()).as_bytes());
 
     // DAG-S29.1: when --seed is at its default (0), pick a runtime
     // entropy seed so intent hashes don't collide with prior runs'
@@ -311,6 +350,8 @@ async fn main() -> anyhow::Result<()> {
         let signer_sk = signer_sk.clone();
         let signer_pk = signer_pk.clone();
         let network_id = args.network_id.clone();
+        let fastpath = args.fastpath;
+        let owner = fastpath_owner;
         task_set.spawn(async move {
             let mut client =
                 match LoadGenClient::connect(addr, signer_sk, signer_pk, network_id).await {
@@ -320,6 +361,87 @@ async fn main() -> anyhow::Result<()> {
                         return;
                     }
                 };
+            if fastpath {
+                // PERF-2: ground lineage once at start, refresh at most
+                // once per second — a lineage a few rounds stale is fine
+                // (the K=4 binding window is measured FROM lineage_round,
+                // so fresher is safer, but per-tx roundtrips would halve
+                // throughput for no measurement benefit).
+                let (mut lineage_round, mut lineage_hash) = match client.get_lineage().await {
+                    Ok(l) => l,
+                    Err(e) => {
+                        eprintln!("suwappu-loadgen: target {} GetLineage failed: {:#}", idx, e);
+                        return;
+                    }
+                };
+                let mut last_lineage_refresh = Instant::now();
+                let seed_bytes = seed.to_le_bytes();
+                let mut next_send = Instant::now();
+                let mut sent_local: u64 = 0;
+                while sent_local < planned {
+                    if let Some(d) = deadline {
+                        if Instant::now() >= d {
+                            break;
+                        }
+                    }
+                    if last_lineage_refresh.elapsed() >= Duration::from_secs(1) {
+                        if let Ok((r, h)) = client.get_lineage().await {
+                            lineage_round = r;
+                            lineage_hash = h;
+                        }
+                        last_lineage_refresh = Instant::now();
+                    }
+                    // Fresh single-owner object per tx (nonce stays 0)
+                    // so submissions never contend on an object key.
+                    // Derivations are deterministic from (seed, i) —
+                    // and seed differs per target task — so objects and
+                    // payload digests are campaign-unique.
+                    let i_bytes = sent_local.to_le_bytes();
+                    let mut h = blake3::Hasher::new();
+                    h.update(&seed_bytes);
+                    h.update(&i_bytes);
+                    let object = *h.finalize().as_bytes();
+                    let mut h = blake3::Hasher::new();
+                    h.update(&seed_bytes);
+                    h.update(&i_bytes);
+                    h.update(b"payload");
+                    let payload_digest = *h.finalize().as_bytes();
+                    let tx = FastPathTx {
+                        object: OwnedObjectId(object),
+                        owner,
+                        nonce: 0,
+                        lineage: CertHash(lineage_hash),
+                        lineage_round,
+                        payload_digest,
+                    };
+                    let send_ms = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    match client.submit_fastpath(tx).await {
+                        Ok(digest) => {
+                            // Hash column carries the payload_digest —
+                            // the join key against `lane=fastpath`
+                            // `cert_hash` in the validator event log.
+                            let _ = csv_tx.send((send_ms, digest, idx));
+                            aggregate_sent.fetch_add(1, Ordering::Relaxed);
+                            sent_local += 1;
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "suwappu-loadgen: submit_fastpath failed on target {} ({}): {:#}",
+                                idx, addr, e
+                            );
+                        }
+                    }
+                    next_send += interval;
+                    let now = Instant::now();
+                    if next_send > now {
+                        tokio::time::sleep(next_send - now).await;
+                    }
+                }
+                return;
+            }
             let mut rng = StdRng::seed_from_u64(seed);
             let mut next_send = Instant::now();
             let mut sent_local: u64 = 0;

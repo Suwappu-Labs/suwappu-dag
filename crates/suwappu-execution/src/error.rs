@@ -455,4 +455,40 @@ pub enum ExecutionError {
         /// for this ring.
         last_distributed_epoch: u64,
     },
+
+    /// FEE-1 Phase 1 (IQ-007): a `FeeCharge` named a reserved
+    /// protocol-registry account as the fee `payer`. Reserved
+    /// accounts are protocol-owned and may not be debited for a
+    /// user/sponsor fee — this also closes the `payer == fee-sink`
+    /// evasion path (the sink is itself reserved). Checked before
+    /// any state moves in
+    /// [`crate::Substrate::apply_intent_with_fee`].
+    #[error(
+        "reserved address named as fee payer: 0x{addr}",
+        addr = hex::encode(addr),
+    )]
+    ReservedAddressFeePayerDenied {
+        /// The reserved address the `FeeCharge` named as payer.
+        addr: Address,
+    },
+
+    /// FEE-1 Phase 1 (IQ-007): a `FeeCharge` carried `max_fee == 0`.
+    /// A zero fee MUST be represented as `fee: None` (the fee-less
+    /// path), not `Some(FeeCharge { max_fee: 0 })` — the latter would
+    /// diverge between substrate impls (InMemory no-ops a zero move;
+    /// suwappu-db's `Bridge` may not), so it is rejected up front.
+    #[error("zero-value fee charge (use fee = None for the fee-less path)")]
+    ZeroFeeCharge,
+
+    /// FEE-1 Phase 1 (IQ-007): the fee-settlement transfer failed for
+    /// a reason other than the expected insufficient-balance /
+    /// overflow. Surfaced (rather than panicking) so an unexpected
+    /// `Bridge` rejection on the settlement or rollback leg fails the
+    /// intent + fee unit cleanly instead of crashing the node
+    /// mid-block.
+    #[error("fee settlement failed: {reason}")]
+    FeeSettlementFailed {
+        /// Diagnostic reason (stringified reject reason).
+        reason: String,
+    },
 }

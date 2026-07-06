@@ -44,13 +44,15 @@ pub mod substrate;
 pub mod suwappu_db_substrate;
 pub mod validator_registry;
 
-pub use block::{execute_block, Block, ExecutionReport};
+pub use block::{execute_block, execute_block_with_fees, Block, ExecutionReport};
 pub use checkpoint::{
     ratify_checkpoint, sign_checkpoint, Checkpoint, CheckpointError, CheckpointHeight,
     CheckpointSignature, Checkpointer, CoSignedCheckpoint,
 };
 pub use error::ExecutionError;
-pub use substrate::{Address, Balance, InMemorySubstrate, Intent, RewardsRing, Substrate};
+pub use substrate::{
+    Address, Balance, FeeCharge, InMemorySubstrate, Intent, RewardsRing, Substrate,
+};
 pub use suwappu_db_substrate::SuwappuDbSubstrate;
 
 /// Checkpoint cadence C — the rate at which the Authority Ring co-signs a

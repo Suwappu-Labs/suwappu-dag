@@ -179,6 +179,21 @@ pub enum LtpError {
     MalformedKey(AuthorityId),
 }
 
+/// The 7-of-9 corridor quorum predicate (paper §10): an attestation is
+/// admissible only with at least `LTP_ATTESTATION_QUORUM_THRESHOLD` (7)
+/// distinct signing witnesses.
+///
+/// Factored out so the predicate the pipeline *enforces* is exactly the
+/// one the formal harness *verifies* — IQ-014 obligation (a) (the
+/// protocol-logic obligation), kept separate from obligation (b) (the
+/// cryptographic unforgeability of the aggregate signature, which is cited
+/// to the primitive's literature, not re-proven here). Both `attest` and
+/// `verify_attestation` gate on this exact function.
+#[inline]
+pub(crate) fn quorum_reached(distinct_signers: usize) -> bool {
+    distinct_signers >= LTP_ATTESTATION_QUORUM_THRESHOLD
+}
+
 /// Aggregate `signatures` into a `CorridorAttestation` over `payload`.
 ///
 /// Validation order:
@@ -219,7 +234,7 @@ pub fn attest(
         parsed_pks.push(pk);
     }
 
-    if signers.len() < LTP_ATTESTATION_QUORUM_THRESHOLD {
+    if !quorum_reached(signers.len()) {
         return Err(LtpError::BelowQuorum {
             have: signers.len(),
             need: LTP_ATTESTATION_QUORUM_THRESHOLD,
@@ -257,7 +272,7 @@ pub fn verify_attestation(
             got: corridor.members.len(),
         });
     }
-    if attestation.signers.len() < LTP_ATTESTATION_QUORUM_THRESHOLD {
+    if !quorum_reached(attestation.signers.len()) {
         return Err(LtpError::BelowQuorum {
             have: attestation.signers.len(),
             need: LTP_ATTESTATION_QUORUM_THRESHOLD,
@@ -393,5 +408,56 @@ mod tests {
         att.payload.state_root[0] ^= 1;
         let err = verify_attestation(&corridor, &att);
         assert_eq!(err, Err(LtpError::AggregateVerificationFailed));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Machine-checked obligations (IQ-014, Phase 1 — Kani bounded model checking).
+//
+// SCOPE — obligation (a) only. These harnesses verify the *protocol-logic*
+// obligation of LTP soundness: the 7-of-9 quorum predicate the pipeline
+// enforces (`quorum_reached`, gated on by both `attest` and
+// `verify_attestation`) admits an attestation only at or above threshold.
+// They deliberately do NOT touch obligation (b) — the cryptographic
+// unforgeability of the BLS12-381 aggregate signature — which is cited to
+// the primitive's literature and, per IQ-009, is mid-migration to a PQ
+// aggregate (proving a hardness reduction against a primitive we are
+// removing would be the overclaim IQ-014 exists to avoid). See
+// docs/audit/formal-verification.md for the exact (a)/(b) split.
+//
+// Compiled only under `--cfg kani`; excluded from every normal build.
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /// The quorum predicate matches the 7-of-9 threshold exactly, and — the
+    /// safety-critical direction — never admits a below-threshold signer
+    /// count. Verified against the real `quorum_reached` both `attest` and
+    /// `verify_attestation` call.
+    #[kani::proof]
+    fn quorum_reached_matches_threshold() {
+        let d: usize = kani::any();
+        // A corridor has at most `LTP_ATTESTATION_QUORUM_SIZE` (9) witnesses,
+        // so distinct signers never exceed 9.
+        kani::assume(d <= LTP_ATTESTATION_QUORUM_SIZE);
+        assert_eq!(quorum_reached(d), d >= LTP_ATTESTATION_QUORUM_THRESHOLD);
+        if d < LTP_ATTESTATION_QUORUM_THRESHOLD {
+            assert!(!quorum_reached(d));
+        }
+    }
+
+    /// The 7-of-9 sizing is a genuine Byzantine supermajority of the
+    /// corridor — strictly greater than two-thirds of the witnesses
+    /// (`3·threshold > 2·size`), which is the BFT bound, not merely a
+    /// simple majority — and it tolerates `f = size − threshold = 2`
+    /// faulty/absent witnesses while satisfying `size ≥ 3f + 1`.
+    #[kani::proof]
+    fn threshold_is_bft_supermajority() {
+        // Strictly greater than two-thirds (the actual BFT relation).
+        assert!(3 * LTP_ATTESTATION_QUORUM_THRESHOLD > 2 * LTP_ATTESTATION_QUORUM_SIZE);
+        // Fault tolerance f = 2, and the BFT sizing n ≥ 3f + 1.
+        let f = LTP_ATTESTATION_QUORUM_SIZE - LTP_ATTESTATION_QUORUM_THRESHOLD;
+        assert!(f >= 2);
+        assert!(LTP_ATTESTATION_QUORUM_SIZE >= 3 * f + 1);
     }
 }

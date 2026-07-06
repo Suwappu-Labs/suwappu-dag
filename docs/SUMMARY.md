@@ -33,6 +33,18 @@
 * [IQ-003 — Fast-path architecture](iq/IQ-003-fast-path-architecture.md)
 * [IQ-004 — decide_slot orphan window](iq/IQ-004-decide-slot-orphan-window.md)
 
+## Research
+
+* [Competitive gap analysis — payments & settlement chains (2026-07)](research/competitive-gap-analysis.md)
+* [Feature-parity matrix — vs. Tempo / Arc / Robinhood / stablecoin chains (2026-07)](research/feature-parity-matrix.md)
+* [Compliance-regime mapping — GENIUS / MiCA / EU TFR (2026-07)](research/compliance-regime-mapping.md)
+* [Institutional design-partner outreach kit (GTM-1)](research/institutional-gtm-kit.md)
+* [Brief — Tempo (Stripe/Paradigm)](research/briefs/tempo.md)
+* [Brief — Arc (Circle)](research/briefs/arc.md)
+* [Brief — Robinhood Chain](research/briefs/robinhood-chain.md)
+* [Brief — Payments-chain landscape](research/briefs/landscape.md)
+* [Brief — 2026 new entrants + recent papers (PQ competitors, aggregation literature)](research/briefs/2026-new-entrants-and-papers.md)
+
 ## Audit & Perf
 
 * [Mainnet readiness 2026-05-14](audit/mainnet-readiness-2026-05-14.md)

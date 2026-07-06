@@ -1,0 +1,83 @@
+{
+  "asOf": "2026-07-06",
+  "positioning": "Post-quantum is no longer rare — several chains now claim it. suwappu-dag is the only one where settlement is both deterministic and joint-quorum-safe: a fork requires Byzantine capture of two independent validator rings at once, and committed state never reverts.",
+  "note": "Honest capability status. 'Shipped' = implemented, reviewed, and CI-green on the working branch (not necessarily on a live network). 'In progress' = primitive landed or design ratified, remaining work named. 'Planned' = designed, gated on a dependency. Links point at the repo.",
+  "repoBase": "https://github.com/Suwappu-Labs/suwappu-dag/blob/main/",
+  "groups": [
+    {
+      "title": "Post-quantum cryptography",
+      "items": [
+        {
+          "name": "ML-DSA-65 signing · ML-KEM-768 confidentiality",
+          "status": "shipped",
+          "note": "NIST FIPS-204 / FIPS-203 on the primary signing and confidential surfaces — the only settlement chain with PQ on its primary surface, not opt-in wallets.",
+          "invariant": true
+        },
+        {
+          "name": "Auditable confidential transfers",
+          "status": "in-progress",
+          "note": "Dual-recipient memo envelope shipped (ML-KEM-768 + ChaCha20-Poly1305, recipient + independent auditor, no key escrow). The zk range/spend proof (Phase 3) is a dedicated crypto sprint.",
+          "doc": "docs/iq/IQ-013-pq-confidential-transfers.md"
+        },
+        {
+          "name": "Constant-size LTP attestation → PQ",
+          "status": "in-progress",
+          "note": "The classical BLS aggregate is time-boxed (end-2028 sunset) and migrates to a hash-based ML-DSA Merkle aggregate; 'constant-size' restated as O(1)-in-signers.",
+          "doc": "docs/iq/IQ-009-ltp-aggregate-pq-migration.md"
+        }
+      ]
+    },
+    {
+      "title": "Safety & consensus",
+      "items": [
+        {
+          "name": "Joint-quorum AND-gate (dual-ring)",
+          "status": "shipped",
+          "note": "A fork requires Byzantine corruption of both the 40-slot Authority Ring and the 200-slot Validator Ring at once (paper Theorem 2). No single ring is a point of failure.",
+          "invariant": true
+        },
+        {
+          "name": "Fast-path lane · 100% equivocation slashing",
+          "status": "shipped",
+          "note": "Single-owner sub-second lane with K=4 binding. Fast-path slashing evidence is observability-only until per-signer cert signatures land.",
+          "doc": "docs/architecture/fast-path.md"
+        },
+        {
+          "name": "Round-driver liveness (frontier snap)",
+          "status": "shipped",
+          "note": "Snap-to-frontier + density clamp fixes the multi-region round-advance stall (PERF-1, consensus-reviewed, CI-green).",
+          "doc": "docs/perf-run-2026-05-13/"
+        },
+        {
+          "name": "Machine-checked invariant obligations",
+          "status": "in-progress",
+          "note": "Phase 1: Kani bounded-model-checking harnesses verify the joint-quorum (Theorem 2) and LTP 7-of-9 quorum predicates against the shipping code (no model-code gap). The cryptographic-hardness layer is cited, not proven; an unbounded proof-assistant mechanization (Phase 2) is not started.",
+          "doc": "docs/audit/formal-verification.md"
+        }
+      ]
+    },
+    {
+      "title": "Payments, fees & interop",
+      "items": [
+        {
+          "name": "Fee abstraction · sponsorship",
+          "status": "in-progress",
+          "note": "Fee-payer/sender separation + ML-DSA sponsorship primitive shipped (dormant — no funds move yet). Mempool→settlement threading + fee-auth nonce/expiry are settlement-PR prerequisites.",
+          "doc": "docs/iq/IQ-007-fee-abstraction-and-stablecoin-fees.md"
+        },
+        {
+          "name": "Stablecoin-denominated fees",
+          "status": "planned",
+          "note": "Gated on a live registered issuer (a fee token to denominate in).",
+          "doc": "docs/iq/IQ-007-fee-abstraction-and-stablecoin-fees.md"
+        },
+        {
+          "name": "Cross-chain settlement (LTP + adapter)",
+          "status": "planned",
+          "note": "LTP is the settlement-attestation layer; a thin OFT-class asset-mobility adapter is designed, gated on the end-to-end PQ bridge mint path.",
+          "doc": "docs/iq/IQ-010-cross-chain-interop-adapter.md"
+        }
+      ]
+    }
+  ]
+}

@@ -54,12 +54,44 @@
 //! receive `ClientResponse::Err("decode: ...")`. Operators must update
 //! `suwappu-loadgen` (rebuilt from this branch) and any external submitters
 //! before rolling validators.
+//!
+//! ### Wire additions (PERF-2, append-only)
+//!
+//! PERF-2 appends `ClientMessage::GetLineage` + `ClientMessage::SubmitFastPath`
+//! and `ClientResponse::Lineage` + `ClientResponse::AckFastPath` at the END
+//! of the respective enums. bincode's legacy config encodes the variant
+//! index, so append-only extension keeps every pre-PERF-2 frame byte-
+//! identical — old clients keep working; new variants sent to an old
+//! validator fail decode (the established "version" signal). Fast-path
+//! submissions sign `fastpath_signing_digest` (distinct domain tag,
+//! `SUWAPPU_FASTPATH_V1`) with the same seated-Authority ML-DSA-65 gate
+//! `Submit` uses.
+//!
+//! ### DoS controls on the PERF-2 messages
+//!
+//! `SubmitFastPath` and `GetLineage` arrive on the same connections as
+//! `Submit`, so the accept-time controls in [`run`] — the global
+//! `max_connections` semaphore and the per-IP connection cap — already
+//! gate them; they are NOT an un-throttled side door. What they do NOT
+//! reuse is the mempool's per-peer leaky bucket, because fast-path txs
+//! never enter the mempool (they gossip as partial certs, not intents)
+//! and `Mempool`'s bucket has no standalone "spend one token" entry
+//! point reachable without enqueuing an intent — and the mempool crate
+//! is out of scope for this change. The fast-path-specific admission
+//! control is therefore the `MAX_FASTPATH_TRACKED` soft cap in
+//! `propose_fastpath_tx` (bounds distinct-key memory growth). RESIDUAL:
+//! a single authorized signer can still burst fast-path submissions up
+//! to the per-connection frame rate; a per-peer token bucket for the
+//! fast-path wire is a follow-up (needs a small `Mempool` API addition
+//! or a dedicated limiter, both outside this PR's blast radius).
 
 use std::{collections::HashMap, io, net::SocketAddr, sync::Arc};
 
 use serde::{Deserialize, Serialize};
+use suwappu_consensus::AuthorityId;
 use suwappu_crypto::mldsa;
-use suwappu_execution::Intent;
+use suwappu_execution::{Balance, Intent};
+use suwappu_fastpath::FastPathTx;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -69,6 +101,7 @@ use tracing::{debug, info, warn};
 use crate::{
     daemon::State,
     events::{Event, EventLog, Lane},
+    wire::{PeerId, WireMessage},
 };
 
 /// Client wire protocol version. Bumped from 1 → 2 in Phase 2.6 (Issue
@@ -98,11 +131,87 @@ pub fn intent_signing_digest(network_id: &str, intent: &Intent) -> [u8; 32] {
     *hasher.finalize().as_bytes()
 }
 
+/// Domain-separation tag mixed into every signed fast-path transaction
+/// payload (PERF-2). Distinct from [`INTENT_DOMAIN_TAG`] so a signature
+/// over an intent can never be replayed as a fast-path authorization
+/// (and vice versa).
+pub const FASTPATH_DOMAIN_TAG: &[u8] = b"SUWAPPU_FASTPATH_V1";
+
+/// Compute the canonical signing digest for a fast-path transaction
+/// under `network_id`. Mirrors [`intent_signing_digest`] with its own
+/// domain tag:
+///
+/// `digest = blake3( FASTPATH_DOMAIN_TAG || network_id_bytes || bincode(tx) )`.
+pub fn fastpath_signing_digest(network_id: &str, tx: &FastPathTx) -> [u8; 32] {
+    let tx_bytes = crate::codec::encode(tx).expect("fastpath tx serialize");
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(FASTPATH_DOMAIN_TAG);
+    hasher.update(network_id.as_bytes());
+    hasher.update(&tx_bytes);
+    *hasher.finalize().as_bytes()
+}
+
+/// Domain-separation tag mixed into every signed fee-sponsorship
+/// payload (FEE-1 Phase 1 / IQ-007 Option A). Distinct from
+/// [`INTENT_DOMAIN_TAG`] and [`FASTPATH_DOMAIN_TAG`] so a sender's
+/// intent signature can never be replayed as a fee authorization (and
+/// vice versa) — the two-signatures-never-cross-replay property is
+/// carried entirely by this domain separation.
+pub const FEE_DOMAIN_TAG: &[u8] = b"SUWAPPU_FEE_V1";
+
+/// Compute the canonical signing digest for a fee sponsorship under
+/// `network_id`. Mirrors [`intent_signing_digest`] /
+/// [`fastpath_signing_digest`] with its own domain tag, but binds to the
+/// intent's **content hash** (not the intent bytes) plus `max_fee`:
+///
+/// `digest = blake3( FEE_DOMAIN_TAG || network_id_bytes || intent_hash || max_fee_be )`.
+///
+/// Binding to `intent_hash` (= `blake3(bincode(intent))`, the same value
+/// the mempool + Ack use) means the sponsor authorizes exactly one
+/// intent at a capped price: "I will pay up to `max_fee` for intent H."
+/// A different intent, or a higher `max_fee`, yields a different digest
+/// and rejects the reused signature. (Same-intent *resubmission* is
+/// covered by the mempool's content-hash dedup, not this digest — see
+/// IQ-007 "Open questions / Sponsorship replay".)
+pub fn fee_signing_digest(network_id: &str, intent_hash: &[u8; 32], max_fee: Balance) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(FEE_DOMAIN_TAG);
+    hasher.update(network_id.as_bytes());
+    hasher.update(intent_hash);
+    hasher.update(&max_fee.to_be_bytes());
+    *hasher.finalize().as_bytes()
+}
+
 /// Compute the blake3 hash of an ML-DSA public key — used as the
 /// `signer_pubkey_hash` on the client wire. The validator side resolves
 /// the hash against the seated Authority Ring to recover the public key.
 pub fn signer_pubkey_hash(pubkey_bytes: &[u8]) -> [u8; 32] {
     *blake3::hash(pubkey_bytes).as_bytes()
+}
+
+/// A fee-sponsorship envelope (FEE-1 Phase 1 / IQ-007 Option A). Names a
+/// `fee_payer` distinct from the intent's logical sender and carries a
+/// **second ML-DSA-65 signature** from that payer authorizing "I will pay
+/// up to `max_fee` for this exact intent." Rides on the
+/// [`ClientMessage::SubmitWithFee`] / [`ClientMessage::SubmitBatchWithFee`]
+/// variants; unsponsored submissions use plain `Submit`/`SubmitBatch` and
+/// carry no envelope (the sender pays nothing today — fees are a pure
+/// addition).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FeeAuthorization {
+    /// blake3 hash of the fee payer's ML-DSA-65 public-key bytes,
+    /// resolved against the seated `AuthorityRegistry` exactly like a
+    /// sender's `signer_pubkey_hash`. Phase 1 fee payers are seated
+    /// Authorities (Issue #28 gate — see [`verify_signed_fee`]).
+    pub payer_pubkey_hash: [u8; 32],
+    /// ML-DSA-65 detached signature over
+    /// [`fee_signing_digest`]`(network_id, &intent_hash, max_fee)`.
+    /// `Vec<u8>` rather than a fixed array for forward-compat with
+    /// future parameter sets, matching the sender signature shape.
+    pub fee_signature: Vec<u8>,
+    /// The flat maximum fee (SUWAPPU-denominated in Phase 1) the sponsor
+    /// authorizes. Also feeds the mempool's fee-derived priority.
+    pub max_fee: Balance,
 }
 
 /// Client → validator messages. **Wire-version 2 (Issue #28):** every
@@ -146,6 +255,66 @@ pub enum ClientMessage {
     },
     /// No-op liveness probe.
     Ping(u64),
+    /// Ask for the highest committed main-lane `(round, cert_hash)`
+    /// (PERF-2). Fast-path submitters call this to ground each
+    /// `FastPathTx`'s lineage in a cert already linearized on the main
+    /// lane (paper §6.4 eligibility). Appended after `Ping` for bincode
+    /// wire compatibility — never reorder.
+    GetLineage,
+    /// Submit one fast-path transaction (PERF-2). Verified with the
+    /// same seated-Authority ML-DSA-65 gate as `Submit`, but over
+    /// [`fastpath_signing_digest`] (distinct domain tag). Appended
+    /// after `GetLineage` — never reorder.
+    SubmitFastPath {
+        /// The fast-path transaction to propose into the cluster.
+        tx: suwappu_fastpath::FastPathTx,
+        /// ML-DSA-65 detached signature over
+        /// [`fastpath_signing_digest`]`(network_id, &tx)`.
+        signature: Vec<u8>,
+        /// blake3 hash of the signer's ML-DSA-65 public-key bytes,
+        /// resolved against the seated `AuthorityRegistry` exactly
+        /// like `Submit`.
+        signer_pubkey_hash: [u8; 32],
+    },
+    /// Submit one intent with a fee sponsorship (FEE-1 Phase 1,
+    /// IQ-007 Option A). Same sender-signature gate as `Submit`, plus a
+    /// second ML-DSA-65 signature from `fee_payer` over
+    /// [`fee_signing_digest`]. Appended at the END of the enum —
+    /// **never reorder**. bincode's legacy config encodes the variant
+    /// index, so appending new variants keeps every pre-fee frame
+    /// byte-identical (an added *trailing struct field* would instead
+    /// break decode of pre-fee frames, since bincode has no field tags
+    /// — hence new variants, mirroring the PERF-2 discipline).
+    SubmitWithFee {
+        /// The intent to include (payload is untouched by the fee
+        /// surface — content-hashing, dedup, and the tx index are
+        /// unchanged).
+        intent: Intent,
+        /// Sender's ML-DSA-65 detached signature over
+        /// [`intent_signing_digest`]`(network_id, &intent)`, exactly
+        /// as on `Submit`.
+        signature: Vec<u8>,
+        /// blake3 hash of the sender's ML-DSA-65 public key.
+        signer_pubkey_hash: [u8; 32],
+        /// The fee sponsorship: payer identity + second signature +
+        /// `max_fee`.
+        fee_payer: FeeAuthorization,
+    },
+    /// Batched twin of `SubmitWithFee` (FEE-1 Phase 1). One `fee_payer`
+    /// sponsors the WHOLE batch: its signature binds the batch's
+    /// **combined intent hash** (blake3 over each intent's content hash,
+    /// in order) at the batch `max_fee`. Appended at the END — **never
+    /// reorder**.
+    SubmitBatchWithFee {
+        /// The intents to include, in submission order.
+        intents: Vec<Intent>,
+        /// Sender signatures, one per intent in matching order.
+        signatures: Vec<Vec<u8>>,
+        /// blake3 hash of the single sender's ML-DSA-65 public key.
+        signer_pubkey_hash: [u8; 32],
+        /// The fee sponsorship for the whole batch.
+        fee_payer: FeeAuthorization,
+    },
 }
 
 /// Validator → client messages.
@@ -170,6 +339,25 @@ pub enum ClientResponse {
     Err(String),
     /// Echo of a `Ping`.
     Pong(u64),
+    /// Response to `GetLineage` (PERF-2): the highest committed
+    /// main-lane round and its cert hash. `(0, [0; 32])` when no cert
+    /// has committed yet. Appended after `Pong` for bincode wire
+    /// compatibility — never reorder.
+    Lineage {
+        /// Highest committed main-lane round.
+        round: u64,
+        /// Hash of the cert committed at that round.
+        cert_hash: [u8; 32],
+    },
+    /// Fast-path transaction accepted and proposed (PERF-2). Echoes
+    /// the tx's `payload_digest` — the same value the daemon writes as
+    /// `cert_hash` on its `lane=fastpath` event log lines, so the
+    /// metrics join is uniform with the intent path. Appended after
+    /// `Lineage` — never reorder.
+    AckFastPath {
+        /// `payload_digest` of the accepted fast-path transaction.
+        payload_digest: [u8; 32],
+    },
 }
 
 /// Hardening limits applied to every accepted client connection.
@@ -215,11 +403,14 @@ impl ClientListenLimits {
 ///
 /// Crate-private — only the [`crate::daemon::Daemon`] startup path
 /// invokes this. External callers go through [`LoadGenClient`].
+#[allow(clippy::too_many_arguments)] // daemon-startup plumbing, one call site
 pub(crate) async fn run(
     listen: SocketAddr,
     self_label: String,
+    self_id: AuthorityId,
     log: EventLog,
     state: Arc<State>,
+    outbound: Arc<HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>>,
     network_id: String,
     limits: ClientListenLimits,
 ) -> io::Result<tokio::task::JoinHandle<()>> {
@@ -270,6 +461,7 @@ pub(crate) async fn run(
                     let log = log.clone();
                     let self_label = self_label.clone();
                     let state = state.clone();
+                    let outbound = outbound.clone();
                     let network_id = network_id.clone();
                     let peer_label = addr.to_string();
                     let idle_timeout_ms = limits.idle_timeout_ms;
@@ -278,9 +470,11 @@ pub(crate) async fn run(
                         let result = handle_conn(
                             stream,
                             self_label,
+                            self_id,
                             peer_label,
                             log,
                             state,
+                            outbound,
                             network_id,
                             idle_timeout_ms,
                         )
@@ -346,6 +540,85 @@ pub(crate) async fn verify_signed_intent(
     signature_bytes: &[u8],
     signer_pubkey_hash: &[u8; 32],
 ) -> AuthOutcome {
+    let digest = intent_signing_digest(network_id, intent);
+    verify_authority_signature(state, &digest, signature_bytes, signer_pubkey_hash).await
+}
+
+/// PERF-2: the fast-path twin of [`verify_signed_intent`] — same
+/// seated-Authority lookup + ML-DSA verify, over the fast-path domain
+/// digest. Both wrappers share [`verify_authority_signature`] so the
+/// two submission surfaces can never drift on what "signed" means.
+pub(crate) async fn verify_signed_fastpath(
+    state: &State,
+    network_id: &str,
+    tx: &FastPathTx,
+    signature_bytes: &[u8],
+    signer_pubkey_hash: &[u8; 32],
+) -> AuthOutcome {
+    let digest = fastpath_signing_digest(network_id, tx);
+    verify_authority_signature(state, &digest, signature_bytes, signer_pubkey_hash).await
+}
+
+/// FEE-1 Phase 1: verify a fee-sponsorship signature (IQ-007 Option A).
+/// The twin of [`verify_signed_intent`] / [`verify_signed_fastpath`] for
+/// the *second* (fee) signature, over the fee domain digest binding the
+/// intent's content hash + `max_fee`. Shares
+/// [`verify_authority_signature`] so the fee wire can never drift from
+/// the sender wire on what "signed" means.
+///
+/// Issue #28 gate: this resolves the fee payer against the seated
+/// **Authority Ring** only — the Validator Ring registry carries no
+/// pubkey material yet, so a non-Authority fee payer needs the Issue #28
+/// auth extension first. Phase 1 sponsors are therefore seated
+/// Authorities, consistent with the sender gate.
+pub(crate) async fn verify_signed_fee(
+    state: &State,
+    network_id: &str,
+    intent_hash: &[u8; 32],
+    max_fee: Balance,
+    fee_signature_bytes: &[u8],
+    payer_pubkey_hash: &[u8; 32],
+) -> AuthOutcome {
+    let digest = fee_signing_digest(network_id, intent_hash, max_fee);
+    verify_authority_signature(state, &digest, fee_signature_bytes, payer_pubkey_hash).await
+}
+
+/// Canonical content hash of a single intent — `blake3(bincode(intent))`.
+/// The value the fee sponsor binds to, the mempool dedups on, and the
+/// `Ack` echoes. Centralised so every fee/ack/hash site agrees.
+fn intent_content_hash(intent: &Intent) -> [u8; 32] {
+    blake3::hash(&crate::codec::encode(intent).expect("intent serialize")).into()
+}
+
+/// Combined content hash of a batch — `blake3( each intent's content
+/// hash, in order )`. A single `fee_payer` signs this so one sponsorship
+/// binds the exact ordered batch it authorizes (FEE-1 Phase 1 batch
+/// sponsorship).
+fn batch_intent_hash(intents: &[Intent]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    for intent in intents {
+        hasher.update(&intent_content_hash(intent));
+    }
+    *hasher.finalize().as_bytes()
+}
+
+/// Saturating cast of a `max_fee` (u128) to the mempool's `u64` priority
+/// knob (FEE-1 Phase 1). Higher fee → drained first. Phase 1 uses the
+/// flat `max_fee` as the priority directly (no fee/size normalization);
+/// a fee/size ratio is a follow-up if frame sizes diverge materially.
+fn fee_derived_priority(max_fee: Balance) -> u64 {
+    max_fee.min(u64::MAX as Balance) as u64
+}
+
+/// Shared lookup + verify leg of the two `verify_signed_*` wrappers.
+/// Callers compute the domain-separated digest; this resolves the
+/// signer against the seated Authority Ring and checks the signature.
+async fn verify_authority_signature(
+    state: &State,
+    digest: &[u8; 32],
+    signature_bytes: &[u8],
+    signer_pubkey_hash: &[u8; 32],
+) -> AuthOutcome {
     // Authority Ring lookup. Hold the read guard only for the lookup,
     // then drop before the (CPU-heavy) signature verify.
     let pubkey_bytes_opt: Option<Vec<u8>> = {
@@ -369,8 +642,7 @@ pub(crate) async fn verify_signed_intent(
         Ok(s) => s,
         Err(_) => return AuthOutcome::BadSignature,
     };
-    let digest = intent_signing_digest(network_id, intent);
-    match mldsa::verify(&digest, &signature, &pubkey) {
+    match mldsa::verify(digest, &signature, &pubkey) {
         Ok(()) => AuthOutcome::Ok,
         Err(_) => AuthOutcome::BadSignature,
     }
@@ -390,12 +662,15 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+#[allow(clippy::too_many_arguments)] // one task-entry fn mirroring `run`'s plumbing
 async fn handle_conn(
     mut stream: TcpStream,
     self_label: String,
+    self_id: AuthorityId,
     peer_label: String,
     log: EventLog,
     state: Arc<State>,
+    outbound: Arc<HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>>,
     network_id: String,
     idle_timeout_ms: u64,
 ) -> io::Result<()> {
@@ -545,6 +820,362 @@ async fn handle_conn(
             ClientMessage::Ping(t) => {
                 write_response(&mut stream, &ClientResponse::Pong(t)).await?;
             }
+            ClientMessage::GetLineage => {
+                // PERF-2: O(1) read of the committed-head scalar that
+                // `try_commit` maintains. `(0, [0; 32])` sentinel until
+                // the first cert commits.
+                let (round, cert_hash) = state
+                    .inner
+                    .lock()
+                    .await
+                    .highest_committed
+                    .unwrap_or((0, [0u8; 32]));
+                write_response(&mut stream, &ClientResponse::Lineage { round, cert_hash }).await?;
+            }
+            ClientMessage::SubmitFastPath {
+                tx,
+                signature,
+                signer_pubkey_hash,
+            } => {
+                match verify_signed_fastpath(
+                    &state,
+                    &network_id,
+                    &tx,
+                    &signature,
+                    &signer_pubkey_hash,
+                )
+                .await
+                {
+                    AuthOutcome::Ok => {}
+                    AuthOutcome::UnknownSigner => {
+                        let resp = ClientResponse::Err(
+                            "auth: unknown signer (pubkey hash not in Authority Ring)".to_string(),
+                        );
+                        let _ = write_response(&mut stream, &resp).await;
+                        return Ok(());
+                    }
+                    AuthOutcome::BadSignature => {
+                        let resp = ClientResponse::Err("auth: bad ML-DSA-65 signature".to_string());
+                        let _ = write_response(&mut stream, &resp).await;
+                        return Ok(());
+                    }
+                }
+
+                // Owner binding (PERF-2). The owner must be the
+                // submitting authority itself: `owner == blake3(signer
+                // pubkey bytes)`, which — because `signer_pubkey_hash`
+                // is defined as exactly that blake3 — is a byte compare
+                // against the (now signature-verified) `signer_pubkey_hash`.
+                // Without this, a seated authority could author a
+                // fast-path cert that spends an object owned by someone
+                // else. DEVNET SIMPLIFICATION: on mainnet the owner is a
+                // separate account with its own key and the fast-path tx
+                // would carry the owner's signature, not the validator's;
+                // here we collapse owner == submitter so the harness
+                // needs only one keypair.
+                if tx.owner.0 != signer_pubkey_hash {
+                    let resp = ClientResponse::Err(
+                        "fastpath: owner does not match signer (owner must be \
+                         blake3(signer pubkey))"
+                            .to_string(),
+                    );
+                    let _ = write_response(&mut stream, &resp).await;
+                    return Ok(());
+                }
+
+                // Lineage-committed bound (PERF-2, closes the K=4
+                // binding bypass). The tx's lineage must reference a
+                // cert already committed on the main lane: a far-future
+                // `lineage_round` would make the reconciliation window
+                // `(lineage_round, lineage_round + K]` vacuous, so the
+                // main-lane cross-check could never catch an
+                // equivocation. Require `lineage_round <= committed head`
+                // AND `lineage` == the committed cert hash at that round.
+                // With nothing committed yet, only `lineage_round == 0`
+                // (the GetLineage sentinel) is allowed.
+                let (head, want_hash_at_lineage) = {
+                    let inner = state.inner.lock().await;
+                    let committed = state.committed.lock();
+                    let head = inner.highest_committed;
+                    let want = inner
+                        .blocks_by_round
+                        .get(&tx.lineage_round)
+                        .filter(|h| committed.contains(*h))
+                        .map(|h| h.0);
+                    (head, want)
+                };
+                let lineage_ok = match head {
+                    None => tx.lineage_round == 0,
+                    Some((head_round, _)) => {
+                        tx.lineage_round <= head_round && want_hash_at_lineage == Some(tx.lineage.0)
+                    }
+                };
+                if !lineage_ok {
+                    let resp = ClientResponse::Err("fastpath: lineage not committed".to_string());
+                    let _ = write_response(&mut stream, &resp).await;
+                    return Ok(());
+                }
+
+                let payload_digest = tx.payload_digest;
+                // `propose_fastpath_tx` runs the self-equivocation guards
+                // (payload pin-check, main-lane K-binding cross-check,
+                // capacity cap) under its own short inner-lock window and
+                // only signs/broadcasts if all pass. Map each refusal to
+                // a distinct client error rather than a silent no-op.
+                match crate::daemon::propose_fastpath_tx(
+                    &state,
+                    self_id,
+                    tx,
+                    &self_label,
+                    &log,
+                    &outbound,
+                )
+                .await
+                {
+                    crate::daemon::FastPathProposeOutcome::Accepted => {
+                        write_response(
+                            &mut stream,
+                            &ClientResponse::AckFastPath { payload_digest },
+                        )
+                        .await?;
+                    }
+                    crate::daemon::FastPathProposeOutcome::ConflictingPayload => {
+                        let resp = ClientResponse::Err(
+                            "fastpath: conflicting payload for (object,nonce)".to_string(),
+                        );
+                        let _ = write_response(&mut stream, &resp).await;
+                        return Ok(());
+                    }
+                    crate::daemon::FastPathProposeOutcome::MainLaneConflict => {
+                        let resp = ClientResponse::Err(
+                            "fastpath: main-lane conflict in binding window".to_string(),
+                        );
+                        let _ = write_response(&mut stream, &resp).await;
+                        return Ok(());
+                    }
+                    crate::daemon::FastPathProposeOutcome::CapacityExhausted => {
+                        let resp = ClientResponse::Err(
+                            "fastpath: node at fast-path tracking capacity, retry later"
+                                .to_string(),
+                        );
+                        let _ = write_response(&mut stream, &resp).await;
+                        return Ok(());
+                    }
+                }
+            }
+            // FEE-1 Phase 1 (IQ-007 Option A): sponsored single submit.
+            // Two ML-DSA-65 signatures — the sender's over the intent and
+            // the fee payer's over (intent_hash, max_fee) — both resolved
+            // against the seated Authority Ring.
+            //
+            // SETTLEMENT-PR PREREQUISITES (record only; NOT fixed here):
+            // (1) the fee authorization has no nonce / expiry / revocation
+            // — binding to the intent content hash blocks cross-intent
+            // replay but not same-intent resubmission; a nonce is required
+            // before this envelope actually moves funds. (2) The validated
+            // envelope drives mempool admission priority only; it is not
+            // yet threaded mempool -> block, so execution-time settlement
+            // (`Substrate::apply_intent_with_fee`) is landed + tested but
+            // not wired. Both are prerequisites of the settlement PR.
+            ClientMessage::SubmitWithFee {
+                intent,
+                signature,
+                signer_pubkey_hash,
+                fee_payer,
+            } => {
+                // 1. Sender signature (identical gate to `Submit`).
+                match verify_signed_intent(
+                    &state,
+                    &network_id,
+                    &intent,
+                    &signature,
+                    &signer_pubkey_hash,
+                )
+                .await
+                {
+                    AuthOutcome::Ok => {}
+                    AuthOutcome::UnknownSigner => {
+                        let resp = ClientResponse::Err(
+                            "auth: unknown signer (pubkey hash not in Authority Ring)".to_string(),
+                        );
+                        let _ = write_response(&mut stream, &resp).await;
+                        return Ok(());
+                    }
+                    AuthOutcome::BadSignature => {
+                        let resp = ClientResponse::Err("auth: bad ML-DSA-65 signature".to_string());
+                        let _ = write_response(&mut stream, &resp).await;
+                        return Ok(());
+                    }
+                }
+                // 2. Fee sponsorship signature, bound to this intent's
+                //    content hash + max_fee.
+                let intent_hash = intent_content_hash(&intent);
+                match verify_signed_fee(
+                    &state,
+                    &network_id,
+                    &intent_hash,
+                    fee_payer.max_fee,
+                    &fee_payer.fee_signature,
+                    &fee_payer.payer_pubkey_hash,
+                )
+                .await
+                {
+                    AuthOutcome::Ok => {}
+                    AuthOutcome::UnknownSigner => {
+                        let resp = ClientResponse::Err(
+                            "fee: unknown sponsor (pubkey hash not in Authority Ring)".to_string(),
+                        );
+                        let _ = write_response(&mut stream, &resp).await;
+                        return Ok(());
+                    }
+                    AuthOutcome::BadSignature => {
+                        let resp = ClientResponse::Err(
+                            "fee: bad ML-DSA-65 sponsorship signature".to_string(),
+                        );
+                        let _ = write_response(&mut stream, &resp).await;
+                        return Ok(());
+                    }
+                }
+                // 3. Fee-derived mempool priority (turns the dormant
+                //    priority knob live). NOTE: the mempool carries only
+                //    the intent; the validated `fee_payer` envelope drives
+                //    admission priority here but is not yet plumbed into
+                //    the block for execution-time settlement (that needs a
+                //    mempool `Entry` + block plumbing change out of this
+                //    PR's blast radius — see IQ-007). The substrate-side
+                //    settlement path (`apply_intent_with_fee`) is landed
+                //    and tested, ready for that plumbing.
+                let priority = fee_derived_priority(fee_payer.max_fee);
+                match state
+                    .mempool
+                    .submit(intent, priority, Some(peer_label.clone()), now_ms())
+                {
+                    Ok(_) => {}
+                    Err(e) => {
+                        let resp = ClientResponse::Err(format!("mempool: {}", e));
+                        let _ = write_response(&mut stream, &resp).await;
+                        return Ok(());
+                    }
+                }
+                log.emit(
+                    Event::now(&self_label, Lane::Client, "submitted").with_tx_hash(&intent_hash),
+                );
+                write_response(&mut stream, &ClientResponse::Ack { intent_hash }).await?;
+            }
+            // FEE-1 Phase 1: sponsored batch — one `fee_payer` sponsors
+            // the whole ordered batch, signing over the combined batch
+            // hash at `max_fee`.
+            ClientMessage::SubmitBatchWithFee {
+                intents,
+                signatures,
+                signer_pubkey_hash,
+                fee_payer,
+            } => {
+                // Reject a zero-length sponsored batch: an empty batch
+                // would have the sponsor sign over `blake3("")` and return
+                // an empty `AckBatch` as a spurious success. There is
+                // nothing to sponsor, so refuse it outright.
+                if intents.is_empty() {
+                    let resp = ClientResponse::Err("fee: empty batch".to_string());
+                    let _ = write_response(&mut stream, &resp).await;
+                    return Ok(());
+                }
+                if signatures.len() != intents.len() {
+                    let resp = ClientResponse::Err(format!(
+                        "auth: batch length mismatch ({} intents vs {} signatures)",
+                        intents.len(),
+                        signatures.len()
+                    ));
+                    let _ = write_response(&mut stream, &resp).await;
+                    return Ok(());
+                }
+                // Verify every sender signature BEFORE admitting any
+                // intent (same all-or-nothing gate as `SubmitBatch`).
+                for (intent, sig) in intents.iter().zip(signatures.iter()) {
+                    match verify_signed_intent(
+                        &state,
+                        &network_id,
+                        intent,
+                        sig,
+                        &signer_pubkey_hash,
+                    )
+                    .await
+                    {
+                        AuthOutcome::Ok => {}
+                        AuthOutcome::UnknownSigner => {
+                            let resp = ClientResponse::Err(
+                                "auth: unknown signer (pubkey hash not in Authority Ring)"
+                                    .to_string(),
+                            );
+                            let _ = write_response(&mut stream, &resp).await;
+                            return Ok(());
+                        }
+                        AuthOutcome::BadSignature => {
+                            let resp = ClientResponse::Err(
+                                "auth: bad ML-DSA-65 signature in batch".to_string(),
+                            );
+                            let _ = write_response(&mut stream, &resp).await;
+                            return Ok(());
+                        }
+                    }
+                }
+                // One sponsorship signature over the combined batch hash.
+                let combined = batch_intent_hash(&intents);
+                match verify_signed_fee(
+                    &state,
+                    &network_id,
+                    &combined,
+                    fee_payer.max_fee,
+                    &fee_payer.fee_signature,
+                    &fee_payer.payer_pubkey_hash,
+                )
+                .await
+                {
+                    AuthOutcome::Ok => {}
+                    AuthOutcome::UnknownSigner => {
+                        let resp = ClientResponse::Err(
+                            "fee: unknown sponsor (pubkey hash not in Authority Ring)".to_string(),
+                        );
+                        let _ = write_response(&mut stream, &resp).await;
+                        return Ok(());
+                    }
+                    AuthOutcome::BadSignature => {
+                        let resp = ClientResponse::Err(
+                            "fee: bad ML-DSA-65 sponsorship signature".to_string(),
+                        );
+                        let _ = write_response(&mut stream, &resp).await;
+                        return Ok(());
+                    }
+                }
+                let priority = fee_derived_priority(fee_payer.max_fee);
+                let mut hashes: Vec<[u8; 32]> = Vec::with_capacity(intents.len());
+                for intent in intents {
+                    let intent_hash = intent_content_hash(&intent);
+                    match state
+                        .mempool
+                        .submit(intent, priority, Some(peer_label.clone()), now_ms())
+                    {
+                        Ok(_) => {}
+                        Err(e) => {
+                            let resp = ClientResponse::Err(format!("mempool (mid-batch): {}", e));
+                            let _ = write_response(&mut stream, &resp).await;
+                            return Ok(());
+                        }
+                    }
+                    log.emit(
+                        Event::now(&self_label, Lane::Client, "submitted")
+                            .with_tx_hash(&intent_hash),
+                    );
+                    hashes.push(intent_hash);
+                }
+                write_response(
+                    &mut stream,
+                    &ClientResponse::AckBatch {
+                        intent_hashes: hashes,
+                    },
+                )
+                .await?;
+            }
         }
     }
 }
@@ -667,9 +1298,52 @@ impl LoadGenClient {
         match resp {
             ClientResponse::Ack { intent_hash } => Ok(intent_hash),
             ClientResponse::Err(e) => Err(io::Error::new(io::ErrorKind::InvalidData, e)),
-            ClientResponse::AckBatch { .. } | ClientResponse::Pong(_) => Err(io::Error::new(
+            _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "unexpected response for Submit",
+            )),
+        }
+    }
+
+    /// FEE-1 Phase 1 (IQ-007 Option A): submit one intent with a fee
+    /// sponsorship. In the devnet harness the sponsor is the client's own
+    /// key (owner == submitter == sponsor, matching the fast-path
+    /// simplification), so both signatures are produced from `secret_key`.
+    /// On mainnet the sponsor is a distinct account whose key signs only
+    /// the fee digest.
+    pub async fn submit_with_fee(
+        &mut self,
+        intent: Intent,
+        max_fee: Balance,
+    ) -> io::Result<[u8; 32]> {
+        let intent_digest = intent_signing_digest(&self.network_id, &intent);
+        let signature = mldsa::sign(&intent_digest, &self.secret_key)
+            .map_err(|e| io::Error::other(format!("sign: {:?}", e)))?;
+        let pkh = self.signer_pubkey_hash();
+        // Sponsor signs (intent_hash, max_fee) under the fee domain tag.
+        // One canonical spelling of the content hash via the shared helper.
+        let intent_hash = intent_content_hash(&intent);
+        let fee_digest = fee_signing_digest(&self.network_id, &intent_hash, max_fee);
+        let fee_signature = mldsa::sign(&fee_digest, &self.secret_key)
+            .map_err(|e| io::Error::other(format!("fee sign: {:?}", e)))?;
+        let msg = ClientMessage::SubmitWithFee {
+            intent,
+            signature: signature.as_bytes().to_vec(),
+            signer_pubkey_hash: pkh,
+            fee_payer: FeeAuthorization {
+                payer_pubkey_hash: pkh,
+                fee_signature: fee_signature.as_bytes().to_vec(),
+                max_fee,
+            },
+        };
+        self.send_frame(&msg).await?;
+        let resp = self.read_response().await?;
+        match resp {
+            ClientResponse::Ack { intent_hash } => Ok(intent_hash),
+            ClientResponse::Err(e) => Err(io::Error::new(io::ErrorKind::InvalidData, e)),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unexpected response for SubmitWithFee",
             )),
         }
     }
@@ -705,19 +1379,74 @@ impl LoadGenClient {
         match resp {
             ClientResponse::AckBatch { intent_hashes } => Ok(intent_hashes),
             ClientResponse::Err(e) => Err(io::Error::new(io::ErrorKind::InvalidData, e)),
-            ClientResponse::Ack { .. } | ClientResponse::Pong(_) => Err(io::Error::new(
+            _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "unexpected response for SubmitBatch",
             )),
         }
     }
-}
 
-// Suppress dead-code complaints. The `outbound` HashMap import stays around
-// for symmetry with future fast-path/LTP submission paths.
-#[allow(dead_code)]
-fn _shape_hint() -> Option<HashMap<u32, u32>> {
-    None
+    /// PERF-2: fetch the highest committed main-lane `(round, cert_hash)`
+    /// so fast-path transactions can ground their lineage. Returns
+    /// `(0, [0; 32])` before the first commit.
+    pub async fn get_lineage(&mut self) -> io::Result<(u64, [u8; 32])> {
+        self.send_frame(&ClientMessage::GetLineage).await?;
+        let resp = self.read_response().await?;
+        match resp {
+            ClientResponse::Lineage { round, cert_hash } => Ok((round, cert_hash)),
+            ClientResponse::Err(e) => Err(io::Error::new(io::ErrorKind::InvalidData, e)),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unexpected response for GetLineage",
+            )),
+        }
+    }
+
+    /// PERF-2: submit one signed fast-path transaction and wait for the
+    /// `AckFastPath`. Returns the acked `payload_digest` — the value the
+    /// validator writes as `cert_hash` on `lane=fastpath` event lines,
+    /// so callers key their submit-timestamp CSV on it.
+    pub async fn submit_fastpath(&mut self, tx: FastPathTx) -> io::Result<[u8; 32]> {
+        let digest = fastpath_signing_digest(&self.network_id, &tx);
+        let signature = mldsa::sign(&digest, &self.secret_key)
+            .map_err(|e| io::Error::other(format!("sign: {:?}", e)))?;
+        let pkh = self.signer_pubkey_hash();
+        let msg = ClientMessage::SubmitFastPath {
+            tx,
+            signature: signature.as_bytes().to_vec(),
+            signer_pubkey_hash: pkh,
+        };
+        self.send_frame(&msg).await?;
+        let resp = self.read_response().await?;
+        match resp {
+            ClientResponse::AckFastPath { payload_digest } => Ok(payload_digest),
+            ClientResponse::Err(e) => Err(io::Error::new(io::ErrorKind::InvalidData, e)),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unexpected response for SubmitFastPath",
+            )),
+        }
+    }
+
+    /// Frame + flush one `ClientMessage` (shared by the PERF-2 methods;
+    /// the pre-PERF-2 `submit`/`submit_batch` keep their inline framing
+    /// untouched).
+    async fn send_frame(&mut self, msg: &ClientMessage) -> io::Result<()> {
+        let bytes = crate::codec::encode_frame(msg)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        let len = (bytes.len() as u32).to_be_bytes();
+        self.stream.write_all(&len).await?;
+        self.stream.write_all(&bytes).await?;
+        self.stream.flush().await?;
+        Ok(())
+    }
+
+    /// Read + decode one framed `ClientResponse`.
+    async fn read_response(&mut self) -> io::Result<ClientResponse> {
+        let resp_bytes = read_frame(&mut self.stream).await?;
+        crate::codec::decode_frame(&resp_bytes)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
+    }
 }
 
 #[cfg(test)]
@@ -798,6 +1527,119 @@ mod tests {
         let digest = intent_signing_digest("rt-net", &intent);
         let sig = mldsa::sign(&digest, &sk).unwrap();
         mldsa::verify(&digest, &sig, &pk).expect("genuine signature must verify");
+    }
+
+    // ----- FEE-1 Phase 1 (IQ-007 Option A) -----------------------------
+
+    #[test]
+    fn fee_signing_digest_is_deterministic() {
+        let ih = [7u8; 32];
+        let d1 = fee_signing_digest("perf-7r", &ih, 100);
+        let d2 = fee_signing_digest("perf-7r", &ih, 100);
+        assert_eq!(d1, d2);
+    }
+
+    #[test]
+    fn fee_digest_sensitive_to_intent_hash_and_max_fee() {
+        let base = fee_signing_digest("n", &[1u8; 32], 100);
+        // Different intent hash → different digest.
+        assert_ne!(base, fee_signing_digest("n", &[2u8; 32], 100));
+        // Different max_fee → different digest.
+        assert_ne!(base, fee_signing_digest("n", &[1u8; 32], 101));
+        // Different network → different digest (cross-network replay).
+        assert_ne!(base, fee_signing_digest("m", &[1u8; 32], 100));
+    }
+
+    #[test]
+    fn fee_digest_domain_is_distinct_from_intent_and_fastpath() {
+        // The fee digest binds an intent HASH (not intent bytes) under a
+        // distinct domain tag, so it can never collide with an intent or
+        // fast-path signing digest — the cross-replay guard.
+        let intent = Intent::Transfer {
+            from: [1u8; 20],
+            to: [2u8; 20],
+            amount: 99,
+        };
+        let ih: [u8; 32] = blake3::hash(&crate::codec::encode(&intent).unwrap()).into();
+        let fee = fee_signing_digest("net", &ih, 50);
+        let intent_dig = intent_signing_digest("net", &intent);
+        assert_ne!(fee, intent_dig, "fee digest MUST differ from intent digest");
+        // Manual recompute pins the recipe (tag || net || intent_hash || max_fee_be).
+        let mut h = blake3::Hasher::new();
+        h.update(b"SUWAPPU_FEE_V1");
+        h.update(b"net");
+        h.update(&ih);
+        h.update(&50u128.to_be_bytes());
+        assert_eq!(fee, *h.finalize().as_bytes());
+    }
+
+    #[test]
+    fn fee_derived_priority_saturates() {
+        assert_eq!(fee_derived_priority(0), 0);
+        assert_eq!(fee_derived_priority(42), 42);
+        // A u128 max_fee beyond u64::MAX saturates to u64::MAX.
+        assert_eq!(fee_derived_priority(u128::MAX), u64::MAX);
+    }
+
+    #[test]
+    fn pre_fee_submit_frame_still_decodes_after_variant_append() {
+        // Wire compat: a pre-FEE-1 `Submit` frame (variant 0) must decode
+        // unchanged now that `SubmitWithFee` / `SubmitBatchWithFee` are
+        // appended at the end of the enum. bincode encodes the variant
+        // index, so appending variants leaves index 0 byte-identical.
+        let intent = Intent::Transfer {
+            from: [1u8; 20],
+            to: [2u8; 20],
+            amount: 5,
+        };
+        let old = ClientMessage::Submit {
+            intent: intent.clone(),
+            signature: vec![0xab; 16],
+            signer_pubkey_hash: [9u8; 32],
+        };
+        let frame = crate::codec::encode_frame(&old).unwrap();
+        let back: ClientMessage = crate::codec::decode_frame(&frame).unwrap();
+        match back {
+            ClientMessage::Submit {
+                intent: got,
+                signature,
+                signer_pubkey_hash,
+            } => {
+                assert_eq!(got, intent);
+                assert_eq!(signature, vec![0xab; 16]);
+                assert_eq!(signer_pubkey_hash, [9u8; 32]);
+            }
+            other => panic!("pre-fee Submit frame decoded as {other:?}"),
+        }
+    }
+
+    #[test]
+    fn submit_with_fee_frame_round_trips() {
+        let intent = Intent::Transfer {
+            from: [1u8; 20],
+            to: [2u8; 20],
+            amount: 5,
+        };
+        let msg = ClientMessage::SubmitWithFee {
+            intent,
+            signature: vec![0x11; 8],
+            signer_pubkey_hash: [3u8; 32],
+            fee_payer: FeeAuthorization {
+                payer_pubkey_hash: [4u8; 32],
+                fee_signature: vec![0x22; 8],
+                max_fee: 777,
+            },
+        };
+        let frame = crate::codec::encode_frame(&msg).unwrap();
+        let back: ClientMessage = crate::codec::decode_frame(&frame).unwrap();
+        match back {
+            ClientMessage::SubmitWithFee { fee_payer, .. } => {
+                assert_eq!(fee_payer.max_fee, 777);
+                assert_eq!(fee_payer.payer_pubkey_hash, [4u8; 32]);
+                assert_eq!(fee_payer.fee_signature, vec![0x22; 8]);
+            }
+            other => panic!("SubmitWithFee decoded as {other:?}"),
+        }
     }
 
     // ----- Property tests (Issue #28) ---------------------------------

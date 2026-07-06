@@ -818,6 +818,26 @@ pub enum SlashReason {
     Downtime,
 }
 
+/// A fee authorization resolved for execution (FEE-1 Phase 1 / IQ-007
+/// Option A). Names the account that pays for one intent and the flat
+/// amount authorized. `payer` is the sponsor when a submission carried a
+/// [`crate`]-external fee envelope, or the intent's own `from` for a
+/// self-paid fee (the latter is not levied in Phase 1 — the flat metered
+/// model is a follow-up; see IQ-007 "Open questions / Fee unit").
+///
+/// The fee is SUWAPPU-denominated in Phase 1 (Option B stablecoin
+/// denomination is gated on the issuer story). The credit recipient is
+/// fixed to [`reserved::authority_rewards_pool_address`] — the fee sink —
+/// so this carries only the payer + amount.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct FeeCharge {
+    /// The account debited for the fee.
+    pub payer: Address,
+    /// The flat amount authorized and charged (Phase 1 charges the full
+    /// authorized `max_fee`; a metered actual-cost model is a follow-up).
+    pub max_fee: Balance,
+}
+
 /// The execution substrate API consumed by the block executor.
 ///
 /// Implementations must:
@@ -844,6 +864,113 @@ pub trait Substrate {
     /// Apply a single intent. On error, the substrate's state is
     /// guaranteed identical to before the call (atomicity).
     fn apply_intent(&mut self, intent: &Intent) -> Result<(), ExecutionError>;
+
+    /// Apply `intent`, optionally settling `fee` atomically with it
+    /// (FEE-1 Phase 1 / IQ-007 Option A).
+    ///
+    /// - `fee == None` delegates to [`Substrate::apply_intent`] and is
+    ///   byte-for-byte identical to the fee-less path — the fee surface
+    ///   is a *pure addition*, so an intent with no sponsor executes
+    ///   exactly as it does today (zero fee moved).
+    /// - `fee == Some(_)` charges `fee.max_fee` from `fee.payer` to the
+    ///   protocol fee sink ([`reserved::authority_rewards_pool_address`])
+    ///   and applies the intent as **one all-or-nothing unit**: the fee
+    ///   is settled first, the intent applied second, and if the intent
+    ///   fails the fee is rolled back. Either the whole `intent + fee`
+    ///   unit lands or none of it does. This keeps the fee debit/credit
+    ///   in the intent's atomic unit (CLAUDE.md Invariant 4 — bundle
+    ///   atomicity, dual-VM projection equality) without touching the
+    ///   joint-quorum commit path.
+    ///
+    /// Fee settlement rides [`Substrate::settle_protocol_fee`], whose
+    /// default fails closed; a substrate that has not opted into the fee
+    /// surface rejects sponsored intents rather than silently dropping
+    /// the fee. Adding these methods with defaults keeps the trait
+    /// backward-compatible for external implementors.
+    fn apply_intent_with_fee(
+        &mut self,
+        intent: &Intent,
+        fee: Option<&FeeCharge>,
+    ) -> Result<(), ExecutionError> {
+        let charge = match fee {
+            None => return self.apply_intent(intent),
+            Some(c) => c,
+        };
+        // Guards, BEFORE any state moves — reject the two divergence /
+        // evasion vectors so the InMemory and suwappu-db impls are only
+        // ever asked to settle the case they provably agree on
+        // (`amount > 0`, `payer` not reserved, hence `payer != sink`):
+        //
+        // - Zero fee: a zero move no-ops on InMemory but is not
+        //   guaranteed to on suwappu-db's `Bridge`; a zero fee must be
+        //   expressed as `fee: None`, not `Some(max_fee = 0)`.
+        // - Reserved payer: the reserved-address gate is bypassed on the
+        //   protocol-owned settlement path, so without this a `FeeCharge`
+        //   could debit a registry account — and since the fee sink
+        //   (`authority_rewards_pool`) is itself reserved, this also
+        //   closes the `payer == sink` fee-evasion no-op.
+        //
+        // SETTLEMENT-PR PREREQUISITE (this path does NOT move real funds
+        // yet): the fee authorization still lacks a nonce / expiry /
+        // revocation surface, and the wire envelope is not yet threaded
+        // mempool -> block. Both are hard prerequisites of the PR that
+        // wires execution-time settlement — see IQ-007 "Open questions".
+        if charge.max_fee == 0 {
+            return Err(ExecutionError::ZeroFeeCharge);
+        }
+        if reserved::is_reserved(&charge.payer) {
+            return Err(ExecutionError::ReservedAddressFeePayerDenied { addr: charge.payer });
+        }
+        // 1. Settle the fee (payer -> sink). Atomic on its own; on
+        //    insufficient balance nothing has moved and the intent is
+        //    never applied — the whole unit fails closed.
+        self.settle_protocol_fee(&charge.payer, charge.max_fee, false)?;
+        // 2. Apply the intent. `apply_intent` is atomic (Err => state
+        //    unchanged), so on failure only the fee leg needs undoing.
+        match self.apply_intent(intent) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                // Roll the fee back so the intent + fee is all-or-nothing.
+                // This is the exact reverse of a completed settlement
+                // (sink holds >= max_fee, payer credit cannot overflow the
+                // value just debited), so it cannot fail. NOTE: this
+                // refund's infallibility DEPENDS on `apply_intent` honoring
+                // its atomic-on-Err contract — any future intent arm that
+                // partially mutates then returns Err would break this
+                // rollback and must instead be made truly atomic.
+                let _ = self.settle_protocol_fee(&charge.payer, charge.max_fee, true);
+                Err(e)
+            }
+        }
+    }
+
+    /// Move `amount` between `payer` and the protocol fee sink
+    /// ([`reserved::authority_rewards_pool_address`]). `refund == false`
+    /// charges `payer -> sink`; `refund == true` reverses `sink -> payer`
+    /// (the rollback leg of [`Substrate::apply_intent_with_fee`]). Atomic
+    /// on its own: on insufficient balance no state changes.
+    ///
+    /// Default impl **fails closed** — it treats the payer as unable to
+    /// settle (`have = 0`) so a substrate that has not implemented the
+    /// fee surface rejects sponsored intents instead of silently
+    /// swallowing the fee. Both in-repo substrates override this.
+    fn settle_protocol_fee(
+        &mut self,
+        payer: &Address,
+        amount: Balance,
+        refund: bool,
+    ) -> Result<(), ExecutionError> {
+        if refund {
+            // The fail-closed default never charges, so there is nothing
+            // to refund.
+            return Ok(());
+        }
+        Err(ExecutionError::InsufficientBalance {
+            from: *payer,
+            have: 0,
+            need: amount,
+        })
+    }
 
     /// Ambient Mysticeti round at which intents are being
     /// applied. Used by lifecycle gates that need a height
@@ -3103,6 +3230,28 @@ impl Substrate for InMemorySubstrate {
                 Ok(())
             }
         }
+    }
+
+    fn settle_protocol_fee(
+        &mut self,
+        payer: &Address,
+        amount: Balance,
+        refund: bool,
+    ) -> Result<(), ExecutionError> {
+        // FEE-1 Phase 1: a flat SUWAPPU debit from `payer` credited to the
+        // authority-rewards-pool fee sink, routed through the existing
+        // atomic `transfer_internal` primitive (source-sufficiency +
+        // dest-overflow pre-flight, zero-amount no-op). `refund` reverses
+        // the direction for the rollback leg. The sink is a reserved
+        // registry account; the reserved-address gate lives on the user
+        // `Transfer` arm, not on this protocol-owned settlement path.
+        let sink = reserved::authority_rewards_pool_address();
+        let (from, to) = if refund {
+            (sink, *payer)
+        } else {
+            (*payer, sink)
+        };
+        self.transfer_internal(from, to, amount)
     }
 
     fn state_root(&self) -> [u8; 32] {
@@ -8818,5 +8967,168 @@ mod tests {
             crate::authority_registry::AuthorityStatus::Active
         );
         assert_eq!(s.authority_deposited_stake(0), 1_000_000);
+    }
+
+    // ----- FEE-1 Phase 1 (IQ-007 Option A) fee settlement ------------
+
+    /// A sponsored intent debits `max_fee` from the sponsor and credits
+    /// the authority-rewards-pool fee sink, atomically with the intent.
+    #[test]
+    fn apply_intent_with_fee_charges_sponsor_and_credits_sink() {
+        let sponsor = addr(9);
+        let sink = reserved::authority_rewards_pool_address();
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 100), (sponsor, 50)]);
+        let intent = Intent::Transfer {
+            from: addr(1),
+            to: addr(2),
+            amount: 30,
+        };
+        let fee = FeeCharge {
+            payer: sponsor,
+            max_fee: 20,
+        };
+        s.apply_intent_with_fee(&intent, Some(&fee)).unwrap();
+        // Intent effect applied.
+        assert_eq!(s.balance(&addr(1)), 70);
+        assert_eq!(s.balance(&addr(2)), 30);
+        // Fee moved sponsor -> sink.
+        assert_eq!(s.balance(&sponsor), 30);
+        assert_eq!(s.balance(&sink), 20);
+    }
+
+    /// No sponsor (fee = None) is byte-for-byte the fee-less path: no fee
+    /// moved, sink untouched, and the resulting state root matches a plain
+    /// `apply_intent`. Proves the fee surface is a pure addition.
+    #[test]
+    fn apply_intent_with_no_fee_is_unchanged() {
+        let sink = reserved::authority_rewards_pool_address();
+        let intent = Intent::Transfer {
+            from: addr(1),
+            to: addr(2),
+            amount: 30,
+        };
+        let mut with_fee_api = InMemorySubstrate::from_balances([(addr(1), 100)]);
+        let mut plain = InMemorySubstrate::from_balances([(addr(1), 100)]);
+        with_fee_api.apply_intent_with_fee(&intent, None).unwrap();
+        plain.apply_intent(&intent).unwrap();
+        assert_eq!(
+            with_fee_api.state_root(),
+            plain.state_root(),
+            "fee-less apply_intent_with_fee must equal apply_intent"
+        );
+        // Nothing landed in the fee sink.
+        assert_eq!(with_fee_api.balance(&sink), 0);
+    }
+
+    /// An insufficient-balance sponsor fails the WHOLE intent + fee unit
+    /// atomically: the intent's effect is NOT applied, no fee moves, and
+    /// the state root is unchanged.
+    #[test]
+    fn apply_intent_with_fee_insufficient_sponsor_is_atomic() {
+        let sponsor = addr(9);
+        let sink = reserved::authority_rewards_pool_address();
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 100), (sponsor, 5)]);
+        let before = s.state_root();
+        let intent = Intent::Transfer {
+            from: addr(1),
+            to: addr(2),
+            amount: 30,
+        };
+        let fee = FeeCharge {
+            payer: sponsor,
+            max_fee: 20, // sponsor only has 5
+        };
+        let err = s.apply_intent_with_fee(&intent, Some(&fee));
+        assert!(matches!(
+            err,
+            Err(ExecutionError::InsufficientBalance { .. })
+        ));
+        // Sender effect NOT applied; sponsor + sink untouched.
+        assert_eq!(s.balance(&addr(1)), 100);
+        assert_eq!(s.balance(&addr(2)), 0);
+        assert_eq!(s.balance(&sponsor), 5);
+        assert_eq!(s.balance(&sink), 0);
+        assert_eq!(s.state_root(), before, "failed unit leaves state unchanged");
+    }
+
+    /// If the fee settles but the INTENT fails (e.g. sender can't cover),
+    /// the fee is rolled back so the unit is all-or-nothing.
+    #[test]
+    fn apply_intent_with_fee_rolls_back_on_intent_failure() {
+        let sponsor = addr(9);
+        let sink = reserved::authority_rewards_pool_address();
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 10), (sponsor, 50)]);
+        let before = s.state_root();
+        // Sender has 10 but tries to move 30 -> intent fails AFTER the fee
+        // settled. The fee must be refunded.
+        let intent = Intent::Transfer {
+            from: addr(1),
+            to: addr(2),
+            amount: 30,
+        };
+        let fee = FeeCharge {
+            payer: sponsor,
+            max_fee: 20,
+        };
+        let err = s.apply_intent_with_fee(&intent, Some(&fee));
+        assert!(matches!(
+            err,
+            Err(ExecutionError::InsufficientBalance { .. })
+        ));
+        assert_eq!(s.balance(&sponsor), 50, "fee refunded on intent failure");
+        assert_eq!(s.balance(&sink), 0);
+        assert_eq!(s.balance(&addr(1)), 10);
+        assert_eq!(s.state_root(), before);
+    }
+
+    /// A `FeeCharge` naming a reserved registry account as payer is
+    /// rejected before any state moves (closes the reserved-payer debit
+    /// and the `payer == sink` evasion path). State is byte-identical.
+    #[test]
+    fn apply_intent_with_fee_rejects_reserved_payer() {
+        for payer in [
+            reserved::treasury_address(),
+            reserved::authority_rewards_pool_address(),
+        ] {
+            let mut s = InMemorySubstrate::from_balances([(addr(1), 100)]);
+            let before = s.state_root();
+            let intent = Intent::Transfer {
+                from: addr(1),
+                to: addr(2),
+                amount: 10,
+            };
+            let fee = FeeCharge { payer, max_fee: 5 };
+            let err = s.apply_intent_with_fee(&intent, Some(&fee));
+            assert!(matches!(
+                err,
+                Err(ExecutionError::ReservedAddressFeePayerDenied { .. })
+            ));
+            assert_eq!(s.state_root(), before, "reserved-payer reject is inert");
+            assert_eq!(s.balance(&addr(1)), 100);
+            assert_eq!(s.balance(&addr(2)), 0);
+        }
+    }
+
+    /// A zero-value `FeeCharge` is rejected up front — a zero fee must be
+    /// expressed as `fee: None`, not `Some(max_fee = 0)` (mock-vs-prod
+    /// zero-move parity). State is unchanged.
+    #[test]
+    fn apply_intent_with_fee_rejects_zero_fee() {
+        let sponsor = addr(9);
+        let mut s = InMemorySubstrate::from_balances([(addr(1), 100), (sponsor, 50)]);
+        let before = s.state_root();
+        let intent = Intent::Transfer {
+            from: addr(1),
+            to: addr(2),
+            amount: 10,
+        };
+        let fee = FeeCharge {
+            payer: sponsor,
+            max_fee: 0,
+        };
+        let err = s.apply_intent_with_fee(&intent, Some(&fee));
+        assert!(matches!(err, Err(ExecutionError::ZeroFeeCharge)));
+        assert_eq!(s.state_root(), before, "zero-fee reject is inert");
+        assert_eq!(s.balance(&addr(2)), 0);
     }
 }

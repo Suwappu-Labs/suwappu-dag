@@ -7,13 +7,18 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 publish.workspace = true
-description = "SUWAPPU L2 PQ-confidential transfer primitives (Track H). Note commitment + nullifier + L2-address derivation. Phase 1 — viewing-key + hybrid AEAD encryption land in phase 2."
+description = "SUWAPPU L2 PQ-confidential transfer primitives (Track H). Phase 1: note commitment + nullifier + L2-address derivation. Phase 2: auditable dual-recipient ML-KEM-768 + ChaCha20-Poly1305 memo envelope (selective disclosure)."
 
 [dependencies]
 suwappu-crypto.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+# Phase-2 confidential-memo envelope AEAD (see src/memo.rs).
+chacha20poly1305.workspace = true
+# Wipe derived AEAD key material on drop.
+zeroize.workspace = true
 
 [dev-dependencies]
 hex.workspace = true
 proptest.workspace = true
+serde_json.workspace = true

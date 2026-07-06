@@ -235,6 +235,53 @@ impl Substrate for SuwappuDbSubstrate {
         }
     }
 
+    fn settle_protocol_fee(
+        &mut self,
+        payer: &Address,
+        amount: Balance,
+        refund: bool,
+    ) -> Result<(), ExecutionError> {
+        // FEE-1 Phase 1: mirror the InMemorySubstrate settlement over the
+        // capability-gated `Bridge` — a flat SUWAPPU move between `payer`
+        // and the authority-rewards-pool fee sink, routed through
+        // `Bridge::submit(Transfer)` so it inherits suwappu-db's lane
+        // separation + bundle atomicity. `refund` reverses the direction
+        // for the rollback leg of `apply_intent_with_fee`. The sink is a
+        // reserved registry account; the reserved-address gate lives on
+        // the user `Transfer` arm, not on this protocol-owned path.
+        let sink = reserved::authority_rewards_pool_address();
+        let (from, to) = if refund {
+            (sink, *payer)
+        } else {
+            (*payer, sink)
+        };
+        let mut bridge = Bridge::new(&mut self.state);
+        match bridge.submit(SuwappuIntent::Transfer {
+            from: SuwappuAddress(from),
+            to: SuwappuAddress(to),
+            amount,
+        }) {
+            Ok(()) => Ok(()),
+            Err(RejectReason::InsufficientBalance) => {
+                let have = bridge.balance_of(&SuwappuAddress(from)).0;
+                Err(ExecutionError::InsufficientBalance {
+                    from,
+                    have,
+                    need: amount,
+                })
+            }
+            Err(RejectReason::AmountOverflow) => Err(ExecutionError::BalanceOverflow { to }),
+            // Any other reject reason is unexpected on a Transfer, but the
+            // settlement path (and its rollback leg) MUST NOT panic — a
+            // crash mid-block would take the node down. Surface a hard
+            // accounting error so `apply_intent_with_fee` fails the
+            // intent + fee unit cleanly instead.
+            Err(other) => Err(ExecutionError::FeeSettlementFailed {
+                reason: format!("{other:?}"),
+            }),
+        }
+    }
+
     fn state_root(&self) -> [u8; 32] {
         // The canonical consensus root is the substrate-level **V2 recipe**
         // (`compute_state_root_v2`), NOT suwappu-db's internal balance trie —
@@ -253,7 +300,7 @@ impl Substrate for SuwappuDbSubstrate {
             .map(|(a, slot)| (a.0, slot.canonical()))
             .filter(|(_, bal)| *bal != 0)
             .collect();
-        balances.sort_by(|x, y| x.0.cmp(&y.0));
+        balances.sort_by_key(|x| x.0);
 
         let mut bytes: Vec<(Address, Vec<u8>)> = self
             .state
@@ -261,7 +308,7 @@ impl Substrate for SuwappuDbSubstrate {
             .into_iter()
             .map(|(a, d)| (a.0, d))
             .collect();
-        bytes.sort_by(|x, y| x.0.cmp(&y.0));
+        bytes.sort_by_key(|x| x.0);
 
         crate::substrate::compute_state_root_v2(
             balances.iter().map(|(a, b)| (a, *b)),
@@ -396,14 +443,20 @@ mod tests {
 
         // (b) Put identical bytes-state on both at the same reserved address,
         // then re-check — proves the bytes_state_root path matches too.
-        reference.pin_l2_verifying_key([0xab; 32], [0xcd; 32]).unwrap();
+        reference
+            .pin_l2_verifying_key([0xab; 32], [0xcd; 32])
+            .unwrap();
         let reg = crate::reserved::l2_registry_address();
         let raw = reference.read_bytes(&reg).expect("reference wrote bytes");
         {
             let mut bridge = Bridge::new(durable.state_mut());
             bridge.write_bytes(SuwappuAddress(reg), raw.clone());
         }
-        assert_eq!(durable.read_bytes(&reg), Some(raw), "durable mirrors the bytes");
+        assert_eq!(
+            durable.read_bytes(&reg),
+            Some(raw),
+            "durable mirrors the bytes"
+        );
         assert_eq!(
             durable.state_root(),
             reference.state_root(),

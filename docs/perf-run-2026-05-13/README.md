@@ -102,6 +102,20 @@ and round driver advances at `max(last_authored, max_observed) + 1`.
 Slow validators "snap up" instead of falling behind. Tracked as the
 next change.
 
+> **Correction (2026-07-03, consensus review):** the formula above is
+> off by one and would itself deadlock the cluster. Snapping to
+> `max_observed + 1` abandons the frontier round: with phase-offset
+> ticks, the first authority to author round R teleports every other
+> node's target to R+1, round R freezes at a single author, and the
+> propose gate (quorum, or f+1 under leader timeout) becomes
+> permanently unsatisfiable for everyone. The implemented fix
+> (`next_target_round` in `crates/suwappu-node/src/daemon.rs`) snaps
+> **to** the frontier — `max(last_authored + 1, max_observed)`,
+> matching Sui's threshold clock — and clamps the walk to rounds whose
+> predecessor already has ≥ f+1 distinct authors, so an unvalidated
+> `max_observed_round` (e.g. a Byzantine solo-cert chain) cannot steer
+> the target onto an unsatisfiable round.
+
 ## Wire-transport health check
 The TCP wire (length-prefixed bincode, geometric reconnect) is solid:
 - 0 connection drops observed in any region.

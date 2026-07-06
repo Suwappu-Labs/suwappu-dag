@@ -361,3 +361,150 @@ mod tests {
         assert_eq!(validator_double_vote_stake(&stake, a, b, &votes), 100);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Machine-checked obligations (IQ-014, Phase 1 — Kani bounded model checking).
+//
+// These harnesses verify the *pure* Validator-leg quorum predicates of the
+// joint-quorum AND-gate (Theorem 2) against the shipping functions above —
+// no reimplementation, no separate model, so there is no model-code gap
+// (IQ-014 §Options A). They are BOUNDED: counts and stake weights are
+// clamped so CBMC stays tractable. The bounds are chosen to exercise the
+// dedup / conflicting-candidate shapes that matter, not the full ring
+// envelope; see docs/audit/formal-verification.md for exactly what is and
+// is not discharged. The Authority leg (`commit_leader` over the DAG) is
+// covered by the DAG-S4 commit proptests and a symbolic-DAG harness is
+// deferred (the quorum arithmetic is the stable surface — IQ-014 OQ3).
+//
+// Compiled only under `--cfg kani`; excluded from every normal build.
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+    use crate::cert::CertHash;
+
+    // Small envelopes: enough to force duplicate voters and two conflicting
+    // candidates, small enough for CBMC. The real rings are larger (≤40 / ≤500)
+    // but the properties below are size-agnostic (they hold for all n).
+    const N_VALIDATORS: u32 = 3;
+    const N_VOTES: usize = 3;
+    // Cap weights so `2 * total` and `3 * thr` cannot overflow u128.
+    const MAX_WEIGHT: Stake = 1u128 << 40;
+
+    // A stake table of `N_VALIDATORS` seats with nondeterministic bounded
+    // weights, plus the exact total the real `StakeTable::total()` reports.
+    fn any_stake_table() -> (StakeTable, Stake) {
+        let mut t = StakeTable::new();
+        let mut total: Stake = 0;
+        let mut i = 0u32;
+        while i < N_VALIDATORS {
+            let w: Stake = kani::any();
+            kani::assume(w <= MAX_WEIGHT);
+            t.insert(i, w);
+            total += w;
+            i += 1;
+        }
+        (t, total)
+    }
+
+    // One of two distinct candidate hashes — models the conflicting-commit
+    // setting Theorem 2 reasons over.
+    const CAND_A: CertHash = CertHash([0xAA; 32]);
+    const CAND_B: CertHash = CertHash([0xBB; 32]);
+
+    fn any_candidate() -> CertHash {
+        if kani::any() {
+            CAND_A
+        } else {
+            CAND_B
+        }
+    }
+
+    fn any_votes() -> Vec<Vote> {
+        let mut votes = Vec::with_capacity(N_VOTES);
+        let mut i = 0usize;
+        while i < N_VOTES {
+            let vid: ValidatorId = kani::any();
+            kani::assume(vid < N_VALIDATORS);
+            votes.push(Vote {
+                validator: vid,
+                candidate: any_candidate(),
+            });
+            i += 1;
+        }
+        votes
+    }
+
+    /// `validator_quorum_threshold` is the least integer strictly greater
+    /// than two-thirds of the total stake (paper Definition 2).
+    #[kani::proof]
+    fn quorum_threshold_is_least_strict_supermajority() {
+        let (t, total) = any_stake_table();
+        let thr = validator_quorum_threshold(&t);
+        // Strictly above two-thirds: 3*thr > 2*total.
+        assert!(3 * thr > 2 * total);
+        // And the least such integer: thr-1 is not above two-thirds.
+        assert!(3 * (thr - 1) <= 2 * total);
+    }
+
+    /// The Validator leg of the AND-gate has no false positives: a
+    /// candidate reported as meeting quorum genuinely holds ≥ threshold
+    /// distinct-signer stake, and — composing with the non-inflation
+    /// bound — quorum can never be met when the *whole ring's* seated
+    /// stake is itself below threshold. This is the safety-critical
+    /// direction (no quorum out of thin air).
+    #[kani::proof]
+    fn met_quorum_implies_threshold_stake() {
+        let (t, total) = any_stake_table();
+        let votes = any_votes();
+        let cand = any_candidate();
+        if validator_quorum_met(&t, cand, &votes) {
+            let thr = validator_quorum_threshold(&t);
+            assert!(voting_stake(&t, cand, &votes) >= thr);
+            // Composed with `voting_stake ≤ total`: the ring cannot ratify
+            // a candidate it does not collectively hold the stake for.
+            assert!(total >= thr);
+        }
+    }
+
+    /// Tallies cannot be inflated past the ring: `voting_stake` for any
+    /// candidate never exceeds the total seated stake, regardless of how
+    /// many (possibly duplicate) votes are supplied.
+    #[kani::proof]
+    fn voting_stake_never_exceeds_total() {
+        let (t, total) = any_stake_table();
+        let votes = any_votes();
+        let cand = any_candidate();
+        assert!(voting_stake(&t, cand, &votes) <= total);
+    }
+
+    /// Duplicate votes do not inflate the tally: appending a copy of a
+    /// vote already present leaves `voting_stake` unchanged (the dedup
+    /// property the AND-gate relies on).
+    #[kani::proof]
+    fn duplicate_vote_does_not_inflate() {
+        let (t, _total) = any_stake_table();
+        let cand = any_candidate();
+        let vid: ValidatorId = kani::any();
+        kani::assume(vid < N_VALIDATORS);
+        let v = Vote {
+            validator: vid,
+            candidate: cand,
+        };
+        let base = vec![v];
+        let with_dup = vec![v, v];
+        assert_eq!(
+            voting_stake(&t, cand, &base),
+            voting_stake(&t, cand, &with_dup)
+        );
+    }
+
+    /// The Theorem-2 Validator-equivocation quantity is well-formed:
+    /// double-vote stake never exceeds the total ring stake.
+    #[kani::proof]
+    fn double_vote_stake_is_bounded() {
+        let (t, total) = any_stake_table();
+        let votes = any_votes();
+        let dv = validator_double_vote_stake(&t, CAND_A, CAND_B, &votes);
+        assert!(dv <= total);
+    }
+}

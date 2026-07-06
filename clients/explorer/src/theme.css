@@ -1,0 +1,27 @@
+/* suwappu-devnet explorer — design tokens.
+ *
+ * Dark-first; light via prefers-color-scheme. All component CSS is
+ * written against these role tokens, never raw hex. Palette validated
+ * by the dataviz palette validator (see the dataviz skill).
+ */
+
+:root {
+  --bg:#12130f; --surface-1:#1a1a19; --surface-2:#232320; --border:#2e2e2a;
+  --text-primary:#ffffff; --text-secondary:#c3c2b7; --text-muted:#8a897e;
+  --accent:#3987e5; --accent-hover:#5598e7;
+  --series-1:#3987e5; --series-2:#199e70; --series-3:#c98500; --series-4:#008300;
+  --series-5:#9085e9; --series-6:#e66767; --series-7:#d55181; --series-8:#d95926;
+  --good:#0ca30c; --warning:#fab219; --serious:#ec835a; --critical:#d03b3b;
+  --radius:10px; --radius-sm:6px; --shadow:0 1px 3px rgba(0,0,0,.4);
+  --font-sans:system-ui,-apple-system,"Segoe UI",sans-serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: light){ :root{
+  --bg:#f7f7f5; --surface-1:#fcfcfb; --surface-2:#ffffff; --border:#e5e4df;
+  --text-primary:#0b0b0b; --text-secondary:#52514e; --text-muted:#77766e;
+  --accent:#2a78d6; --accent-hover:#256abf;
+  --series-1:#2a78d6; --series-2:#1baf7a; --series-3:#eda100; --series-4:#008300;
+  --series-5:#4a3aa7; --series-6:#e34948; --series-7:#e87ba4; --series-8:#eb6834;
+  --good:#0ca30c; --warning:#fab219; --serious:#ec835a; --critical:#d03b3b;
+  --shadow:0 1px 3px rgba(0,0,0,.08);
+}}

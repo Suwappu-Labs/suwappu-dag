@@ -9,6 +9,12 @@ authors.workspace = true
 publish.workspace = true
 description = "Lattice Transfer Protocol attestation pipeline + super-node integration (paper §10)."
 
+[lints.rust]
+# Kani harnesses (src/attestation.rs) are gated on `--cfg kani`, which only
+# the Kani toolchain sets; declare it so `unexpected_cfgs` stays quiet under
+# the CI `-D warnings` policy (IQ-014, Phase 1).
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
 [dependencies]
 suwappu-crypto.workspace = true
 suwappu-precompiles.workspace = true

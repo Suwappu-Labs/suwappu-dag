@@ -19,6 +19,11 @@
 //! - `recovery` — gaps between consecutive `committed` events
 //!   longer than `--recovery-threshold-ms` (default 5000), reported
 //!   as outage windows.
+//! - `fastpath` (PERF-2) — fast-path submit → first-commit latency per
+//!   tx. Joins loadgen CSV (hash column = `payload_digest` from
+//!   `suwappu-loadgen --fastpath`) to `lane=fastpath event=committed`
+//!   events' `cert_hash` (the daemon logs the tx's payload digest
+//!   there); first committed event across regions wins.
 //!
 //! Usage:
 //!
@@ -32,6 +37,10 @@
 //!
 //! # Per-validator-pair edges:
 //! suwappu-metrics --mode pair --logs us-east-1=us.ndjson --logs eu-west-1=eu.ndjson
+//!
+//! # Fast-path latency join (PERF-2):
+//! suwappu-metrics --mode fastpath --loadgen-csv fastpath-loadgen.csv \
+//!     --logs us-east-1=us.ndjson --logs eu-west-1=eu.ndjson > fastpath.csv
 //! ```
 
 use std::{
@@ -55,6 +64,8 @@ enum Mode {
     Tps,
     /// Outage windows: gaps between consecutive `committed`.
     Recovery,
+    /// Fast-path submit → first-commit latency per tx (PERF-2).
+    Fastpath,
 }
 
 #[derive(Parser, Debug)]
@@ -185,6 +196,128 @@ fn main() -> Result<()> {
         Mode::Pair => emit_pair_mode(&all_events),
         Mode::Tps => emit_tps_mode(&all_events, args.bucket_ms),
         Mode::Recovery => emit_recovery_mode(&all_events, args.recovery_threshold_ms),
+        Mode::Fastpath => emit_fastpath_mode(&all_events, &args.loadgen_csv)?,
+    }
+    Ok(())
+}
+
+/// PERF-2: fast-path submit → first-commit latency per tx.
+///
+/// Join key: the loadgen's hash column carries the `FastPathTx`'s
+/// `payload_digest` (from `suwappu-loadgen --fastpath`), and the daemon
+/// writes the same digest as `cert_hash` on every `lane=fastpath`
+/// event line — so the join is `payload_digest hex == cert_hash hex`
+/// on `event == "committed"`. First committed event across regions
+/// wins (fast-path finality is "any honest node observed quorum").
+fn emit_fastpath_mode(events: &[Event], loadgen_csv: &Option<PathBuf>) -> Result<()> {
+    let path = loadgen_csv
+        .as_ref()
+        .context("--mode fastpath requires --loadgen-csv")?;
+    let csv = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    // payload_digest hex → client_submitted_ms (lowest, in case of retries).
+    let mut submitted: HashMap<String, u64> = HashMap::new();
+    for (i, line) in csv.lines().enumerate() {
+        if i == 0 || line.trim().is_empty() {
+            continue; // header
+        }
+        let mut parts = line.split(',');
+        let ms = parts.next().and_then(|s| s.parse::<u64>().ok());
+        let h = parts.next().map(|s| s.to_string());
+        if let (Some(ms), Some(h)) = (ms, h) {
+            submitted
+                .entry(h)
+                .and_modify(|prev| {
+                    if ms < *prev {
+                        *prev = ms;
+                    }
+                })
+                .or_insert(ms);
+        }
+    }
+
+    // payload_digest hex → (first_committed_ms, region-of-first-commit),
+    // scanning every region's log so the earliest observer wins.
+    let mut first_committed: HashMap<String, (u64, String)> = HashMap::new();
+    for ev in events {
+        if ev.lane != "fastpath" || ev.event != "committed" {
+            continue;
+        }
+        let Some(hash) = ev.cert_hash.as_ref() else {
+            continue;
+        };
+        first_committed
+            .entry(hash.clone())
+            .and_modify(|(prev_ms, prev_region)| {
+                if ev.t_ms < *prev_ms {
+                    *prev_ms = ev.t_ms;
+                    *prev_region = ev.region.clone();
+                }
+            })
+            .or_insert((ev.t_ms, ev.region.clone()));
+    }
+
+    // One row per joined tx. Unjoined counts go to stderr:
+    //   - submitted but never committed (lost / still pending / log gap)
+    //   - committed but not in the loadgen CSV (prior campaign, other
+    //     submitter) — same class the e2e mode's stale filter targets.
+    let mut latencies: Vec<u64> = Vec::new();
+    let mut submitted_unjoined: u64 = 0;
+    let mut committed_unjoined: u64 = 0;
+    let mut dropped_stale: u64 = 0;
+    println!("tx_hash,submitted_ms,committed_ms,latency_ms,region");
+    for (hash, submitted_ms) in &submitted {
+        let Some((committed_ms, region)) = first_committed.get(hash) else {
+            submitted_unjoined += 1;
+            continue;
+        };
+        if committed_ms < submitted_ms {
+            // Stale match from a prior campaign sharing the event log
+            // (only reachable with a reused `--seed`).
+            dropped_stale += 1;
+            continue;
+        }
+        let latency = committed_ms - submitted_ms;
+        latencies.push(latency);
+        println!(
+            "{},{},{},{},{}",
+            hash, submitted_ms, committed_ms, latency, region
+        );
+    }
+    for hash in first_committed.keys() {
+        if !submitted.contains_key(hash) {
+            committed_unjoined += 1;
+        }
+    }
+
+    latencies.sort_unstable();
+    let pct = |q: f64| -> String {
+        if latencies.is_empty() {
+            return "-".into();
+        }
+        let idx = ((latencies.len() - 1) as f64 * q).round() as usize;
+        latencies[idx].to_string()
+    };
+    eprintln!(
+        "suwappu-metrics fastpath: joined={} submitted_unjoined={} committed_unjoined={} \
+         p50={}ms p95={}ms p99={}ms max={}ms",
+        latencies.len(),
+        submitted_unjoined,
+        committed_unjoined,
+        pct(0.50),
+        pct(0.95),
+        pct(0.99),
+        latencies
+            .last()
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "-".into()),
+    );
+    if dropped_stale > 0 {
+        eprintln!(
+            "suwappu-metrics fastpath: warning — dropped {} txs where committed_ms < \
+             submitted_ms (stale match from a prior campaign; pass a unique --seed \
+             to suwappu-loadgen to suppress)",
+            dropped_stale
+        );
     }
     Ok(())
 }

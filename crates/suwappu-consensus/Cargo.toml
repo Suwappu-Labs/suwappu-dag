@@ -9,6 +9,12 @@ authors.workspace = true
 publish.workspace = true
 description = "Mysticeti-C certificate DAG consensus + BFT linearization for the SUWAPPU DAG L1 (paper §6)."
 
+[lints.rust]
+# Kani harnesses (src/joint.rs) are gated on `--cfg kani`, which only the
+# Kani toolchain sets; declare it so `unexpected_cfgs` stays quiet under the
+# CI `-D warnings` policy (IQ-014, Phase 1).
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
 [dependencies]
 suwappu-crypto.workspace = true
 blake3.workspace = true
