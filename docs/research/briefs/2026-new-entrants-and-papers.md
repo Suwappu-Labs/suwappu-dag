@@ -60,6 +60,21 @@ PQ-marketing pool, not competitors.
 [Cointrust/Autheo](https://www.cointrust.com/market-news/autheo-launches-mainnet-with-post-quantum-blockchain-security) ·
 [Quantum Insider/Naoris](https://thequantuminsider.com/2026/04/01/naoris-protocol-launches-mainnet-introducing-post-quantum-layer-1-blockchain/)
 
+**BTX Chain** (`btxchain/btx`, mainnet **2026-03-19**) — a live
+post-quantum "AI-native settlement" chain and our **closest positioning-twin**
+(same "computational settlement / machine-verifiable / without administrators
+/ institutions-exchanges-bridges-agents" copy). Under the shared sentence:
+a **Bitcoin-Knots PoW fork** ("MatMul PoW" 512×512 over F(2³¹−1), 90 s
+blocks, **probabilistic** finality), **ML-DSA-44** (NIST-L2) + SLH-DSA
+backup from genesis, and a **SMILE v2 lattice confidential pool it shipped
+at genesis then *disabled* at block 125k**. Inherits a real 9-year
+**BitCore** holder/brand community (its GitHub dev community is tiny: 32★).
+Genuinely ahead of us on **machine-checked formal verification** (Module-SIS
+reduction, 21 obligations) and **live status**; behind on finality
+determinism, safety model, PQ tier, and any payments/issuer surface. Full
+analysis: [`btx-chain.md`](btx-chain.md).
+[repo](https://github.com/btxchain/btx) · [btx.dev](https://www.btx.dev/)
+
 **"Lattice: A Post-Quantum Settlement Layer"** (arXiv
 [2603.07947](https://arxiv.org/abs/2603.07947), 2026-03-10) — flagged for
 **name-collision** with our Lattice Transfer Protocol. On inspection it is
