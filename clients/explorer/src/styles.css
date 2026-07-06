@@ -467,6 +467,17 @@ pre {
   font-size: 0.82rem;
   color: var(--text-muted);
 }
+.cap-positioning {
+  margin: 0 0 1.25rem;
+  max-width: 80ch;
+  padding: 0.85rem 1rem;
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface-1));
+  color: var(--text-primary);
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
 
 /* ---------- Charts (shared tokens) ---------- */
 

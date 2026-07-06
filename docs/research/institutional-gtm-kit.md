@@ -66,6 +66,25 @@ similar horizon (landscape §3). No competitor in the category has PQ on primary
 surfaces. The window to own this narrative is real but narrowing — Ethereum and
 Arc have both signalled intent.
 
+**The sharpened differentiator (use this when "post-quantum" alone is
+challenged).** As of mid-2026, "post-quantum blockchain" is no longer a
+rare claim — QoreChain (live, ML-DSA-87) and BTX Chain (live, ML-DSA-44 PoW
+fork) both hold it, and the retail chains are drifting toward it. **Do not
+defend "we're the only PQ chain" — it's no longer true.** Defend the
+*intersection*, which no one else occupies:
+
+> **Post-quantum is table stakes now — several chains claim it. suwappu-dag
+> is the only one where settlement is both *deterministic* and
+> *joint-quorum-safe*: a fork requires Byzantine capture of two independent
+> validator rings at once, and committed state never reverts. The other PQ
+> chains are post-quantum *Nakamoto-PoW* (BTX) or *single-set BFT*
+> (QoreChain) — we are post-quantum *dual-ring settlement*.**
+
+This reframes the moat from *PQ alone* (contested) to *PQ **and**
+dual-ring-safe **and** deterministic-settlement-shaped* (uncontested).
+Sourced in [`briefs/btx-chain.md`](briefs/btx-chain.md) and
+[`briefs/2026-new-entrants-and-papers.md`](briefs/2026-new-entrants-and-papers.md).
+
 ---
 
 ## 3. Target segments (ranked)
@@ -160,6 +179,8 @@ better that we concede up front. Conceding is the point — see §1.
 | **Tempo** (Stripe/Paradigm) | PQ on primary surfaces + dual-ring joint-quorum safety; they run classical crypto on a single permissioned BFT set. | **Mainnet is live** (2026-03-18) with real distribution — Visa/Stripe/MoneyGram validators, OUSD consortium, benchmarked throughput. We are pre-mainnet devnet with no distribution. |
 | **Arc** (Circle) | PQ is *default on our consensus/bridge surfaces*; Arc's PQ (Apr 2026) is **opt-in, wallet-level, future-tense**. | Native USDC/EURC issuance, EVM tooling day one, TEE confidential transfers, and a real issuer story. We have precompiles with no issuer using them and no EVM-standard endpoint. |
 | **Robinhood Chain** | Decentralized dual-ring settlement with slashing economics; theirs is a **single centralized sequencer**. | Live mainnet, 26M+ funded accounts, 120+ countries, real distribution and a flagship asset (tokenized stocks). We have none of that reach. |
+| **QoreChain** (live PQ L1) | Deterministic **dual-ring joint-quorum** settlement; QoreChain is PQ but a **single-set BFT** ("PRISM") chain — no two-ring AND-gate, and payments/settlement is not its specialization. Our PQ tier is more conservative on confidentiality (ML-KEM-768 on a primary surface) even though they lead on signature tier (ML-DSA-87). | **Live mainnet** (2026-06-07) and first to claim an all-NIST-PQ mainnet tx; a triple-VM (EVM+CosmWasm+SVM) developer surface and a funded token. We are pre-mainnet with none of that. |
+| **BTX Chain** (live PQ "AI settlement") | **Deterministic joint-quorum finality vs their probabilistic 90 s PoW.** BTX borrows our exact "computational settlement / without administrators" language but is a Bitcoin-Knots **Nakamoto-PoW** fork — reorg-able, no finality semantics — at **NIST-L2** (ML-DSA-44), and it **disabled its confidential pool at block 125k**. Our confidential path, once CONF-1 ships, is the only *standing* PQ one. | **Live mainnet** (2026-03-19) with an inherited ~9-year **BitCore** holder/brand community, and — genuinely — a **machine-checked formal-verification** artifact (Module-SIS reduction, 21 obligations) we don't yet match (see IQ-014). Concede both. Full analysis: [`briefs/btx-chain.md`](briefs/btx-chain.md). |
 
 ---
 

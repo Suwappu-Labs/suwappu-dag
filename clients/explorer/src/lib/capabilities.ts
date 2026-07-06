@@ -22,6 +22,12 @@ export interface CapabilityGroup {
 
 export interface CapabilitiesDoc {
   asOf: string;
+  /**
+   * One-sentence positioning/differentiator, rendered above the inventory.
+   * Factual, not marketing: describes the architecture, not a claim of
+   * superiority we can't back.
+   */
+  positioning?: string;
   /** Base URL that `item.doc` paths are resolved against. */
   repoBase: string;
   note?: string;

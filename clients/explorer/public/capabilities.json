@@ -1,5 +1,6 @@
 {
-  "asOf": "2026-07-03",
+  "asOf": "2026-07-06",
+  "positioning": "Post-quantum is no longer rare — several chains now claim it. suwappu-dag is the only one where settlement is both deterministic and joint-quorum-safe: a fork requires Byzantine capture of two independent validator rings at once, and committed state never reverts.",
   "note": "Honest capability status. 'Shipped' = implemented, reviewed, and CI-green on the working branch (not necessarily on a live network). 'In progress' = primitive landed or design ratified, remaining work named. 'Planned' = designed, gated on a dependency. Links point at the repo.",
   "repoBase": "https://github.com/Suwappu-Labs/suwappu-dag/blob/main/",
   "groups": [

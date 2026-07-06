@@ -67,6 +67,10 @@ export function Capabilities() {
         </p>
       </div>
 
+      {load.status === "ok" && load.doc.positioning && (
+        <p className="cap-positioning">{load.doc.positioning}</p>
+      )}
+
       {load.status === "loading" && <Loading />}
       {load.status === "error" && <ErrorState message={load.message} />}
       {load.status === "ok" &&
