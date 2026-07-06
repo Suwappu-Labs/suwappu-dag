@@ -1,11 +1,25 @@
 # IQ-014 — Machine-checked obligations for Theorem 2 + LTP soundness
 
-**Status:** Recommendation, pending sign-off. No implementation
-scheduled; this IQ fixes a *target shape and scope* for adding
-machine-checked formal-verification artifacts to the two load-bearing
-invariants that carry the most weight with an institutional/formal buyer.
+**Status:** Recommendation, pending sign-off — **Phase 1 landed** (the
+recommended Kani harnesses are in-tree and CI-wired non-blocking; the
+Decision below is still pending formal sign-off, and Phase 2 has not
+started). This IQ fixes the *target shape and scope*; what is actually
+discharged is tracked in
+[`../audit/formal-verification.md`](../audit/formal-verification.md).
 **Owner:** consensus / crypto
 **Date:** 2026-07-06
+
+> **Phase 1 implementation (2026-07-06).** Kani bounded-model-checking
+> harnesses for the Validator-leg quorum predicates (Theorem 2) and the
+> LTP 7-of-9 quorum predicate (obligation (a)) are implemented in
+> `crates/suwappu-consensus/src/joint.rs` and
+> `crates/suwappu-ltp/src/attestation.rs` (both `#[cfg(kani)]`-gated),
+> with a `scripts/verify/run_all.sh` entry point, a non-blocking `kani`
+> CI job, and the honesty doc above. Reviewed by consensus-reviewer +
+> crypto-reviewer (APPROVE-WITH-NITS; the "BFT supermajority" harness was
+> tightened from `>½` to the actual `>⅔` relation per the crypto-reviewer
+> nit). The LTP hardness layer (obligation (b)) and the Authority-leg /
+> full `joint_commit` harness remain deferred exactly as scoped below.
 **Tracking:** Prompted by the **BTX Chain** competitor brief
 ([`../research/briefs/btx-chain.md`](../research/briefs/btx-chain.md)) and
 threaded into the parity matrix F3 row

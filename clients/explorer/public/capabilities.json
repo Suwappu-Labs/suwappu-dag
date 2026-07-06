@@ -47,6 +47,12 @@
           "status": "shipped",
           "note": "Snap-to-frontier + density clamp fixes the multi-region round-advance stall (PERF-1, consensus-reviewed, CI-green).",
           "doc": "docs/perf-run-2026-05-13/"
+        },
+        {
+          "name": "Machine-checked invariant obligations",
+          "status": "in-progress",
+          "note": "Phase 1: Kani bounded-model-checking harnesses verify the joint-quorum (Theorem 2) and LTP 7-of-9 quorum predicates against the shipping code (no model-code gap). The cryptographic-hardness layer is cited, not proven; an unbounded proof-assistant mechanization (Phase 2) is not started.",
+          "doc": "docs/audit/formal-verification.md"
         }
       ]
     },

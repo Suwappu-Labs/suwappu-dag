@@ -62,6 +62,30 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-targets
 
+  kani:
+    name: kani (formal verification)
+    runs-on: ubuntu-latest
+    # Non-blocking while the harness set + CI timings stabilize (IQ-014
+    # Phase 1). Promote to required once green and fast. Kani's own build
+    # sets its codegen flags, so drop the workspace-wide `-D warnings` here.
+    continue-on-error: true
+    env:
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v5
+      - name: Setup suwappu-db deploy key
+        uses: webfactory/ssh-agent@v0.10.0
+        with:
+          ssh-private-key: ${{ secrets.SUWAPPU_DB_DEPLOY_KEY }}
+      - name: Rewrite https://github.com → git@github.com for cargo
+        run: git config --global url."git@github.com:".insteadOf "https://github.com/"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Kani
+        run: cargo install --locked kani-verifier && cargo kani setup
+      - name: Run machine-checked obligations (IQ-014)
+        run: bash scripts/verify/run_all.sh
+
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest
