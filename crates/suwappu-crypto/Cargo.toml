@@ -29,6 +29,13 @@ hex.workspace = true
 rand = { workspace = true }
 rand_chacha = { workspace = true }
 
+# suwappu-keygen CLI binary only
+clap.workspace = true
+
+[[bin]]
+name = "suwappu-keygen"
+path = "src/bin/suwappu-keygen.rs"
+
 [dev-dependencies]
 proptest.workspace = true
 hex.workspace = true

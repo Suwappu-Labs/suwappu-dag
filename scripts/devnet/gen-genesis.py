@@ -17,16 +17,22 @@ Output layout (in --out-dir, default ./target/devnet/keys):
     faucet/mldsa.sk       <-- real ML-DSA-65 key (the faucet binary loads this)
     faucet/mldsa.pk       <-- matching public key
 
-Validator-side keys (entries 0-3) use deterministic placeholders for now —
-this matches the perf testnet's posture and reflects that suwappu-node does
-NOT currently verify ML-DSA signatures on validator-to-validator wire
+Validator-side keys (entries 0-3), like the faucet key, are now REAL
+ML-DSA-65 + BLS12-381 keypairs minted via `suwappu-keygen`. suwappu-node
+does not currently verify ML-DSA signatures on validator-to-validator wire
 traffic (only on client-submitted intents at the verify_signed_intent
-gate). If/when on-wire validator-side ML-DSA verification lands, this
-script must switch to real keys via the suwappu-keygen binary.
+gate), so this doesn't change today's consensus behavior — but there is no
+reason to hand out non-cryptographic placeholder key material when the real
+thing costs nothing extra to generate, and it means this genesis is already
+correct for whenever on-wire validator-side ML-DSA verification lands.
 
 The faucet's authority entry (id = 4) MUST have a real ML-DSA-65 keypair
 because every faucet drip submits a signed Transfer intent through the
 intent_signing_digest path, which IS verified by the validators.
+
+Falls back to deterministic placeholder bytes if suwappu-keygen isn't on
+PATH, with a loud warning. Build it with:
+  cargo build --release -p suwappu-crypto --bin suwappu-keygen
 """
 
 from __future__ import annotations
@@ -51,9 +57,8 @@ FAUCET_LABEL = "faucet"
 
 
 def placeholder_key(seed: bytes, length: int) -> bytes:
-    """Deterministic byte stream from a seed. Not cryptographically random.
-    Acceptable only for validator-side keys on this devnet, where the
-    validator-to-validator wire doesn't currently verify ML-DSA."""
+    """Deterministic byte stream from a seed. Not cryptographically random —
+    only used as a fallback when suwappu-keygen isn't on PATH."""
     out = b""
     counter = 0
     while len(out) < length:
@@ -62,25 +67,15 @@ def placeholder_key(seed: bytes, length: int) -> bytes:
     return out[:length]
 
 
-def mint_real_faucet_key(out_dir: Path) -> tuple[bytes, bytes]:
-    """Generate a real ML-DSA-65 keypair for the faucet via suwappu-keygen.
-
-    Falls back to placeholder bytes if suwappu-keygen isn't available, with a
-    loud warning — but a placeholder faucet key cannot actually sign
-    valid transfers, so the faucet service will reject every drip until
-    a real key is dropped in place.
-    """
-    faucet_dir = out_dir / "faucet"
-    faucet_dir.mkdir(parents=True, exist_ok=True)
-    sk_path = faucet_dir / "mldsa.sk"
-    pk_path = faucet_dir / "mldsa.pk"
+def mint_keypair(sk_path: Path, pk_path: Path, algo: str, warn_label: str) -> tuple[bytes, bytes]:
+    """Real keypair via suwappu-keygen (--algo mldsa|bls). Falls back to a
+    placeholder + loud warning if suwappu-keygen isn't on PATH."""
+    sk_path.parent.mkdir(parents=True, exist_ok=True)
 
     if shutil.which("suwappu-keygen") is not None:
-        # suwappu-keygen --algo mldsa --sk <path> --pk <path>
         subprocess.run(
             [
-                "suwappu-keygen",
-                "--algo", "mldsa",
+                "suwappu-keygen", "--algo", algo,
                 "--sk", str(sk_path),
                 "--pk", str(pk_path),
             ],
@@ -89,22 +84,26 @@ def mint_real_faucet_key(out_dir: Path) -> tuple[bytes, bytes]:
         os.chmod(sk_path, 0o600)
         return sk_path.read_bytes(), pk_path.read_bytes()
 
-    # Fallback — placeholder. Faucet WILL NOT WORK with this key.
     print(
-        "WARNING: suwappu-keygen not found on PATH; emitting placeholder faucet "
-        "key. The faucet binary will reject every drip until a real ML-DSA-65 "
-        "keypair is placed in faucet/mldsa.{sk,pk}. Build suwappu-keygen with: "
+        f"WARNING: suwappu-keygen not found on PATH; emitting placeholder "
+        f"{warn_label} key. Build suwappu-keygen with: "
         "  cargo build --release -p suwappu-crypto --bin suwappu-keygen",
         file=sys.stderr,
     )
-    seed_sk = f"FAUCET-PLACEHOLDER-SK".encode()
-    seed_pk = f"FAUCET-PLACEHOLDER-PK".encode()
-    sk = placeholder_key(seed_sk, 4032)
-    pk = placeholder_key(seed_pk, 1952)
+    key_len = 4032 if algo == "mldsa" else 32
+    pk_len = 1952 if algo == "mldsa" else 48
+    sk = placeholder_key(f"{warn_label}-PLACEHOLDER-SK".encode(), key_len)
+    pk = placeholder_key(f"{warn_label}-PLACEHOLDER-PK".encode(), pk_len)
     sk_path.write_bytes(sk)
     pk_path.write_bytes(pk)
     os.chmod(sk_path, 0o600)
     return sk, pk
+
+
+def mint_real_faucet_key(out_dir: Path) -> tuple[bytes, bytes]:
+    """Real ML-DSA-65 keypair for the faucet — see `mint_keypair`."""
+    faucet_dir = out_dir / "faucet"
+    return mint_keypair(faucet_dir / "mldsa.sk", faucet_dir / "mldsa.pk", "mldsa", "faucet")
 
 
 def main() -> int:
@@ -140,37 +139,32 @@ def main() -> int:
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    MLDSA_SK_LEN = 4032
-    BLS_SK_LEN = 32
-
     validator_entries = []
     for region, aid in REGIONS:
         region_dir = args.out_dir / region
         region_dir.mkdir(parents=True, exist_ok=True)
 
-        seed_mldsa = f"{args.network_id}-{region}-mldsa".encode()
-        seed_bls = f"{args.network_id}-{region}-bls".encode()
-        mldsa_sk = placeholder_key(seed_mldsa, MLDSA_SK_LEN)
-        bls_sk = placeholder_key(seed_bls, BLS_SK_LEN)
+        _mldsa_sk, mldsa_pk_bytes = mint_keypair(
+            region_dir / "mldsa.sk", region_dir / "mldsa.pk", "mldsa", f"{region}-mldsa"
+        )
+        _bls_sk, bls_pk_bytes = mint_keypair(
+            region_dir / "bls.sk", region_dir / "bls.pk", "bls", f"{region}-bls"
+        )
 
-        (region_dir / "mldsa.sk").write_bytes(mldsa_sk)
-        (region_dir / "bls.sk").write_bytes(bls_sk)
-        os.chmod(region_dir / "mldsa.sk", 0o600)
-        os.chmod(region_dir / "bls.sk", 0o600)
-
-        # Public-key surrogate — matches the perf-testnet pattern. The
-        # validator-side ML-DSA verifier is not on the wire today; if it
-        # ever lands, replace this with the real pk produced by
-        # suwappu-keygen.
-        mldsa_pk = hashlib.blake2b(mldsa_sk, digest_size=32).hexdigest()
-        bls_pk = hashlib.blake2b(bls_sk, digest_size=48).hexdigest()
+        mldsa_pk = mldsa_pk_bytes.hex()
+        bls_pk = bls_pk_bytes.hex()
 
         validator_entries.append((aid, region, mldsa_pk, bls_pk))
 
-    # Faucet authority — needs a REAL ML-DSA-65 keypair.
+    # Faucet authority — needs a REAL ML-DSA-65 keypair (the faucet doesn't
+    # sign with BLS, but the manifest schema requires the field, so mint a
+    # real one too rather than a hash-derived placeholder).
     _faucet_sk, faucet_pk = mint_real_faucet_key(args.out_dir)
     faucet_pk_hex = faucet_pk.hex()
-    faucet_bls_pk_hex = hashlib.blake2b(b"faucet-bls-placeholder", digest_size=48).hexdigest()
+    _faucet_bls_sk, faucet_bls_pk = mint_keypair(
+        args.out_dir / "faucet" / "bls.sk", args.out_dir / "faucet" / "bls.pk", "bls", "faucet-bls"
+    )
+    faucet_bls_pk_hex = faucet_bls_pk.hex()
 
     genesis = args.out_dir / "genesis.toml"
     with genesis.open("w") as f:
@@ -225,8 +219,11 @@ def main() -> int:
     print(f"  faucet initial balance = {args.faucet_initial_balance_suwappu:,} SUWAPPU", file=sys.stderr)
     print(f"wrote {prebalances}", file=sys.stderr)
     print(
-        "NOTE: validator keys are placeholders (matches perf); only the faucet "
-        "ML-DSA key is real. Do not reuse this output for mainnet.",
+        "NOTE: all keys are real ML-DSA-65/BLS12-381 keypairs minted via "
+        "suwappu-keygen (unless it wasn't on PATH, in which case per-key "
+        "WARNINGs above flag placeholder fallbacks). Do not reuse this "
+        "output for mainnet regardless — devnet keys are not access-"
+        "controlled or backed up.",
         file=sys.stderr,
     )
     return 0
