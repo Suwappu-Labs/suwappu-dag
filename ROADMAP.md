@@ -14,7 +14,7 @@ and [`CHANGELOG.md`](./CHANGELOG.md) (released versions).
 | Phase | Window | Headline | Status |
 |---|---|---|---|
 | **Phase 0 — Spec** | Q1 2026 | v8 academic paper ratified, repo bootstrapped | ✅ Closed |
-| **Phase 1 — Consensus + crypto** | Q1–Q2 2026 | DAG-S1…S20 close (Mysticeti-C + PQ crypto + LTP + SCION + fast-path) | ✅ Closed (v0.1.0) |
+| **Phase 1 — Consensus + crypto** | Q1–Q2 2026 | DAG-S1…S20 close (DagBft-C + PQ crypto + LTP + SCION + fast-path) | ✅ Closed (v0.1.0) |
 | **Phase 2 — State surface** | May 2026 | Force-include, slashing waterfall, registries, dual-bond model | ✅ Closed (v0.2.0) |
 | **Phase 3 — Economic surface** | May 2026 | Per-slot stake, withdraw, eject-slash, cooldown, genesis, inflation, distribute, delegate, atomicity | ✅ Closed (v0.3.0) |
 | **Phase 4 — Public devnet** | Q2 2026 | 4-region public devnet, RPC + faucet + explorer + status, operator-program v0 | 🟡 In flight |
@@ -54,7 +54,7 @@ dependency graph.
 Highlights:
 
 - Post-quantum crypto surface (ML-DSA-65, ML-KEM-768, BLS12-381, SHA3-256).
-- Mysticeti-C certificate DAG + joint-quorum AND-gate safety (Theorem 2).
+- DagBft-C certificate DAG + joint-quorum AND-gate safety (Theorem 2).
 - Fast-path lane with K=4 equivocation binding (100% slashing).
 - Constant-size LTP attestation (≈1,600 B regardless of payload).
 - JSON-RPC + WebSocket API + Rust + TypeScript SDKs.

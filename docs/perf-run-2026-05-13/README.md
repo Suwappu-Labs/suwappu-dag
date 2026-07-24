@@ -96,7 +96,7 @@ puts peers on different rounds, two things go wrong simultaneously:
    as a parent.** Their round-(R+1) certs include only the healthy
    subset → commit_leader still can't reach quorum.
 
-Both halves of the chain need a fix. The proper Mysticeti-C pattern:
+Both halves of the chain need a fix. The proper DagBft-C pattern:
 `parents_for_round` looks at `max(observed_round)` rather than `R-1`,
 and round driver advances at `max(last_authored, max_observed) + 1`.
 Slow validators "snap up" instead of falling behind. Tracked as the

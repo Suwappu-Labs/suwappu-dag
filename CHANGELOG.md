@@ -12,6 +12,18 @@ will coincide with mainnet genesis.
 
 ## [Unreleased]
 
+### Changed
+
+- Renamed our consensus's internal identifier from `Mysticeti-C` to
+  `DagBft-C` across crates, docs, and visuals. `Mysticeti-C` is not a
+  generic term — it names a specific sub-protocol in Mysten Labs'
+  published Mysticeti consensus (arXiv:2310.14821), live in production
+  on Sui mainnet. Reusing that exact name for our own independently
+  implemented consensus read as an unintended claim of shared lineage.
+  `DagBft-C` remains design-inspired by Mysticeti (see README
+  Attribution section and `suwappu-consensus` module docs) but the
+  identifier is now our own.
+
 ### Planned (G-track devnet hosting program → public testnet rollout)
 
 - **G2** — public RPC endpoint with DNS + TLS + ALB + WAF.
@@ -142,7 +154,7 @@ per-sprint scope.
 - **DAG-S2** `suwappu-transport`: RaptorQ shred / reconstruct (in-mem).
 - **DAG-S3** `suwappu-consensus`: DAG store, certificate types, vote
   aggregation.
-- **DAG-S4** Mysticeti-C commit rule.
+- **DAG-S4** DagBft-C commit rule.
 - **DAG-S5** Joint-quorum AND-gate (paper Theorem 2 — Authority Ring
   AND Validator Ring must both ratify).
 - **DAG-S6** Authority + Validator registry types + quorum threshold.

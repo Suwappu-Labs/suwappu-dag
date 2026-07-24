@@ -22,7 +22,7 @@ presentations: [Visual Index](../visuals/index.html) ·
 |---|---|---|
 | [overview.md](overview.md) | §4 | Four-layer stack on a single chain |
 | [validator-rings.md](validator-rings.md) | §5 | Authority Ring (PoA) + Validator Ring (PoS) |
-| [consensus.md](consensus.md) | §6 | Mysticeti-C certificate DAG + commit rule |
+| [consensus.md](consensus.md) | §6 | DagBft-C certificate DAG + commit rule |
 | [transport.md](transport.md) | §6.3 | SCION + RaptorQ inter-validator transport |
 | [fast-path.md](fast-path.md) | §6.4 | FastPay-style single-owner fast-path lane |
 | [execution.md](execution.md) | §7 | Co-resident dual VM over polymorphic balance map |

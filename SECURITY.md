@@ -55,7 +55,7 @@ even if a same-day fix isn't possible.
 Anything in this repo's `crates/`, `clients/`, `scripts/`, or
 `fuzz/` is in scope. Specifically:
 
-- The Mysticeti-C consensus implementation
+- The DagBft-C consensus implementation
   (`crates/suwappu-consensus/`, `crates/suwappu-node/src/daemon.rs`).
 - The fast-path equivocation slashing surface
   (`crates/suwappu-fastpath/`, especially `binding.rs` + `equivocation.rs`).

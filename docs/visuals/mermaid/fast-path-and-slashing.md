@@ -13,7 +13,7 @@ flowchart LR
     Cross -->|"conflict in K-window"| Equiv["EquivocationProof<br/>two fast-path certs<br/>same owner, same nonce"]
     Equiv --> Slash["100% bonded stake<br/>+ Authority Ring expulsion"]
     subgraph MainLane ["Main-lane fallback"]
-      MLane["Same intent flows<br/>through Mysticeti-C DAG"]
+      MLane["Same intent flows<br/>through DagBft-C DAG"]
       MLane --> Commit["Block commit<br/>main_lane_index updated"]
     end
     Cross -.-> MLane

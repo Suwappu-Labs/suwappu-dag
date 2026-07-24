@@ -10,12 +10,12 @@
 
 The chain's safety guarantee — **paper Theorem 2** — is that a safety
 violation requires Byzantine corruption of *both* rings simultaneously
-(the AND-gate). The Authority Ring decides ordering via Mysticeti-C
+(the AND-gate). The Authority Ring decides ordering via DagBft-C
 direct + indirect commit; the Validator Ring co-signs ordering via
 stake-weighted joint quorum. Either ring alone cannot finalize a cert
 that conflicts with the other's vote.
 
-Liveness inherits from Mysticeti-C plus the indirect-decide path
+Liveness inherits from DagBft-C plus the indirect-decide path
 (IQ-002): so long as honest authorities advance round-on-round and
 ≥`f+1` parents arrive within the leader-timeout window, the commit rule
 keeps making forward progress. The one currently known liveness gap is

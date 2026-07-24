@@ -52,7 +52,7 @@ pub struct NodeConfig {
     /// Peers this node should dial. List excludes self.
     pub peers: Vec<Peer>,
 
-    /// Round cadence in milliseconds. Mysticeti-C round = one DAG layer.
+    /// Round cadence in milliseconds. DagBft-C round = one DAG layer.
     /// Paper uses ~250 ms for the testnet; tune down for low-latency regions.
     #[serde(default = "default_round_ms")]
     pub round_ms: u64,

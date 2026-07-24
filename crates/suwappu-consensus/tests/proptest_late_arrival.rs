@@ -15,7 +15,7 @@
 //! - `late_arrival_does_not_break_direct_monotonicity` — extending a
 //!   DAG that already returns `Direct(h)` for some round R must keep
 //!   returning `Direct(h)` regardless of further certs inserted. (The
-//!   monotonicity guarantee that `mysticeti_c_finality` already covers
+//!   monotonicity guarantee that `dagbft_c_finality` already covers
 //!   for the direct rule, restated for the new path.)
 //! - `orphan_with_zero_supporters_still_skips` — when no R+1 cert
 //!   references the leader, no anchor's causal_history can reach the

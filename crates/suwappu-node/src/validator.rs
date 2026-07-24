@@ -10,7 +10,7 @@
 //!
 //! 1. Each validator authors a round-0 `Certificate` (paper §6.1, S3).
 //! 2. Round-1 certificates reference every round-0 cert as parent.
-//! 3. The Mysticeti-C commit rule (S4) commits the round-0 leader once
+//! 3. The DagBft-C commit rule (S4) commits the round-0 leader once
 //!    `quorum_threshold(n)` round-1 supporters exist.
 //! 4. Each validator runs the same `Block` through the `Substrate`
 //!    (S10), producing identical post-state roots — the
@@ -203,7 +203,7 @@ fn run_genesis_flow(
         }
     }
 
-    // Check if the round-0 leader commits under Mysticeti-C at round 1.
+    // Check if the round-0 leader commits under DagBft-C at round 1.
     let leader = commit_leader(&validators[0].dag, 0, n);
 
     // Execute the same (empty) block on every validator's substrate.

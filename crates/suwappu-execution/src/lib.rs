@@ -2,7 +2,7 @@
 //!
 //! Wires the [`suwappu-db`](https://github.com/Suwappu-Labs/suwappu-db)
 //! execution substrate into the consensus pipeline. Implements the dispatch
-//! from a Mysticeti-linearized block of intents through the OCC scheduler,
+//! from a DagBft-linearized block of intents through the OCC scheduler,
 //! the state tree commit, and the outbound anchor pipeline.
 //!
 //! Paper mapping (§7):

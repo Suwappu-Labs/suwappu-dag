@@ -41,7 +41,7 @@ use tokio::{
 use tracing::{debug, info, warn};
 
 /// Side-channel block payload referenced by a [`Certificate::payload_digest`].
-/// Mysticeti-C separates cert proposal from block dissemination — the cert
+/// DagBft-C separates cert proposal from block dissemination — the cert
 /// commits to a 32-byte digest, the block (which carries the actual intents)
 /// flows on a parallel `WireMessage::Block` frame.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -76,7 +76,7 @@ impl PeerId {
 /// Top-level wire frame. One bincode-encoded value per TCP frame.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum WireMessage {
-    /// Authority Ring certificate proposal (Mysticeti-C).
+    /// Authority Ring certificate proposal (DagBft-C).
     Cert(Certificate),
     /// Block payload backing a cert (intents + digest match check).
     Block(BlockPayload),

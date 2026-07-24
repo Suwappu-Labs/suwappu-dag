@@ -6,8 +6,10 @@ current sprint state, load-bearing invariants, and how to collaborate.
 
 ## Project
 
-`suwappu-dag` is the implementation of the **SUWAPPU DAG Layer 1**: a Mysticeti-style
-certificate-DAG settlement chain with a dual-ring validator set, co-resident
+`suwappu-dag` is the implementation of the **SUWAPPU DAG Layer 1**: a
+`DagBft-C` certificate-DAG settlement chain (design-inspired by Mysticeti,
+arXiv:2310.14821 — an independent implementation, not a fork of Sui's
+`MystenLabs/sui` consensus) with a dual-ring validator set, co-resident
 dual VM, and post-quantum cross-chain attestation under the Lattice Transfer
 Protocol. The reference design is `suwappu-papers/papers/dag-l1` (formerly
 `suwappu_dag_l1_academic_v7.pdf`).
@@ -76,7 +78,7 @@ Between sessions, you resume via:
 | DAG-S1 | `suwappu-crypto` — ML-DSA-65, ML-KEM-768, BLS12-381, SHA3-256 | ✅ Closed    | 7 properties × 10k cases (`tests/proptest_roundtrips.rs`) |
 | DAG-S2 | `suwappu-transport` — RaptorQ shred/reconstruct (in-mem)      | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_reconstruction.rs`) |
 | DAG-S3 | `suwappu-consensus` — DAG store, certificate types, voting   | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_dag_order.rs`) |
-| DAG-S4 | `suwappu-consensus` — Mysticeti-C commit rule                | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_mysticeti_commit.rs`) |
+| DAG-S4 | `suwappu-consensus` — DagBft-C commit rule                | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_dagbft_commit.rs`) |
 | DAG-S5 | `suwappu-consensus` — joint-quorum AND-gate (Theorem 2)     | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_joint_quorum.rs`) |
 | DAG-S6 | `suwappu-authority` + `suwappu-validator` — registries & quorum  | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_quorum.rs`) |
 | DAG-S7 | Equivocation detection + slashing                         | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_slashing.rs`) |
@@ -127,7 +129,7 @@ Update this table when a sprint closes.
 
 ### Branch naming
 
-`<scope>/<short-slug>` — e.g., `crypto/mldsa-acvp`, `consensus/mysticeti-c`,
+`<scope>/<short-slug>` — e.g., `crypto/mldsa-acvp`, `consensus/dagbft-c`,
 `fastpath/equivocation-proof`.
 
 ### Commits
@@ -158,7 +160,7 @@ Invoke these proactively per the rules below.
 | Trigger | Subagent | Why |
 |---|---|---|
 | Changes to `suwappu-crypto` | `crypto-reviewer` | PQ correctness + side-channels |
-| Changes to `suwappu-consensus` | `consensus-reviewer` | DAG topology + Mysticeti commit rule |
+| Changes to `suwappu-consensus` | `consensus-reviewer` | DAG topology + DagBft-C commit rule |
 | Changes to `suwappu-fastpath` | `fastpath-auditor` | Equivocation proof completeness |
 | Changes to `suwappu-transport` | `transport-auditor` | SCION path auth + RaptorQ |
 | Changes touching joint-quorum logic | `consensus-reviewer` + `crypto-reviewer` | Theorem 2 dependence |

@@ -1,7 +1,7 @@
 //! Validator daemon — main DAG lane.
 //!
 //! Composes the wire transport, DAG store, joint-quorum voter, and block
-//! executor into a single running process. Drives Mysticeti-C rounds on a
+//! executor into a single running process. Drives DagBft-C rounds on a
 //! tokio interval and surfaces per-event timestamps to the [`EventLog`].
 //!
 //! Scope of this module is the **main lane only**: cert proposal, vote
@@ -489,7 +489,7 @@ impl State {
 }
 
 /// Count distinct authors with a cert at `round` in the local DAG.
-/// Mysticeti-C admits round R+1 once `quorum_threshold(n)` distinct
+/// DagBft-C admits round R+1 once `quorum_threshold(n)` distinct
 /// authors are observed at round R. Free function (was on `&State`
 /// pre-S31.2) because the caller now passes the DAG read guard.
 fn distinct_authors_at(dag: &DagStore, round: u64, n_authorities: u32) -> u32 {
@@ -1659,7 +1659,7 @@ async fn apply_governance_intent(
 
 /// Byzantine fault tolerance: f = floor((n-1)/3). The minimum number of
 /// honest parents needed to make safe progress under partial synchrony is
-/// `f + 1` — Mysticeti-C §6.2 fallback.
+/// `f + 1` — DagBft-C §6.2 fallback.
 fn f_plus_one(n: u32) -> u32 {
     (n - 1) / 3 + 1
 }

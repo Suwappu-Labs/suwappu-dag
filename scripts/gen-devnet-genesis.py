@@ -68,7 +68,7 @@ def main() -> int:
         "--num-nodes",
         type=int,
         default=4,
-        help="Number of validators (default 4 — Mysticeti n=4 minimum).",
+        help="Number of validators (default 4 — DagBft n=4 minimum).",
     )
     ap.add_argument(
         "--out-dir",
@@ -104,7 +104,7 @@ def main() -> int:
 
     if args.num_nodes < 4:
         print(
-            "warning: <4 nodes selected; Mysticeti-C BFT needs n=3f+1 ≥ 4 for liveness",
+            "warning: <4 nodes selected; DagBft-C BFT needs n=3f+1 ≥ 4 for liveness",
             file=sys.stderr,
         )
     if args.num_nodes > 16:

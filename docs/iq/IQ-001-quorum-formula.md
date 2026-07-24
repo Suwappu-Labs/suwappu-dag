@@ -7,7 +7,7 @@
 
 ## Question
 
-What is the correct integer encoding of the Mysticeti-C commit-rule quorum
+What is the correct integer encoding of the DagBft-C commit-rule quorum
 threshold for an Authority Ring of size `n`?
 
 ## Background

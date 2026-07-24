@@ -1,4 +1,4 @@
-# Mysticeti-C commit rule — direct + indirect + orphan window
+# DagBft-C commit rule — direct + indirect + orphan window
 
 Covers `crates/suwappu-consensus/src/commit.rs` end-to-end: `try_direct_decide`,
 `try_indirect_decide`, `decide_slot`, `causal_history`. Highlights the

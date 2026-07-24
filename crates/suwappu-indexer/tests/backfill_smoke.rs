@@ -142,7 +142,7 @@ async fn catch_up_skips_already_indexed_rounds() {
 
 #[tokio::test]
 async fn catch_up_handles_skip_rounds() {
-    // Round 2 is Skip — Mysticeti-C legitimate gap.
+    // Round 2 is Skip — DagBft-C legitimate gap.
     let chain = MockChain {
         blocks: Arc::new(vec![
             Some(bv(0, "00", vec![])),

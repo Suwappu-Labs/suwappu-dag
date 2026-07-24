@@ -269,7 +269,7 @@ in the foundation board's emergency-procedure handbook.
 
 The `AUTHORITY_RING_MAX = 50` constant at
 `crates/suwappu-authority/src/lib.rs:38` is a Paper §5.1 ceiling, NOT
-a Mysticeti-C protocol constraint. The consensus paths handle
+a DagBft-C protocol constraint. The consensus paths handle
 arbitrary `n`.
 
 To raise the ceiling:

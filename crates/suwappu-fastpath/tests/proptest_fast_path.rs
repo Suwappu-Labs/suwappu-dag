@@ -13,7 +13,7 @@
 //!   the lineage round signals inconsistency.
 //! - `conflict_beyond_k_rounds_preserves_binding` — the same conflict
 //!   strictly beyond the binding window does NOT signal inconsistency
-//!   (it is the main-lane Mysticeti-C commit rule's responsibility).
+//!   (it is the main-lane DagBft-C commit rule's responsibility).
 //!
 //! Run at default 256 cases under CI; sprint close runs
 //! `PROPTEST_CASES=10000 cargo test -p suwappu-fastpath --release`.
@@ -130,7 +130,7 @@ proptest! {
     }
 
     /// The same conflict strictly past `R + K` does NOT signal
-    /// inconsistency. The main-lane Mysticeti-C commit rule handles it.
+    /// inconsistency. The main-lane DagBft-C commit rule handles it.
     #[test]
     fn conflict_beyond_k_rounds_preserves_binding(
         n_authorities in 3u32..=50,

@@ -1,17 +1,28 @@
-//! suwappu-consensus — Mysticeti-C certificate DAG consensus.
+//! suwappu-consensus — DagBft-C certificate DAG consensus.
+//!
+//! `DagBft-C` is an independent implementation. Its commit rule and
+//! quorum formula are design-inspired by Mysticeti (Babel, Chursin,
+//! Danezis, Kichidis, Kokoris-Kogias, Sonnino, Yin — "Mysticeti: Reaching
+//! the Limits of Latency with Uncertified DAGs," arXiv:2310.14821), the
+//! consensus protocol live on Sui mainnet (`consensus/core` in
+//! `MystenLabs/sui`, Apache 2.0). We reuse the *ideas* — an uncertified
+//! DAG with deterministic finality via a hash-based commit rule — not
+//! Mysten Labs' name, code, or any claim of shared lineage; this is a
+//! from-scratch implementation for a different chain and threat model.
 //!
 //! Implements §6 of the *SUWAPPU DAG Layer 1* paper:
 //!
 //! - §6.1 certificate-DAG topology
-//! - §6.2 Mysticeti-C selection rationale (Apache 2.0, Sui-mainnet validated,
-//!   uncertified-DAG deterministic finality, post-quantum-friendly hash surface)
+//! - §6.2 DagBft-C selection rationale (Apache 2.0-licensed prior art,
+//!   Sui-mainnet-validated design pattern, uncertified-DAG deterministic
+//!   finality, post-quantum-friendly hash surface)
 //! - §6.3 inter-validator transport boundary (delegated to `suwappu-transport`)
 //! - §6.4 fast-path lane boundary (delegated to `suwappu-fastpath`)
 //!
 //! Sprint scope:
 //!
 //! - DAG-S3: certificate types, DAG store, deterministic linearization ✅
-//! - DAG-S4: Mysticeti-C commit rule, fork-choice
+//! - DAG-S4: DagBft-C commit rule, fork-choice
 //! - DAG-S5: joint-quorum AND-gate over Authority Ring + Validator Ring
 //!   certificates (paper Theorem 2)
 //!

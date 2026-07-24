@@ -25,7 +25,7 @@ academic reviewers post-mainnet.
 
 Track H's confidential-transfer construction is **the first
 production deployment** of a PQ-confidential L2 paradigm on
-an SP1 + Mysticeti rollup. No prior production exists; the
+an SP1 + DagBft rollup. No prior production exists; the
 closest academic precedent is Lether (eprint 2026/076), which
 is research-stage.
 

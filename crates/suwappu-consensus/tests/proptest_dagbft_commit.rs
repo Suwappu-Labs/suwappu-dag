@@ -1,6 +1,6 @@
 //! DAG-S4 exit-gate property tests.
 //!
-//! Exit gate: `mysticeti_c_finality` — once a leader is committed, no DAG
+//! Exit gate: `dagbft_c_finality` — once a leader is committed, no DAG
 //! extension can uncommit it. This is the load-bearing finality property
 //! of the paper's §6.2 commit rule.
 //!
@@ -80,7 +80,7 @@ proptest! {
     /// certificates at later rounds, or more witnesses at round `r+1`,
     /// only grows the supporter set. The commit decision is monotone.
     #[test]
-    fn mysticeti_c_finality(
+    fn dagbft_c_finality(
         n_authorities in 1u32..=8,
         n_rounds in 2u64..=6,
         payload_seed in any::<u64>(),

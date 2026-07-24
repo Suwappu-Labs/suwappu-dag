@@ -3,7 +3,7 @@
 ```mermaid
 flowchart LR
   Users["Users / Apps"] --> DAG["suwappu-dag"]
-  DAG --> C["Consensus<br/>Mysticeti-C DAG"]
+  DAG --> C["Consensus<br/>DagBft-C DAG"]
   C --> E["Execution<br/>Dual VM"]
   E --> DB["suwappu-db<br/>Canonical state lattice"]
   DB --> LTP["LTP<br/>Commit / Lattice / Materialize"]

@@ -10,7 +10,7 @@ flowchart TB
     S1[DAG-S1 — suwappu-crypto<br/>ML-DSA-65, ML-KEM-768,<br/>BLS, SHA3-256]
     S2[DAG-S2 — suwappu-transport<br/>RaptorQ in-memory]
     S3[DAG-S3 — suwappu-consensus<br/>DAG store + voting]
-    S4[DAG-S4 — suwappu-consensus<br/>Mysticeti-C commit rule]
+    S4[DAG-S4 — suwappu-consensus<br/>DagBft-C commit rule]
     S5[DAG-S5 — joint-quorum<br/>AND-gate Theorem 2]
     S6[DAG-S6 — authority +<br/>validator registries]
     S7[DAG-S7 — equivocation<br/>+ slashing]
@@ -66,7 +66,7 @@ diagram + exit-gate registry.
 | DAG-S1 ✅ | suwappu-crypto | (lib) | 7 properties × 10k cases (sign/verify, encap/decap, aggregate, domain-sep) |
 | DAG-S2 | suwappu-transport | `raptorq` | `raptorq_reconstructs_under_loss` |
 | DAG-S3 | suwappu-consensus | `dag`, `cert` | `dag_topological_order_unique` |
-| DAG-S4 | suwappu-consensus | `commit_rule` | `mysticeti_c_finality` |
+| DAG-S4 | suwappu-consensus | `commit_rule` | `dagbft_c_finality` |
 | DAG-S5 | suwappu-consensus | `joint_quorum` | `joint_quorum_safety` (Theorem 2) |
 | DAG-S6 | suwappu-authority, suwappu-validator | `registry`, `quorum` | `quorum_math_matches_paper` |
 | DAG-S7 | suwappu-authority, suwappu-validator | `slashing` | `equivocation_proof_slashes` |
@@ -108,7 +108,7 @@ for the canonical day-to-day status.
 | Phase | Sprints | Outcome |
 |---|---|---|
 | Phase A: foundations | DAG-S1, S2 | Crypto + transport primitives sealed |
-| Phase B: consensus | DAG-S3 → S9 | Mysticeti-C + dual-ring + fast-path with slashing |
+| Phase B: consensus | DAG-S3 → S9 | DagBft-C + dual-ring + fast-path with slashing |
 | Phase C: execution | DAG-S10, S11 | suwappu-db wired in; checkpoint co-signature live |
 | Phase D: application | DAG-S12 → S14 | Precompiles for identity + issuance + reserve |
 | Phase E: cross-chain | DAG-S15 → S17 | LTP attestation + DA SLA + DID STARK |
@@ -117,7 +117,7 @@ for the canonical day-to-day status.
 
 ## Phase-1 invariants — full list
 
-The chain enforces these at every Mysticeti round:
+The chain enforces these at every DagBft round:
 
 1. **Joint-quorum AND-gate** (DAG-S5) — safety violation requires Byzantine
    corruption of both rings simultaneously.

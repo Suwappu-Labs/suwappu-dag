@@ -845,7 +845,7 @@ pub trait Substrate {
     /// guaranteed identical to before the call (atomicity).
     fn apply_intent(&mut self, intent: &Intent) -> Result<(), ExecutionError>;
 
-    /// Ambient Mysticeti round at which intents are being
+    /// Ambient DagBft round at which intents are being
     /// applied. Used by lifecycle gates that need a height
     /// (e.g., the exit-cooldown gate on
     /// `WithdrawAuthorityStake` / `WithdrawValidatorStake`).

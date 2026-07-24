@@ -6,7 +6,7 @@
 //! 1. Every validator authors a round-0 genesis cert.
 //! 2. Every validator authors a round-1 cert referencing all round-0
 //!    certs as parents.
-//! 3. The Mysticeti-C commit rule fires on the round-0 leader at
+//! 3. The DagBft-C commit rule fires on the round-0 leader at
 //!    round 1.
 //! 4. Every validator executes the same block and converges on the
 //!    same state root.

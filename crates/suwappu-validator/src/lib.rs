@@ -3,7 +3,7 @@
 //! Implements §5.2 of the *SUWAPPU DAG Layer 1* paper:
 //!
 //! - 100–500 stake-weighted open participants
-//! - Validators ratify ordering, vote on Mysticeti commit rounds, enforce slashing
+//! - Validators ratify ordering, vote on DagBft commit rounds, enforce slashing
 //! - 25,000 SUWAPPU genesis stake threshold per member
 //! - Open admission subject to stake threshold, uptime, and key-management standard
 //!
