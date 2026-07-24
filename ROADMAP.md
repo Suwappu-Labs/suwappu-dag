@@ -28,6 +28,15 @@ and [`CHANGELOG.md`](./CHANGELOG.md) (released versions).
 
 - v8 academic paper ratified in
   `Suwappu-Labs/suwappu-papers/papers/dag-l1` (`suwappu_dag_l1_academic_v7.pdf`).
+  **Note:** `Suwappu-Labs/suwappu-papers` was never published/created — this citation is
+  currently dangling. The companion LTP paper below did ship, as
+  `suwappu-lattice-protocol/docs/WHITEPAPER.md`; the dag-l1 academic paper itself
+  remains unpublished. For the tokenomics questions this ROADMAP cites below
+  (Tokenomics §3/§4/§8), see
+  [`suwappu-lattice-protocol/docs/economics/UNIFIED_TOKENOMICS.md`](https://github.com/Suwappu-Labs/suwappu-lattice-protocol/blob/main/docs/economics/UNIFIED_TOKENOMICS.md)
+  for the token-identity resolution (SUWAPPU = SUWP) — the detailed inflation /
+  delegated-PoS / slashing-waterfall formulas those sections cite are still an open gap,
+  tracked as a follow-up there.
 - Companion LTP paper in `suwappu_ltp_academic_v7.pdf`.
 - Repo bootstrap: workspace layout, crate skeletons, CI matrix
   (rustfmt / clippy / test / cargo-deny), collaboration contract in
