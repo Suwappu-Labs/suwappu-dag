@@ -102,3 +102,6 @@ divergence is a bug, not a "the formula was unclear" defence.
   (the only way to earn the bug-bounty tier).
 - [`../whitepaper/`](../whitepaper/) — token economic design
   (forthcoming; testnet allocation lives here).
+- [`suwappu-lattice-protocol/docs/economics/UNIFIED_TOKENOMICS.md`](https://github.com/Suwappu-Labs/suwappu-lattice-protocol/blob/main/docs/economics/UNIFIED_TOKENOMICS.md) —
+  confirms "mainnet token" above is SUWP, the same asset as suwappubot's Seasons
+  token and this chain's native `_suwappu`-denominated genesis/staking fields.
