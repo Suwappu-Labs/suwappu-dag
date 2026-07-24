@@ -102,6 +102,8 @@ divergence is a bug, not a "the formula was unclear" defence.
   (the only way to earn the bug-bounty tier).
 - [`../whitepaper/`](../whitepaper/) — token economic design
   (forthcoming; testnet allocation lives here).
-- [`suwappu-lattice-protocol/docs/economics/UNIFIED_TOKENOMICS.md`](https://github.com/Suwappu-Labs/suwappu-lattice-protocol/blob/main/docs/economics/UNIFIED_TOKENOMICS.md) —
-  confirms "mainnet token" above is SUWP, the same asset as suwappubot's Seasons
-  token and this chain's native `_suwappu`-denominated genesis/staking fields.
+- [`suwappu-lattice-protocol/docs/economics/DEFERRED_TOKEN_ARCHITECTURE.md`](https://github.com/Suwappu-Labs/suwappu-lattice-protocol/blob/main/docs/economics/DEFERRED_TOKEN_ARCHITECTURE.md) —
+  a "mainnet token" here is not a given: mainnet validator security is designed to
+  bootstrap via bonded/restaked stablecoins, with any native token (SUWP or otherwise)
+  deferred until after the bridge and chain have real usage to design its economics
+  from. Treat this testnet allocation formula as provisional pending that decision.

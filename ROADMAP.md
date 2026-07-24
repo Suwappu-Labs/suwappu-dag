@@ -33,10 +33,12 @@ and [`CHANGELOG.md`](./CHANGELOG.md) (released versions).
   `suwappu-lattice-protocol/docs/WHITEPAPER.md`; the dag-l1 academic paper itself
   remains unpublished. For the tokenomics questions this ROADMAP cites below
   (Tokenomics §3/§4/§8), see
-  [`suwappu-lattice-protocol/docs/economics/UNIFIED_TOKENOMICS.md`](https://github.com/Suwappu-Labs/suwappu-lattice-protocol/blob/main/docs/economics/UNIFIED_TOKENOMICS.md)
-  for the token-identity resolution (SUWAPPU = SUWP) — the detailed inflation /
-  delegated-PoS / slashing-waterfall formulas those sections cite are still an open gap,
-  tracked as a follow-up there.
+  [`suwappu-lattice-protocol/docs/economics/DEFERRED_TOKEN_ARCHITECTURE.md`](https://github.com/Suwappu-Labs/suwappu-lattice-protocol/blob/main/docs/economics/DEFERRED_TOKEN_ARCHITECTURE.md) —
+  chain-launch validator security bootstraps via bonded/restaked stablecoins rather than
+  a freshly-premined SUWP stake; a native token (if any) is deferred until after real
+  usage exists. The detailed inflation / delegated-PoS / slashing-waterfall formulas
+  these sections cite are accordingly an open design question, not just an open gap —
+  they're deferred by design, not just unwritten.
 - Companion LTP paper in `suwappu_ltp_academic_v7.pdf`.
 - Repo bootstrap: workspace layout, crate skeletons, CI matrix
   (rustfmt / clippy / test / cargo-deny), collaboration contract in
