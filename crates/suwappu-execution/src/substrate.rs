@@ -21,6 +21,17 @@ pub type Address = [u8; 20];
 /// Balance type. `u128` matches the canonical `suwappu-db::BalanceSlot` storage.
 pub type Balance = u128;
 
+/// Fixed maximum SUWP supply, enforced on-chain against
+/// `Intent::MintInflation`. Per
+/// `suwappu-lattice-protocol/docs/economics/UNIFIED_TOKENOMICS.md`,
+/// SUWAPPU (this chain's native gas/stake unit) and SUWP
+/// (suwappubot's Seasons token) are the same asset, and SUWP's
+/// committed max supply — set in `suwappubot`'s
+/// `docs/economics/SEASONS_TOKENOMICS.md` §4 — is 1,000,000,000.
+/// `Intent::MintInflation` may not push `total_supply()` past this
+/// ceiling; see `ExecutionError::InflationExceedsMaxSupply`.
+pub const MAX_SUPPLY: Balance = 1_000_000_000;
+
 /// Basis points drained from the sequencer's liveness bond per
 /// missed force-include deadline. 500 bps = 5% per the SLA doc §3
 /// medium-tier band. Capped at 50% drained before
@@ -1699,6 +1710,23 @@ impl Substrate for InMemorySubstrate {
                     return Err(ExecutionError::InflationEpochAlreadyMinted {
                         attempted_epoch: epoch,
                         last_minted_epoch: last_epoch,
+                    });
+                }
+                // Max-supply cap: SUWP is fixed at MAX_SUPPLY (see
+                // its doc comment). Checked against saturating
+                // arithmetic so a maliciously huge share triple
+                // can't wrap u128 and slip past the comparison —
+                // saturating_add pins at u128::MAX, which is always
+                // > MAX_SUPPLY, so the check still rejects.
+                let attempted_mint = authority_share
+                    .saturating_add(*validator_share)
+                    .saturating_add(*treasury_share);
+                let current_supply = self.total_supply();
+                if current_supply.saturating_add(attempted_mint) > MAX_SUPPLY {
+                    return Err(ExecutionError::InflationExceedsMaxSupply {
+                        attempted_mint,
+                        current_supply,
+                        max_supply: MAX_SUPPLY,
                     });
                 }
                 // Atomic across all three credits: if any of
@@ -8218,6 +8246,76 @@ mod tests {
         ));
     }
 
+    /// A mint that fits exactly at MAX_SUPPLY succeeds, and the
+    /// registry counter advances.
+    #[test]
+    fn mint_inflation_exact_fit_at_max_supply_succeeds() {
+        let mut s = InMemorySubstrate::new();
+        s.apply_intent(&Intent::GenesisAllocation {
+            allocations: vec![(reserved::treasury_address(), MAX_SUPPLY - 100)],
+        })
+        .unwrap();
+        s.apply_intent(&Intent::MintInflation {
+            epoch: 1,
+            authority_share: 60,
+            validator_share: 30,
+            treasury_share: 10,
+        })
+        .unwrap();
+        assert_eq!(s.total_supply(), MAX_SUPPLY);
+        assert_eq!(s.last_minted_inflation_epoch(), 1);
+    }
+
+    /// A mint that would push total_supply() past MAX_SUPPLY by
+    /// even 1 unit is rejected atomically: no pool is credited and
+    /// the epoch counter does not advance.
+    #[test]
+    fn mint_inflation_exceeding_max_supply_rejected() {
+        let mut s = InMemorySubstrate::new();
+        s.apply_intent(&Intent::GenesisAllocation {
+            allocations: vec![(reserved::treasury_address(), MAX_SUPPLY - 100)],
+        })
+        .unwrap();
+        let err = s.apply_intent(&Intent::MintInflation {
+            epoch: 1,
+            authority_share: 60,
+            validator_share: 30,
+            treasury_share: 11,
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::InflationExceedsMaxSupply {
+                attempted_mint: 101,
+                current_supply,
+                max_supply: MAX_SUPPLY,
+            }) if current_supply == MAX_SUPPLY - 100
+        ));
+        // Rejected atomically: no pool credited, counter unchanged.
+        assert_eq!(s.balance(&reserved::authority_rewards_pool_address()), 0);
+        assert_eq!(s.balance(&reserved::validator_rewards_pool_address()), 0);
+        assert_eq!(s.total_supply(), MAX_SUPPLY - 100);
+        assert_eq!(s.last_minted_inflation_epoch(), 0);
+    }
+
+    /// A pathologically huge share triple that would wrap u128 via
+    /// naive addition is still rejected (saturating_add pins at
+    /// u128::MAX, which is always > MAX_SUPPLY).
+    #[test]
+    fn mint_inflation_overflowing_shares_rejected_not_wrapped() {
+        let mut s = InMemorySubstrate::new();
+        let err = s.apply_intent(&Intent::MintInflation {
+            epoch: 1,
+            authority_share: u128::MAX,
+            validator_share: u128::MAX,
+            treasury_share: 1,
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::InflationExceedsMaxSupply { .. })
+        ));
+        assert_eq!(s.total_supply(), 0);
+    }
+
     /// Sparse epochs (1 → 100) succeed — no contiguity gate.
     #[test]
     fn mint_inflation_sparse_epochs_succeed() {
@@ -8626,14 +8724,20 @@ mod tests {
     // overflow and assert the substrate state is byte-identical
     // to the pre-arm snapshot via state_root.
 
-    /// MintInflation: if the third credit (treasury) would
-    /// overflow, the prior two credits are rolled back and
-    /// the epoch counter does NOT bump.
+    /// MintInflation: a treasury balance near u128::MAX is a
+    /// pre-cap-era scenario — since MAX_SUPPLY (1e9) is far below
+    /// u128's range, any total_supply anywhere near u128::MAX
+    /// already violates the max-supply cap by an astronomical
+    /// margin, so `InflationExceedsMaxSupply` now fires before the
+    /// per-credit overflow path is ever reached. Pool balances are
+    /// unchanged and the epoch counter does NOT bump either way.
+    /// (The underlying atomic-rollback-on-overflow mechanism in
+    /// `credit_many_atomic` is still exercised directly via
+    /// `GenesisAllocation`, which isn't max-supply-capped — see
+    /// the test below.)
     #[test]
-    fn mint_inflation_overflow_rolls_back_atomically() {
+    fn mint_inflation_near_u128_max_supply_rejected_by_cap() {
         let mut s = InMemorySubstrate::new();
-        // Park the treasury at u128::MAX so any non-zero
-        // credit overflows.
         s.apply_intent(&Intent::GenesisAllocation {
             allocations: vec![(reserved::treasury_address(), Balance::MAX)],
         })
@@ -8647,7 +8751,7 @@ mod tests {
         });
         assert!(matches!(
             err,
-            Err(ExecutionError::DistributionOverflow { .. })
+            Err(ExecutionError::InflationExceedsMaxSupply { .. })
         ));
         assert_eq!(s.state_root(), before);
         // Pool balances unchanged.
