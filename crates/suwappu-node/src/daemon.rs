@@ -91,6 +91,14 @@ pub(crate) struct State {
     /// content dedup, capacity floor with priority-ordered eviction,
     /// and TTL expiry. See `crates/suwappu-mempool/src/lib.rs`.
     pub(crate) mempool: std::sync::Arc<suwappu_mempool::Mempool>,
+    /// This validator's own ML-DSA-65 secret key, loaded unconditionally from
+    /// `NodeConfig::mldsa_secret_key_path` at startup (that field is required,
+    /// not optional — every validator must be able to author signed
+    /// certificates). Used by the round driver to sign every self-authored
+    /// `Certificate` before broadcast; gossip-received certificates are
+    /// verified against the author's genesis-registered public key in
+    /// `ingest_cert`, not against this key.
+    pub(crate) self_secret_key: suwappu_crypto::mldsa::SecretKey,
     /// Bridge header-attestation signer, or `None` when header attestation is
     /// not configured (no `bridge_oracle_address`, or the ML-DSA key could not
     /// be loaded). When `None`, `suwappu_getHeaderAttestation` returns `null`.
@@ -415,7 +423,11 @@ fn load_corridors(manifest: &GenesisManifest) -> HashMap<(ChainId, ChainId), Cor
 }
 
 impl State {
-    fn new(manifest: &GenesisManifest, bridge_signer: Option<BridgeHeaderSigner>) -> Self {
+    fn new(
+        manifest: &GenesisManifest,
+        self_secret_key: suwappu_crypto::mldsa::SecretKey,
+        bridge_signer: Option<BridgeHeaderSigner>,
+    ) -> Self {
         let mut stake_table = StakeTable::new();
         let mut authority_registry = AuthorityRegistry::new();
         let mut validator_registry = ValidatorRegistry::new();
@@ -477,6 +489,7 @@ impl State {
             mempool: std::sync::Arc::new(suwappu_mempool::Mempool::new(
                 suwappu_mempool::MempoolConfig::default(),
             )),
+            self_secret_key,
             bridge_signer,
             bridge_attestation_cache: parking_lot::Mutex::new(None),
         }
@@ -555,11 +568,26 @@ impl Daemon {
             tasks: mut wire_tasks,
         } = wire.split();
         let outbound = Arc::new(outbound);
-        // First runtime use of the validator's ML-DSA key: load it (if header
+        // Load this validator's own ML-DSA-65 secret key. Unlike the bridge
+        // signer below (which fails open — header attestation is optional),
+        // this load is fatal: `mldsa_secret_key_path` is a required
+        // `NodeConfig` field, and a validator that cannot sign cannot author
+        // certificates every peer's `ingest_cert` verify-gate will accept.
+        let self_secret_key = std::fs::read(&cfg.mldsa_secret_key_path)
+            .ok()
+            .and_then(|raw| load_mldsa_secret(&raw))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "cannot load ML-DSA-65 secret key from mldsa_secret_key_path {:?}",
+                    cfg.mldsa_secret_key_path
+                )
+            })?;
+        // First runtime use of the validator's ML-DSA key for the (separate,
+        // optional) bridge-attestation surface: load it (if header
         // attestation is configured) so the RPC adapter can sign bridge
         // headers. `None` => attestation disabled; the daemon still runs.
         let bridge_signer = BridgeHeaderSigner::from_config(&cfg, &manifest);
-        let state = Arc::new(State::new(&manifest, bridge_signer));
+        let state = Arc::new(State::new(&manifest, self_secret_key, bridge_signer));
 
         // DAG-S31.4 / A3: client + JSON-RPC intent submissions flow
         // through `state.mempool` directly. The pre-A3 `intent_tx` /
@@ -791,6 +819,32 @@ async fn ingest_cert(
     while let Some(c) = work.pop() {
         let h = c.hash();
         let round = c.round;
+
+        // DAG-S6 / epic item 2: verify the author's signature against their
+        // genesis-registered public key before admission. A cert that fails
+        // this is never inserted, never cascades through the orphan buffer,
+        // and is never served to other peers via `GetCert` — the network
+        // effectively never gossips it further, satisfying "reject /
+        // don't-gossip on failure" without needing an explicit relay step
+        // (this daemon doesn't push-relay certs; peers pull via GetCert).
+        let author_pubkey = state
+            .authority_registry
+            .read()
+            .await
+            .get(c.author)
+            .and_then(|m| suwappu_crypto::mldsa::PublicKey::from_bytes(&m.public_key_bytes).ok());
+        match author_pubkey {
+            Some(pk) if c.verify_signature(&pk) => {}
+            Some(_) => {
+                debug!(peer = %from.0, author = c.author, round, "inbox: cert signature verification failed");
+                continue;
+            }
+            None => {
+                debug!(peer = %from.0, author = c.author, round, "inbox: cert author not a seated authority (or malformed registered key)");
+                continue;
+            }
+        }
+
         // Acquire dag write lock briefly for the insert.
         let insert_result = state.dag.write().await.insert(c.clone());
         match insert_result {
@@ -1761,21 +1815,14 @@ async fn run_round_driver(
             state.mempool.drain_for_block(MAX_INTENTS_PER_BLOCK);
         let payload_digest: [u8; 32] =
             blake3::hash(&crate::codec::encode(&intents).expect("intents serialize")).into();
-        // NOTE: not yet signed. `Certificate::sign` exists (suwappu-consensus
-        // DAG-S6), and this daemon's `BridgeHeaderSigner` already proves the
-        // key-loading + genesis-pubkey-binding pattern this needs, but a
-        // general (bridge-config-independent) signing key on `State` and
-        // signature verification on the gossip-admission path are follow-up
-        // work — this cert is deliberately left unsigned rather than signed
-        // with a placeholder key, so nothing here looks verified when it
-        // isn't. See tasks/pq-competitive-gaps-epic.md item 2.
-        let cert = Certificate {
+        let mut cert = Certificate {
             author: self_id,
             round: target_round,
             parents,
             payload_digest,
             signature: Vec::new(),
         };
+        cert.sign(&state.self_secret_key);
         let cert_hash = cert.hash();
 
         // Per-intent hashes for the `tx_to_block` secondary index.
@@ -1849,6 +1896,24 @@ mod tests {
 
     use super::*;
     use crate::config::{GenesisValidator, Peer};
+
+    /// Write an ML-DSA-65 secret key's raw bytes to a fresh temp file and
+    /// return its path, for use as `NodeConfig::mldsa_secret_key_path` — the
+    /// daemon now loads and requires this key at startup (DAG-S6 / epic item
+    /// 2), so every test that starts a real `Daemon` needs a real key file
+    /// on disk, not the pre-signing-era `"/dev/null"` placeholder.
+    fn write_mldsa_key_file(sk: &suwappu_crypto::mldsa::SecretKey) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "suwappu-node-test-mldsa-sk-{}-{}.bin",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::write(&path, sk.as_bytes()).expect("write test mldsa secret key file");
+        path
+    }
 
     /// Bridge header-attestation key-loading + hex helpers, and a full
     /// create→verify roundtrip under a key loaded the way `from_config` loads
@@ -1999,7 +2064,7 @@ mod tests {
             peers: vec![],
             round_ms: 500,
             checkpoint_cadence_rounds: 1,
-            mldsa_secret_key_path: "/dev/null".into(),
+            mldsa_secret_key_path: write_mldsa_key_file(&sk),
             bls_secret_key_path: "/dev/null".into(),
             genesis_manifest_path: "/dev/null".into(),
             event_log_path: std::env::temp_dir().join("suwappu-client-test.ndjson"),
@@ -2084,7 +2149,7 @@ mod tests {
             peers: vec![],
             round_ms: 500,
             checkpoint_cadence_rounds: 1,
-            mldsa_secret_key_path: "/dev/null".into(),
+            mldsa_secret_key_path: write_mldsa_key_file(&sk),
             bls_secret_key_path: "/dev/null".into(),
             genesis_manifest_path: "/dev/null".into(),
             event_log_path: std::env::temp_dir().join("suwappu-client-batch-test.ndjson"),
@@ -2144,16 +2209,30 @@ mod tests {
         let n = 4u32;
         let base_port: u16 = 19_000;
 
+        // DAG-S6: each validator now signs its own certs and every peer
+        // verifies against the genesis-registered key, so each of the 4
+        // needs a real, distinct keypair rather than a shared placeholder.
+        let keypairs: Vec<(suwappu_crypto::mldsa::PublicKey, suwappu_crypto::mldsa::SecretKey)> =
+            (0..n).map(|_| suwappu_crypto::mldsa::keypair()).collect();
+
         let manifest = GenesisManifest {
             network_id: "test-4n".into(),
             validators: (0..n)
                 .map(|i| GenesisValidator {
                     authority_id: i,
                     label: format!("v{}", i),
-                    mldsa_public_key_hex: "00".into(),
+                    mldsa_public_key_hex: hex::encode(keypairs[i as usize].0.as_bytes()),
                     bls_public_key_hex: "00".into(),
-                    validator_stake_suwappu: 1_000,
-                    authority_stake_suwappu: 1_000,
+                    // Must clear AUTHORITY_STAKE_THRESHOLD_SUWAPPU (100_000):
+                    // previously a silently-failed admission (just a
+                    // `tracing::warn!`) didn't matter because certs weren't
+                    // checked against the registry at all. Now that
+                    // `ingest_cert` verifies every cert's signature against
+                    // the author's registered key, an unadmitted authority
+                    // means every one of its certs is rejected and consensus
+                    // never commits.
+                    validator_stake_suwappu: 150_000,
+                    authority_stake_suwappu: 150_000,
                 })
                 .collect(),
             corridors: Vec::new(),
@@ -2184,7 +2263,7 @@ mod tests {
                 peers,
                 round_ms: 100,
                 checkpoint_cadence_rounds: 1,
-                mldsa_secret_key_path: "/dev/null".into(),
+                mldsa_secret_key_path: write_mldsa_key_file(&keypairs[i as usize].1),
                 bls_secret_key_path: "/dev/null".into(),
                 genesis_manifest_path: "/dev/null".into(),
                 event_log_path: std::env::temp_dir()
@@ -2251,8 +2330,17 @@ mod tests {
         // Issue #28 (Phase 2.6): generate a real ML-DSA-65 keypair
         // for v0 so the loadgen client can sign AdmitAuthority /
         // EjectAuthority intents that pass the new signature gate.
+        // DAG-S6: this is now ALSO v0's own certificate-authoring key
+        // (its authority identity and its client-signer identity are
+        // the same keypair in this test) — v0's `mldsa_secret_key_path`
+        // below must load `client_sk`, not a separate key.
         let (client_pk, client_sk) = suwappu_crypto::mldsa::keypair();
         let client_pk_hex = hex::encode(client_pk.as_bytes());
+        // v1-v3 need their own real, distinct keypairs too: every cert
+        // they author must now verify against their genesis-registered
+        // key on every peer.
+        let other_keypairs: Vec<(suwappu_crypto::mldsa::PublicKey, suwappu_crypto::mldsa::SecretKey)> =
+            (1..n).map(|_| suwappu_crypto::mldsa::keypair()).collect();
 
         let manifest = GenesisManifest {
             network_id: network_id.to_string(),
@@ -2261,14 +2349,12 @@ mod tests {
                     authority_id: i,
                     label: format!("v{}", i),
                     // v0 carries the loadgen-known pubkey so this
-                    // test's `client.submit(...)` calls verify.
-                    // Other validators carry "00" — they don't need
-                    // to verify their OWN cert authorship in this
-                    // test, only the client wire on v0.
+                    // test's `client.submit(...)` calls verify, and so
+                    // v0's own self-authored certs verify too (same key).
                     mldsa_public_key_hex: if i == 0 {
                         client_pk_hex.clone()
                     } else {
-                        "00".into()
+                        hex::encode(other_keypairs[(i - 1) as usize].0.as_bytes())
                     },
                     bls_public_key_hex: "00".into(),
                     validator_stake_suwappu: 30_000, // ≥ VALIDATOR_STAKE_THRESHOLD_SUWAPPU
@@ -2306,7 +2392,11 @@ mod tests {
                 peers,
                 round_ms: 100,
                 checkpoint_cadence_rounds: 1,
-                mldsa_secret_key_path: "/dev/null".into(),
+                mldsa_secret_key_path: write_mldsa_key_file(if i == 0 {
+                    &client_sk
+                } else {
+                    &other_keypairs[(i - 1) as usize].1
+                }),
                 bls_secret_key_path: "/dev/null".into(),
                 genesis_manifest_path: "/dev/null".into(),
                 event_log_path: std::env::temp_dir()
@@ -2775,7 +2865,7 @@ mod tests {
             peers: vec![],
             round_ms: 500,
             checkpoint_cadence_rounds: 1,
-            mldsa_secret_key_path: "/dev/null".into(),
+            mldsa_secret_key_path: write_mldsa_key_file(&sk),
             bls_secret_key_path: "/dev/null".into(),
             genesis_manifest_path: "/dev/null".into(),
             event_log_path: std::env::temp_dir().join("suwappu-client-auth-test.ndjson"),
@@ -2943,7 +3033,8 @@ mod tests {
             EventLog::start(&std::env::temp_dir().join("suwappu-fastpath-test.ndjson"))
                 .await
                 .unwrap();
-        let state = Arc::new(State::new(&manifest, None));
+        let (_unused_pk, self_sk) = suwappu_crypto::mldsa::keypair();
+        let state = Arc::new(State::new(&manifest, self_sk, None));
         let outbound: HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>> = HashMap::new();
         let self_id: AuthorityId = 0;
 
@@ -3042,7 +3133,8 @@ mod tests {
             EventLog::start(&std::env::temp_dir().join("suwappu-fp-k-binding-test.ndjson"))
                 .await
                 .unwrap();
-        let state = Arc::new(State::new(&manifest, None));
+        let (_unused_pk, self_sk) = suwappu_crypto::mldsa::keypair();
+        let state = Arc::new(State::new(&manifest, self_sk, None));
         let outbound: HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>> = HashMap::new();
         let self_id: AuthorityId = 0;
 
@@ -3148,7 +3240,8 @@ mod tests {
             EventLog::start(&std::env::temp_dir().join("suwappu-ltp-test.ndjson"))
                 .await
                 .unwrap();
-        let state = Arc::new(State::new(&manifest, None));
+        let (_unused_pk, self_sk) = suwappu_crypto::mldsa::keypair();
+        let state = Arc::new(State::new(&manifest, self_sk, None));
 
         let payload = suwappu_ltp::AttestationPayload {
             source_chain: 1u64, // Ethereum
@@ -3249,7 +3342,8 @@ mod tests {
             EventLog::start(&std::env::temp_dir().join("suwappu-ltp-unreg.ndjson"))
                 .await
                 .unwrap();
-        let state = Arc::new(State::new(&manifest, None));
+        let (_unused_pk, self_sk) = suwappu_crypto::mldsa::keypair();
+        let state = Arc::new(State::new(&manifest, self_sk, None));
         assert!(state.inner.lock().await.corridors.is_empty());
 
         let payload = suwappu_ltp::AttestationPayload {
@@ -3285,12 +3379,13 @@ mod tests {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let base_port: u16 = 21_000;
+        let (rpc_pk, rpc_sk) = suwappu_crypto::mldsa::keypair();
         let manifest = GenesisManifest {
             network_id: "rpc-bind-1n".into(),
             validators: vec![GenesisValidator {
                 authority_id: 0,
                 label: "v0".into(),
-                mldsa_public_key_hex: "00".into(),
+                mldsa_public_key_hex: hex::encode(rpc_pk.as_bytes()),
                 bls_public_key_hex: "00".into(),
                 validator_stake_suwappu: 30_000,
                 authority_stake_suwappu: 150_000,
@@ -3307,7 +3402,7 @@ mod tests {
             peers: vec![],
             round_ms: 500,
             checkpoint_cadence_rounds: 1,
-            mldsa_secret_key_path: "/dev/null".into(),
+            mldsa_secret_key_path: write_mldsa_key_file(&rpc_sk),
             bls_secret_key_path: "/dev/null".into(),
             genesis_manifest_path: "/dev/null".into(),
             event_log_path: std::env::temp_dir().join("suwappu-rpc-bind-test.ndjson"),
@@ -3399,7 +3494,7 @@ mod tests {
             peers: vec![],
             round_ms: 500,
             checkpoint_cadence_rounds: 1,
-            mldsa_secret_key_path: "/dev/null".into(),
+            mldsa_secret_key_path: write_mldsa_key_file(&sk),
             bls_secret_key_path: "/dev/null".into(),
             genesis_manifest_path: "/dev/null".into(),
             event_log_path: std::env::temp_dir().join("suwappu-blocks-idx-test.ndjson"),
@@ -3515,7 +3610,7 @@ mod tests {
             peers: vec![],
             round_ms: 500,
             checkpoint_cadence_rounds: 1,
-            mldsa_secret_key_path: "/dev/null".into(),
+            mldsa_secret_key_path: write_mldsa_key_file(&sk),
             bls_secret_key_path: "/dev/null".into(),
             genesis_manifest_path: "/dev/null".into(),
             event_log_path: std::env::temp_dir().join("suwappu-rpc-submit-test.ndjson"),
@@ -3605,7 +3700,11 @@ mod tests {
 
         let base_port: u16 = 21_600;
         let network_id = "rpc-submit-bad-1n".to_string();
-        let (pk, _sk) = suwappu_crypto::mldsa::keypair();
+        // v0's own real keypair — needed so the daemon can sign its own
+        // certs (DAG-S6). The test's "unknown signer" case submits a
+        // CLIENT intent under a *different*, unregistered keypair below;
+        // this one is unrelated to that assertion.
+        let (pk, sk) = suwappu_crypto::mldsa::keypair();
         let pk_hex = hex::encode(pk.as_bytes());
         let manifest = GenesisManifest {
             network_id,
@@ -3629,7 +3728,7 @@ mod tests {
             peers: vec![],
             round_ms: 500,
             checkpoint_cadence_rounds: 1,
-            mldsa_secret_key_path: "/dev/null".into(),
+            mldsa_secret_key_path: write_mldsa_key_file(&sk),
             bls_secret_key_path: "/dev/null".into(),
             genesis_manifest_path: "/dev/null".into(),
             event_log_path: std::env::temp_dir().join("suwappu-rpc-submit-bad-test.ndjson"),
