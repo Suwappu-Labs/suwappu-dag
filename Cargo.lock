@@ -2675,6 +2675,7 @@ name = "suwappu-crypto"
 version = "0.1.0"
 dependencies = [
  "blst",
+ "clap",
  "hex",
  "hkdf",
  "pqcrypto-mldsa",
