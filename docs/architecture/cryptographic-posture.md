@@ -2,6 +2,11 @@
 
 Paper §3.3 + §12. Implemented in [`suwappu-crypto`](../../crates/suwappu-crypto).
 
+This doc covers migrating *away from* classical primitives toward
+ML-DSA-65/ML-KEM-768. For the complementary question — what if
+ML-DSA-65 itself, our only signature scheme, ever needs replacing —
+see [PQ-primitive hedge](pq-hedge.md).
+
 ## Post-quantum-conservative surfaces
 
 The chain is post-quantum-conservative on long-lived confidentiality surfaces
