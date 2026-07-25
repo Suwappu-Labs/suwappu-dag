@@ -230,6 +230,7 @@ mod tests {
             round,
             parents,
             payload_digest: [tag; 32],
+            signature: Vec::new(),
         }
     }
 
@@ -320,6 +321,7 @@ mod tests {
             round: 1,
             parents: vec![g1],
             payload_digest: [0xB0; 32],
+            signature: Vec::new(),
         };
         dag.insert(cert_dup).unwrap();
 

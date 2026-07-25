@@ -1761,11 +1761,20 @@ async fn run_round_driver(
             state.mempool.drain_for_block(MAX_INTENTS_PER_BLOCK);
         let payload_digest: [u8; 32] =
             blake3::hash(&crate::codec::encode(&intents).expect("intents serialize")).into();
+        // NOTE: not yet signed. `Certificate::sign` exists (suwappu-consensus
+        // DAG-S6), and this daemon's `BridgeHeaderSigner` already proves the
+        // key-loading + genesis-pubkey-binding pattern this needs, but a
+        // general (bridge-config-independent) signing key on `State` and
+        // signature verification on the gossip-admission path are follow-up
+        // work — this cert is deliberately left unsigned rather than signed
+        // with a placeholder key, so nothing here looks verified when it
+        // isn't. See tasks/pq-competitive-gaps-epic.md item 2.
         let cert = Certificate {
             author: self_id,
             round: target_round,
             parents,
             payload_digest,
+            signature: Vec::new(),
         };
         let cert_hash = cert.hash();
 

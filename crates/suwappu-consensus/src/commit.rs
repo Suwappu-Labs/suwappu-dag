@@ -354,6 +354,7 @@ mod tests {
             round,
             parents,
             payload_digest: [tag; 32],
+            signature: Vec::new(),
         }
     }
 
@@ -834,6 +835,7 @@ mod tests {
                             round: r,
                             parents: parents.clone(),
                             payload_digest: payload,
+                            signature: Vec::new(),
                         }
                     };
                     if let Ok(h) = dag.insert(cert) {
@@ -856,6 +858,7 @@ mod tests {
                                 round: r,
                                 parents: parents.clone(),
                                 payload_digest: payload2,
+                                signature: Vec::new(),
                             }
                         };
                         if let Ok(h2) = dag.insert(cert2) {
