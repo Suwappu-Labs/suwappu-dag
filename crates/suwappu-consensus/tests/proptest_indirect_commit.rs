@@ -94,6 +94,7 @@ fn build_sparse_dag(
                     round: r as Round,
                     parents,
                     payload_digest: payload,
+                    signature: Vec::new(),
                 }
             };
             this_round.push(cert.hash());

@@ -69,6 +69,7 @@ fn build_dag(
                 round: r as Round,
                 parents: parents.clone(),
                 payload_digest: payload,
+                signature: Vec::new(),
             };
             this_round.push(cert.hash());
             all_certs.push(cert);

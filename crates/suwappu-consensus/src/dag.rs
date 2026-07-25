@@ -188,6 +188,7 @@ mod tests {
             round: 1,
             parents: vec![CertHash([0xFF; 32])],
             payload_digest: [0; 32],
+            signature: Vec::new(),
         };
         match store.insert(cert) {
             Err(ConsensusError::UnknownParent(_)) => {}
@@ -207,6 +208,7 @@ mod tests {
             round: 0,
             parents: vec![g_hash],
             payload_digest: [1; 32],
+            signature: Vec::new(),
         };
         // This first hits the genesis-with-parents rule (since round == 0),
         // which is the correct rejection. Test the monotonicity path with
@@ -219,6 +221,7 @@ mod tests {
             round: 1,
             parents: vec![g_hash],
             payload_digest: [1; 32],
+            signature: Vec::new(),
         };
         let r1_hash = store.insert(r1).unwrap();
 
@@ -229,6 +232,7 @@ mod tests {
             round: 1,
             parents: vec![r1_hash],
             payload_digest: [2; 32],
+            signature: Vec::new(),
         };
         match store.insert(bad) {
             Err(ConsensusError::NonMonotonicRound {

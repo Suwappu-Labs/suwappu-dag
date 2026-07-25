@@ -48,6 +48,7 @@ fn build_dense_dag(
                     round: r as Round,
                     parents: prev_round_hashes.clone(),
                     payload_digest: payload,
+                    signature: Vec::new(),
                 }
             };
             this_round.push(cert.hash());
@@ -149,6 +150,7 @@ proptest! {
                 round: 1,
                 parents: vec![leader_hash],
                 payload_digest: p,
+                signature: Vec::new(),
             })
                 .unwrap();
         }
