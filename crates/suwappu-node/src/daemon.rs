@@ -2217,48 +2217,27 @@ mod tests {
         }
     }
 
-    /// Phase G integration test (DAG-S27.5).
+    /// Shared cluster setup for the Phase G admit/eject tests below.
     ///
     /// Spins up a 4-node loopback cluster with above-threshold stakes so
-    /// the genesis admission populates both registries on every node.
-    /// Submits an `AdmitAuthority` intent for a new id=4, waits for it
-    /// to commit across the mesh, then submits an `EjectAuthority` for
-    /// the same id. Asserts the registries converge to size 5 → size 4
-    /// on every validator, which is the end-to-end guarantee Phase G
-    /// claims (paper §4.1 + Invariant 5 for the eject path).
+    /// the genesis admission populates both registries on every node,
+    /// waits for warm-up, and connects a signed loadgen client on v0's
+    /// client port. Returns `(daemons, client, base_port, network_id)`.
     ///
-    /// Issue #18 fix (2026-05-14): governance intents
-    /// (`AdmitAuthority` / `ExitAuthority` / `EjectAuthority`) are now
-    /// queued at commit time and drained at the next epoch boundary,
-    /// making the registry mutation atomic across the mesh. This
-    /// eliminates the transitional quorum-threshold asymmetry where
-    /// daemons disagreed on `quorum_threshold(5)=4` vs
-    /// `quorum_threshold(4)=3` during the n=5→n=4 window. The test
-    /// uses a deliberately short `rounds_per_epoch = 16` (≈1.6s at
-    /// `round_ms=100ms`) so each governance op only waits ~one epoch
-    /// boundary, not multi-round consensus convergence.
-    ///
-    /// Un-`#[ignore]`'d in #35: the eject path was failing with the
-    /// bare `registry sizes = [5,5,5,5]` panic, which doesn't say
-    /// whether the eject Intent ever reached a block, ever committed,
-    /// or whether `pending_governance` is draining. The eject failure
-    /// branch below now mirrors the admit branch's diagnostic so the
-    /// CI log actually identifies which step is wedged.
-    ///
-    /// **Re-`#[ignore]`'d 2026-05-16** under tracking issue #171: the
-    /// test is still flaky on shared GHA runners (~60s admit timeout
-    /// fires under load even with the diagnostic instrumentation from
-    /// #35). The un-ignore in #35 was deliberate — those eject-path
-    /// regressions still need coverage. Un-ignore again once the
-    /// underlying round-time-starvation flake is fixed; see #171 for
-    /// suggested investigations (test split, dedicated integration
-    /// budget, RUST_LOG=trace local repro).
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-    #[ignore = "flaky on CI under load; tracked in #171 (regression of #35 un-ignore)"]
-    async fn phase_g_admit_and_eject() {
+    /// Split out of the former single `phase_g_admit_and_eject` mega-test
+    /// (tracking issue #171) so admit and eject are independently
+    /// runnable/diagnosable: a transient flake in one no longer also
+    /// swallows the other's result, and CI can retry just the flaky half
+    /// instead of the whole ~270s worst-case combined test. This does
+    /// NOT by itself resolve the underlying CI-runner resource-contention
+    /// flake described below (only reproducible under real shared-runner
+    /// load, not verified fixed here) — it narrows the blast radius and
+    /// makes a future flake's diagnostics per-stage instead of pooled.
+    async fn spawn_phase_g_cluster(
+        base_port: u16,
+        network_id: &str,
+    ) -> (Vec<Daemon>, crate::client::LoadGenClient) {
         let n = 4u32;
-        let base_port: u16 = 19_700;
-        let network_id = "phase-g-4n".to_string();
 
         // Issue #28 (Phase 2.6): generate a real ML-DSA-65 keypair
         // for v0 so the loadgen client can sign AdmitAuthority /
@@ -2267,7 +2246,7 @@ mod tests {
         let client_pk_hex = hex::encode(client_pk.as_bytes());
 
         let manifest = GenesisManifest {
-            network_id: network_id.clone(),
+            network_id: network_id.to_string(),
             validators: (0..n)
                 .map(|i| GenesisValidator {
                     authority_id: i,
@@ -2322,7 +2301,7 @@ mod tests {
                 bls_secret_key_path: "/dev/null".into(),
                 genesis_manifest_path: "/dev/null".into(),
                 event_log_path: std::env::temp_dir()
-                    .join(format!("suwappu-phaseg-test-v{}.ndjson", i)),
+                    .join(format!("suwappu-phaseg-test-v{}-{}.ndjson", i, base_port)),
 
                 max_client_connections: 256,
                 client_idle_timeout_ms: 30_000,
@@ -2347,18 +2326,26 @@ mod tests {
             assert_eq!(reg.len(), 4, "node v{} genesis admission size", i);
         }
 
-        // Submit AdmitAuthority for a new id=4 via v0's client port.
         let admit_addr = format!("127.0.0.1:{}", base_port + 100)
             .parse::<SocketAddr>()
             .unwrap();
-        let mut client = crate::client::LoadGenClient::connect(
+        let client = crate::client::LoadGenClient::connect(
             admit_addr,
             client_sk,
             client_pk,
-            network_id.clone(),
+            network_id.to_string(),
         )
         .await
         .unwrap();
+
+        (daemons, client)
+    }
+
+    /// Submit `AdmitAuthority{id=4}` and poll for it to converge across
+    /// every node's registry, panicking with a full per-node diagnostic
+    /// on timeout. Shared by both `phase_g_admit` and `phase_g_eject`
+    /// (the latter needs authority 4 admitted before it can eject it).
+    async fn admit_authority_4(daemons: &[Daemon], client: &mut crate::client::LoadGenClient) {
         let admit = suwappu_execution::Intent::AdmitAuthority {
             authority_id: 4,
             stake_suwappu: 150_000,
@@ -2376,7 +2363,7 @@ mod tests {
         loop {
             let all_at_5 = {
                 let mut ok = true;
-                for d in &daemons {
+                for d in daemons {
                     let reg = d.state.authority_registry.read().await;
                     if reg.len() != 5 || !reg.contains(4) {
                         ok = false;
@@ -2442,6 +2429,60 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
+    }
+
+    /// Phase G admit half (DAG-S27.5, split from the former combined
+    /// test under issue #171 — see `spawn_phase_g_cluster`).
+    ///
+    /// Spins up a 4-node loopback cluster, submits `AdmitAuthority` for
+    /// a new id=4, and asserts the registry converges to size 5 on every
+    /// validator. Issue #18 fix (2026-05-14): governance intents are
+    /// queued at commit time and drained at the next epoch boundary,
+    /// making the registry mutation atomic across the mesh — this
+    /// eliminates the transitional quorum-threshold asymmetry where
+    /// daemons disagreed on `quorum_threshold(5)=4` vs
+    /// `quorum_threshold(4)=3` during the n=5→n=4 window.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn phase_g_admit() {
+        let (daemons, mut client) = spawn_phase_g_cluster(19_700, "phase-g-admit-4n").await;
+        admit_authority_4(&daemons, &mut client).await;
+    }
+
+    /// Phase G eject half (DAG-S27.5, split from the former combined
+    /// test under issue #171 — see `spawn_phase_g_cluster`).
+    ///
+    /// Admits authority 4 (precondition — eject needs something to
+    /// eject), then submits `EjectAuthority` for it and asserts the
+    /// registry converges back to size 4 → excludes id 4 on every
+    /// validator, which is the end-to-end guarantee Phase G claims
+    /// (paper §4.1 + Invariant 5 for the eject path).
+    ///
+    /// Un-`#[ignore]`'d in #35: the eject path was failing with the
+    /// bare `registry sizes = [5,5,5,5]` panic, which doesn't say
+    /// whether the eject Intent ever reached a block, ever committed,
+    /// or whether `pending_governance` is draining. The eject failure
+    /// branch below mirrors `admit_authority_4`'s diagnostic so the CI
+    /// log actually identifies which step is wedged.
+    ///
+    /// **Re-`#[ignore]`'d 2026-05-16** under tracking issue #171: the
+    /// combined test was still flaky on shared GHA runners under load
+    /// even with the diagnostic instrumentation from #35. This split
+    /// (admit_authority_4 factored out, separate ports/network_id so
+    /// `phase_g_admit` and `phase_g_eject` can run concurrently without
+    /// colliding) is the "test split" mitigation #171 suggested — it
+    /// narrows each test's failure surface and lets CI retry just the
+    /// flaky half, but has NOT been verified against a real loaded
+    /// shared runner (only this sandboxed environment), so this stays
+    /// `#[ignore]`d until a CI run confirms the flake is actually gone,
+    /// not just relocated. Un-ignore once that's confirmed; if it's
+    /// still flaky, the remaining #171 investigations (dedicated
+    /// integration budget, RUST_LOG=trace local repro under simulated
+    /// load) are still open.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[ignore = "test-split mitigation for #171 not yet confirmed against loaded CI; un-ignore after a clean CI run"]
+    async fn phase_g_eject() {
+        let (daemons, mut client) = spawn_phase_g_cluster(19_800, "phase-g-eject-4n").await;
+        admit_authority_4(&daemons, &mut client).await;
 
         // Eject the new authority.
         let eject = suwappu_execution::Intent::EjectAuthority {
