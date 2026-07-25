@@ -1,0 +1,13 @@
+[package]
+name = "reserve-coverage-verifier"
+version = "0.1.0"
+edition = "2021"
+description = "SP1 zkVM circuit: proves a hidden reserve-item composition sums to a public total and matches a public commitment (paper §8.3, F1 aggregate-only disclosure tier)."
+
+[dependencies]
+# Pinned to match the installed toolchain (cargo-prove/sp1up install
+# 6.x as of this writing) -- see suwappu-lattice-protocol#50 for why an
+# older sp1-zkvm pin (its ~2MB stack / 1.875GB heap) breaks on
+# real-sized witnesses.
+sp1-zkvm = "6.3.1"
+sha3 = "0.10"
