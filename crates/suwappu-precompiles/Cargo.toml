@@ -14,6 +14,14 @@ suwappu-crypto.workspace = true
 blake3.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+# Optional: real SP1 proof verification for reserve.rs's coverage
+# predicate (see reserve_proof.rs). Off by default -- sp1-sdk's prover
+# stack is heavy, and most consumers of this crate (e.g. every
+# suwappu-node validator binary) don't need it linked in.
+reserve-coverage-host = { path = "../../zkvm/reserve-coverage-host", optional = true }
+
+[features]
+zk-proofs = ["dep:reserve-coverage-host"]
 
 [dev-dependencies]
 proptest.workspace = true
