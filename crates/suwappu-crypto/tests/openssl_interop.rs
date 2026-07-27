@@ -43,7 +43,10 @@ const SPKI_HEADER: [u8; 22] = [
 ];
 
 fn openssl_supports_mldsa65() -> bool {
-    let Ok(out) = Command::new("openssl").args(["list", "-signature-algorithms"]).output() else {
+    let Ok(out) = Command::new("openssl")
+        .args(["list", "-signature-algorithms"])
+        .output()
+    else {
         return false;
     };
     out.status.success() && String::from_utf8_lossy(&out.stdout).contains("ML-DSA-65")
@@ -105,15 +108,25 @@ fn openssl_signed_message_verifies_with_suwappu_crypto() {
 
     // Strip the 22-byte SPKI DER header OpenSSL wraps the raw pubkey in.
     let pk_der = std::fs::read(&pk_der_path).unwrap();
-    assert_eq!(pk_der.len(), 22 + 1952, "unexpected SPKI DER length for ML-DSA-65 pubkey");
-    assert_eq!(&pk_der[..22], &SPKI_HEADER[..], "unexpected SPKI DER header — OpenSSL encoding changed?");
+    assert_eq!(
+        pk_der.len(),
+        22 + 1952,
+        "unexpected SPKI DER length for ML-DSA-65 pubkey"
+    );
+    assert_eq!(
+        &pk_der[..22],
+        &SPKI_HEADER[..],
+        "unexpected SPKI DER header — OpenSSL encoding changed?"
+    );
     let raw_pk = &pk_der[22..];
 
     let msg = std::fs::read(&msg_path).unwrap();
     let sig_bytes = std::fs::read(&sig_path).unwrap();
 
-    let pk = mldsa::PublicKey::from_bytes(raw_pk).expect("openssl pubkey must parse as valid ML-DSA-65 pk");
-    let sig = mldsa::Signature::from_bytes(&sig_bytes).expect("openssl signature must parse as valid ML-DSA-65 sig");
+    let pk = mldsa::PublicKey::from_bytes(raw_pk)
+        .expect("openssl pubkey must parse as valid ML-DSA-65 pk");
+    let sig = mldsa::Signature::from_bytes(&sig_bytes)
+        .expect("openssl signature must parse as valid ML-DSA-65 sig");
     mldsa::verify(&msg, &sig, &pk)
         .expect("suwappu_crypto::mldsa::verify must accept an OpenSSL-produced signature");
 

@@ -192,9 +192,15 @@ mod tests {
     fn sign_then_verify_succeeds() {
         let (pk, sk) = suwappu_crypto::mldsa::keypair();
         let mut c = Certificate::genesis(1, [0x11; 32]);
-        assert!(!c.verify_signature(&pk), "unsigned certificate must not verify");
+        assert!(
+            !c.verify_signature(&pk),
+            "unsigned certificate must not verify"
+        );
         c.sign(&sk);
-        assert!(c.verify_signature(&pk), "honestly-signed certificate must verify");
+        assert!(
+            c.verify_signature(&pk),
+            "honestly-signed certificate must verify"
+        );
     }
 
     #[test]
@@ -203,7 +209,10 @@ mod tests {
         let (pk_b, _sk_b) = suwappu_crypto::mldsa::keypair();
         let mut c = Certificate::genesis(1, [0x22; 32]);
         c.sign(&sk_a);
-        assert!(!c.verify_signature(&pk_b), "signature by a different key must not verify");
+        assert!(
+            !c.verify_signature(&pk_b),
+            "signature by a different key must not verify"
+        );
     }
 
     #[test]
@@ -212,6 +221,9 @@ mod tests {
         let mut c = Certificate::genesis(1, [0x33; 32]);
         c.sign(&sk);
         c.payload_digest[0] ^= 0x01;
-        assert!(!c.verify_signature(&pk), "tampering after signing must break verification");
+        assert!(
+            !c.verify_signature(&pk),
+            "tampering after signing must break verification"
+        );
     }
 }
