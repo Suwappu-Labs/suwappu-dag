@@ -137,7 +137,7 @@ impl DagStore {
     /// `(authority_id, cert_hash)`.
     pub fn linearize(&self) -> Vec<CertHash> {
         let mut out = Vec::with_capacity(self.certs.len());
-        for (_round, hashes) in self.by_round.iter() {
+        for hashes in self.by_round.values() {
             let mut sorted = hashes.clone();
             sorted.sort_by_key(|h| {
                 let cert = &self.certs[h];

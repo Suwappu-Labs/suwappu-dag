@@ -18,7 +18,9 @@
 //!   SP1's Network prover.
 
 use sha3::{Digest, Sha3_256};
-use sp1_sdk::{Elf, Prover, ProverClient, ProvingKey, SP1ProofWithPublicValues, SP1Stdin, SP1VerifyingKey};
+use sp1_sdk::{
+    Elf, Prover, ProverClient, ProvingKey, SP1ProofWithPublicValues, SP1Stdin, SP1VerifyingKey,
+};
 
 /// Re-exported so downstream crates (e.g. `suwappu-precompiles`'s
 /// `zk-proofs` feature) reference the exact `sp1-sdk` version this
@@ -121,7 +123,10 @@ pub async fn prove(
         .setup(Elf::Static(ELF))
         .await
         .map_err(|e| format!("setup failed: {e}"))?;
-    let proof = client.prove(&pk, stdin).await.map_err(|e| format!("proving failed: {e}"))?;
+    let proof = client
+        .prove(&pk, stdin)
+        .await
+        .map_err(|e| format!("proving failed: {e}"))?;
     Ok((proof, pk.verifying_key().clone()))
 }
 
@@ -131,13 +136,16 @@ pub fn prove_blocking(
     salt: [u8; 32],
     amounts: &[u128],
 ) -> Result<(SP1ProofWithPublicValues, SP1VerifyingKey), String> {
-    use sp1_sdk::blocking::{Prover as BlockingProver, ProveRequest, ProverClient as BlockingProverClient};
+    use sp1_sdk::blocking::{
+        ProveRequest, Prover as BlockingProver, ProverClient as BlockingProverClient,
+    };
 
     let stdin = build_stdin(salt, amounts);
     let client = BlockingProverClient::builder().cpu().build();
-    let pk = BlockingProver::setup(&client, Elf::Static(ELF)).map_err(|e| format!("setup failed: {e}"))?;
-    let proof =
-        ProveRequest::run(BlockingProver::prove(&client, &pk, stdin)).map_err(|e| format!("proving failed: {e}"))?;
+    let pk = BlockingProver::setup(&client, Elf::Static(ELF))
+        .map_err(|e| format!("setup failed: {e}"))?;
+    let proof = ProveRequest::run(BlockingProver::prove(&client, &pk, stdin))
+        .map_err(|e| format!("proving failed: {e}"))?;
     Ok((proof, pk.verifying_key().clone()))
 }
 
@@ -153,7 +161,8 @@ pub async fn verify(
     expected_commitment: [u8; 32],
 ) -> Result<(), String> {
     let client = ProverClient::builder().cpu().build().await;
-    Prover::verify(&client, proof, vk, None).map_err(|e| format!("proof verification failed: {e}"))?;
+    Prover::verify(&client, proof, vk, None)
+        .map_err(|e| format!("proof verification failed: {e}"))?;
 
     let (total_reserves, commitment) = parse_public_values(proof.public_values.as_slice());
     if total_reserves != expected_total_reserves {

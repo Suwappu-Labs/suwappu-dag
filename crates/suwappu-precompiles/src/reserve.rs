@@ -437,8 +437,11 @@ mod tests {
             amounts: &[u128],
             outstanding: u128,
             round: u64,
-        ) -> (ReserveAttestation, reserve_coverage_host::sp1_sdk::SP1ProofWithPublicValues, reserve_coverage_host::sp1_sdk::SP1VerifyingKey)
-        {
+        ) -> (
+            ReserveAttestation,
+            reserve_coverage_host::sp1_sdk::SP1ProofWithPublicValues,
+            reserve_coverage_host::sp1_sdk::SP1VerifyingKey,
+        ) {
             let salt = [0x42u8; 32];
             let (total_reserves, commitment) = compute_reference(salt, amounts);
             let (proof, vk) = prove_blocking(salt, amounts).expect("real proof generation failed");
@@ -460,13 +463,19 @@ mod tests {
         #[ignore = "generates a real SP1 STARK proof; slow, run explicitly"]
         fn proof_generation_and_submission_round_trips() {
             let asset = AssetId([7; 32]);
-            let (attestation, proof, vk) =
-                real_attestation(0, asset, &[10_000_000, 25_000_000, 7_500_000], 30_000_000, 10);
+            let (attestation, proof, vk) = real_attestation(
+                0,
+                asset,
+                &[10_000_000, 25_000_000, 7_500_000],
+                30_000_000,
+                10,
+            );
             assert_eq!(attestation.total_reserves, 42_500_000);
 
             let mut c = ReserveCoverageChecker::with_ttl(1_000);
             c.set_rule(0, asset, CoverageRule::OneToOnePar);
-            c.submit_attestation_with_proof(attestation, &proof, &vk).unwrap();
+            c.submit_attestation_with_proof(attestation, &proof, &vk)
+                .unwrap();
             c.can_mint(0, asset, 30_000_000, 50).unwrap();
         }
 
@@ -480,28 +489,44 @@ mod tests {
             // wired path must catch that mismatch even though the
             // proof itself is valid.
             let asset = AssetId([8; 32]);
-            let (mut attestation, proof, vk) =
-                real_attestation(0, asset, &[10_000_000, 25_000_000, 7_500_000], 30_000_000, 10);
+            let (mut attestation, proof, vk) = real_attestation(
+                0,
+                asset,
+                &[10_000_000, 25_000_000, 7_500_000],
+                30_000_000,
+                10,
+            );
             attestation.total_reserves = 999_999_999; // doesn't match the proof's real output
 
             let mut c = ReserveCoverageChecker::with_ttl(1_000);
             c.set_rule(0, asset, CoverageRule::OneToOnePar);
             let err = c.submit_attestation_with_proof(attestation, &proof, &vk);
-            assert!(matches!(err, Err(CoverageError::ProofVerificationFailed(_))));
+            assert!(matches!(
+                err,
+                Err(CoverageError::ProofVerificationFailed(_))
+            ));
         }
 
         #[test]
         #[ignore = "generates a real SP1 STARK proof; slow, run explicitly"]
         fn tampered_commitment_rejected_even_though_proof_is_real() {
             let asset = AssetId([9; 32]);
-            let (mut attestation, proof, vk) =
-                real_attestation(0, asset, &[10_000_000, 25_000_000, 7_500_000], 30_000_000, 10);
+            let (mut attestation, proof, vk) = real_attestation(
+                0,
+                asset,
+                &[10_000_000, 25_000_000, 7_500_000],
+                30_000_000,
+                10,
+            );
             attestation.commitment[0] ^= 0xFF; // tamper
 
             let mut c = ReserveCoverageChecker::with_ttl(1_000);
             c.set_rule(0, asset, CoverageRule::OneToOnePar);
             let err = c.submit_attestation_with_proof(attestation, &proof, &vk);
-            assert!(matches!(err, Err(CoverageError::ProofVerificationFailed(_))));
+            assert!(matches!(
+                err,
+                Err(CoverageError::ProofVerificationFailed(_))
+            ));
         }
 
         #[test]
@@ -517,7 +542,9 @@ mod tests {
             let err = c.submit_attestation_with_proof(attestation, &proof, &vk);
             assert_eq!(
                 err,
-                Err(CoverageError::UnsupportedTierForProof(DisclosureTier::F2BroadCategory))
+                Err(CoverageError::UnsupportedTierForProof(
+                    DisclosureTier::F2BroadCategory
+                ))
             );
         }
     }

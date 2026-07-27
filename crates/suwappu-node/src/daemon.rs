@@ -2212,8 +2212,10 @@ mod tests {
         // DAG-S6: each validator now signs its own certs and every peer
         // verifies against the genesis-registered key, so each of the 4
         // needs a real, distinct keypair rather than a shared placeholder.
-        let keypairs: Vec<(suwappu_crypto::mldsa::PublicKey, suwappu_crypto::mldsa::SecretKey)> =
-            (0..n).map(|_| suwappu_crypto::mldsa::keypair()).collect();
+        let keypairs: Vec<(
+            suwappu_crypto::mldsa::PublicKey,
+            suwappu_crypto::mldsa::SecretKey,
+        )> = (0..n).map(|_| suwappu_crypto::mldsa::keypair()).collect();
 
         let manifest = GenesisManifest {
             network_id: "test-4n".into(),
@@ -2339,8 +2341,10 @@ mod tests {
         // v1-v3 need their own real, distinct keypairs too: every cert
         // they author must now verify against their genesis-registered
         // key on every peer.
-        let other_keypairs: Vec<(suwappu_crypto::mldsa::PublicKey, suwappu_crypto::mldsa::SecretKey)> =
-            (1..n).map(|_| suwappu_crypto::mldsa::keypair()).collect();
+        let other_keypairs: Vec<(
+            suwappu_crypto::mldsa::PublicKey,
+            suwappu_crypto::mldsa::SecretKey,
+        )> = (1..n).map(|_| suwappu_crypto::mldsa::keypair()).collect();
 
         let manifest = GenesisManifest {
             network_id: network_id.to_string(),
