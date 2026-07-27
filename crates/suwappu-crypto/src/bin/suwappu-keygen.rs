@@ -68,11 +68,17 @@ fn main() {
     };
 
     write_key(&args.sk, &sk_bytes, true).unwrap_or_else(|e| {
-        eprintln!("suwappu-keygen: failed to write secret key to {:?}: {e}", args.sk);
+        eprintln!(
+            "suwappu-keygen: failed to write secret key to {:?}: {e}",
+            args.sk
+        );
         std::process::exit(1);
     });
     write_key(&args.pk, &pk_bytes, false).unwrap_or_else(|e| {
-        eprintln!("suwappu-keygen: failed to write public key to {:?}: {e}", args.pk);
+        eprintln!(
+            "suwappu-keygen: failed to write public key to {:?}: {e}",
+            args.pk
+        );
         std::process::exit(1);
     });
 

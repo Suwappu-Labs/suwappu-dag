@@ -396,14 +396,20 @@ mod tests {
 
         // (b) Put identical bytes-state on both at the same reserved address,
         // then re-check — proves the bytes_state_root path matches too.
-        reference.pin_l2_verifying_key([0xab; 32], [0xcd; 32]).unwrap();
+        reference
+            .pin_l2_verifying_key([0xab; 32], [0xcd; 32])
+            .unwrap();
         let reg = crate::reserved::l2_registry_address();
         let raw = reference.read_bytes(&reg).expect("reference wrote bytes");
         {
             let mut bridge = Bridge::new(durable.state_mut());
             bridge.write_bytes(SuwappuAddress(reg), raw.clone());
         }
-        assert_eq!(durable.read_bytes(&reg), Some(raw), "durable mirrors the bytes");
+        assert_eq!(
+            durable.read_bytes(&reg),
+            Some(raw),
+            "durable mirrors the bytes"
+        );
         assert_eq!(
             durable.state_root(),
             reference.state_root(),
