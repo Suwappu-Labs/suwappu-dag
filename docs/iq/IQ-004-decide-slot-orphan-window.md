@@ -75,7 +75,7 @@ It doesn't (and can't) edit the round-R+1 certs already in flight.
 - **Differential diagnosis ruled out:**
   - `bft-stake-denominator-deadlock-on-admit`: `stake(tot)>thr`,
     cluster keeps committing — not the stake-table inflation bug.
-  - `mysticeti-leader-rotation-needs-active-manifest`: leader cert
+  - `dagbft-leader-rotation-needs-active-manifest`: leader cert
     IS authored on time — the slot is not "permanently missing
     leader", the leader's cert is in the DAG, just orphaned from
     every R+1 cert.

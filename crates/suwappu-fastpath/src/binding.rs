@@ -13,7 +13,7 @@
 //!    different `payload_digest` than `T`'s.
 //!
 //! Conflicts strictly beyond `R + K` are not the fast-path's
-//! responsibility; the main-lane Mysticeti commit rule of DAG-S4
+//! responsibility; the main-lane DagBft commit rule of DAG-S4
 //! linearizes them.
 
 use serde::{Deserialize, Serialize};

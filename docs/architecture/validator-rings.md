@@ -24,7 +24,7 @@ Implementation in [`suwappu-authority`](../../crates/suwappu-authority).
 
 - **Size:** 100–500 stake-weighted open participants.
 - **Genesis stake threshold:** 25,000 SUWAPPU (`VALIDATOR_STAKE_THRESHOLD_SUWAPPU`).
-- **Role:** ratify ordering, vote on Mysticeti commit rounds, enforce slashing.
+- **Role:** ratify ordering, vote on DagBft commit rounds, enforce slashing.
 - **Admission:** open to any party meeting the stake threshold, the operational
   uptime requirement, and the cryptographic key-management standard.
 

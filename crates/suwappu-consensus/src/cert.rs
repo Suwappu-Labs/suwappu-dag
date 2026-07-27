@@ -1,6 +1,6 @@
 //! Certificate types for the SUWAPPU certificate DAG.
 //!
-//! A `Certificate` is the unit of production in the Mysticeti-C DAG
+//! A `Certificate` is the unit of production in the DagBft-C DAG
 //! (paper §6.1). Each Authority Node authors at most one certificate per
 //! round, referencing certificates from prior rounds as parents.
 //!

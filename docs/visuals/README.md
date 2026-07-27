@@ -17,13 +17,13 @@ consensus deep-dives.
 
 ### SUWAPPU DAG — chain architecture
 
-Mysticeti-C certificate DAG, dual-ring security (Authority + Validator),
+DagBft-C certificate DAG, dual-ring security (Authority + Validator),
 dual-VM execution, and LTP transfer-and-attestation surface.
 
 ```mermaid
 flowchart LR
   Users[Users / Apps] --> DAG[suwappu-dag]
-  DAG --> C[Consensus<br/>Mysticeti-C DAG]
+  DAG --> C[Consensus<br/>DagBft-C DAG]
   C --> E[Execution<br/>Dual VM]
   E --> DB[suwappu-db<br/>Canonical state lattice]
   DB --> LTP[LTP<br/>Commit / Lattice / Materialize]
@@ -96,7 +96,7 @@ Source: [`mermaid/ltp.md`](./mermaid/ltp.md) ·
 
 ## Consensus deep dives
 
-### Mysticeti-C commit rule
+### DagBft-C commit rule
 
 Direct + indirect commit rule with the IQ-004 parent-set freeze window.
 Covers `crates/suwappu-consensus/src/commit.rs` end-to-end.
@@ -145,7 +145,7 @@ flowchart LR
     Cross -->|conflict<br/>in K-window| Equiv[EquivocationProof<br/>two fast-path certs<br/>same owner, same nonce]
     Equiv --> Slash[100% bonded stake<br/>+ Authority Ring expulsion]
     subgraph MainLane[Main-lane fallback]
-      MLane[Same intent flows<br/>through Mysticeti-C DAG]
+      MLane[Same intent flows<br/>through DagBft-C DAG]
       MLane --> Commit[Block commit<br/>main_lane_index updated]
     end
     Cross -.- MLane

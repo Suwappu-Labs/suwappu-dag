@@ -50,7 +50,7 @@ export function BlockPage({
         <h1>Block {round}</h1>
         <div className="not-found">
           No block committed at round {round}. Either the round is in the
-          future, or the round was skipped (Mysticeti-C <em>Skip</em>{" "}
+          future, or the round was skipped (DagBft-C <em>Skip</em>{" "}
           outcome — a legitimate gap; the next round will have a block).
         </div>
         <div>

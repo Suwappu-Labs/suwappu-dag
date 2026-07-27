@@ -2,7 +2,7 @@
 //
 // Polls `suwappu_getEpoch` every 3 seconds to discover the chain head;
 // renders the last ~30 blocks in reverse order. Skip rounds
-// (Mysticeti-C `Skip` outcome) are elided — `suwappu_getBlock` returns
+// (DagBft-C `Skip` outcome) are elided — `suwappu_getBlock` returns
 // null for them, and we just don't render them.
 
 import { useEffect, useState } from "react";

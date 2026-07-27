@@ -12,7 +12,7 @@
 * [Section index](architecture/README.md)
 * [Overview — four-layer stack (§4)](architecture/overview.md)
 * [Validator rings (§5)](architecture/validator-rings.md)
-* [Consensus — Mysticeti-C DAG (§6)](architecture/consensus.md)
+* [Consensus — DagBft-C DAG (§6)](architecture/consensus.md)
 * [Transport — SCION + RaptorQ (§6.3)](architecture/transport.md)
 * [Fast path — single-owner + K-binding (§6.4)](architecture/fast-path.md)
 * [Execution — dual VM (§7)](architecture/execution.md)

@@ -41,7 +41,7 @@ pub type CheckpointHeight = u64;
 pub struct Checkpoint {
     /// Sequence number; increments by 1 per checkpoint.
     pub height: CheckpointHeight,
-    /// Mysticeti round at which this checkpoint was taken.
+    /// DagBft round at which this checkpoint was taken.
     pub round: Round,
     /// `Substrate::state_root` immediately after the block at `round`
     /// was applied.

@@ -14,7 +14,7 @@ and [`CHANGELOG.md`](./CHANGELOG.md) (released versions).
 | Phase | Window | Headline | Status |
 |---|---|---|---|
 | **Phase 0 — Spec** | Q1 2026 | v8 academic paper ratified, repo bootstrapped | ✅ Closed |
-| **Phase 1 — Consensus + crypto** | Q1–Q2 2026 | DAG-S1…S20 close (Mysticeti-C + PQ crypto + LTP + SCION + fast-path) | ✅ Closed (v0.1.0) |
+| **Phase 1 — Consensus + crypto** | Q1–Q2 2026 | DAG-S1…S20 close (DagBft-C + PQ crypto + LTP + SCION + fast-path) | ✅ Closed (v0.1.0) |
 | **Phase 2 — State surface** | May 2026 | Force-include, slashing waterfall, registries, dual-bond model | ✅ Closed (v0.2.0) |
 | **Phase 3 — Economic surface** | May 2026 | Per-slot stake, withdraw, eject-slash, cooldown, genesis, inflation, distribute, delegate, atomicity | ✅ Closed (v0.3.0) |
 | **Phase 4 — Public devnet** | Q2 2026 | 4-region public devnet, RPC + faucet + explorer + status, operator-program v0 | 🟡 In flight |
@@ -33,10 +33,12 @@ and [`CHANGELOG.md`](./CHANGELOG.md) (released versions).
   `suwappu-lattice-protocol/docs/WHITEPAPER.md`; the dag-l1 academic paper itself
   remains unpublished. For the tokenomics questions this ROADMAP cites below
   (Tokenomics §3/§4/§8), see
-  [`suwappu-lattice-protocol/docs/economics/UNIFIED_TOKENOMICS.md`](https://github.com/Suwappu-Labs/suwappu-lattice-protocol/blob/main/docs/economics/UNIFIED_TOKENOMICS.md)
-  for the token-identity resolution (SUWAPPU = SUWP) — the detailed inflation /
-  delegated-PoS / slashing-waterfall formulas those sections cite are still an open gap,
-  tracked as a follow-up there.
+  [`suwappu-lattice-protocol/docs/economics/DEFERRED_TOKEN_ARCHITECTURE.md`](https://github.com/Suwappu-Labs/suwappu-lattice-protocol/blob/main/docs/economics/DEFERRED_TOKEN_ARCHITECTURE.md) —
+  chain-launch validator security bootstraps via bonded/restaked stablecoins rather than
+  a freshly-premined SUWP stake; a native token (if any) is deferred until after real
+  usage exists. The detailed inflation / delegated-PoS / slashing-waterfall formulas
+  these sections cite are accordingly an open design question, not just an open gap —
+  they're deferred by design, not just unwritten.
 - Companion LTP paper in `suwappu_ltp_academic_v7.pdf`.
 - Repo bootstrap: workspace layout, crate skeletons, CI matrix
   (rustfmt / clippy / test / cargo-deny), collaboration contract in
@@ -52,7 +54,7 @@ dependency graph.
 Highlights:
 
 - Post-quantum crypto surface (ML-DSA-65, ML-KEM-768, BLS12-381, SHA3-256).
-- Mysticeti-C certificate DAG + joint-quorum AND-gate safety (Theorem 2).
+- DagBft-C certificate DAG + joint-quorum AND-gate safety (Theorem 2).
 - Fast-path lane with K=4 equivocation binding (100% slashing).
 - Constant-size LTP attestation (≈1,600 B regardless of payload).
 - JSON-RPC + WebSocket API + Rust + TypeScript SDKs.

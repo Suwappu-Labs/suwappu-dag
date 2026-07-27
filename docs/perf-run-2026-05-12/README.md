@@ -8,7 +8,7 @@ propagating cross-region.
 - 6 t3.small instances in us-east-1, us-west-2, eu-west-1, ap-northeast-1,
   ap-southeast-2, sa-east-1. (af-south-1 dropped — region opt-in needed.)
 - Each running `suwappu-node` daemon over real TCP wire.
-- Mysticeti-C round driver + joint-quorum voter + block executor active.
+- DagBft-C round driver + joint-quorum voter + block executor active.
 - Genesis manifest: 6 validators with placeholder ML-DSA / BLS keys.
 
 ## What we measured
@@ -42,7 +42,7 @@ in-process 4-node loopback test (`daemon::tests::four_node_main_lane_commits`)
 always sees all peers within a few ms, so the quorum-wait gate fires
 reliably. Across geography it doesn't.
 
-The fix is the Mysticeti-C "fall through with f+1 parents" recovery the
+The fix is the DagBft-C "fall through with f+1 parents" recovery the
 paper describes (§6.2) — not yet implemented. Tracked as a follow-up.
 
 ## Files

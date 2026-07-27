@@ -26,7 +26,7 @@ use crate::{
 /// wire-up.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Block {
-    /// Mysticeti round at which this block was committed.
+    /// DagBft round at which this block was committed.
     pub round: Round,
     /// Intents to apply. Order is the linearized order produced by
     /// `suwappu_consensus::finalize`.

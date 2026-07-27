@@ -15,7 +15,7 @@ on three interlocking commitments:
 
 1. **Dual-ring validator set** (§5) — Authority Ring (PoA, 30–50 licensed
    institutional entities) + Validator Ring (PoS, 100–500 stake-weighted open
-   participants). Both rings operate over a Mysticeti-style certificate DAG.
+   participants). Both rings operate over a DagBft-style certificate DAG.
 2. **Co-resident dual virtual machine** (§7) — EVM (over Reth/REVM) +
    permissioned Move VM, both over a single polymorphic balance map.
 3. **Lattice Transfer Protocol** (§10) — corridor super-node attestation
@@ -32,7 +32,7 @@ on three interlocking commitments:
 │ 3. Execution — co-resident dual VM over polymorphic balance │
 │    map (paper §7 → suwappu-execution + suwappu-db)                  │
 ├─────────────────────────────────────────────────────────────┤
-│ 2. Consensus — Mysticeti-C certificate DAG with deterministic│
+│ 2. Consensus — DagBft-C certificate DAG with deterministic  │
 │    BFT linearization (paper §6 → suwappu-consensus)             │
 ├─────────────────────────────────────────────────────────────┤
 │ 1. Data availability + attestation — LTP Commitment Nodes   │
@@ -70,7 +70,7 @@ Each crate maps 1:1 to a paper section. Crate boundaries are also the
 
 | Layer | Phase-1 impl | Production swap | Swap point |
 |---|---|---|---|
-| Consensus base | Mysticeti-C v1 | Mysticeti v2 [Sui, 2025] | `suwappu-consensus` upstream |
+| Consensus base | DagBft-C v1 | Mysticeti v2 [Sui, 2025] | `suwappu-consensus` upstream |
 | Transport | tokio TCP (dev) | SCION path-authenticated | `suwappu-transport` |
 | Authority signatures | ML-DSA-65 (pure) | ML-DSA-65 (pure, unchanged) | n/a |
 | EVM TX signing | ECDSA secp256k1 hybrid with ML-DSA-65 | Pure ML-DSA-65 by ~2030 | Account-signing surface |
@@ -84,7 +84,7 @@ any of the swaps above.
 
 ## What the chain commits to per block
 
-After every Mysticeti round:
+After every DagBft round:
 
 1. **Linearized order** of certificates produced into the DAG.
 2. **Joint state commitment** `(Σ_EVM, Σ_Move)` — the BLAKE3-rooted state

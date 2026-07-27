@@ -3,7 +3,7 @@
 # suwappu-dag
 
 The **post-quantum settlement chain**. Joint-quorum BFT safety on a
-Mysticeti-C certificate-DAG, constant-size cross-chain attestation,
+DagBft-C certificate-DAG, constant-size cross-chain attestation,
 and an execution substrate built to settle regulated assets.
 
 [![CI](https://img.shields.io/github/actions/workflow/status/Suwappu-Labs/suwappu-dag/ci.yml?branch=main&label=CI)](https://github.com/Suwappu-Labs/suwappu-dag/actions)
@@ -128,7 +128,7 @@ together with a single rule: every commit is the joint product of two
 independently-bonded validator rings.
 
 **Consensus (paper §6).** Authority Nodes propose intents and produce
-Mysticeti-C certificates. The DAG store linearizes those certificates
+DagBft-C certificates. The DAG store linearizes those certificates
 into a totally-ordered commit stream under a commit rule whose orphan
 window is property-tested at 10,000 cases. A single-owner fast-path
 lane (paper §6.4) clears non-contested intents sub-second with K=4
@@ -153,7 +153,7 @@ flowchart LR
     Client["SDK / RPC client"] --> Mempool
     Mempool --> Authority["Authority Ring<br/>40 slots"]
     Mempool --> Validator["Validator Ring<br/>200 slots"]
-    Authority -.->|joint co-sign| DAG[("Mysticeti-C DAG")]
+    Authority -.->|joint co-sign| DAG[("DagBft-C DAG")]
     Validator -.->|joint co-sign| DAG
     DAG --> Executor["suwappu-execution → suwappu-db"]
     Executor --> LTP["LTP attestation<br/>≈1,600 B constant"]
@@ -184,7 +184,7 @@ implements where applicable.
 | Crate | Paper § | Owns |
 |---|---|---|
 | `suwappu-crypto` | §3.3, §10, §12 | ML-DSA-65, ML-KEM-768, BLS12-381, SHA3-256, Poseidon2 |
-| `suwappu-consensus` | §6 | Mysticeti-C integration, certificate DAG, BFT linearization |
+| `suwappu-consensus` | §6 | DagBft-C integration, certificate DAG, BFT linearization |
 | `suwappu-fastpath` | §6.4 | Single-owner lane, K=4 equivocation binding |
 | `suwappu-authority` | §5.1 | Authority Ring registry + certificate production |
 | `suwappu-validator` | §5.2 | Validator Ring registry + ratification + slashing |
@@ -350,6 +350,21 @@ Released versions:
 Per-release scope: [`CHANGELOG.md`](./CHANGELOG.md).
 
 ---
+
+## Attribution
+
+`DagBft-C`, this repo's consensus, is an independent implementation
+design-inspired by **Mysticeti** (Babel, Chursin, Danezis, Kichidis,
+Kokoris-Kogias, Sonnino, Yin — "Mysticeti: Reaching the Limits of
+Latency with Uncertified DAGs," [arXiv:2310.14821](https://arxiv.org/abs/2310.14821)),
+the consensus protocol Mysten Labs runs in production on Sui mainnet
+(Apache 2.0, `consensus/core` in
+[`MystenLabs/sui`](https://github.com/MystenLabs/sui)). We adopted the
+underlying ideas — an uncertified DAG with deterministic finality via
+a hash-based commit rule — because they are Apache-2.0-licensed,
+production-validated at mainnet scale, and natively post-quantum on
+the safety surface (paper §6.2). We did not fork or vendor Sui's code,
+and `DagBft-C` makes no claim of shared lineage with Mysticeti or Sui.
 
 ## Specs & research
 

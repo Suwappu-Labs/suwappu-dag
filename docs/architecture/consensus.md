@@ -8,9 +8,10 @@ liveness gap) lives in the IQs linked inline.
 ## Topology
 
 Throughput and ordering are decoupled. Validators produce certificates into
-a directed-acyclic-graph gossip layer in parallel; a Mysticeti-style BFT
-linearization protocol orders the DAG into a canonical linear history
-[Babel et al., 2023].
+a directed-acyclic-graph gossip layer in parallel; a DagBft-style BFT
+linearization protocol — design-inspired by Mysticeti [Babel et al.,
+2023, arXiv:2310.14821] — orders the DAG into a canonical linear
+history.
 
 Target mainnet parameters:
 
@@ -29,19 +30,28 @@ p95 finality budget breakdown:
 - ≈500 ms leader commit
 - ≈1 s network-delay variance
 
-## Mysticeti-C selection
+## DagBft-C selection
 
-Mysticeti-C is the consensus base. Five reasons (paper §6.2):
+`DagBft-C` is our own implementation of an uncertified-DAG BFT consensus,
+built for this chain's specific validator-ring topology and PQ crypto
+surface. It is design-inspired by Mysticeti (Babel, Chursin, Danezis,
+Kichidis, Kokoris-Kogias, Sonnino, Yin, arXiv:2310.14821), the consensus
+protocol Mysten Labs runs in production on Sui mainnet (Apache 2.0,
+`consensus/core` in `MystenLabs/sui`) — we did not fork or vendor their
+code, and `DagBft-C` carries no claim of shared lineage with Sui. Five
+reasons the family of ideas was chosen as our base (paper §6.2):
 
-1. **Apache 2.0 license** — removes the IP-contamination risk of earlier
-   Monad-derived paths.
-2. **Production-validated at Sui-mainnet scale** [Sui Consensus, 2024].
+1. **Apache 2.0-licensed prior art** — removes the IP-contamination risk of
+   earlier Monad-derived paths.
+2. **The underlying design pattern is production-validated at Sui-mainnet
+   scale** [Sui Consensus, 2024].
 3. **Deterministic finality through an uncertified DAG with a novel commit
    rule** — eliminates probabilistic-reorganization concerns of weakly-
    finalizing DAG protocols.
 4. **Consensus path is hash-based** — natively post-quantum on the safety
    surface.
-5. **Mysticeti v2 [Sui Mysticeti V2, 2025]** is the upstream evolution target.
+5. **Mysticeti v2 [Sui Mysticeti V2, 2025]** is tracked as a reference for
+   future upstream ideas, not a dependency.
 
 ## Parent-set selection
 
@@ -52,7 +62,7 @@ its *current local view* of round R-1 certs:
 parents = parents_for_round(&dag, target_round, n);
 ```
 
-This is the standard Mysticeti propose-with-what-you-have rule. It admits
+This is the standard Mysticeti-style propose-with-what-you-have rule. It admits
 a known orphan window: if the round-R leader cert hasn't arrived at peer A
 by the time A proposes at R+1, A ships round R+1 without that hash in its
 parents field. Orphan-pull recovery delivers the cert into the DAG later,
@@ -93,7 +103,7 @@ analysis: [IQ-001](../iq/IQ-001-quorum-formula.md) — ratified
 
 ## Commit rule
 
-`decide_slot` runs the Mysticeti-C direct + indirect rule:
+`decide_slot` runs the DagBft-C direct + indirect rule:
 
 ```mermaid
 flowchart TB
@@ -179,7 +189,7 @@ Detailed spec: [fast-path.md](fast-path.md). Architecture decision in
 | Sprint | Exit gate |
 |---|---|
 | DAG-S3 | `dag_topological_order_unique` @ 10k |
-| DAG-S4 | `mysticeti_c_finality` @ 10k |
+| DAG-S4 | `dagbft_c_finality` @ 10k |
 | DAG-S5 | `joint_quorum_safety` @ 10k (Theorem 2) |
 | DAG-S21.1 | IQ-001 ratification ([suwappu-papers#1](https://github.com/Suwappu-Labs/suwappu-papers/pull/1)) |
 | DAG-S21.2 | IQ-002 ratification ([suwappu-papers#1](https://github.com/Suwappu-Labs/suwappu-papers/pull/1)) |

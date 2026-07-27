@@ -24,7 +24,7 @@ pub struct EpochView {
     pub last_boundary_round: u64,
     /// Rounds per epoch (constant across an epoch, set at genesis).
     pub rounds_per_epoch: u64,
-    /// Highest round that has been committed on this node (Mysticeti-C
+    /// Highest round that has been committed on this node (DagBft-C
     /// direct or indirect commit; Skip rounds are not counted). Zero
     /// if the daemon hasn't committed any block yet — the genesis
     /// state. Used by indexers + explorers to find the chain head for

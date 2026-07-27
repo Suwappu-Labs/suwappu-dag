@@ -53,7 +53,7 @@ No tags or releases exist. Cut `v0.1.0-testnet` before any public exposure.
 
 | Sprint | Earlier read | Verified state (2026-05-14) |
 |---|---|---|
-| S4 (Mysticeti-C commit) | Direct-only; IQ-002 open | Direct + indirect both implemented at `commit.rs:126-202`. IQ-002 awaiting formal sign-off only. |
+| S4 (DagBft-C commit) | Direct-only; IQ-002 open | Direct + indirect both implemented at `commit.rs:126-202`. IQ-002 awaiting formal sign-off only. |
 | S5 (joint quorum) | Diverges from Definition 2 | Canonical `2f+1` (`commit.rs:61-66`). IQ-001 awaiting formal sign-off only. |
 | S8/S9 (fast-path + slashing) | Library only; daemon no-op | Library + daemon receiver + proposer + equivocation slashing across fast-path partials (`daemon.rs:499-820`). **K-binding vs main-lane window not wired** (`binding.rs:51-63` defined but unused outside tests). |
 | S20 (full E2E) | Only main lane | Same. `four_node_main_lane_commits` exercises main lane. Fast-path lane and LTP lane not exercised end-to-end. `phase_g_admit_and_eject` is `#[ignore]` (`daemon.rs:1680`). |
@@ -66,7 +66,7 @@ of correctness work, not 4–6 weeks.
 
 | Chain | Architecture | Demonstrated TPS | Finality | Mainnet status |
 |---|---|---:|---:|---|
-| **suwappu-dag (this repo, 4-region t3.small)** | Mysticeti-C + dual-ring + ML-DSA | **4,300 submit / 0.125 commit** | (no finality; stalls) | Pre-testnet |
+| **suwappu-dag (this repo, 4-region t3.small)** | DagBft-C + dual-ring + ML-DSA | **4,300 submit / 0.125 commit** | (no finality; stalls) | Pre-testnet |
 | Solana (Firedancer + Alpenglow) | Sealevel BPF + TowerBFT→Votor | 3k–5k real, 100k peak (Aug 2025) | 400–800ms today → ~150ms (Alpenglow, late 2026) | Mainnet 2020; Firedancer Dec 2025 |
 | Sui (Mysticeti v2) | Move + DAG-BFT + FPC built-in | ~15k real | ~390ms (35% latency cut on Asia) | Mainnet May 2023; v2 Nov 2025 |
 | Aptos (Baby Raptr → Raptr → Velociraptr) | Move + Block-STM + Quorum Store | 250k bench, ~10k real | 100–150ms faster than 2024 | Mainnet Oct 2022; Baby Raptr 2025 |

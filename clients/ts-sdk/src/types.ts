@@ -17,7 +17,7 @@ export interface EpochView {
   /** Rounds per epoch (constant across an epoch, set at genesis). */
   rounds_per_epoch: number;
   /**
-   * Highest round committed on this node (Mysticeti-C direct or
+   * Highest round committed on this node (DagBft-C direct or
    * indirect commit; Skip rounds not counted). Zero before the
    * first commit. Added with F2 alongside the indexer backfill
    * path; serialized as `0` by pre-F2 daemons via `#[serde(default)]`.

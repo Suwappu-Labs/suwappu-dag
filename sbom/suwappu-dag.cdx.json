@@ -95,7 +95,7 @@
       "type": "application",
       "name": "suwappu-consensus",
       "version": "0.1.0",
-      "description": "Mysticeti-C certificate DAG consensus + BFT linearization for the SUWAPPU DAG L1 (paper \u00a76).",
+      "description": "DagBft-C certificate DAG consensus + BFT linearization for the SUWAPPU DAG L1 (paper \u00a76).",
       "scope": "required",
       "licenses": [
         {

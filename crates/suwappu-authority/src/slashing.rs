@@ -6,7 +6,7 @@
 //! ring. The slashing severity is identical on both lanes because the
 //! integrity surface is the same: a single Authority signing two
 //! distinct certificates at the same round breaks the certificate-DAG
-//! uniqueness assumption that the Mysticeti-C commit rule relies on.
+//! uniqueness assumption that the DagBft-C commit rule relies on.
 //!
 //! The pipeline is deliberately atomic: a single `slash_authority` call
 //! takes a verified equivocation proof and returns the slashing outcome.

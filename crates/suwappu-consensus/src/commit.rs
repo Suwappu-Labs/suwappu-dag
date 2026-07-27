@@ -1,4 +1,4 @@
-//! Mysticeti-C commit rule over the certificate DAG.
+//! DagBft-C commit rule over the certificate DAG.
 //!
 //! Implements §6.2 of the *SUWAPPU DAG Layer 1* paper: deterministic finality
 //! through an uncertified DAG with a novel commit rule
@@ -29,7 +29,7 @@
 //! Once a leader is committed, no DAG extension (insertion of additional
 //! valid certificates) can uncommit it: the supporter set at `r+1` only
 //! grows, never shrinks. Verified at 10,000 cases by
-//! `mysticeti_c_finality`.
+//! `dagbft_c_finality`.
 
 use std::collections::{BTreeSet, HashSet, VecDeque};
 
@@ -108,7 +108,7 @@ fn supporters(dag: &DagStore, target: CertHash, round: Round) -> BTreeSet<Author
         .collect()
 }
 
-/// Decision for a single leader slot under the Mysticeti-C commit rule.
+/// Decision for a single leader slot under the DagBft-C commit rule.
 ///
 /// - `Direct(hash)` — leader directly committed by the direct rule, or
 ///   inherited from a later anchor's causal history by the indirect rule.
@@ -208,7 +208,7 @@ pub fn try_indirect_decide(
 /// once a future anchor is directly decided.
 ///
 /// Safety: `Direct → Skip/Undecided` transitions remain forbidden
-/// (verified by `mysticeti_c_finality` at 10k cases). Only
+/// (verified by `dagbft_c_finality` at 10k cases). Only
 /// `Skip → Direct` is newly permitted via this late-arrival path. The
 /// safety witness for any retroactive flip is the directly-decided
 /// anchor itself, which is finalized via the joint-quorum AND-gate
@@ -307,7 +307,7 @@ pub fn causal_history(dag: &DagStore, start: CertHash) -> Vec<CertHash> {
     out
 }
 
-/// Run the Mysticeti-C commit rule (direct + indirect) across every
+/// Run the DagBft-C commit rule (direct + indirect) across every
 /// round of the DAG and return the finalized linear history.
 ///
 /// The output is the deterministic concatenation of causal histories of

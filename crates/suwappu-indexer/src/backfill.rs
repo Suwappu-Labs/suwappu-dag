@@ -12,7 +12,7 @@
 //!    presence before insert).
 //!
 //! Rounds that come back `None` from `get_block` are legitimate gaps
-//! (Mysticeti-C `Skip` outcome) — they are not errors, just elided
+//! (DagBft-C `Skip` outcome) — they are not errors, just elided
 //! from the store.
 //!
 //! The walk is bounded: each iteration covers `max_per_iter` rounds,
@@ -91,7 +91,7 @@ where
                     ingested += 1;
                 }
                 Ok(None) => {
-                    // Mysticeti-C `Skip` round — legitimate gap.
+                    // DagBft-C `Skip` round — legitimate gap.
                     debug!(round = r, "indexer backfill: skipped round (Skip outcome)");
                 }
                 Err(e) => {

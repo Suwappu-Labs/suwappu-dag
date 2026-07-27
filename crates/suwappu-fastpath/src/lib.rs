@@ -2,7 +2,7 @@
 //!
 //! Implements §6.4 of the *SUWAPPU DAG Layer 1* paper:
 //!
-//! - Parallel to main-lane Mysticeti consensus
+//! - Parallel to main-lane DagBft consensus
 //! - Eligible: read-write footprint is a single owned Move object, owner is sole
 //!   signer, lineage grounded in a main-lane path
 //! - Quorum: ⌈(2/3)|A|⌉ + 1 Authority Ring members

@@ -8,7 +8,7 @@
 //! plus the Lether-paradigm L2-confidential-transfer shape).
 //! The closest academic precedent is Lether (IACR ePrint
 //! 2026/076); this crate ships the first production deployment
-//! of the paradigm on an SP1+Mysticeti rollup.
+//! of the paradigm on an SP1+DagBft rollup.
 //!
 //! ## Phase split
 //!

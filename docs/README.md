@@ -65,7 +65,7 @@ docs/
 │   ├── README.md                  index → 14 sections mapped to paper §§4–14
 │   ├── overview.md                §4 — four-layer stack on a single chain
 │   ├── validator-rings.md         §5 — Authority + Validator rings
-│   ├── consensus.md               §6 — Mysticeti-C DAG + commit rule
+│   ├── consensus.md               §6 — DagBft-C DAG + commit rule
 │   ├── transport.md               §6.3 — SCION + RaptorQ
 │   ├── fast-path.md               §6.4 — single-owner lane + K-binding
 │   ├── execution.md               §7 — dual VM over polymorphic balance map
