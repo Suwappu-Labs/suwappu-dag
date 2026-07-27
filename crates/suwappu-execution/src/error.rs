@@ -439,6 +439,26 @@ pub enum ExecutionError {
         last_minted_epoch: u64,
     },
 
+    /// `Intent::MintInflation`'s tranche would push
+    /// `total_supply()` past `substrate::MAX_SUPPLY` (SUWP's
+    /// committed 1,000,000,000 fixed cap — see
+    /// `suwappu-lattice-protocol/docs/economics/UNIFIED_TOKENOMICS.md`).
+    /// Rejected atomically: no credit lands and the inflation
+    /// registry's last-minted-epoch counter is not bumped, so the
+    /// daemon can retry the same epoch with a smaller tranche.
+    #[error(
+        "inflation mint of {attempted_mint} at supply {current_supply} would exceed max supply {max_supply}"
+    )]
+    InflationExceedsMaxSupply {
+        /// Sum of `authority_share + validator_share + treasury_share`
+        /// in the rejected Intent.
+        attempted_mint: Balance,
+        /// `total_supply()` immediately before this mint.
+        current_supply: Balance,
+        /// `substrate::MAX_SUPPLY`.
+        max_supply: Balance,
+    },
+
     /// `Intent::DistributeRewards { epoch, ring, .. }`
     /// carried an epoch number ≤ the ring's last distributed
     /// epoch on record. Replay defense per-ring at
