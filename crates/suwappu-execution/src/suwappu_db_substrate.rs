@@ -253,7 +253,7 @@ impl Substrate for SuwappuDbSubstrate {
             .map(|(a, slot)| (a.0, slot.canonical()))
             .filter(|(_, bal)| *bal != 0)
             .collect();
-        balances.sort_by(|x, y| x.0.cmp(&y.0));
+        balances.sort_by_key(|x| x.0);
 
         let mut bytes: Vec<(Address, Vec<u8>)> = self
             .state
@@ -261,7 +261,7 @@ impl Substrate for SuwappuDbSubstrate {
             .into_iter()
             .map(|(a, d)| (a.0, d))
             .collect();
-        bytes.sort_by(|x, y| x.0.cmp(&y.0));
+        bytes.sort_by_key(|x| x.0);
 
         crate::substrate::compute_state_root_v2(
             balances.iter().map(|(a, b)| (a, *b)),
