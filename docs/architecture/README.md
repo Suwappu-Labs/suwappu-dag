@@ -33,6 +33,7 @@ presentations: [Visual Index](../visuals/index.html) ·
 | [safety-liveness.md](safety-liveness.md) | §11 | Joint-quorum AND-gate safety (Theorem 2) |
 | [cryptographic-posture.md](cryptographic-posture.md) | §12 | PQ posture + exception zones |
 | [pq-hedge.md](pq-hedge.md) | — | Design-only: hedge/migration path if ML-DSA-65 itself needs replacing |
+| [dagbft-design.md](dagbft-design.md) | — | Citable technical writeup of the DagBft/DagBft-C design, explicitly distinguished from Mysten Labs' Mysticeti-C by name and concrete divergence points |
 | [governance-phasing.md](governance-phasing.md) | §14 | Phase G2 → G3 → G4 governance |
 | [sprint-map.md](sprint-map.md) | — | Sprint backlog + dependency DAG |
 
