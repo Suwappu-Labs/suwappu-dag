@@ -22,6 +22,7 @@
 * [LTP integration — Commit/Lattice/Materialize (§10)](architecture/ltp-integration.md)
 * [Safety + liveness — joint-quorum AND-gate (§11)](architecture/safety-liveness.md)
 * [Cryptographic posture (§12)](architecture/cryptographic-posture.md)
+* [PQ-primitive hedge — if ML-DSA-65 needs replacing](architecture/pq-hedge.md)
 * [Governance phasing — G2 → G3 → G4 (§14)](architecture/governance-phasing.md)
 * [Sprint map](architecture/sprint-map.md)
 

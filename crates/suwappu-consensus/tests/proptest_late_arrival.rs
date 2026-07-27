@@ -46,6 +46,7 @@ fn cert(author: AuthorityId, round: Round, parents: Vec<CertHash>, seed: u64) ->
             round,
             parents,
             payload_digest: payload,
+            signature: Vec::new(),
         }
     }
 }

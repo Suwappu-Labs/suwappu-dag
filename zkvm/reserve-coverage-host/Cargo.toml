@@ -1,0 +1,19 @@
+[package]
+name = "reserve-coverage-host"
+version = "0.1.0"
+edition = "2021"
+description = "Host binary + library: generates/executes/verifies reserve-coverage-verifier proofs."
+
+[lib]
+name = "reserve_coverage_host"
+path = "src/lib.rs"
+
+[[bin]]
+name = "reserve-coverage-host"
+path = "src/main.rs"
+
+[dependencies]
+sp1-sdk = { version = "6.0", features = ["blocking"] }
+tokio = { version = "1", features = ["full"] }
+sha3 = "0.10"
+hex = "0.4"

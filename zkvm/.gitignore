@@ -1,0 +1,14 @@
+# Cargo build artifacts for the zkvm sub-workspace (excluded from the main
+# workspace in ../Cargo.toml). The compiled guest ELF that
+# reserve-coverage-host embeds via include_bytes! is force-added below since
+# it's a build output the host crate depends on, not a build byproduct.
+reserve-coverage-host/target/
+reserve-coverage-verifier/target/*
+!reserve-coverage-verifier/target/elf-compilation/
+reserve-coverage-verifier/target/elf-compilation/*
+!reserve-coverage-verifier/target/elf-compilation/riscv64im-succinct-zkvm-elf/
+reserve-coverage-verifier/target/elf-compilation/riscv64im-succinct-zkvm-elf/*
+!reserve-coverage-verifier/target/elf-compilation/riscv64im-succinct-zkvm-elf/release/
+reserve-coverage-verifier/target/elf-compilation/riscv64im-succinct-zkvm-elf/release/*
+!reserve-coverage-verifier/target/elf-compilation/riscv64im-succinct-zkvm-elf/release/reserve-coverage-verifier
+Cargo.lock

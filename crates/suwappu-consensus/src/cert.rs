@@ -5,10 +5,26 @@
 //! round, referencing certificates from prior rounds as parents.
 //!
 //! For DAG-S3 the certificate is a minimal data record: author, round,
-//! parents, and a 32-byte payload digest (typically a block hash). The
-//! signing surface lands in DAG-S6 with the validator-set registry.
+//! parents, and a 32-byte payload digest (typically a block hash).
+//!
+//! DAG-S6 adds the signing surface: every certificate carries a detached
+//! ML-DSA-65 signature (paper §6.1, reusing the Authority Ring signing
+//! keys already used for bridge-header attestation, see
+//! `bridge_header.rs`) over its own [`hash`](Certificate::hash). The
+//! signature is authored with [`Certificate::sign`] and checked with
+//! [`Certificate::verify_signature`] against the author's known public
+//! key (resolved out-of-band, e.g. from the genesis manifest / Authority
+//! Ring registry — `Certificate` itself carries no key material). Callers
+//! that admit certificates into a [`crate::dag::DagStore`] from gossip or
+//! RPC MUST call `verify_signature` and reject (never insert, never
+//! re-gossip) on failure; `DagStore::insert` itself performs only the
+//! structural DAG invariants (parent existence, round monotonicity,
+//! genesis shape) and does not check signatures, so that its extensive
+//! proptest/unit-test suite can keep constructing certificates directly
+//! without needing key material.
 
 use serde::{Deserialize, Serialize};
+use suwappu_crypto::mldsa::{sign, verify, PublicKey, SecretKey};
 
 /// Authority identifier — index into the published Authority Ring set.
 ///
@@ -45,16 +61,24 @@ pub struct Certificate {
     pub parents: Vec<CertHash>,
     /// 32-byte digest of the payload (typically a block hash).
     pub payload_digest: [u8; 32],
+    /// Detached ML-DSA-65 signature by `author` over `self.hash()`.
+    ///
+    /// Empty until [`Certificate::sign`] is called. `DagStore::insert`
+    /// does not check this field — see the module docs for why signature
+    /// verification is the admitting caller's responsibility.
+    #[serde(default)]
+    pub signature: Vec<u8>,
 }
 
 impl Certificate {
-    /// Construct a genesis certificate (round 0, no parents).
+    /// Construct a genesis certificate (round 0, no parents, unsigned).
     pub fn genesis(author: AuthorityId, payload_digest: [u8; 32]) -> Self {
         Self {
             author,
             round: 0,
             parents: Vec::new(),
             payload_digest,
+            signature: Vec::new(),
         }
     }
 
@@ -77,6 +101,39 @@ impl Certificate {
         out.copy_from_slice(hasher.finalize().as_bytes());
         CertHash(out)
     }
+
+    /// Sign this certificate's [`hash`](Self::hash) with the author's
+    /// ML-DSA-65 secret key and store the detached signature in
+    /// `self.signature`.
+    ///
+    /// Signing over a freshly computed hash with a valid secret key is
+    /// infallible, so this never fails.
+    pub fn sign(&mut self, sk: &SecretKey) {
+        let digest = self.hash();
+        self.signature = sign(digest.as_bytes(), sk)
+            .expect("ml-dsa-65 detached_sign over a valid secret key is infallible")
+            .as_bytes()
+            .to_vec();
+    }
+
+    /// Verify `self.signature` is a valid ML-DSA-65 detached signature by
+    /// `pk` over `self.hash()`.
+    ///
+    /// Returns `false` (never panics) on empty/malformed signature bytes.
+    /// This checks only the signature; it does NOT check that `pk`
+    /// belongs to `self.author` in the Authority Ring — the caller must
+    /// resolve `pk` from a trusted source (e.g. the genesis manifest)
+    /// keyed by `self.author` before calling this.
+    pub fn verify_signature(&self, pk: &PublicKey) -> bool {
+        if self.signature.is_empty() {
+            return false;
+        }
+        let digest = self.hash();
+        match suwappu_crypto::mldsa::Signature::from_bytes(&self.signature) {
+            Ok(sig) => verify(digest.as_bytes(), &sig, pk).is_ok(),
+            Err(_) => false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -98,6 +155,7 @@ mod tests {
             round: 5,
             parents: vec![CertHash([1; 32]), CertHash([2; 32])],
             payload_digest: [0xCD; 32],
+            signature: Vec::new(),
         };
         assert_eq!(c.hash(), c.hash());
     }
@@ -118,13 +176,54 @@ mod tests {
             round: 1,
             parents: vec![p1, p2],
             payload_digest: [0; 32],
+            signature: Vec::new(),
         };
         let b = Certificate {
             author: 0,
             round: 1,
             parents: vec![p2, p1],
             payload_digest: [0; 32],
+            signature: Vec::new(),
         };
         assert_ne!(a.hash(), b.hash());
+    }
+
+    #[test]
+    fn sign_then_verify_succeeds() {
+        let (pk, sk) = suwappu_crypto::mldsa::keypair();
+        let mut c = Certificate::genesis(1, [0x11; 32]);
+        assert!(
+            !c.verify_signature(&pk),
+            "unsigned certificate must not verify"
+        );
+        c.sign(&sk);
+        assert!(
+            c.verify_signature(&pk),
+            "honestly-signed certificate must verify"
+        );
+    }
+
+    #[test]
+    fn verify_rejects_wrong_key() {
+        let (_pk_a, sk_a) = suwappu_crypto::mldsa::keypair();
+        let (pk_b, _sk_b) = suwappu_crypto::mldsa::keypair();
+        let mut c = Certificate::genesis(1, [0x22; 32]);
+        c.sign(&sk_a);
+        assert!(
+            !c.verify_signature(&pk_b),
+            "signature by a different key must not verify"
+        );
+    }
+
+    #[test]
+    fn verify_rejects_tampered_certificate() {
+        let (pk, sk) = suwappu_crypto::mldsa::keypair();
+        let mut c = Certificate::genesis(1, [0x33; 32]);
+        c.sign(&sk);
+        c.payload_digest[0] ^= 0x01;
+        assert!(
+            !c.verify_signature(&pk),
+            "tampering after signing must break verification"
+        );
     }
 }

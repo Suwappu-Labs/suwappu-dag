@@ -21,10 +21,18 @@ The per-validator `node.toml` is filled in by `scripts/devnet-local.sh`
 (or `docker-compose.yml`) at startup since the peer-list IPs depend on
 the deployment target.
 
-Keys: this script writes deterministic placeholder bytes derived from
-a seed. **Acceptable only for a LOCAL devnet that never accepts
-external traffic.** For any public testnet / mainnet, use the
-real `suwappu-crypto` keygen path.
+Keys: real ML-DSA-65 + BLS12-381 keypairs minted via `suwappu-keygen`
+(build with `cargo build --release -p suwappu-crypto --bin
+suwappu-keygen`). This matters beyond "nice to have": any client
+(e.g. `suwappu-loadgen`) submitting signed intents through
+`verify_signed_intent` must sign with a keypair that verifies against
+one of these genesis-registered public keys, so non-corresponding
+placeholder sk/pk pairs make the devnet unable to accept any signed
+traffic at all — confirmed empirically (fake-keypair sign+verify
+round trip fails, see suwappu-dag PR for the TPS benchmark harness).
+Falls back to deterministic (non-cryptographic) placeholder bytes with
+a loud warning if `suwappu-keygen` isn't on PATH — that fallback mode
+can start a cluster but cannot accept signed intents.
 
 Usage:
     ./scripts/gen-devnet-genesis.py --num-nodes 4 --out-dir target/devnet
@@ -34,6 +42,9 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -42,13 +53,43 @@ DEFAULT_NETWORK_ID = "suwappu-devnet-local"
 
 def placeholder_key(seed: bytes, length: int) -> bytes:
     """Deterministic byte stream from a seed. Not cryptographically
-    random — devnet ONLY."""
+    random — only used as a fallback when suwappu-keygen isn't on PATH."""
     out = b""
     counter = 0
     while len(out) < length:
         out += hashlib.blake2b(seed + counter.to_bytes(4, "big")).digest()
         counter += 1
     return out[:length]
+
+
+def mint_keypair(sk_path: Path, pk_path: Path, algo: str, seed_root: bytes) -> tuple[bytes, bytes]:
+    """Real keypair via suwappu-keygen (--algo mldsa|bls). Falls back to a
+    placeholder + loud warning if suwappu-keygen isn't on PATH."""
+    sk_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if shutil.which("suwappu-keygen") is not None:
+        subprocess.run(
+            ["suwappu-keygen", "--algo", algo, "--sk", str(sk_path), "--pk", str(pk_path)],
+            check=True,
+        )
+        os.chmod(sk_path, 0o600)
+        return sk_path.read_bytes(), pk_path.read_bytes()
+
+    print(
+        f"WARNING: suwappu-keygen not found on PATH; emitting non-functional "
+        f"placeholder {algo} key for {sk_path.parent.name} (signed intents from "
+        "this validator's keypair will NOT verify). Build suwappu-keygen with: "
+        "  cargo build --release -p suwappu-crypto --bin suwappu-keygen",
+        file=sys.stderr,
+    )
+    key_len = ML_DSA_SK_BYTES if algo == "mldsa" else BLS_SK_BYTES
+    pk_len = ML_DSA_PK_BYTES if algo == "mldsa" else BLS_PK_BYTES
+    sk = placeholder_key(seed_root + f"-{algo}-sk".encode(), key_len)
+    pk = placeholder_key(seed_root + f"-{algo}-pk".encode(), pk_len)
+    sk_path.write_bytes(sk)
+    pk_path.write_bytes(pk)
+    os.chmod(sk_path, 0o600)
+    return sk, pk
 
 
 # Real key sizes:
@@ -123,13 +164,12 @@ def main() -> int:
         node_dir.mkdir(parents=True, exist_ok=True)
 
         seed_root = f"{args.seed}-{label}".encode()
-        mldsa_sk = placeholder_key(seed_root + b"-mldsa-sk", ML_DSA_SK_BYTES)
-        mldsa_pk = placeholder_key(seed_root + b"-mldsa-pk", ML_DSA_PK_BYTES)
-        bls_sk = placeholder_key(seed_root + b"-bls-sk", BLS_SK_BYTES)
-        bls_pk = placeholder_key(seed_root + b"-bls-pk", BLS_PK_BYTES)
-
-        (node_dir / "mldsa.sk").write_bytes(mldsa_sk)
-        (node_dir / "bls.sk").write_bytes(bls_sk)
+        _mldsa_sk, mldsa_pk = mint_keypair(
+            node_dir / "mldsa.sk", node_dir / "mldsa.pk", "mldsa", seed_root
+        )
+        _bls_sk, bls_pk = mint_keypair(
+            node_dir / "bls.sk", node_dir / "bls.pk", "bls", seed_root
+        )
 
         validators.append(
             {
@@ -168,7 +208,10 @@ def main() -> int:
     print(f"  network_id: {args.network_id}")
     print(f"  per-node keys: {out}/v{{0..{args.num_nodes - 1}}}/{{mldsa,bls}}.sk")
     print()
-    print("WARNING: placeholder keys — devnet ONLY. Never expose to the public.")
+    if shutil.which("suwappu-keygen") is not None:
+        print("Real ML-DSA-65 + BLS12-381 keypairs (via suwappu-keygen). Devnet-only: never expose to the public.")
+    else:
+        print("WARNING: suwappu-keygen not on PATH — placeholder keys emitted; signed intents will NOT verify.")
     return 0
 
 

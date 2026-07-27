@@ -46,6 +46,21 @@ pub enum NodeError {
     /// Checkpoint ratification failed.
     #[error("checkpoint ratification failed: {0}")]
     Checkpoint(#[from] suwappu_execution::CheckpointError),
+
+    /// A certificate's claimed author is not seated in the Authority
+    /// registry, so no public key exists to verify against.
+    #[error("certificate author {0} is not a seated Authority Ring member")]
+    UnknownSigner(AuthorityId),
+
+    /// The Authority registry's published public-key bytes for a
+    /// certificate's author don't decode as a valid ML-DSA-65 key.
+    #[error("malformed ML-DSA-65 public key registered for authority {0}")]
+    MalformedAuthorPublicKey(AuthorityId),
+
+    /// A certificate's signature did not verify against its claimed
+    /// author's registered public key.
+    #[error("certificate signature verification failed for authority {0}")]
+    InvalidCertificateSignature(AuthorityId),
 }
 
 /// One Authority Ring member, fully wired.
@@ -90,30 +105,52 @@ impl Validator {
         Vec::new()
     }
 
-    /// Produce a genesis certificate (round 0, no parents).
+    /// Produce a genesis certificate (round 0, no parents), signed with
+    /// this validator's ML-DSA-65 key.
     pub fn produce_genesis(&mut self, payload_digest: [u8; 32]) -> Certificate {
-        Certificate::genesis(self.id, payload_digest)
+        let mut cert = Certificate::genesis(self.id, payload_digest);
+        cert.sign(&self.mldsa_sk);
+        cert
     }
 
     /// Author a round-`round` certificate referencing every parent in
-    /// `parents`.
+    /// `parents`, signed with this validator's ML-DSA-65 key.
     pub fn author_round(
         &mut self,
         round: Round,
         parents: Vec<CertHash>,
         payload_digest: [u8; 32],
     ) -> Certificate {
-        Certificate {
+        let mut cert = Certificate {
             author: self.id,
             round,
             parents,
             payload_digest,
-        }
+            signature: Vec::new(),
+        };
+        cert.sign(&self.mldsa_sk);
+        cert
     }
 
-    /// Insert a certificate (own or peer) into the local DAG.
+    /// Insert a certificate (own or peer) into the local DAG without
+    /// signature verification. Only safe when the caller has already
+    /// verified the signature (or the cert is locally self-authored) —
+    /// prefer [`Self::observe_verified`] for anything received from a
+    /// peer.
     pub fn observe(&mut self, cert: Certificate) -> Result<CertHash, NodeError> {
         Ok(self.dag.insert(cert)?)
+    }
+
+    /// Insert a certificate into the local DAG after verifying its
+    /// signature against `registry`'s published public key for
+    /// `cert.author`. Rejects (and does not insert) on missing author,
+    /// malformed public key, or signature-verification failure.
+    pub fn observe_verified(
+        &mut self,
+        cert: Certificate,
+        registry: &AuthorityRegistry,
+    ) -> Result<CertHash, NodeError> {
+        insert_verified(&mut self.dag, &cert, registry)
     }
 
     /// Look up the cert hash this validator authored at `round`, if any.
@@ -192,6 +229,7 @@ fn run_genesis_flow(
             round: 1,
             parents: round_0_hashes.clone(),
             payload_digest: payload,
+            signature: Vec::new(),
         };
         for v in &mut validators {
             if v.id == author {
@@ -262,6 +300,27 @@ pub fn seed_registry(n: u32) -> (AuthorityRegistry, Vec<mldsa::SecretKey>) {
     (registry, sks)
 }
 
+/// Verify `cert`'s signature against `registry`'s published public key
+/// for `cert.author`, then insert it into `dag`. Rejects (returns `Err`,
+/// does not insert) on unknown author, malformed public key, or
+/// signature-verification failure — the same gate a peer-gossip
+/// admission path must apply before relaying a certificate onward.
+fn insert_verified(
+    dag: &mut DagStore,
+    cert: &Certificate,
+    registry: &AuthorityRegistry,
+) -> Result<CertHash, NodeError> {
+    let author = registry
+        .get(cert.author)
+        .ok_or(NodeError::UnknownSigner(cert.author))?;
+    let pk = mldsa::PublicKey::from_bytes(&author.public_key_bytes)
+        .map_err(|_| NodeError::MalformedAuthorPublicKey(cert.author))?;
+    if !cert.verify_signature(&pk) {
+        return Err(NodeError::InvalidCertificateSignature(cert.author));
+    }
+    Ok(dag.insert(cert.clone())?)
+}
+
 /// Variant of `run_genesis_flow` that uses a registry-bound set of SKs
 /// so the ratification step verifies against the real public keys.
 pub fn run_genesis_flow_with_keys(
@@ -274,16 +333,19 @@ pub fn run_genesis_flow_with_keys(
     let mut dags: Vec<DagStore> = (0..n).map(|_| DagStore::new()).collect();
     let mut substrates: Vec<InMemorySubstrate> = (0..n).map(|_| InMemorySubstrate::new()).collect();
 
-    // Round 0.
+    // Round 0. Each genesis cert is signed with its author's real
+    // registry-bound key; every DAG verifies before admitting, exercising
+    // the same reject-on-bad-signature path a peer's gossip would hit.
     let mut round_0_hashes = Vec::with_capacity(n as usize);
     for i in 0..n {
         let mut payload = [0u8; 32];
         payload[0] = i as u8;
         payload[1] = payload_seed;
-        let cert = Certificate::genesis(i, payload);
+        let mut cert = Certificate::genesis(i, payload);
+        cert.sign(&sks[i as usize]);
         round_0_hashes.push(cert.hash());
         for dag in &mut dags {
-            dag.insert(cert.clone())?;
+            insert_verified(dag, &cert, registry)?;
         }
     }
 
@@ -291,14 +353,16 @@ pub fn run_genesis_flow_with_keys(
     for i in 0..n {
         let mut payload = [0xAB; 32];
         payload[0] = i as u8;
-        let cert = Certificate {
+        let mut cert = Certificate {
             author: i,
             round: 1,
             parents: round_0_hashes.clone(),
             payload_digest: payload,
+            signature: Vec::new(),
         };
+        cert.sign(&sks[i as usize]);
         for dag in &mut dags {
-            dag.insert(cert.clone())?;
+            insert_verified(dag, &cert, registry)?;
         }
     }
 

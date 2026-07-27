@@ -91,6 +91,7 @@ fn build_equivocation_dag(
             round: 1,
             parents: vec![cand_a],
             payload_digest: payload_1,
+            signature: Vec::new(),
         };
         dag.insert(cert_a).unwrap();
 
@@ -103,6 +104,7 @@ fn build_equivocation_dag(
                 round: 1,
                 parents: vec![cand_b],
                 payload_digest: payload_2,
+                signature: Vec::new(),
             };
             dag.insert(cert_b).unwrap();
         }
