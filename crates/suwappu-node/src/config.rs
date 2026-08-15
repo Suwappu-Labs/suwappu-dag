@@ -51,6 +51,15 @@ pub struct NodeConfig {
 
     /// Peers this node should dial. List excludes self.
     pub peers: Vec<Peer>,
+    /// Allow this node to start even when its `authority_id` is absent
+    /// from the genesis manifest — a post-genesis joiner admitted via a
+    /// governed `AdmitAuthority` intent. The node boots in passive sync
+    /// mode (ingest + backfill + serve) and begins authoring/voting only
+    /// once it observes itself seated in the Authority Ring. Genesis
+    /// validators keep the default `false` and the strict manifest
+    /// cross-check.
+    #[serde(default)]
+    pub allow_post_genesis_join: bool,
 
     /// Round cadence in milliseconds. DagBft-C round = one DAG layer.
     /// Paper uses ~250 ms for the testnet; tune down for low-latency regions.
@@ -430,6 +439,7 @@ mod tests {
             client_listen: "0.0.0.0:9091".parse().unwrap(),
             rpc_listen: None,
             peers: vec![],
+            allow_post_genesis_join: false,
             round_ms: 250,
             checkpoint_cadence_rounds: 1,
             mldsa_secret_key_path: "/x".into(),

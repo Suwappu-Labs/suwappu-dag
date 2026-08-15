@@ -46,7 +46,7 @@ use suwappu_validator::{ValidatorMember, ValidatorRegistry};
 use tracing::debug;
 
 use crate::{
-    config::{GenesisManifest, NodeConfig},
+    config::{ConfigError, GenesisManifest, NodeConfig},
     events::{Event, EventLog, Lane},
     wire::{BlockPayload, PeerId, Wire, WireConfig, WireEvent, WireMessage, WireSplit},
 };
@@ -251,6 +251,10 @@ pub(crate) struct StateInner {
     /// Highest round observed across own + peer certs. Used by the
     /// synchronizer (S21.3) to detect catch-up gaps.
     pub(crate) max_observed_round: u64,
+    /// Highest DAG round any peer has reported via `WireMessage::Tip`.
+    /// Drives the forward backfill loop (`run_backfill`) for late-join
+    /// and restart catch-up.
+    pub(crate) sync_tip: u64,
     pub(crate) n_authorities: u32,
     /// Certs received whose parents aren't yet in the local DAG.
     pub(crate) orphans: HashMap<CertHash, Vec<Certificate>>,
@@ -490,6 +494,7 @@ impl State {
                 substrate,
                 last_authored_round: None,
                 max_observed_round: 0,
+                sync_tip: 0,
                 n_authorities: n,
                 orphans: HashMap::new(),
                 inflight_fetches: HashSet::new(),
@@ -574,7 +579,22 @@ impl Daemon {
     /// and inbox handler. Returns once the wire is bound and tasks are live —
     /// does not block until shutdown. Drop the returned handle to stop.
     pub async fn start(cfg: NodeConfig, manifest: GenesisManifest) -> anyhow::Result<Self> {
-        manifest.validate_against(&cfg)?;
+        match manifest.validate_against(&cfg) {
+            Ok(_) => {}
+            Err(ConfigError::MissingAuthority(id)) if cfg.allow_post_genesis_join => {
+                // Post-genesis joiner: admitted (or to be admitted) via a
+                // governed `AdmitAuthority` intent rather than genesis. The
+                // node starts in passive-sync mode — it ingests, backfills
+                // via the sync protocol, and serves requests, but authors
+                // certificates and votes only once it observes itself
+                // seated in the Authority Ring.
+                tracing::warn!(
+                    authority_id = id,
+                    "authority not in genesis manifest; starting in post-genesis join mode"
+                );
+            }
+            Err(e) => return Err(e.into()),
+        }
         let self_id: AuthorityId = cfg.authority_id;
         let self_label = cfg.self_id.clone();
         let round_ms = cfg.round_ms;
@@ -593,6 +613,7 @@ impl Daemon {
         let WireSplit {
             inboxes,
             outbound,
+            dyn_inbox,
             tasks: mut wire_tasks,
         } = wire.split();
         let outbound = Arc::new(outbound);
@@ -641,6 +662,32 @@ impl Daemon {
                 tracing::debug!(peer = %peer_label, "inbox task: starting");
                 run_inbox(self_label, self_id, state, outbound, log, peer_inbox).await;
                 tracing::debug!(peer = %peer_label, "inbox task: exiting");
+            }));
+        }
+
+        // Dynamic-peer inbox (late-join): one consumer for every inbound
+        // connection whose hello label isn't in the configured peer set.
+        // Same handler as the per-peer inboxes — replies to dynamic peers
+        // travel back over the event's `reply` sender.
+        {
+            let state = state.clone();
+            let outbound = outbound.clone();
+            let log = log.clone();
+            let self_label = self_label.clone();
+            tasks.push(tokio::spawn(async move {
+                run_inbox(self_label, self_id, state, outbound, log, dyn_inbox).await;
+            }));
+        }
+
+        // Forward backfill (late-join / restart catch-up): polls peer tips
+        // and pulls missing rounds oldest-first through the normal ingest
+        // path. Idle when the node is within the lag threshold of the
+        // best-known tip.
+        {
+            let state = state.clone();
+            let outbound = outbound.clone();
+            tasks.push(tokio::spawn(async move {
+                run_backfill(state, outbound).await;
             }));
         }
 
@@ -759,7 +806,7 @@ async fn run_inbox(
     mut inbox: tokio::sync::mpsc::Receiver<WireEvent>,
 ) {
     while let Some(ev) = inbox.recv().await {
-        let WireEvent { from, msg } = ev;
+        let WireEvent { from, msg, reply } = ev;
         match msg {
             WireMessage::Cert(cert) => {
                 let h = cert.hash();
@@ -771,18 +818,25 @@ async fn run_inbox(
                         .with_peer(from.0.clone()),
                 );
                 let inserted = ingest_cert(&state, cert, &from, &outbound).await;
-                for ic in inserted {
-                    let vote = Vote {
-                        validator: self_id,
-                        candidate: ic.hash,
-                    };
-                    state.votes.lock().entry(ic.hash).or_default().push(vote);
-                    log.emit(
-                        Event::now(&self_label, Lane::Main, "voted")
-                            .with_round(ic.round)
-                            .with_cert_hash(&ic.hash.0),
-                    );
-                    broadcast_traced(&outbound, WireMessage::Vote(vote), &self_label, &log);
+                // Post-genesis joiners ingest and commit but do not vote
+                // until seated in the Authority Ring: an unseated vote
+                // carries zero stake in `validator_quorum_met` anyway,
+                // and emitting it would just be gossip noise.
+                let seated = state.authority_registry.read().await.contains(self_id);
+                if seated {
+                    for ic in inserted {
+                        let vote = Vote {
+                            validator: self_id,
+                            candidate: ic.hash,
+                        };
+                        state.votes.lock().entry(ic.hash).or_default().push(vote);
+                        log.emit(
+                            Event::now(&self_label, Lane::Main, "voted")
+                                .with_round(ic.round)
+                                .with_cert_hash(&ic.hash.0),
+                        );
+                        broadcast_traced(&outbound, WireMessage::Vote(vote), &self_label, &log);
+                    }
                 }
                 try_commit(&state, &self_label, &log).await;
             }
@@ -801,9 +855,7 @@ async fn run_inbox(
             WireMessage::GetCert(hash) => {
                 let cert_opt = state.dag.read().await.get(&hash).cloned();
                 if let Some(cert) = cert_opt {
-                    if let Some(tx) = outbound.get(&from) {
-                        let _ = tx.try_send(WireMessage::Cert(cert));
-                    }
+                    reply_to(&outbound, &from, &reply, WireMessage::Cert(cert));
                 }
             }
             WireMessage::FastPath(cert) => {
@@ -813,11 +865,113 @@ async fn run_inbox(
                 handle_ltp_attestation(&state, att, &self_label, &log).await;
             }
             WireMessage::Ping(t) => {
-                if let Some(tx) = outbound.get(&from) {
-                    let _ = tx.send(WireMessage::Pong(t)).await;
-                }
+                reply_to(&outbound, &from, &reply, WireMessage::Pong(t));
             }
             WireMessage::Pong(_) => {}
+            WireMessage::GetTip => {
+                let tip = state.dag.read().await.max_round().unwrap_or(0);
+                reply_to(&outbound, &from, &reply, WireMessage::Tip(tip));
+            }
+            WireMessage::Tip(r) => {
+                let mut inner = state.inner.lock().await;
+                if r > inner.sync_tip {
+                    inner.sync_tip = r;
+                }
+            }
+            WireMessage::GetCertsByRound(round) => {
+                // Serve every cert at `round` as ordinary Cert frames (the
+                // requester's normal ingest verifies + dedups), each with
+                // its block payload when held so the requester can also
+                // replay intents. All of this is public chain data.
+                let certs: Vec<Certificate> = {
+                    let dag = state.dag.read().await;
+                    dag.round_hashes(round)
+                        .iter()
+                        .filter_map(|h| dag.get(h).cloned())
+                        .collect()
+                };
+                for cert in certs {
+                    let h = cert.hash();
+                    reply_to(&outbound, &from, &reply, WireMessage::Cert(cert));
+                    let block_opt = state.blocks.lock().get(&h).cloned();
+                    if let Some(block) = block_opt {
+                        reply_to(&outbound, &from, &reply, WireMessage::Block(block));
+                    }
+                }
+            }
+            WireMessage::GetBlock(hash) => {
+                let block_opt = state.blocks.lock().get(&hash).cloned();
+                if let Some(block) = block_opt {
+                    reply_to(&outbound, &from, &reply, WireMessage::Block(block));
+                }
+            }
+        }
+    }
+}
+
+/// Route a reply to `from`: configured peers via the outbound map,
+/// dynamic peers via the per-connection `reply` sender carried on the
+/// event (see [`WireEvent::reply`]). Best-effort — a full channel drops
+/// the frame, consistent with the gossip model.
+fn reply_to(
+    outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
+    from: &PeerId,
+    reply: &Option<tokio::sync::mpsc::Sender<WireMessage>>,
+    msg: WireMessage,
+) {
+    if let Some(tx) = outbound.get(from) {
+        let _ = tx.try_send(msg);
+    } else if let Some(tx) = reply {
+        let _ = tx.try_send(msg);
+    }
+}
+
+/// Forward backfill loop: poll peer tips, and whenever the local DAG is
+/// behind the best-known tip by more than a small lag threshold, request
+/// the missing rounds oldest-first via `GetCertsByRound`. Responses ride
+/// the ordinary `Cert`/`Block` ingest path (signature-verified, deduped),
+/// and round-at-a-time forward requests arrive parents-first so catch-up
+/// never leans on the bounded orphan buffer. Idle in steady state.
+async fn run_backfill(
+    state: Arc<State>,
+    outbound: Arc<HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>>,
+) {
+    const BACKFILL_TICK_MS: u64 = 500;
+    const BACKFILL_BATCH_ROUNDS: u64 = 8;
+    const BACKFILL_LAG_THRESHOLD: u64 = 2;
+
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(BACKFILL_TICK_MS));
+    let mut ticks: u64 = 0;
+    loop {
+        tick.tick().await;
+        // Refresh peer tips every 4 ticks (2s).
+        if ticks % 4 == 0 {
+            for tx in outbound.values() {
+                let _ = tx.try_send(WireMessage::GetTip);
+            }
+        }
+        ticks = ticks.wrapping_add(1);
+
+        let local = state.dag.read().await.max_round().unwrap_or(0);
+        let target = state.inner.lock().await.sync_tip;
+        if target <= local.saturating_add(BACKFILL_LAG_THRESHOLD) {
+            continue;
+        }
+        let from_round = local.saturating_add(1);
+        let to_round = from_round
+            .saturating_add(BACKFILL_BATCH_ROUNDS - 1)
+            .min(target);
+        for round in from_round..=to_round {
+            // Two-peer fan-out, mirroring `fetch_cert_from_peers`.
+            let mut sent = 0usize;
+            for tx in outbound.values() {
+                if tx.try_send(WireMessage::GetCertsByRound(round)).is_ok() {
+                    sent += 1;
+                    if sent >= 2 {
+                        break;
+                    }
+                }
+            }
         }
     }
 }
@@ -1391,6 +1545,10 @@ fn wire_msg_kind(msg: &WireMessage) -> &'static str {
         WireMessage::Ltp(_) => "ltp",
         WireMessage::Ping(_) => "ping",
         WireMessage::Pong(_) => "pong",
+        WireMessage::GetTip => "get_tip",
+        WireMessage::Tip(_) => "tip",
+        WireMessage::GetCertsByRound(_) => "get_certs_by_round",
+        WireMessage::GetBlock(_) => "get_block",
     }
 }
 
@@ -1781,6 +1939,16 @@ async fn run_round_driver(
     loop {
         tick.tick().await;
 
+        // Post-genesis joiners: never author until seated in the
+        // Authority Ring (admitted at an epoch boundary). Every peer's
+        // `ingest_cert` would reject an unseated author's cert anyway —
+        // this gate just avoids authoring rejected certs and, more
+        // importantly, keeps a joiner from burning its round cadence
+        // before catch-up completes.
+        if !state.authority_registry.read().await.contains(self_id) {
+            continue;
+        }
+
         // DAG-S30.2: split the propose path into 3 short lock-windows
         // with the expensive bincode/blake3 work outside the lock.
         // Pre-S30 the driver held `state.lock().await` for the entire
@@ -2091,6 +2259,7 @@ mod tests {
             client_listen: format!("127.0.0.1:{}", base_port + 100).parse().unwrap(),
             rpc_listen: None,
             peers: vec![],
+            allow_post_genesis_join: false,
             round_ms: 500,
             checkpoint_cadence_rounds: 1,
             mldsa_secret_key_path: write_mldsa_key_file(&sk),
@@ -2177,6 +2346,7 @@ mod tests {
             client_listen: format!("127.0.0.1:{}", base_port + 100).parse().unwrap(),
             rpc_listen: None,
             peers: vec![],
+            allow_post_genesis_join: false,
             round_ms: 500,
             checkpoint_cadence_rounds: 1,
             mldsa_secret_key_path: write_mldsa_key_file(&sk),
@@ -2294,6 +2464,7 @@ mod tests {
                     .unwrap(),
                 rpc_listen: None,
                 peers,
+                allow_post_genesis_join: false,
                 round_ms: 100,
                 checkpoint_cadence_rounds: 1,
                 mldsa_secret_key_path: write_mldsa_key_file(&keypairs[i as usize].1),
@@ -2426,6 +2597,7 @@ mod tests {
                     .unwrap(),
                 rpc_listen: None,
                 peers,
+                allow_post_genesis_join: false,
                 round_ms: 100,
                 checkpoint_cadence_rounds: 1,
                 mldsa_secret_key_path: write_mldsa_key_file(if i == 0 {
@@ -2900,6 +3072,7 @@ mod tests {
             client_listen: format!("127.0.0.1:{}", base_port + 100).parse().unwrap(),
             rpc_listen: None,
             peers: vec![],
+            allow_post_genesis_join: false,
             round_ms: 500,
             checkpoint_cadence_rounds: 1,
             mldsa_secret_key_path: write_mldsa_key_file(&sk),
@@ -3503,6 +3676,7 @@ mod tests {
             client_listen: format!("127.0.0.1:{}", base_port + 100).parse().unwrap(),
             rpc_listen: Some(format!("127.0.0.1:{}", base_port + 200).parse().unwrap()),
             peers: vec![],
+            allow_post_genesis_join: false,
             round_ms: 500,
             checkpoint_cadence_rounds: 1,
             mldsa_secret_key_path: write_mldsa_key_file(&rpc_sk),
@@ -3596,6 +3770,7 @@ mod tests {
             client_listen: format!("127.0.0.1:{}", base_port + 100).parse().unwrap(),
             rpc_listen: None,
             peers: vec![],
+            allow_post_genesis_join: false,
             round_ms: 500,
             checkpoint_cadence_rounds: 1,
             mldsa_secret_key_path: write_mldsa_key_file(&sk),
@@ -3713,6 +3888,7 @@ mod tests {
             client_listen: format!("127.0.0.1:{}", base_port + 100).parse().unwrap(),
             rpc_listen: Some(format!("127.0.0.1:{}", base_port + 200).parse().unwrap()),
             peers: vec![],
+            allow_post_genesis_join: false,
             round_ms: 500,
             checkpoint_cadence_rounds: 1,
             mldsa_secret_key_path: write_mldsa_key_file(&sk),
@@ -3832,6 +4008,7 @@ mod tests {
             client_listen: format!("127.0.0.1:{}", base_port + 100).parse().unwrap(),
             rpc_listen: Some(format!("127.0.0.1:{}", base_port + 200).parse().unwrap()),
             peers: vec![],
+            allow_post_genesis_join: false,
             round_ms: 500,
             checkpoint_cadence_rounds: 1,
             mldsa_secret_key_path: write_mldsa_key_file(&sk),

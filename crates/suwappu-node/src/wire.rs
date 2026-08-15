@@ -96,6 +96,25 @@ pub enum WireMessage {
     Ping(u64),
     /// Echo of a `Ping` from this side, for RTT measurement.
     Pong(u64),
+    // ── Sync / late-join primitives (appended; bincode variant indexes
+    //    of the pre-existing messages above are load-bearing) ──────────
+    /// Sync: ask a peer for its highest DAG round. Receivers respond
+    /// with `Tip(max_round)`. Drives forward catch-up for late-joining
+    /// or restarted nodes.
+    GetTip,
+    /// Sync: the sender's current max DAG round (response to `GetTip`).
+    Tip(u64),
+    /// Sync: request every certificate at the given round. Receivers
+    /// respond with an ordinary `Cert(...)` frame per certificate (plus
+    /// a `Block(...)` frame when the backing payload is held), so the
+    /// requester's normal ingest path — including dedup and signature
+    /// verification — handles the response. Forward, round-at-a-time
+    /// requests arrive parents-first, so catch-up never leans on the
+    /// bounded orphan buffer.
+    GetCertsByRound(u64),
+    /// Sync: request the block payload backing a cert hash. Receivers
+    /// respond with `Block(...)` if held; otherwise silently drop.
+    GetBlock(CertHash),
 }
 
 /// Maximum allowed framed payload size. Drops the connection on overrun.
@@ -129,6 +148,16 @@ pub const MAX_COMPACT_MESSAGE_BYTES: usize = 64 * 1024;
 /// Outbound dial reconnect parameters. Geometric backoff capped at `max_ms`.
 const RECONNECT_MIN_MS: u64 = 50;
 const RECONNECT_MAX_MS: u64 = 5_000;
+
+/// Cap on concurrently-connected DYNAMIC peers (inbound connections whose
+/// hello label is not in the configured peer set — late-joiners syncing
+/// before their operators are added to every seed's static config). The
+/// wire layer is unauthenticated by design (see module docs): the real
+/// security boundary is per-message ML-DSA verification in the consensus
+/// layer, and everything served to a dynamic peer (certs, blocks, tips)
+/// is public chain data. This cap plus the per-variant frame caps bound
+/// the resource cost of that openness.
+pub const MAX_DYNAMIC_PEERS: usize = 64;
 
 /// Errors produced by the wire transport. Internal to the `suwappu-node` daemon —
 /// not part of the consensus API surface.
@@ -171,6 +200,12 @@ pub struct WireEvent {
     pub from: PeerId,
     /// Message contents.
     pub msg: WireMessage,
+    /// Direct reply channel for DYNAMIC peers (late-joiners not in this
+    /// node's configured peer set): responses are written back on the
+    /// same TCP connection the request arrived on, because this node
+    /// has no dialer toward an unconfigured peer. `None` for configured
+    /// peers — replies to those go through the ordinary outbound map.
+    pub reply: Option<mpsc::Sender<WireMessage>>,
 }
 
 /// Running wire-transport handle. Drop to stop all background tasks.
@@ -188,6 +223,10 @@ pub struct Wire {
     /// excess sends (bounded channel) — this matches the consensus paper's
     /// "best-effort gossip, retries via re-broadcast" model.
     outbound: HashMap<PeerId, mpsc::Sender<WireMessage>>,
+    /// Shared inbox for DYNAMIC peers — inbound connections whose hello
+    /// label is not in the configured peer set (late-joiners). Their
+    /// events carry a per-connection `reply` sender; see [`WireEvent`].
+    pub dyn_inbox: mpsc::Receiver<WireEvent>,
     /// Background task handles. Aborted on drop.
     tasks: Vec<JoinHandle<()>>,
 }
@@ -200,6 +239,8 @@ pub struct WireSplit {
     pub inboxes: HashMap<PeerId, mpsc::Receiver<WireEvent>>,
     /// Per-peer outbound senders.
     pub outbound: HashMap<PeerId, mpsc::Sender<WireMessage>>,
+    /// Shared dynamic-peer inbox. See [`Wire::dyn_inbox`].
+    pub dyn_inbox: mpsc::Receiver<WireEvent>,
     /// Background accept/dialer tasks. Abort them to stop the wire.
     pub tasks: Vec<JoinHandle<()>>,
 }
@@ -219,10 +260,13 @@ impl Wire {
     pub fn split(mut self) -> WireSplit {
         let inboxes = std::mem::take(&mut self.inboxes);
         let outbound = std::mem::take(&mut self.outbound);
+        let (_closed_tx, closed_rx) = mpsc::channel(1);
+        let dyn_inbox = std::mem::replace(&mut self.dyn_inbox, closed_rx);
         let tasks = std::mem::take(&mut self.tasks);
         WireSplit {
             inboxes,
             outbound,
+            dyn_inbox,
             tasks,
         }
     }
@@ -242,6 +286,12 @@ impl Wire {
         }
         let inbound_txs = Arc::new(inbound_txs);
 
+        // Shared inbox for dynamic (non-configured) peers. One channel for
+        // all of them: dynamic traffic is sync-protocol dominated and low
+        // rate compared to the per-peer static inboxes.
+        let (dyn_tx, dyn_inbox) = mpsc::channel::<WireEvent>(4096);
+        let dyn_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
         // Bind first so the caller knows the port is up before we return.
         let listener = TcpListener::bind(cfg.listen).await?;
         info!(addr = %cfg.listen, peer_id = %cfg.self_id.0, "wire: listening");
@@ -252,8 +302,10 @@ impl Wire {
         {
             let inbound_txs = inbound_txs.clone();
             let self_id = cfg.self_id.clone();
+            let dyn_tx = dyn_tx.clone();
+            let dyn_count = dyn_count.clone();
             tasks.push(tokio::spawn(async move {
-                accept_loop(listener, inbound_txs, self_id).await;
+                accept_loop(listener, inbound_txs, dyn_tx, dyn_count, self_id).await;
             }));
         }
 
@@ -268,14 +320,16 @@ impl Wire {
             let (tx, rx) = mpsc::channel::<WireMessage>(8192);
             outbound.insert(peer.clone(), tx);
             let self_id = cfg.self_id.clone();
+            let inbound_txs = inbound_txs.clone();
             tasks.push(tokio::spawn(async move {
-                dialer_loop(peer, addr, rx, self_id).await;
+                dialer_loop(peer, addr, rx, self_id, inbound_txs).await;
             }));
         }
 
         Ok(Self {
             inboxes,
             outbound,
+            dyn_inbox,
             tasks,
         })
     }
@@ -307,6 +361,8 @@ impl Wire {
 async fn accept_loop(
     listener: TcpListener,
     inbound_txs: Arc<HashMap<PeerId, mpsc::Sender<WireEvent>>>,
+    dyn_tx: mpsc::Sender<WireEvent>,
+    dyn_count: Arc<std::sync::atomic::AtomicUsize>,
     self_id: PeerId,
 ) {
     loop {
@@ -315,9 +371,13 @@ async fn accept_loop(
                 debug!(remote = %addr, "wire: inbound");
                 let _ = stream.set_nodelay(true);
                 let inbound_txs = inbound_txs.clone();
+                let dyn_tx = dyn_tx.clone();
+                let dyn_count = dyn_count.clone();
                 let self_id = self_id.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = read_loop(stream, inbound_txs, self_id, addr).await {
+                    if let Err(e) =
+                        read_loop(stream, inbound_txs, dyn_tx, dyn_count, self_id, addr).await
+                    {
                         debug!(remote = %addr, err = %e, "wire: inbound closed");
                     }
                 });
@@ -336,11 +396,18 @@ async fn accept_loop(
 /// can't tell which region the traffic came from.
 ///
 /// DAG-S31.1: routes WireEvents to a per-peer channel rather than a
-/// shared fan-in. If the hello-frame peer ID doesn't match any
-/// configured peer, the connection is closed.
+/// shared fan-in.
+///
+/// Late-join extension: a hello whose peer ID is NOT in the configured
+/// set no longer drops the connection. Up to [`MAX_DYNAMIC_PEERS`] such
+/// peers are served on a shared dynamic inbox, full-duplex on their own
+/// TCP connection (this node has no dialer toward them, so replies are
+/// written back on the same socket via the event's `reply` sender).
 async fn read_loop(
     mut stream: TcpStream,
     inbound_txs: Arc<HashMap<PeerId, mpsc::Sender<WireEvent>>>,
+    dyn_tx: mpsc::Sender<WireEvent>,
+    dyn_count: Arc<std::sync::atomic::AtomicUsize>,
     _self_id: PeerId,
     remote_addr: SocketAddr,
 ) -> Result<(), WireError> {
@@ -348,25 +415,75 @@ async fn read_loop(
     let from: PeerId = crate::codec::decode_frame(&hello)?;
     debug!(peer = %from.0, addr = %remote_addr, "wire: hello");
 
-    let inbound_tx = match inbound_txs.get(&from) {
-        Some(tx) => tx.clone(),
-        None => {
-            warn!(peer = %from.0, addr = %remote_addr, "wire: unknown peer in hello, dropping");
-            return Ok(());
+    // Configured peer: the original read-only per-peer path.
+    if let Some(tx) = inbound_txs.get(&from) {
+        let inbound_tx = tx.clone();
+        loop {
+            let bytes = read_frame(&mut stream).await?;
+            let msg: WireMessage = crate::codec::decode_frame(&bytes)?;
+            // B3 hardening: per-variant size cap. `Block` carries up to
+            // ~1100 intents in the perf testnet's peak, so the cap
+            // sits at `MAX_FRAME_BYTES` (1 MiB). Compact variants
+            // cap at `MAX_COMPACT_MESSAGE_BYTES` (64 KiB) — a
+            // malicious peer can't burn CPU sending us an inflated
+            // cert that happens to fit inside the 1 MiB frame cap.
+            if !enforce_compact_variant_cap(&msg, bytes.len()) {
+                warn!(
+                    peer = %from.0,
+                    variant = wire_variant_name(&msg),
+                    bytes = bytes.len(),
+                    cap = MAX_COMPACT_MESSAGE_BYTES,
+                    "wire: compact-variant cap exceeded; dropping frame"
+                );
+                continue;
+            }
+            if inbound_tx
+                .send(WireEvent {
+                    from: from.clone(),
+                    msg,
+                    reply: None,
+                })
+                .await
+                .is_err()
+            {
+                return Ok(());
+            }
         }
-    };
+    }
 
-    loop {
-        let bytes = read_frame(&mut stream).await?;
-        let msg: WireMessage = crate::codec::decode_frame(&bytes)?;
-        // B3 hardening: per-variant size cap. `Block` carries up to
-        // ~1100 intents in the perf testnet's peak, so the cap
-        // sits at `MAX_FRAME_BYTES` (1 MiB). Compact variants
-        // (`Cert`, `Vote`, `GetCert`, `FastPath`, `Ltp`,
-        // `Ping`/`Pong`) cap at `MAX_COMPACT_MESSAGE_BYTES`
-        // (64 KiB) — a malicious peer can't burn CPU sending us
-        // an inflated cert that happens to fit inside the
-        // 1 MiB frame cap.
+    // Dynamic peer path (late-join).
+    use std::sync::atomic::Ordering;
+    if dyn_count.load(Ordering::Relaxed) >= MAX_DYNAMIC_PEERS {
+        warn!(peer = %from.0, addr = %remote_addr, "wire: dynamic peer capacity reached, dropping");
+        return Ok(());
+    }
+    dyn_count.fetch_add(1, Ordering::Relaxed);
+    info!(peer = %from.0, addr = %remote_addr, "wire: dynamic peer connected");
+
+    let (mut read_half, mut write_half) = stream.into_split();
+    let (conn_tx, mut conn_rx) = mpsc::channel::<WireMessage>(1024);
+    let writer = tokio::spawn(async move {
+        while let Some(msg) = conn_rx.recv().await {
+            match crate::codec::encode_frame(&msg) {
+                Ok(bytes) => {
+                    if write_frame(&mut write_half, &bytes).await.is_err() {
+                        break;
+                    }
+                }
+                Err(e) => warn!(err = %e, "wire: dynamic serialize"),
+            }
+        }
+    });
+
+    let result = loop {
+        let bytes = match read_frame(&mut read_half).await {
+            Ok(b) => b,
+            Err(e) => break Err(e),
+        };
+        let msg: WireMessage = match crate::codec::decode_frame(&bytes) {
+            Ok(m) => m,
+            Err(e) => break Err(e.into()),
+        };
         if !enforce_compact_variant_cap(&msg, bytes.len()) {
             warn!(
                 peer = %from.0,
@@ -377,17 +494,22 @@ async fn read_loop(
             );
             continue;
         }
-        if inbound_tx
+        if dyn_tx
             .send(WireEvent {
                 from: from.clone(),
                 msg,
+                reply: Some(conn_tx.clone()),
             })
             .await
             .is_err()
         {
-            return Ok(());
+            break Ok(());
         }
-    }
+    };
+    dyn_count.fetch_sub(1, Ordering::Relaxed);
+    writer.abort();
+    info!(peer = %from.0, addr = %remote_addr, "wire: dynamic peer disconnected");
+    result
 }
 
 /// B3 hardening: return `true` if the frame size is OK for this
@@ -413,6 +535,10 @@ fn wire_variant_name(msg: &WireMessage) -> &'static str {
         WireMessage::Ltp(_) => "Ltp",
         WireMessage::Ping(_) => "Ping",
         WireMessage::Pong(_) => "Pong",
+        WireMessage::GetTip => "GetTip",
+        WireMessage::Tip(_) => "Tip",
+        WireMessage::GetCertsByRound(_) => "GetCertsByRound",
+        WireMessage::GetBlock(_) => "GetBlock",
     }
 }
 
@@ -421,6 +547,7 @@ async fn dialer_loop(
     addr: SocketAddr,
     mut rx: mpsc::Receiver<WireMessage>,
     self_id: PeerId,
+    inbound_txs: Arc<HashMap<PeerId, mpsc::Sender<WireEvent>>>,
 ) {
     let mut backoff_ms = RECONNECT_MIN_MS;
     // Persistent outbound queue: messages sent while disconnected are dropped
@@ -429,10 +556,12 @@ async fn dialer_loop(
 
     loop {
         match TcpStream::connect(addr).await {
-            Ok(mut stream) => {
+            Ok(stream) => {
                 info!(peer = %peer.0, addr = %addr, "wire: dialed");
                 let _ = stream.set_nodelay(true);
                 backoff_ms = RECONNECT_MIN_MS;
+
+                let (mut read_half, mut write_half) = stream.into_split();
 
                 // Send hello first so the peer can label inbound frames.
                 let hello_bytes = match crate::codec::encode_frame(&self_id) {
@@ -442,15 +571,54 @@ async fn dialer_loop(
                         break;
                     }
                 };
-                if let Err(e) = write_frame(&mut stream, &hello_bytes).await {
+                if let Err(e) = write_frame(&mut write_half, &hello_bytes).await {
                     warn!(peer = %peer.0, err = %e, "wire: hello write");
                     continue;
                 }
 
+                // Late-join extension: also READ on the dial connection.
+                // When the remote treats this node as a dynamic peer (we
+                // are not in its configured set), its replies arrive on
+                // this same socket — a joiner has no listener the remote
+                // would dial back. Static remotes never write on their
+                // inbound sockets, so for configured pairs this reader
+                // simply idles: no duplicate delivery.
+                let reader = {
+                    let peer = peer.clone();
+                    let inbound_tx = inbound_txs.get(&peer).cloned();
+                    tokio::spawn(async move {
+                        let Some(inbound_tx) = inbound_tx else { return };
+                        loop {
+                            let bytes = match read_frame(&mut read_half).await {
+                                Ok(b) => b,
+                                Err(_) => return,
+                            };
+                            let msg: WireMessage = match crate::codec::decode_frame(&bytes) {
+                                Ok(m) => m,
+                                Err(_) => return,
+                            };
+                            if !enforce_compact_variant_cap(&msg, bytes.len()) {
+                                continue;
+                            }
+                            if inbound_tx
+                                .send(WireEvent {
+                                    from: peer.clone(),
+                                    msg,
+                                    reply: None,
+                                })
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                    })
+                };
+
                 // Drain any queued send from before the connection landed.
                 if let Some(msg) = pending.write().await.take() {
                     if let Ok(bytes) = crate::codec::encode_frame(&msg) {
-                        let _ = write_frame(&mut stream, &bytes).await;
+                        let _ = write_frame(&mut write_half, &bytes).await;
                     }
                 }
 
@@ -459,7 +627,7 @@ async fn dialer_loop(
                     match rx.recv().await {
                         Some(msg) => match crate::codec::encode_frame(&msg) {
                             Ok(bytes) => {
-                                if let Err(e) = write_frame(&mut stream, &bytes).await {
+                                if let Err(e) = write_frame(&mut write_half, &bytes).await {
                                     warn!(peer = %peer.0, err = %e, "wire: send failed");
                                     *pending.write().await = Some(msg);
                                     break;
@@ -467,9 +635,13 @@ async fn dialer_loop(
                             }
                             Err(e) => warn!(err = %e, "wire: serialize"),
                         },
-                        None => return, // channel closed; node shutting down
+                        None => {
+                            reader.abort();
+                            return; // channel closed; node shutting down
+                        }
                     }
                 }
+                reader.abort();
             }
             Err(e) => {
                 debug!(peer = %peer.0, addr = %addr, err = %e, backoff_ms, "wire: dial failed");
@@ -480,7 +652,10 @@ async fn dialer_loop(
     }
 }
 
-async fn read_frame(stream: &mut TcpStream) -> Result<Vec<u8>, WireError> {
+async fn read_frame<R>(stream: &mut R) -> Result<Vec<u8>, WireError>
+where
+    R: AsyncReadExt + Unpin,
+{
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf).await.map_err(|e| {
         if e.kind() == io::ErrorKind::UnexpectedEof {
@@ -498,7 +673,10 @@ async fn read_frame(stream: &mut TcpStream) -> Result<Vec<u8>, WireError> {
     Ok(buf)
 }
 
-async fn write_frame(stream: &mut TcpStream, payload: &[u8]) -> Result<(), WireError> {
+async fn write_frame<W>(stream: &mut W, payload: &[u8]) -> Result<(), WireError>
+where
+    W: AsyncWriteExt + Unpin,
+{
     if payload.len() > MAX_FRAME_BYTES {
         return Err(WireError::FrameTooLarge(payload.len()));
     }
@@ -561,6 +739,63 @@ mod tests {
         .expect("a inbox closed");
         assert_eq!(from_b.from.0, "b");
         assert!(matches!(from_b.msg, WireMessage::Ping(99)));
+    }
+
+    /// Late-join: a dynamic peer (not in the seed's configured set) dials
+    /// the seed, sends a request, and receives the reply on the SAME
+    /// connection via the event's `reply` sender routed through the
+    /// dialer's read half.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dynamic_peer_full_duplex() {
+        let seed_addr: SocketAddr = "127.0.0.1:18821".parse().unwrap();
+        let joiner_addr: SocketAddr = "127.0.0.1:18822".parse().unwrap();
+
+        // Seed knows no peers: every inbound connection is dynamic.
+        let mut seed = Wire::start(WireConfig {
+            self_id: PeerId::new("seed"),
+            listen: seed_addr,
+            peers: vec![],
+        })
+        .await
+        .unwrap();
+
+        // Joiner dials the seed as a configured peer.
+        let mut joiner = Wire::start(WireConfig {
+            self_id: PeerId::new("joiner"),
+            listen: joiner_addr,
+            peers: vec![(PeerId::new("seed"), seed_addr)],
+        })
+        .await
+        .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        // Joiner -> seed: request lands on the seed's dynamic inbox.
+        assert!(
+            joiner
+                .send_to(&PeerId::new("seed"), WireMessage::GetTip)
+                .await
+        );
+        let ev = tokio::time::timeout(Duration::from_secs(2), seed.dyn_inbox.recv())
+            .await
+            .expect("seed dyn inbox timed out")
+            .expect("seed dyn inbox closed");
+        assert_eq!(ev.from.0, "joiner");
+        assert!(matches!(ev.msg, WireMessage::GetTip));
+        let reply = ev.reply.expect("dynamic event must carry a reply sender");
+
+        // Seed -> joiner: reply travels back on the same connection and
+        // surfaces in the joiner's per-peer inbox for "seed".
+        reply.send(WireMessage::Tip(41)).await.unwrap();
+        let got = tokio::time::timeout(
+            Duration::from_secs(2),
+            joiner.inboxes.get_mut(&PeerId::new("seed")).unwrap().recv(),
+        )
+        .await
+        .expect("joiner receive timed out")
+        .expect("joiner inbox closed");
+        assert_eq!(got.from.0, "seed");
+        assert!(matches!(got.msg, WireMessage::Tip(41)));
     }
 
     /// Three-node broadcast: A broadcasts a Ping; both B and C must see it.
