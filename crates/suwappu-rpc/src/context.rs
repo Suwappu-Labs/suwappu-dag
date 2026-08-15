@@ -324,6 +324,11 @@ pub enum SubmitIntentError {
     /// The daemon's intent channel is full / closed; the caller should
     /// retry. Maps to `-32003 EnqueueFull`.
     EnqueueFull,
+    /// Governance intents (`AdmitAuthority` / `ExitAuthority` /
+    /// `EjectAuthority`) require the dual-signature rule and cannot be
+    /// submitted single-signed over JSON-RPC — use the governed TCP
+    /// client wire. Maps to `-32004 GovernanceRequiresCoSignature`.
+    GovernanceRequiresCoSignature,
 }
 
 /// Concrete context handle passed into the router. Wraps an

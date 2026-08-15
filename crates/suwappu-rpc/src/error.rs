@@ -42,6 +42,12 @@ pub enum RpcError {
     #[error("enqueue full: {0}")]
     EnqueueFull(String),
 
+    /// `submit_intent`: governance intents require the dual-signature
+    /// rule (sponsor + co-signer) and cannot be submitted single-signed
+    /// over JSON-RPC. Use the governed TCP client wire.
+    #[error("governance requires co-signature: {0}")]
+    GovernanceRequiresCoSignature(String),
+
     /// B2 hardening: the request was rejected by an ingress
     /// middleware (concurrency cap, body-size cap, or future
     /// per-IP rate limit). Transient — caller should retry with
@@ -64,6 +70,7 @@ impl RpcError {
             RpcError::UnknownSigner(_) => -32001,
             RpcError::BadSignature(_) => -32002,
             RpcError::EnqueueFull(_) => -32003,
+            RpcError::GovernanceRequiresCoSignature(_) => -32004,
             // -32099: explicitly chosen to occupy the OTHER end of
             // the application-level range so it can't collide with
             // a future NotFound-style addition.

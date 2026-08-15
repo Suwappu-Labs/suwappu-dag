@@ -2525,10 +2525,18 @@ mod tests {
     /// flake described below (only reproducible under real shared-runner
     /// load, not verified fixed here) — it narrows the blast radius and
     /// makes a future flake's diagnostics per-stage instead of pooled.
+    #[allow(clippy::type_complexity)]
     async fn spawn_phase_g_cluster(
         base_port: u16,
         network_id: &str,
-    ) -> (Vec<Daemon>, crate::client::LoadGenClient) {
+    ) -> (
+        Vec<Daemon>,
+        crate::client::LoadGenClient,
+        Vec<(
+            suwappu_crypto::mldsa::PublicKey,
+            suwappu_crypto::mldsa::SecretKey,
+        )>,
+    ) {
         let n = 4u32;
 
         // Issue #28 (Phase 2.6): generate a real ML-DSA-65 keypair
@@ -2645,7 +2653,7 @@ mod tests {
         .await
         .unwrap();
 
-        (daemons, client)
+        (daemons, client, other_keypairs)
     }
 
     /// Submit `AdmitAuthority{id=4}` and poll for it to converge across
@@ -2653,13 +2661,20 @@ mod tests {
     /// on timeout. Shared by both `phase_g_admit` and `phase_g_eject`
     /// (the latter needs authority 4 admitted before it can eject it).
     async fn admit_authority_4(daemons: &[Daemon], client: &mut crate::client::LoadGenClient) {
+        // Dual-signature rule (wire v3): the candidate co-signs with the
+        // key being admitted (proof of possession), so the candidate
+        // key must be a REAL ML-DSA keypair, not filler bytes.
+        let (cand_pk, cand_sk) = suwappu_crypto::mldsa::keypair();
         let admit = suwappu_execution::Intent::AdmitAuthority {
             authority_id: 4,
             stake_suwappu: 150_000,
-            mldsa_public_key: vec![0u8; 32],
+            mldsa_public_key: cand_pk.as_bytes().to_vec(),
             bls_public_key: vec![0u8; 48],
         };
-        client.submit(admit).await.unwrap();
+        client
+            .submit_governed(admit, &cand_pk, &cand_sk)
+            .await
+            .unwrap();
 
         // Poll for convergence rather than sleeping a fixed wall-clock
         // window. CI runners (2-core, many parallel daemon tests) can
@@ -2751,7 +2766,8 @@ mod tests {
     /// `quorum_threshold(4)=3` during the n=5→n=4 window.
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn phase_g_admit() {
-        let (daemons, mut client) = spawn_phase_g_cluster(19_700, "phase-g-admit-4n").await;
+        let (daemons, mut client, _other_keypairs) =
+            spawn_phase_g_cluster(19_700, "phase-g-admit-4n").await;
         admit_authority_4(&daemons, &mut client).await;
     }
 
@@ -2788,15 +2804,19 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     #[ignore = "test-split mitigation for #171 not yet confirmed against loaded CI; un-ignore after a clean CI run"]
     async fn phase_g_eject() {
-        let (daemons, mut client) = spawn_phase_g_cluster(19_800, "phase-g-eject-4n").await;
+        let (daemons, mut client, other_keypairs) =
+            spawn_phase_g_cluster(19_800, "phase-g-eject-4n").await;
         admit_authority_4(&daemons, &mut client).await;
 
-        // Eject the new authority.
+        // Eject the new authority. Dual-signature rule: v0 sponsors
+        // (the client's own key) and v1 — a second, distinct seated
+        // authority — co-signs.
+        let (co_pk, co_sk) = (&other_keypairs[0].0, &other_keypairs[0].1);
         let eject = suwappu_execution::Intent::EjectAuthority {
             authority_id: 4,
             proof_ref: [0u8; 32],
         };
-        client.submit(eject).await.unwrap();
+        client.submit_governed(eject, co_pk, co_sk).await.unwrap();
 
         // F3 stage-A probe: before entering the long convergence
         // loop below, give every daemon a bounded window to RECEIVE
@@ -2838,7 +2858,7 @@ mod tests {
                     authority_id: 4,
                     proof_ref: [0u8; 32],
                 };
-                let _ = client.submit(resubmit).await;
+                let _ = client.submit_governed(resubmit, co_pk, co_sk).await;
                 propagate_last_resubmit = std::time::Instant::now();
             }
             if std::time::Instant::now() >= propagate_deadline {
@@ -2913,7 +2933,7 @@ mod tests {
                     authority_id: 4,
                     proof_ref: [0u8; 32],
                 };
-                let _ = client.submit(resubmit).await;
+                let _ = client.submit_governed(resubmit, co_pk, co_sk).await;
                 last_resubmit = std::time::Instant::now();
             }
             if std::time::Instant::now() >= eject_deadline {

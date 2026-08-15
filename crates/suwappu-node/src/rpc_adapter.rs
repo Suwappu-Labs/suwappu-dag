@@ -290,6 +290,9 @@ impl StateView for NodeStateView {
             AuthOutcome::Ok => {}
             AuthOutcome::UnknownSigner => return Err(SubmitIntentError::UnknownSigner),
             AuthOutcome::BadSignature => return Err(SubmitIntentError::BadSignature),
+            AuthOutcome::GovernanceRequiresCoSignature => {
+                return Err(SubmitIntentError::GovernanceRequiresCoSignature)
+            }
         }
 
         // 3. Compute the canonical intent hash — same blake3 over the
