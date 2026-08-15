@@ -449,6 +449,35 @@ impl State {
                 tracing::warn!(val = v.authority_id, err = %e, "genesis: skipping malformed validator");
             }
         }
+        // Genesis funding (launch fix): apply the manifest's
+        // `[[prebalances]]` to the fresh substrate here, in the same
+        // manifest-driven spot where the stake table and authority /
+        // validator registries are seeded. Every validator shares the
+        // identical genesis.toml, so the resulting balances (and state
+        // root) are deterministic across the mesh; a restarting node
+        // reconstructs the substrate from empty and re-applies, so this
+        // is idempotent across restarts. Application goes through
+        // `Intent::GenesisAllocation`, whose height-0 gate a fresh
+        // `InMemorySubstrate` satisfies (`current_block_height` starts
+        // at 0) — the same code path the execution crate's own genesis
+        // tests exercise.
+        let mut substrate = InMemorySubstrate::new();
+        let allocations: Vec<(suwappu_execution::Address, suwappu_execution::Balance)> = manifest
+            .prebalances
+            .iter()
+            .filter_map(|p| match p.address_bytes() {
+                Ok(addr) => Some((addr, p.balance_suwappu as u128)),
+                Err(e) => {
+                    tracing::warn!(err = %e, "genesis: skipping malformed prebalance entry");
+                    None
+                }
+            })
+            .collect();
+        if !allocations.is_empty() {
+            if let Err(e) = substrate.apply_intent(&Intent::GenesisAllocation { allocations }) {
+                tracing::warn!(err = %e, "genesis: prebalance application failed");
+            }
+        }
         let n = manifest.validators.len() as u32;
         Self {
             dag: tokio::sync::RwLock::new(DagStore::new()),
@@ -459,7 +488,7 @@ impl State {
             authority_registry: tokio::sync::RwLock::new(authority_registry),
             validator_registry: tokio::sync::RwLock::new(validator_registry),
             inner: tokio::sync::Mutex::new(StateInner {
-                substrate: InMemorySubstrate::new(),
+                substrate,
                 last_authored_round: None,
                 max_observed_round: 0,
                 n_authorities: n,
@@ -2053,6 +2082,7 @@ mod tests {
                 })
                 .collect(),
             corridors: Vec::new(),
+            prebalances: Vec::new(),
             rounds_per_epoch: 1024,
         };
         let cfg = NodeConfig {
@@ -2138,6 +2168,7 @@ mod tests {
                 })
                 .collect(),
             corridors: Vec::new(),
+            prebalances: Vec::new(),
             rounds_per_epoch: 1024,
         };
         let cfg = NodeConfig {
@@ -2238,6 +2269,7 @@ mod tests {
                 })
                 .collect(),
             corridors: Vec::new(),
+            prebalances: Vec::new(),
             rounds_per_epoch: 1024,
         };
 
@@ -2366,6 +2398,7 @@ mod tests {
                 })
                 .collect(),
             corridors: Vec::new(),
+            prebalances: Vec::new(),
             // Issue #18: short epochs so governance application
             // (which now lands at the next boundary) is exercised on
             // CI-sane timescales. 16 rounds * 100ms = 1.6s/boundary.
@@ -2858,6 +2891,7 @@ mod tests {
                 })
                 .collect(),
             corridors: Vec::new(),
+            prebalances: Vec::new(),
             rounds_per_epoch: 1024,
         };
         let cfg = NodeConfig {
@@ -3007,6 +3041,67 @@ mod tests {
         );
     }
 
+    /// Genesis funding (launch fix): `State::new` must credit every
+    /// manifest `[[prebalances]]` entry to the fresh substrate, so a
+    /// pre-balanced faucet address starts with spendable balance at
+    /// height 0. Also asserts the malformed-entry warn-and-skip path
+    /// and that a manifest without prebalances funds nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn state_new_applies_genesis_prebalances() {
+        let faucet_addr: [u8; 20] = [0xAB; 20];
+        let other_addr: [u8; 20] = [0xCD; 20];
+        let mut manifest = GenesisManifest {
+            network_id: "prebalance-test".into(),
+            validators: vec![GenesisValidator {
+                authority_id: 0,
+                label: "v0".into(),
+                mldsa_public_key_hex: "00".into(),
+                bls_public_key_hex: "00".into(),
+                validator_stake_suwappu: 1_000,
+                authority_stake_suwappu: 1_000,
+            }],
+            corridors: Vec::new(),
+            rounds_per_epoch: 1024,
+            prebalances: vec![
+                crate::config::GenesisPrebalance {
+                    address: format!("0x{}", hex::encode(faucet_addr)),
+                    balance_suwappu: 10_000_000_000,
+                    role: Some("faucet".into()),
+                },
+                // No 0x prefix — must also be accepted.
+                crate::config::GenesisPrebalance {
+                    address: hex::encode(other_addr),
+                    balance_suwappu: 7,
+                    role: None,
+                },
+                // Malformed — warn-and-skip, must not poison the rest.
+                crate::config::GenesisPrebalance {
+                    address: "0xnothex".into(),
+                    balance_suwappu: 1,
+                    role: None,
+                },
+            ],
+        };
+        let (_pk, sk) = suwappu_crypto::mldsa::keypair();
+        let state = State::new(&manifest, sk, None);
+        {
+            let inner = state.inner.lock().await;
+            assert_eq!(inner.substrate.balance(&faucet_addr), 10_000_000_000);
+            assert_eq!(inner.substrate.balance(&other_addr), 7);
+            assert_eq!(inner.substrate.total_supply(), 10_000_000_007);
+        }
+
+        // A manifest without prebalances funds nothing (pre-fix behavior).
+        manifest.prebalances = Vec::new();
+        let (_pk2, sk2) = suwappu_crypto::mldsa::keypair();
+        let state2 = State::new(&manifest, sk2, None);
+        {
+            let inner = state2.inner.lock().await;
+            assert_eq!(inner.substrate.balance(&faucet_addr), 0);
+            assert_eq!(inner.substrate.total_supply(), 0);
+        }
+    }
+
     /// Smoke test for the fast-path lane handler (DAG-S22).
     ///
     /// Manually feeds singleton-signer partial certs from each Authority
@@ -3031,6 +3126,7 @@ mod tests {
                 })
                 .collect(),
             corridors: Vec::new(),
+            prebalances: Vec::new(),
             rounds_per_epoch: 1024,
         };
         let (log, _log_task) =
@@ -3131,6 +3227,7 @@ mod tests {
                 })
                 .collect(),
             corridors: Vec::new(),
+            prebalances: Vec::new(),
             rounds_per_epoch: 1024,
         };
         let (log, _log_task) =
@@ -3238,6 +3335,7 @@ mod tests {
                 })
                 .collect(),
             corridors: Vec::new(),
+            prebalances: Vec::new(),
             rounds_per_epoch: 1024,
         };
         let (log, _log_task) =
@@ -3340,6 +3438,7 @@ mod tests {
                 })
                 .collect(),
             corridors: Vec::new(),
+            prebalances: Vec::new(),
             rounds_per_epoch: 1024,
         };
         let (log, _log_task) =
@@ -3395,6 +3494,7 @@ mod tests {
                 authority_stake_suwappu: 150_000,
             }],
             corridors: Vec::new(),
+            prebalances: Vec::new(),
             rounds_per_epoch: 1024,
         };
         let cfg = NodeConfig {
@@ -3487,6 +3587,7 @@ mod tests {
                 })
                 .collect(),
             corridors: Vec::new(),
+            prebalances: Vec::new(),
             rounds_per_epoch: 1024,
         };
         let cfg = NodeConfig {
@@ -3603,6 +3704,7 @@ mod tests {
                 authority_stake_suwappu: 150_000,
             }],
             corridors: Vec::new(),
+            prebalances: Vec::new(),
             rounds_per_epoch: 1024,
         };
         let cfg = NodeConfig {
@@ -3721,6 +3823,7 @@ mod tests {
                 authority_stake_suwappu: 150_000,
             }],
             corridors: Vec::new(),
+            prebalances: Vec::new(),
             rounds_per_epoch: 1024,
         };
         let cfg = NodeConfig {

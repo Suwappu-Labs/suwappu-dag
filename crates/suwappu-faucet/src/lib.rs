@@ -84,19 +84,18 @@ pub fn intent_signing_digest(network_id: &str, intent: &Intent) -> Result<[u8; 3
     Ok(*hasher.finalize().as_bytes())
 }
 
-/// Derive a 20-byte address from an ML-DSA-65 public key. MUST match
-/// the recipe used by the devnet genesis script
-/// (`scripts/devnet/gen-genesis.py`): `blake2b-32(pk)[:20]`.
+/// Derive a 20-byte address from an ML-DSA-65 public key.
+///
+/// CANONICAL RULE: `blake3(pubkey_bytes)[..20]` — the chain-wide
+/// address convention. Evidence: `suwappu_execution::reserved`
+/// derives every reserved address as "the leading 20 bytes of
+/// BLAKE3(domain_tag)", and blake3 is the only hash the node stack
+/// uses (intent hashes, signer pubkey hashes, state roots). The
+/// genesis scripts (`scripts/{devnet,testnet}/gen-genesis.py`)
+/// MUST use the same recipe when emitting `[[prebalances]]`
+/// addresses into genesis.toml, or the funded genesis address is
+/// not the address this faucet spends from.
 pub fn address_from_pubkey(pk: &PublicKey) -> [u8; 20] {
-    // Use blake3 truncated — matches the gen-genesis.py recipe
-    // (the script uses blake2b for compat with Python stdlib hashlib;
-    // both produce a hash of the same key; the address derivation
-    // is whatever genesis declared). For devnet we mirror the
-    // genesis script byte-for-byte; for the address itself the
-    // genesis MUST declare blake2b too. This helper exists so the
-    // faucet binary's address matches what the genesis manifest
-    // pre-balanced.
-    //
     // NOTE: this helper is a CONVENIENCE — callers can pass the
     // faucet's address directly via --faucet-address if they
     // prefer not to rely on the recipe.
@@ -319,6 +318,18 @@ mod tests {
         h.update(&intent_bytes);
         let expected: [u8; 32] = *h.finalize().as_bytes();
         assert_eq!(digest, expected);
+    }
+
+    /// Pin the canonical derivation: `blake3(pk)[..20]`. The genesis
+    /// scripts (`scripts/{devnet,testnet}/gen-genesis.py`) implement
+    /// the same recipe in Python; a change on either side must show
+    /// up here.
+    #[test]
+    fn address_from_pubkey_is_blake3_truncate_20() {
+        let (pk, _) = mldsa::keypair();
+        let addr = address_from_pubkey(&pk);
+        let expected = &blake3::hash(pk.as_bytes()).as_bytes()[..20];
+        assert_eq!(&addr[..], expected);
     }
 
     #[test]
