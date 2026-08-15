@@ -1,6 +1,6 @@
 //! `suwappu-validator-program` — testnet points-accumulator daemon.
 //!
-//! Implements the public contract in [`docs/testnet/POINTS.md`].
+//! Implements the public contract in `docs/testnet/POINTS.md`.
 //!
 //! Workloads:
 //!
