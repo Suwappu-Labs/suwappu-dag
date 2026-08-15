@@ -56,6 +56,7 @@ Done means all four of these are true at once:
 - [x] C3. `suwappu-keygen` + `suwappu-validator-program` packaged in releases.
 - [ ] C4. **Cut the first release tag (`suwappu-dag-v0.1.0`).** Nothing above is actually downloadable until a tag exists — `git tag` is still empty. This is the cheapest high-value unblock left.
 - [ ] C5. Decide `suwappu-db` visibility. While it stays private, external operators can ONLY use the published image/binary — they cannot build from source. Either accept that permanently and document it, or open the repo.
+- [ ] C6. **Enable GitHub Pages** (Settings → Pages → Source: GitHub Actions). **Human/admin only — cannot be done from the repo.** `docs.yml`'s `deploy to Pages` job fails every run on `main` with `Failed to create deployment (status: 404) … Ensure GitHub Pages has been enabled`. Two consequences: the API-reference site never publishes, and the free-tier plan in `NON-AWS-DEPLOY.md` (which hosts `genesis.toml`, `peers.txt`, explorer and status page on Pages) has no host until this is flipped. The rustdoc half of that workflow is green as of 2026-08-15.
 
 ## D. Stand the network up (needs a human — no AWS)
 
