@@ -72,24 +72,37 @@ version; the devnet wipes-and-regenesis on that boundary.
    ```
 
 6. **Watch the release workflow.** The push triggers
-   `.github/workflows/release.yml` which builds three platforms:
-   - `x86_64-unknown-linux-musl` on `ubuntu-latest`
+   `.github/workflows/release.yml` which builds four platforms:
+   - `x86_64-unknown-linux-gnu` on `ubuntu-latest`
+   - `aarch64-unknown-linux-gnu` on `ubuntu-latest` (cross-compiled; the
+     ARM path for Oracle Ampere A1 hosts)
    - `x86_64-apple-darwin` on `macos-13`
    - `aarch64-apple-darwin` on `macos-14`
+
+   Linux builds are **glibc, not musl** — the musl target does not build
+   (PQClean's glibc-only `__GNUC_PREREQ`, then `openssl-sys` needing a
+   musl-linked OpenSSL). See the header of `release.yml`. Glibc binaries
+   carry a floor: they need the builder's glibc or newer on the target.
+
+   > The first tag will be the first time this workflow has ever run.
+   > Both Linux legs were verified locally on 2026-08-15 (7/7 binaries,
+   > correct arch); the **macOS legs are still unverified**, and because
+   > the `release` job declares `needs: build`, a macOS failure blocks
+   > the whole release. Watch this run closely.
 
    ```sh
    gh run watch
    ```
 
 7. **Verify the Release page.** `gh release view suwappu-dag-v${VERSION}`
-   should list three `*.tar.gz` archives + a `SHA256SUMS` file.
+   should list four `*.tar.gz` archives + a `SHA256SUMS` file.
 
 8. **Smoke test on at least one platform.**
 
    ```sh
-   gh release download suwappu-dag-v${VERSION} --pattern '*linux-musl*'
-   tar -xzf suwappu-dag-${VERSION}-x86_64-unknown-linux-musl.tar.gz
-   ./suwappu-dag-${VERSION}-x86_64-unknown-linux-musl/suwappu-node --help
+   gh release download suwappu-dag-v${VERSION} --pattern '*x86_64-unknown-linux-gnu*'
+   tar -xzf suwappu-dag-${VERSION}-x86_64-unknown-linux-gnu.tar.gz
+   ./suwappu-dag-${VERSION}-x86_64-unknown-linux-gnu/suwappu-node --help
    ```
 
 9. **Roll the devnet (optional, per the wipe policy).** If this is a
