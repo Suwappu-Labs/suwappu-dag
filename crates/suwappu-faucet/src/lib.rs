@@ -328,7 +328,8 @@ mod tests {
     fn address_from_pubkey_is_blake3_truncate_20() {
         let (pk, _) = mldsa::keypair();
         let addr = address_from_pubkey(&pk);
-        let expected = &blake3::hash(pk.as_bytes()).as_bytes()[..20];
+        let digest = blake3::hash(pk.as_bytes());
+        let expected = &digest.as_bytes()[..20];
         assert_eq!(&addr[..], expected);
     }
 
