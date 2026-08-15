@@ -1798,7 +1798,20 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
             validator_quorum_met(&st, leader_hash, &votes_flat)
         };
         if !stake_ok {
-            continue;
+            // DEFER THE WHOLE WALK, don't `continue`. This leader is
+            // authority-Direct but not yet validator-ratified locally
+            // (e.g. its votes haven't arrived, or are being withheld by a
+            // Byzantine relay). `continue`-ing would let a LATER, fully
+            // finalized anchor sweep this leader's causal history — which
+            // includes lower-round certs — into commit at a DIFFERENT
+            // position than a node that did have this leader's votes and
+            // committed its sweep here. That reorders substrate
+            // application and diverges post-roots between honest nodes
+            // with zero ring corruption (round-4/5 consensus review). The
+            // joint-quorum AND-gate is halt-not-fork by design: no commit
+            // past an un-ratified earlier leader until its validator
+            // quorum is observed (or the chain intentionally waits).
+            break 'commit;
         }
 
         let history = {
@@ -1809,6 +1822,13 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
             if state.committed.lock().contains(&h) {
                 continue;
             }
+            // `None` is unreachable today: `h` came from
+            // `causal_history`, which only yields certs already in the
+            // DAG, and the DAG is append-only (no eviction/pruning). If
+            // pruning is ever added, this `continue` would skip a cert
+            // while committing finalize-later ones — reopening the
+            // ordering-divergence class fixed above; it must become a
+            // walk-wide defer (`break 'commit`) at that point.
             let (cert_round, cert_payload_digest) = match state.dag.read().await.get(&h) {
                 Some(c) => (c.round, c.payload_digest),
                 None => continue,

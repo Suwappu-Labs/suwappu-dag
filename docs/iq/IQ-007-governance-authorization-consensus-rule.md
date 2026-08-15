@@ -1,10 +1,16 @@
 # IQ-007 — Governance authorization as a consensus rule
 
 **Status:** Recommendation, implemented on branch
-`claude/lattice-chain-quality-parity-x78o7d`. Hardened across four
+`claude/lattice-chain-quality-parity-x78o7d`. Hardened across five
 adversarial consensus-review rounds (each closed a real finding:
 dynamic-peer unsigned Vote/Block; envelope not bound to the signed cert;
-block-availability first-write-wins poison; commit-order defer scope).
+block-availability first-write-wins poison; commit-order defer scope on
+the block axis; and the identical defer scope on the validator-vote axis
+— `if !stake_ok { break 'commit }`). A CI proptest exercising transient
+block/vote absence + later-leader ordering does NOT yet exist and MUST be
+added: the fix's core property (every honest node commits a
+strictly-growing prefix of the joint-gated finalize order under selective
+block/vote unavailability) is currently unguarded by automated tests.
 **Because this touches BFT commit ordering and block availability on a
 settlement chain and repeatedly surfaced subtle safety issues under
 review, it MUST NOT merge without human consensus-team sign-off and a
