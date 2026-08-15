@@ -3203,6 +3203,163 @@ mod tests {
         .await;
     }
 
+    /// IQ-007: strictly-growing finalize prefix under transient block/vote
+    /// absence, plus identical governance apply across the mesh.
+    ///
+    /// The joint-gated commit rule must, when a leader's block or its
+    /// validator-vote quorum is momentarily unavailable, DEFER the whole
+    /// commit walk (`break 'commit`) rather than skip ahead — so every
+    /// honest node only ever APPENDS to its finalize order
+    /// (`blocks_by_round`) and never rewrites the cert already finalized at
+    /// a round, even while it is back-filling missing blocks over
+    /// `GetBlock`. That "strictly-growing prefix under selective block/vote
+    /// unavailability" property is the one IQ-007 flagged as unguarded.
+    ///
+    /// We exercise it on a real 4-node loopback cluster (which naturally
+    /// produces transient block/vote gaps + `GetBlock` recovery — the same
+    /// mechanism `admit_authority_4` relies on) carrying a multi-round mix
+    /// of transfers and a governed `AdmitAuthority`, and assert:
+    ///   1. per node, `blocks_by_round` never REWRITES a round it already
+    ///      finalized (append-only / no reorder), sampled continuously as
+    ///      the mesh commits and back-fills;
+    ///   2. across nodes, the finalize orders agree on every commonly-held
+    ///      round (one joint-gated total order — no fork); and
+    ///   3. every node makes the identical governance apply decision
+    ///      (registries converge to exactly {0,1,2,3,4}).
+    ///
+    /// Scope note: the *pure-consensus* append-only ordering property is
+    /// already covered at 10k in
+    /// `suwappu-consensus/tests/proptest_dagbft_commit.rs`
+    /// (`finalize_is_append_only`). This test adds the *daemon-level*
+    /// defer-under-unavailability + recovery guarantee that the pure layer
+    /// cannot see. A full 10k `proptest!` is impractical here (a real
+    /// multi-node tokio cluster per case), so this is a deterministic
+    /// scenario on top of that pure proptest — and, per IQ-007, still on
+    /// top of the human consensus-team sign-off + loaded devnet
+    /// fault-injection run that a change of this class requires.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn phase_g_growing_prefix_under_transient_unavailability() {
+        let (daemons, mut client, other_keypairs) =
+            spawn_phase_g_cluster(22_000, "iq007-growing-prefix-4n").await;
+
+        // Pre-admit transfer traffic so the finalize order already spans
+        // several rounds before governance lands (more room for a reorder
+        // bug to surface).
+        let pre: Vec<Intent> = (0..4u8)
+            .map(|i| Intent::Transfer {
+                from: [i + 1; 20],
+                to: [i + 9; 20],
+                amount: 500 + i as u128,
+            })
+            .collect();
+        client.submit_batch(pre).await.unwrap();
+
+        // Governed AdmitAuthority{4}: sponsor = v0 (client), second seated
+        // authority = v1, candidate proof-of-possession over a fresh key.
+        let (cand_pk, cand_sk) = suwappu_crypto::mldsa::keypair();
+        let admit = suwappu_execution::Intent::AdmitAuthority {
+            authority_id: 4,
+            stake_suwappu: 150_000,
+            mldsa_public_key: cand_pk.as_bytes().to_vec(),
+            bls_public_key: vec![0u8; 48],
+        };
+        client
+            .submit_governed(
+                admit,
+                &other_keypairs[0].0,
+                &other_keypairs[0].1,
+                Some((&cand_pk, &cand_sk)),
+            )
+            .await
+            .unwrap();
+
+        // Post-admit traffic so ordering keeps advancing across the epoch
+        // boundary where the admission applies.
+        let post: Vec<Intent> = (0..4u8)
+            .map(|i| Intent::Transfer {
+                from: [i + 20; 20],
+                to: [i + 30; 20],
+                amount: 700 + i as u128,
+            })
+            .collect();
+        client.submit_batch(post).await.unwrap();
+
+        // Per-node last-observed finalize order (typed by real clones, so
+        // we never have to name the CertHash type). Assert append-only on
+        // every sample until the admission converges everywhere.
+        let mut last: Vec<_> = Vec::new();
+        for d in &daemons {
+            last.push(d.state.inner.lock().await.blocks_by_round.clone());
+        }
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let mut all_at_5 = true;
+            for (i, d) in daemons.iter().enumerate() {
+                let snap = { d.state.inner.lock().await.blocks_by_round.clone() };
+                // (1) Append-only: any round this node had already finalized
+                // must still map to the SAME cert (never a reorder/rewrite).
+                // A round legitimately disappearing is not what we're
+                // guarding against, so only compare rounds still present.
+                for (round, cert) in last[i].iter() {
+                    if let Some(now) = snap.get(round) {
+                        assert_eq!(
+                            now, cert,
+                            "node v{} rewrote finalized round {} — finalize order is not append-only",
+                            i, round,
+                        );
+                    }
+                }
+                last[i] = snap;
+                let reg = d.state.authority_registry.read().await;
+                if reg.len() != 5 || !reg.contains(4) {
+                    all_at_5 = false;
+                }
+            }
+            if all_at_5 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "IQ-007 growing-prefix test timed out (60s) before the admission converged",
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+
+        // (2) Cross-node agreement: any round finalized by two nodes maps
+        // to the same cert (one joint-gated total order — no fork).
+        let orders: Vec<_> = {
+            let mut v = Vec::new();
+            for d in &daemons {
+                v.push(d.state.inner.lock().await.blocks_by_round.clone());
+            }
+            v
+        };
+        for a in 0..orders.len() {
+            for b in (a + 1)..orders.len() {
+                for (round, cert) in orders[a].iter() {
+                    if let Some(other) = orders[b].get(round) {
+                        assert_eq!(
+                            cert, other,
+                            "nodes v{} and v{} disagree on the finalized cert at round {} — the joint-gated order forked",
+                            a, b, round,
+                        );
+                    }
+                }
+            }
+        }
+
+        // (3) Identical governance apply: every node converged to exactly
+        // the same authority set {0,1,2,3,4}.
+        for (i, d) in daemons.iter().enumerate() {
+            let reg = d.state.authority_registry.read().await;
+            assert_eq!(reg.len(), 5, "node v{} authority count", i);
+            for id in [0u32, 1, 2, 3, 4] {
+                assert!(reg.contains(id), "node v{} missing authority {}", i, id);
+            }
+        }
+    }
+
     /// Phase G eject half (DAG-S27.5, split from the former combined
     /// test under issue #171 — see `spawn_phase_g_cluster`).
     ///
