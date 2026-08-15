@@ -1,6 +1,6 @@
 # G2 — ACM certificate for the devnet subdomain.
 #
-# Single wildcard cert: `*.devnet.suwappu.suwappu.bot` covers
+# Single wildcard cert: `*.devnet.suwappu.bot` covers
 # rpc / ws / faucet / explorer / status. CloudFront REQUIRES certs
 # in us-east-1 regardless of the distribution's edge regions, so
 # the cert lives there even though the ALB itself is also there;
@@ -14,7 +14,7 @@ resource "aws_acm_certificate" "wildcard" {
   provider    = aws.us_east_1
   domain_name = "*.${var.devnet_subdomain}.${var.apex_domain}"
   subject_alternative_names = [
-    # Apex-of-subdomain (e.g. `devnet.suwappu.suwappu.bot`)
+    # Apex-of-subdomain (e.g. `devnet.suwappu.bot`)
     # so we can host a landing page there pointing devs at the
     # other subdomains. Saves issuing a second cert.
     "${var.devnet_subdomain}.${var.apex_domain}",
@@ -54,6 +54,6 @@ resource "aws_acm_certificate_validation" "wildcard" {
 }
 
 output "wildcard_cert_arn" {
-  description = "ACM certificate ARN covering *.devnet.suwappu.suwappu.bot. Consumed by alb.tf + G7 explorer.tf + G8 status.tf."
+  description = "ACM certificate ARN covering *.devnet.suwappu.bot. Consumed by alb.tf + G7 explorer.tf + G8 status.tf."
   value       = aws_acm_certificate_validation.wildcard.certificate_arn
 }

@@ -7,8 +7,8 @@ points convertible to mainnet token at TGE.
 
 This stack is the **L1 testnet only**. The L2 sequencer + prover
 land in a separate follow-up under `terraform/testnet/l2.tf` (Track
-G). The points-accumulator daemon lands in
-`crates/suwappu-validator-program/` (Track B follow-up).
+G). The points-accumulator daemon is implemented in
+`crates/suwappu-validator-program/`.
 
 ## What this stack provisions
 
@@ -24,27 +24,35 @@ G). The points-accumulator daemon lands in
   (public-WRITE per scoped IAM, public-READ blocked). External
   operators upload rotated `events.ndjson` here every hour;
   the points-accumulator daemon reads + scores.
-- **Points-accumulator infra**: `t4g.medium` EC2 in its own VPC
-  + a `db.t4g.small` Postgres RDS in private subnets. Idle for
-  now; daemon binary deploys via SSM once `crates/suwappu-validator-
-  program/` lands.
+- **Points-accumulator infra** (`validator-program.tf`):
+  `t4g.medium` EC2 in its own VPC + a `db.t4g.small` Postgres RDS
+  in private subnets. The daemon binary
+  (`crates/suwappu-validator-program/`) deploys via SSM — see
+  `OPERATIONS.md` § 10.3.
+- **DNS + ACM + ALB + WAF** (`dns.tf`, `acm.tf`, `alb.tf`,
+  `waf.tf`): Route53 zone `testnet.suwappu.bot` with rpc / ws /
+  faucet / program records, a wildcard ACM cert, an ALB fronting
+  the seed validators' RPC, and WAF rate limiting.
+- **Faucet** (`faucet.tf` + `faucet-cloud-init.yaml`): faucet EC2
+  + ALB behind `faucet.testnet.suwappu.bot`.
+- **Explorer + status page** (`explorer.tf`, `status.tf`): S3 +
+  CloudFront static sites at `explorer.testnet.suwappu.bot` and
+  `status.testnet.suwappu.bot`, deployed by the
+  `explorer-testnet.yml` / `status-testnet.yml` workflows.
+- **CloudWatch** (`cloudwatch.tf`): dashboard + halt alarm +
+  7 silent-peer alarms + faucet health alarm in the
+  `suwappu-testnet` metric namespace.
+- **External uploads bucket** IAM plumbing
+  (`external-uploads.tf`) for operator `events.ndjson` uploads.
 - **Billing alarm**: $2000/mo cap (4× devnet's $500 because the
   cluster is bigger + the accumulator infra adds RDS cost).
 
 ## What this stack does NOT provision (yet)
 
 - **L2 sequencer + prover** → `terraform/testnet/l2.tf` (Track G).
-- **DNS + ALB + ACM + WAF** for `*.testnet.suwappu.bot`
-  → fork from `terraform/devnet/{dns,acm,alb,waf}.tf` in a
-  follow-up PR.
-- **CloudWatch dashboard + halt alarm** specific to the testnet
-  → fork from `terraform/devnet/cloudwatch.tf` once the testnet
-  is live and we know which alarms need re-tuning.
-- **Faucet** (testnet faucet is identical to devnet's; defer
-  forking until the testnet is actually serving traffic).
 
-These are non-blocking for an initial apply — they layer onto
-the running cluster without re-doing the validator infra.
+This is non-blocking for an initial apply — it layers onto the
+running cluster without re-doing the validator infra.
 
 ## Apply procedure
 

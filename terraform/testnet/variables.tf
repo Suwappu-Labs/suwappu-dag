@@ -82,9 +82,9 @@ variable "billing_alarm_email" {
 }
 
 variable "testnet_subdomain" {
-  description = "Subdomain under suwappu.bot for testnet endpoints. Mirror of devnet.suwappu.suwappu.bot but on testnet.suwappu.suwappu.bot."
+  description = "Subdomain under suwappu.bot for testnet endpoints. Mirror of devnet.suwappu.bot but on testnet.suwappu.bot."
   type        = string
-  default     = "testnet.suwappu"
+  default     = "testnet"
 }
 
 variable "apex_domain" {

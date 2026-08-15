@@ -82,7 +82,7 @@ cat ./bls.pk | base64
 #    lands. Then on your validator hardware:
 
 # 3a. Pull the testnet binary release.
-gh release download suwappu-dag-v0.X.Y --pattern '*linux-musl-x86_64*'
+gh release download suwappu-dag-v0.X.Y --pattern '*linux-musl*'
 tar -xzf suwappu-dag-0.X.Y-x86_64-unknown-linux-musl.tar.gz
 
 # 3b. Pull the public testnet genesis.

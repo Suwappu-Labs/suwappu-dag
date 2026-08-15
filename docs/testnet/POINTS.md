@@ -85,7 +85,7 @@ whitepaper (see `docs/whitepaper/`).
 
 ## Reference implementation
 
-`crates/suwappu-validator-program/` (forthcoming) is the daemon. It
+`crates/suwappu-validator-program/` is the daemon. It
 runs on the EC2 in `terraform/testnet/validator-program.tf`,
 reads from `s3://suwappu-dag-testnet-validator-uploads/`, writes to
 the program RDS. The leaderboard HTTP server reads from the

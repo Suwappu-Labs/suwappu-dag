@@ -139,6 +139,8 @@ module "us_east_1" {
   metrics_port      = var.metrics_port
   artifact_bucket   = aws_s3_bucket.artifacts.id
   state_volume_gb   = var.state_volume_gb
+  # Testnet metrics must not land in the devnet namespace (module default).
+  cloudwatch_namespace = "suwappu-testnet"
 }
 
 module "us_west_2" {
@@ -155,6 +157,8 @@ module "us_west_2" {
   metrics_port      = var.metrics_port
   artifact_bucket   = aws_s3_bucket.artifacts.id
   state_volume_gb   = var.state_volume_gb
+  # Testnet metrics must not land in the devnet namespace (module default).
+  cloudwatch_namespace = "suwappu-testnet"
 }
 
 module "eu_west_1" {
@@ -171,6 +175,8 @@ module "eu_west_1" {
   metrics_port      = var.metrics_port
   artifact_bucket   = aws_s3_bucket.artifacts.id
   state_volume_gb   = var.state_volume_gb
+  # Testnet metrics must not land in the devnet namespace (module default).
+  cloudwatch_namespace = "suwappu-testnet"
 }
 
 module "eu_central_1" {
@@ -187,6 +193,8 @@ module "eu_central_1" {
   metrics_port      = var.metrics_port
   artifact_bucket   = aws_s3_bucket.artifacts.id
   state_volume_gb   = var.state_volume_gb
+  # Testnet metrics must not land in the devnet namespace (module default).
+  cloudwatch_namespace = "suwappu-testnet"
 }
 
 module "ap_southeast_1" {
@@ -203,6 +211,8 @@ module "ap_southeast_1" {
   metrics_port      = var.metrics_port
   artifact_bucket   = aws_s3_bucket.artifacts.id
   state_volume_gb   = var.state_volume_gb
+  # Testnet metrics must not land in the devnet namespace (module default).
+  cloudwatch_namespace = "suwappu-testnet"
 }
 
 module "ap_northeast_1" {
@@ -219,6 +229,8 @@ module "ap_northeast_1" {
   metrics_port      = var.metrics_port
   artifact_bucket   = aws_s3_bucket.artifacts.id
   state_volume_gb   = var.state_volume_gb
+  # Testnet metrics must not land in the devnet namespace (module default).
+  cloudwatch_namespace = "suwappu-testnet"
 }
 
 module "sa_east_1" {
@@ -235,4 +247,6 @@ module "sa_east_1" {
   metrics_port      = var.metrics_port
   artifact_bucket   = aws_s3_bucket.artifacts.id
   state_volume_gb   = var.state_volume_gb
+  # Testnet metrics must not land in the devnet namespace (module default).
+  cloudwatch_namespace = "suwappu-testnet"
 }

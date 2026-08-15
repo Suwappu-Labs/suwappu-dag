@@ -2,9 +2,10 @@
 
 4-region always-on devnet that external developers point their SDKs at.
 
-This stack is the **operational** layer; the **DNS + ALB + WAF** layer
-that fronts these validators lives in [G2 — to be added in a follow-up
-PR for `terraform/devnet/{dns,alb,acm,waf}.tf`].
+This stack covers both the **operational** layer (validators, S3,
+billing) and the **edge** layer that fronts it
+(`terraform/devnet/{dns,alb,acm,waf}.tf` — G2) plus the faucet,
+explorer, status page, and CloudWatch monitoring (G3, G6–G8).
 
 ## What this stack provisions
 
@@ -30,16 +31,24 @@ PR for `terraform/devnet/{dns,alb,acm,waf}.tf`].
 - CloudWatch billing alarm at `$500/mo` published to an SNS topic;
   ops email is the only subscriber.
 
-## What this stack does NOT provision (G2+)
+## Edge + monitoring layers (G2, G3, G6–G8)
 
-- Route53 records / ACM cert / ALB fronting the 4 validators →
-  pending in `terraform/devnet/{dns,acm,alb,waf}.tf`.
-- Faucet EC2 instance + ALB + DNS record → G3.
-- Block explorer S3 + CloudFront → G7.
-- Status page S3 + CloudFront + API Gateway → G8.
-- CloudWatch dashboard + halt/silent-peer/faucet alarms → G6
-  (the agent + Prometheus exporter are already wired in via
-  cloud-init.yaml; G6 only adds the dashboard + alarm resources).
+- **DNS + ACM + ALB + WAF** (`dns.tf`, `acm.tf`, `alb.tf`,
+  `waf.tf`): Route53 zone `devnet.suwappu.bot` (rpc / ws / faucet
+  records), wildcard ACM cert, ALB fronting the 4 validators'
+  RPC, WAF rate limiting.
+- **Faucet** (`faucet.tf` + `faucet-cloud-init.yaml`): faucet EC2
+  + ALB behind `faucet.devnet.suwappu.bot`.
+- **Block explorer** (`explorer.tf`): S3 + CloudFront at
+  `explorer.devnet.suwappu.bot` (deployed by
+  `.github/workflows/explorer.yml`).
+- **Status page** (`status.tf`): S3 + CloudFront at
+  `status.devnet.suwappu.bot` (deployed by
+  `.github/workflows/status.yml`).
+- **CloudWatch** (`cloudwatch.tf`): dashboard + halt /
+  silent-peer / faucet alarms in the `suwappu-devnet` metric
+  namespace (the agent + Prometheus exporter are wired in via the
+  validator module's cloud-init.yaml).
 
 ## Apply procedure
 

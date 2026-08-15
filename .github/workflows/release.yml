@@ -19,6 +19,8 @@ name: release
 #   - suwappu-loadgen   (load generator + LoadGenClient CLI helper)
 #   - suwappu-metrics   (post-hoc event-log analyzer)
 #   - suwappu-indexer   (streaming indexer with HTTP read API)
+#   - suwappu-keygen    (ML-DSA/BLS keypair generator, from suwappu-crypto)
+#   - suwappu-validator-program (testnet points-accumulator daemon)
 #   - suwappu-faucet    (devnet faucet HTTP service — landed in G3; the
 #                    release workflow attempts to build it and skips
 #                    silently if the crate doesn't exist yet)
@@ -103,7 +105,7 @@ jobs:
         env:
           CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
         run: |
-          CRATES="-p suwappu-node -p suwappu-indexer"
+          CRATES="-p suwappu-node -p suwappu-indexer -p suwappu-crypto -p suwappu-validator-program"
           if [ -d crates/suwappu-faucet ]; then
             CRATES="$CRATES -p suwappu-faucet"
           fi
@@ -122,7 +124,7 @@ jobs:
           # libraries, build artifacts, and the non-suwappu side products
           # (e.g. ureq's bundled binaries).
           BIN_DIR="target/${TARGET}/release"
-          for b in suwappu-node suwappu-loadgen suwappu-metrics suwappu-indexer suwappu-faucet; do
+          for b in suwappu-node suwappu-loadgen suwappu-metrics suwappu-indexer suwappu-keygen suwappu-validator-program suwappu-faucet; do
             if [ -f "$BIN_DIR/$b" ]; then
               cp "$BIN_DIR/$b" "$STAGING/$b"
               chmod +x "$STAGING/$b"

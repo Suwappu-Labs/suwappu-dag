@@ -48,10 +48,10 @@ jobs:
           # becomes `*.testnet.suwappu.bot`. The
           # status page logic itself is environment-agnostic; only
           # the polling URLs differ.
-          sed 's/devnet\.suwappu\.suwappu\.com/testnet.suwappu.bot/g' \
+          sed 's/devnet\.suwappu\.bot/testnet.suwappu.bot/g' \
               ./clients/status-page/app.js > ./build/status/app.js
-          # Also flip the page title.
-          sed -i.bak 's/suwappu-devnet/suwappu-testnet/g; s/devnet\.suwappu\.suwappu\.com/testnet.suwappu.bot/g' \
+          # Also flip the page title + the hardcoded devnet explorer link.
+          sed -i.bak 's/suwappu-devnet/suwappu-testnet/g; s/devnet\.suwappu\.bot/testnet.suwappu.bot/g' \
               ./build/status/index.html
           rm -f ./build/status/index.html.bak
 

@@ -54,7 +54,8 @@ resource "aws_route53_record" "faucet" {
 }
 
 # Validator-program leaderboard endpoint. The points-accumulator
-# daemon (forthcoming) listens on port 8090 of the program EC2;
+# daemon (crates/suwappu-validator-program) listens on port 8090
+# of the program EC2;
 # this DNS record points at the EIP directly (no ALB — single
 # foundation-operated host; the leaderboard endpoint is
 # foundation-controlled, not a public dApp surface).
@@ -67,8 +68,8 @@ resource "aws_route53_record" "program" {
   records  = [aws_eip.program.public_ip]
 }
 
-# explorer.testnet.suwappu + status.testnet.suwappu land in follow-up PRs
-# (forks of terraform/devnet/{explorer,status}.tf).
+# explorer.testnet.suwappu.bot + status.testnet.suwappu.bot records live
+# with their CloudFront distributions in explorer.tf + status.tf.
 
 output "testnet_nameservers" {
   description = "Authoritative nameservers for the testnet subdomain. Publish these as NS records under the apex zone for the testnet_subdomain (variable) of the apex_domain (variable)."

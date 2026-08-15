@@ -1,11 +1,11 @@
 # G2 — DNS records for the public devnet.
 #
-# Subdomain layout (all under devnet.suwappu.suwappu.bot):
+# Subdomain layout (all under devnet.suwappu.bot):
 #
-#   rpc.devnet.suwappu        → ALB fronting the 4 validators (JSON-RPC + WS)
-#   faucet.devnet.suwappu     → ALB fronting the faucet EC2
-#   explorer.devnet.suwappu   → CloudFront distribution serving the SPA   (G7)
-#   status.devnet.suwappu     → CloudFront distribution serving the status page (G8)
+#   rpc.devnet.suwappu.bot        → ALB fronting the 4 validators (JSON-RPC + WS)
+#   faucet.devnet.suwappu.bot     → ALB fronting the faucet EC2
+#   explorer.devnet.suwappu.bot   → CloudFront distribution serving the SPA   (G7)
+#   status.devnet.suwappu.bot     → CloudFront distribution serving the status page (G8)
 #
 # All DNS records use ALIAS to the underlying AWS endpoints
 # (cheaper than A records + faster + no TTL gotchas).
@@ -25,7 +25,7 @@ variable "apex_domain" {
 variable "devnet_subdomain" {
   description = "Subdomain under which all devnet records live."
   type        = string
-  default     = "devnet.suwappu"
+  default     = "devnet"
 }
 
 # Hosted zone for the devnet subdomain. The team has two options:
@@ -100,8 +100,8 @@ resource "aws_route53_record" "faucet" {
   }
 }
 
-# explorer.devnet.suwappu + status.devnet.suwappu record stubs live with
-# their respective CloudFront distributions (G7 + G8 add them).
+# explorer.devnet.suwappu.bot + status.devnet.suwappu.bot record stubs live
+# with their respective CloudFront distributions (G7 + G8 add them).
 
 # Output the NS records so an operator can paste them into the apex
 # zone for delegation.

@@ -6,6 +6,16 @@
 #
 # Built by `scripts/devnet-local.sh` and consumed by
 # `docker-compose.yml` for the 4-node local devnet.
+#
+# The cargo build fetches the PRIVATE suwappu-db git dependency over
+# SSH, so BuildKit must forward an ssh-agent holding a key with read
+# access to Suwappu-Labs/suwappu-db:
+#   - Local (org members, ssh-agent running):
+#       DOCKER_BUILDKIT=1 docker compose build --ssh default
+#     or: DOCKER_BUILDKIT=1 docker build --ssh default .
+#   - CI (.github/workflows/docker.yml): webfactory/ssh-agent loads
+#     the SUWAPPU_DB_DEPLOY_KEY secret, then build-push-action passes
+#     `ssh: default`.
 
 # -------- chef-plan --------
 FROM rust:1.78-bookworm AS chef-plan
@@ -18,13 +28,20 @@ RUN cargo chef prepare --recipe-path recipe.json
 # -------- builder --------
 FROM rust:1.78-bookworm AS builder
 WORKDIR /work
+# The private suwappu-db git dep is fetched over SSH: rewrite the
+# https URL cargo sees to git@github.com, use the system git client
+# (so it talks to the forwarded ssh-agent), and trust github.com's
+# host key before any fetch.
+ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
+RUN git config --global url."git@github.com:".insteadOf "https://github.com/"
+RUN --mount=type=ssh,required=false mkdir -p ~/.ssh && ssh-keyscan github.com >> ~/.ssh/known_hosts
 RUN cargo install --locked cargo-chef
 COPY --from=chef-plan /work/recipe.json recipe.json
 # Build deps once, cache across application rebuilds.
-RUN cargo chef cook --release --recipe-path recipe.json --bin suwappu-node
+RUN --mount=type=ssh cargo chef cook --release --recipe-path recipe.json --bin suwappu-node
 COPY . .
 # Build the binaries the devnet needs.
-RUN cargo build --release \
+RUN --mount=type=ssh cargo build --release \
         -p suwappu-node --bin suwappu-node \
         -p suwappu-node --bin suwappu-loadgen \
         -p suwappu-indexer --bin suwappu-indexer

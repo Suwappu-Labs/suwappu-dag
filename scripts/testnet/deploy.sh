@@ -38,7 +38,8 @@ case "${CMD}" in
             echo "  external developers' transactions land in. To intentionally wipe:" >&2
             echo "    1. Snapshot every state volume (OPERATIONS.md § 8)." >&2
             echo "    2. Export the validator_program RDS via pg_dump." >&2
-            echo "    3. Edit terraform/testnet/modules/validator/main.tf — remove" >&2
+            echo "    3. Edit terraform/devnet/modules/validator/main.tf (testnet" >&2
+            echo "       reuses the devnet validator module) — remove" >&2
             echo "       prevent_destroy on aws_ebs_volume.state." >&2
             echo "    4. terraform apply to update the lifecycle setting." >&2
             echo "    5. scripts/deploy-aws.sh destroy testnet" >&2

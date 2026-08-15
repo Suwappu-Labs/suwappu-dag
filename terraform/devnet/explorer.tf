@@ -2,7 +2,7 @@
 #
 # S3 bucket holds the built artifacts (Vite emits a `dist/` directory).
 # CloudFront fronts it with the wildcard ACM cert + DNS record for
-# explorer.devnet.suwappu.suwappu.bot. The GitHub Actions
+# explorer.devnet.suwappu.bot. The GitHub Actions
 # workflow at .github/workflows/explorer.yml runs `vite build` + s3
 # sync + invalidation on every push to main.
 

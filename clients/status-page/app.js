@@ -1,14 +1,14 @@
 // suwappu-devnet status page — vanilla JS, no framework.
 //
 // Polls every 5 seconds:
-//   - https://rpc.devnet.suwappu.suwappu.bot → suwappu_getEpoch
+//   - https://rpc.devnet.suwappu.bot → suwappu_getEpoch
 //     (chain head + last-commit-timestamp via the explorer's lens).
-//   - https://faucet.devnet.suwappu.suwappu.bot/health → 200 = up.
+//   - https://faucet.devnet.suwappu.bot/health → 200 = up.
 //
 // We don't have per-region tip-round from a single RPC call (the ALB
 // load-balances across the 4 validators). For per-region visibility
 // the status page falls back to the AWS CloudWatch GetMetricData
-// public proxy at status-api.devnet.suwappu.suwappu.bot (G6's
+// public proxy at status-api.devnet.suwappu.bot (G6's
 // metrics endpoint; not wired in this v0.1). For now we show:
 //   - One "Cluster tip" tile (cluster-wide, scraped via the ALB).
 //   - One tile per faucet endpoint (alive/down).
@@ -21,8 +21,8 @@
 
 "use strict";
 
-const RPC_URL    = "https://rpc.devnet.suwappu.suwappu.bot";
-const FAUCET_URL = "https://faucet.devnet.suwappu.suwappu.bot";
+const RPC_URL    = "https://rpc.devnet.suwappu.bot";
+const FAUCET_URL = "https://faucet.devnet.suwappu.bot";
 const POLL_MS    = 5000;
 const TIP_FLAT_THRESHOLD_MS = 60_000;
 
