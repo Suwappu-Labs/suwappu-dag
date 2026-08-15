@@ -32,7 +32,6 @@ use suwappu_consensus::{
     joint::{StakeTable, Vote},
     validator_quorum_met, AuthorityId, ConsensusError, LeaderStatus,
 };
-#[cfg(test)]
 use suwappu_execution::Substrate;
 use suwappu_execution::{execute_block, Block, InMemorySubstrate, Intent};
 use suwappu_fastpath::{
