@@ -120,12 +120,12 @@ whatever domain you pick).
 
 **A concrete $0/month path is written up in
 [`NON-AWS-DEPLOY.md`](NON-AWS-DEPLOY.md)** — Oracle Cloud "Always Free"
-Ampere A1 (ARM64) seeds, GHCR multi-arch image + `aarch64` release binary
-(both added on this branch), GitHub Pages/Releases for genesis/peers/
-explorer/status, and Cloudflare free DNS/TLS. Read its "Honest caveats"
-section first: one box is not fault-independent, node RAM grows unbounded
-(plan periodic regenesis), and throughput is ~0.125 TPS (launch
-un-incentivized).
+Ampere A1 (ARM64) seeds running the `aarch64` release binary (added on
+this branch; the GHCR image is amd64 for x86 hosts), GitHub
+Pages/Releases for genesis/peers/explorer/status, and Cloudflare free
+DNS/TLS. Read its "Honest caveats" section first: one box is not
+fault-independent, node RAM grows unbounded (plan periodic regenesis),
+and throughput is ~0.125 TPS (launch un-incentivized).
 
 ## Requires human action (cannot be done from a repo)
 
