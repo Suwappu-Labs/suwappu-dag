@@ -91,13 +91,40 @@ Gaps 1–3 below were closed on this branch (2026-08-15):
    no relayer transport (`Relayer.relay()` returns an in-process
    object). "Joining a corridor" is currently a human arrangement.
 
+## ⚠️ Hosting: AWS is no longer available (2026-08-15)
+
+The `terraform/testnet/` + `terraform/devnet/` stacks, `scripts/testnet/deploy.sh`,
+`scripts/deploy-aws.sh`, the S3/CloudFront explorer + status deploys, the
+RDS points-program DB, and the `STATUS_TESTNET_DEPLOY_ROLE` /
+`EXPLORER_TESTNET_DEPLOY_ROLE` CI paths **all assume the `gsn` AWS
+account, which the project no longer has.** Do not follow the AWS steps
+below — they are retained only as a record of the original design.
+
+**The non-AWS path is already in the repo and does not depend on AWS:**
+- Node binaries + a published GHCR image (`docker.yml`) — run a node
+  anywhere with `docker run` / the committed `docker-compose.yml`
+  (4-node local cluster), no AWS.
+- `genesis.toml` + `peers.txt` are plain files — host them on any static
+  host (GitHub Pages/Releases, a plain VM, Cloudflare Pages).
+- Seeds are just `suwappu-node` processes — any VMs (Hetzner, Fly,
+  bare-metal, etc.) with the documented ports (9090 peer / 9091 client /
+  9092 RPC) reachable. The seven-region terraform is optional polish, not
+  a requirement to be live.
+- Explorer + status pages are static SPAs — deploy to any static host
+  instead of S3/CloudFront.
+
+**What still needs a decision:** which host replaces AWS, and a DNS zone
+for TLS (any registrar + a reverse proxy / Caddy / Cloudflare in front of
+the seeds — the double-`suwappu` FQDN fixes on this branch still apply to
+whatever domain you pick).
+
 ## Requires human action (cannot be done from a repo)
 
-1. AWS: profile `gsn` (account 492042618949), terraform bootstrap state,
-   `BILLING_ALARM_EMAIL`, operator SSH key + CIDR. Then
-   `scripts/testnet/deploy.sh` (≈$672/mo seeds + RDS/ALB, $2k/mo alarm).
-2. DNS: delegate `suwappu.bot` NS into the account (one-time manual step
-   gating ACM validation → all TLS).
+1. ~~AWS: profile `gsn`…~~ **OBSOLETE — no AWS.** Stand the seeds up on a
+   non-AWS host (see the hosting note above); the seven-region terraform
+   is not required to launch.
+2. DNS: a zone for the seeds' public names, with TLS terminated by a
+   reverse proxy in front of them (no ACM/Route53 dependency now).
 3. Cut the first release (`suwappu-dag-v*` tag) so binaries and the GHCR
    image exist; GitHub secrets `SUWAPPU_DB_DEPLOY_KEY`,
    `STATUS_TESTNET_DEPLOY_ROLE`, `EXPLORER_TESTNET_DEPLOY_ROLE`.
@@ -127,10 +154,12 @@ Gaps 1–3 below were closed on this branch (2026-08-15):
 ## Sequence to a public (foundation-operated) testnet
 
 Genesis funding + keygen shipping (done on this branch) → cut
-`v0.1.0` → GHCR image publishes → human: AWS + DNS + terraform apply →
-genesis ceremony + publish genesis/peers → verify 7-seed mesh, faucet,
-explorer, status → announce. The external-validator join path (late
-join + dynamic peers + dual-sig admit) landed on this branch; before
+`v0.1.0` → GHCR image publishes → human: pick a non-AWS host + a DNS zone
+→ run the seed `suwappu-node`s (docker image or binaries) behind a TLS
+reverse proxy → genesis ceremony + publish genesis/peers on any static
+host → verify the seed mesh, faucet, explorer, status → announce. The
+external-validator join path (late join + dynamic peers + dual-sig
+admit) landed on this branch; before
 seating a real third party, close gap 4 (block-level governance intent
 auth) and re-verify the flow end-to-end on the live testnet. The
 corridor/bridge re-legging (8) can proceed in parallel once RPC is
