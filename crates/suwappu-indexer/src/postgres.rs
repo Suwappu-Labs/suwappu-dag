@@ -3,7 +3,7 @@
 //! Connects to the URL passed via `--database-url` /
 //! `SUWAPPU_INDEXER_DATABASE_URL` and applies the `migrations/` directory
 //! on startup. Schema lives in
-//! [`crates/suwappu-indexer/migrations/0001_create_indexed_blocks.sql`].
+//! `crates/suwappu-indexer/migrations/0001_create_indexed_blocks.sql`.
 //!
 //! Compiled only when the `postgres` feature is enabled. The in-memory
 //! `InMemoryStore` remains available unconditionally so unit tests +
