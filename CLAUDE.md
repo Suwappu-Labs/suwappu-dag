@@ -172,7 +172,7 @@ Subagent definitions live in `claude-code/`.
 | Command | What it does |
 |---|---|
 | `/sprint <id>` | Drive a sprint from start to PR |
-| `/check` | Run `cargo fmt`, `cargo clippy`, `cargo test --workspace`, `cargo deny check` |
+| `/check` | Run `cargo fmt`, `cargo clippy`, `cargo test --workspace`, `check-crypto-boundary.sh`, `cargo deny check` |
 | `/check-10k` | Run all proptests at `PROPTEST_CASES=10000 --release` |
 | `/release <version>` | Tag and ship a release |
 | `/aws-status` | Snapshot AWS infra health (read-only) |
