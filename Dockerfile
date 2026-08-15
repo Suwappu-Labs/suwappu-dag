@@ -18,7 +18,13 @@
 #     `ssh: default`.
 
 # -------- chef-plan --------
-FROM rust:1.78-bookworm AS chef-plan
+# Base image tracks a recent stable Rust (edition-2024-capable). The
+# workspace itself is edition-2021 / MSRV 1.78, but the build *tools*
+# installed here (cargo-chef and its transitive deps, e.g. `ignore`)
+# have moved to edition2024, which needs Cargo >= 1.85. Pinning 1.78
+# broke the image build with "feature `edition2024` is required". CI
+# builds the workspace on stable, so this matches CI's real toolchain.
+FROM rust:1.90-bookworm AS chef-plan
 WORKDIR /work
 # cargo-chef caches dependency builds when only application code changes.
 RUN cargo install --locked cargo-chef
@@ -26,7 +32,7 @@ COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
 
 # -------- builder --------
-FROM rust:1.78-bookworm AS builder
+FROM rust:1.90-bookworm AS builder
 WORKDIR /work
 # The private suwappu-db git dep is fetched over SSH: rewrite the
 # https URL cargo sees to git@github.com, use the system git client
