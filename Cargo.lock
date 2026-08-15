@@ -5460,7 +5460,7 @@ dependencies = [
  "serde",
  "suwappu-consensus",
  "suwappu-crypto",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -5473,7 +5473,7 @@ dependencies = [
  "serde",
  "serde_json",
  "suwappu-rpc",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
 ]
@@ -5488,7 +5488,7 @@ dependencies = [
  "serde",
  "sha3",
  "suwappu-crypto",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tracing",
 ]
 
@@ -5508,7 +5508,7 @@ dependencies = [
  "rand_chacha 0.3.1",
  "serde",
  "sha3",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -5526,7 +5526,7 @@ dependencies = [
  "suwappu-l2-verifier-precompile",
  "suwappudb-bridge",
  "suwappudb-state",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tracing",
 ]
 
@@ -5539,7 +5539,7 @@ dependencies = [
  "suwappu-authority",
  "suwappu-consensus",
  "suwappu-crypto",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -5559,7 +5559,7 @@ dependencies = [
  "suwappu-crypto",
  "suwappu-execution",
  "suwappu-mempool",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tokio",
  "tower 0.5.3",
  "tower-http",
@@ -5581,7 +5581,7 @@ dependencies = [
  "sqlx",
  "suwappu-client",
  "suwappu-rpc",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite 0.21.0",
  "tracing",
@@ -5594,7 +5594,7 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "serde",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -5605,7 +5605,7 @@ dependencies = [
  "proptest",
  "serde",
  "suwappu-crypto",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -5616,7 +5616,7 @@ dependencies = [
  "hex",
  "serde",
  "suwappu-l2-verifier-precompile",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -5624,7 +5624,7 @@ name = "suwappu-l2-verifier-precompile"
 version = "0.1.0"
 dependencies = [
  "hex",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -5637,7 +5637,7 @@ dependencies = [
  "serde",
  "suwappu-crypto",
  "suwappu-precompiles",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -5649,7 +5649,7 @@ dependencies = [
  "hex",
  "serde",
  "suwappu-execution",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tracing",
 ]
 
@@ -5688,7 +5688,7 @@ dependencies = [
  "suwappu-rpc",
  "suwappu-transport",
  "suwappu-validator",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tokio",
  "toml",
  "tracing",
@@ -5705,7 +5705,7 @@ dependencies = [
  "reserve-coverage-host",
  "serde",
  "suwappu-crypto",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -5723,7 +5723,7 @@ dependencies = [
  "suwappu-consensus",
  "suwappu-mempool",
  "suwappu-validator",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tokio",
  "tower 0.5.3",
  "tower-http",
@@ -5740,7 +5740,7 @@ dependencies = [
  "raptorq",
  "serde",
  "suwappu-crypto",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
 ]
@@ -5754,7 +5754,7 @@ dependencies = [
  "suwappu-authority",
  "suwappu-consensus",
  "suwappu-crypto",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -5770,7 +5770,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "suwappu-client",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-subscriber",
