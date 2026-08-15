@@ -9,8 +9,8 @@ Replaces the AWS `terraform/testnet/` path (no longer available — see
 | Piece | Free option | Notes |
 |---|---|---|
 | Seed validators (compute, 24/7, raw TCP) | **Oracle Cloud "Always Free" Ampere A1** (ARM64) | The only genuinely-free always-on VM with a public IP + open ports. 2 OCPU / 12 GB as of June 2026 (was 4/24). |
-| Node image | **GHCR** `ghcr.io/suwappu-labs/suwappu-dag` | Now multi-arch (`amd64`+`arm64`) — runs on the A1 box directly. |
-| Binaries | **GitHub Releases** | `aarch64-unknown-linux-gnu` tarball added for the A1 box. |
+| Node image | **GHCR** `ghcr.io/suwappu-labs/suwappu-dag` | `linux/amd64` — for x86 hosts. On the ARM A1 box use the aarch64 binary or a native `docker build` (below). |
+| Binaries | **GitHub Releases** | `aarch64-unknown-linux-gnu` tarball — the turnkey path for the ARM A1 box. |
 | `genesis.toml`, `peers.txt` | **GitHub Pages / Releases** | Plain static files. |
 | Explorer + status SPAs | **GitHub Pages** (or Cloudflare Pages) | Static builds. |
 | DNS zone + TLS | **Cloudflare (free)** | Free zone + free TLS proxy for RPC/faucet HTTP. |
@@ -59,26 +59,32 @@ service / the raw IP). The DNS *zone* is free on Cloudflare.
    sudo usermod -aG docker "$USER"   # re-login
    ```
 
-## 2. Get the node binary/image (ARM64)
+## 2. Get the node on the ARM64 A1 box
 
-Two paths — pick one:
+The published GHCR image is `linux/amd64` only (a full arm64 compile of
+this crypto + zkVM workspace under QEMU is prohibitively slow, so CI does
+not build it — see the note in `.github/workflows/docker.yml`). On the
+ARM A1 box, pick one:
 
-- **Pull the published image (turnkey, for external operators too):**
+- **Release binary (turnkey, for external operators too):** download the
+  `aarch64-unknown-linux-gnu` tarball from the GitHub Release and run
+  `suwappu-node` directly (under systemd / tmux):
   ```bash
-  docker pull ghcr.io/suwappu-labs/suwappu-dag:latest   # multi-arch; pulls arm64 on the A1 box
+  gh release download suwappu-dag-v0.1.0 \
+    --pattern '*aarch64-unknown-linux-gnu*' && tar xzf *aarch64*.tar.gz
   ```
-- **Build on the box (foundation only — needs the private `suwappu-db`
-  deploy key present in `~/.ssh` + the git rewrite):** native ARM build,
-  no emulation:
+- **Native `docker build` on the box (foundation only — needs the
+  private `suwappu-db` deploy key in `~/.ssh` + the git rewrite):** builds
+  an arm64 image natively, no emulation:
   ```bash
   git config --global url."git@github.com:".insteadOf "https://github.com/"
   git clone git@github.com:Suwappu-Labs/suwappu-dag.git && cd suwappu-dag
   DOCKER_BUILDKIT=1 docker compose build --ssh default
   ```
 
-External operators (no `suwappu-db` key) **must** use the published image
-or the release binary — they cannot build from source. This is why the
-multi-arch image / `aarch64` release tarball exist.
+External operators (no `suwappu-db` key) **must** use the `aarch64`
+release binary on the A1 box — they cannot build from source. (On x86
+hosts they can instead `docker pull` the amd64 GHCR image.)
 
 ## 3. Genesis ceremony (real keys)
 
@@ -143,9 +149,10 @@ from the genesis-funded faucet address.
 ## 7. Cut the release
 
 Tag `suwappu-dag-v0.1.0` → `release.yml` builds the `x86_64` +
-`aarch64` Linux + macOS tarballs, `docker.yml` publishes the multi-arch
-image. Both are prerequisites for external operators to obtain the node
-without the private source.
+`aarch64` Linux + macOS tarballs, and `docker.yml` publishes the amd64
+GHCR image. Both are prerequisites for external operators to obtain the
+node without the private source — the `aarch64` tarball for the ARM A1
+box, the amd64 image for x86 hosts.
 
 ---
 
