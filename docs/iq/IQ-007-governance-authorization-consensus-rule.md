@@ -6,17 +6,35 @@ adversarial consensus-review rounds (each closed a real finding:
 dynamic-peer unsigned Vote/Block; envelope not bound to the signed cert;
 block-availability first-write-wins poison; commit-order defer scope on
 the block axis; and the identical defer scope on the validator-vote axis
-— `if !stake_ok { break 'commit }`). A CI proptest exercising transient
-block/vote absence + later-leader ordering does NOT yet exist and MUST be
-added: the fix's core property (every honest node commits a
+— `if !stake_ok { break 'commit }`).
+
+**Automated coverage for the core property** (every honest node commits a
 strictly-growing prefix of the joint-gated finalize order under selective
-block/vote unavailability) is currently unguarded by automated tests.
-**Because this touches BFT commit ordering and block availability on a
-settlement chain and repeatedly surfaced subtle safety issues under
-review, it MUST NOT merge without human consensus-team sign-off and a
-loaded multi-node devnet run with fault injection (block-withholding /
-stripped-block relay / straggler-cert ordering), on top of the CI
-proptests.** The subagent reviews and CI are necessary but not
+block/vote unavailability) is now split across two layers:
+
+- The **pure-consensus** append-only ordering property runs at 10k in
+  `crates/suwappu-consensus/tests/proptest_dagbft_commit.rs`
+  (`finalize_is_append_only`).
+- The **daemon-level** defer-under-unavailability + `GetBlock` recovery
+  guarantee — the piece the pure layer cannot see — is covered by
+  `phase_g_growing_prefix_under_transient_unavailability` (inline in
+  `crates/suwappu-node/src/daemon.rs`). It drives a real 4-node loopback
+  cluster (which naturally produces transient block/vote gaps and
+  recovery) through a multi-round mix of transfers and a governed
+  `AdmitAuthority`, asserting: (1) no node ever rewrites a round it has
+  already finalized, (2) nodes never disagree on a commonly-held round
+  (no fork of the joint order), and (3) every node makes the identical
+  governance apply decision. A full 10k `proptest!` is impractical at the
+  daemon layer (a real multi-node tokio cluster per case), so this is a
+  deterministic scenario rather than a fuzzed one.
+
+**This automated coverage is necessary but NOT sufficient.** Because this
+touches BFT commit ordering and block availability on a settlement chain
+and repeatedly surfaced subtle safety issues under review, it MUST NOT be
+treated as production-ready without human consensus-team sign-off and a
+loaded multi-node devnet run with adversarial fault injection
+(block-withholding / stripped-block relay / straggler-cert ordering), on
+top of the tests above. The subagent reviews and CI are necessary but not
 sufficient for a change of this class.
 **Owner:** consensus
 **Date:** 2026-08-15

@@ -10,7 +10,7 @@ of truth lives here and gets wired into a session by symlink.
 | Path | What it is |
 |---|---|
 | `agents/` | Specialist subagent definitions (crypto/consensus/fastpath/transport/lane reviewers) |
-| `commands/` | Slash commands: `/sprint`, `/check`, `/check-10k`, `/release`, `/aws-status`, `/iq-decision` |
+| `commands/` | Slash commands: `/goal`, `/sprint`, `/check`, `/check-10k`, `/release`, `/aws-status`, `/iq-decision` |
 | `hooks/` | `fmt-check.sh` (PostToolUse rustfmt hint), `block-destructive.sh` (PreToolUse security floor) |
 | `settings.json` | Three permission tiers (allow / ask / deny) + hook wiring |
 
