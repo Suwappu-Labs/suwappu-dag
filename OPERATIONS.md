@@ -27,7 +27,7 @@ Every procedure assumes:
 Run once when standing up the devnet for the first time.
 
 1. **Build a release `suwappu-node` + `suwappu-faucet` + `suwappu-indexer`** for
-   `aarch64-unknown-linux-musl` (matches the `t4g.medium` validator
+   `aarch64-unknown-linux-gnu` (matches the `t4g.medium` validator
    AMI). Easiest: push a `suwappu-dag-v0.1.0` tag and let
    `.github/workflows/release.yml` produce the binaries; then
    download.
@@ -37,8 +37,8 @@ Run once when standing up the devnet for the first time.
    git push origin suwappu-dag-v0.1.0
    gh run watch
    gh release download suwappu-dag-v0.1.0 \
-     --pattern '*aarch64-unknown-linux-musl*'
-   tar -xzf suwappu-dag-0.1.0-aarch64-unknown-linux-musl.tar.gz
+     --pattern '*aarch64-unknown-linux-gnu*'
+   tar -xzf suwappu-dag-0.1.0-aarch64-unknown-linux-gnu.tar.gz
    ```
 
 2. **Generate genesis + per-region keys + faucet keypair.**
@@ -69,11 +69,11 @@ Run once when standing up the devnet for the first time.
    ```sh
    BUCKET=suwappu-dag-devnet-artifacts
    # Validator binary (from step 1).
-   aws s3 cp ./suwappu-dag-0.1.0-aarch64-unknown-linux-musl/suwappu-node \
+   aws s3 cp ./suwappu-dag-0.1.0-aarch64-unknown-linux-gnu/suwappu-node \
        s3://$BUCKET/bin/suwappu-node --profile gsn
 
    # Faucet binary.
-   aws s3 cp ./suwappu-dag-0.1.0-aarch64-unknown-linux-musl/suwappu-faucet \
+   aws s3 cp ./suwappu-dag-0.1.0-aarch64-unknown-linux-gnu/suwappu-faucet \
        s3://$BUCKET/bin/suwappu-faucet --profile gsn
 
    # Per-region validator keys + genesis (NOT the faucet secret —
@@ -327,8 +327,8 @@ When: a new tagged release lands and the devnet should pick it up.
 
    ```sh
    gh release download suwappu-dag-v0.X.Y \
-     --pattern '*aarch64-unknown-linux-musl*'
-   tar -xzf suwappu-dag-0.X.Y-aarch64-unknown-linux-musl.tar.gz
+     --pattern '*aarch64-unknown-linux-gnu*'
+   tar -xzf suwappu-dag-0.X.Y-aarch64-unknown-linux-gnu.tar.gz
    ```
 
 2. **Upload to S3** (versioned bucket — overwrite is safe; the
@@ -337,7 +337,7 @@ When: a new tagged release lands and the devnet should pick it up.
 
    ```sh
    BUCKET=suwappu-dag-devnet-artifacts
-   aws s3 cp ./suwappu-dag-0.X.Y-aarch64-unknown-linux-musl/suwappu-node \
+   aws s3 cp ./suwappu-dag-0.X.Y-aarch64-unknown-linux-gnu/suwappu-node \
        s3://$BUCKET/bin/suwappu-node --profile gsn
    ```
 

@@ -1,24 +1,59 @@
 # suwappu-testnet validator operators
 
+> ## ⚠️ STATUS: the testnet is NOT live yet (as of 2026-08-15)
+>
+> This document describes the **intended** operator program. Read this
+> box before acting on anything below.
+>
+> **Not yet real:**
+> - **There is no network.** Zero seed validators are running; every
+>   `testnet.suwappu.bot` URL in this guide (genesis, peers, apply,
+>   status) does not resolve yet.
+> - **No release has been cut** — `git tag` is empty, so there is
+>   nothing to `gh release download`.
+> - **The apply form, the Discord channel and the leaderboard do not
+>   exist.**
+> - **The points→token conversion is an open decision, not a
+>   commitment.** `POINTS.md` and the deferred-token architecture have
+>   not been reconciled (`docs/testnet/LAUNCH-STATUS.md`, human-action
+>   item 6). Treat every number in "Points" below as a draft proposal.
+>   **Nothing here is an offer, allocation, or promise of any token.**
+> - The seven-region seed topology below assumed AWS, which the project
+>   no longer has. The live plan is now
+>   [`NON-AWS-DEPLOY.md`](NON-AWS-DEPLOY.md), which starts from a much
+>   smaller footprint.
+>
+> **Already real** (landed and CI-verified): the post-genesis join path
+> — `allow_post_genesis_join`, wire sync (`GetTip`/`GetCertsByRound`/
+> `GetBlock`), dynamic inbound peers, and the two-distinct-authority
+> `AdmitAuthority` governance rule. The mechanism described in
+> "Onboarding flow" is implemented; the *program* around it is not.
+>
+> Track the remaining blockers with `/goal`, or in
+> [`LAUNCH-STATUS.md`](LAUNCH-STATUS.md).
+
 This guide is for external operators who want to run a suwappu-dag
-testnet validator and earn points that convert to mainnet token
-at launch.
+testnet validator.
 
 For the foundation-internal infrastructure side, see
 [`OPERATIONS.md`](../../OPERATIONS.md) (the seed cluster) and
-[`terraform/testnet/`](../../terraform/testnet/) (the IaC).
+[`NON-AWS-DEPLOY.md`](NON-AWS-DEPLOY.md) (the current, non-AWS standup
+plan). `terraform/` is retained only as a record of the retired AWS
+design.
 
 ## TL;DR
 
 - You run **one suwappu-node process** on your hardware that peers
-  with the foundation's 7 seed validators across the public
-  internet.
+  with the foundation's seed validators across the public internet.
+  (Planned topology was 7 regions on AWS; the actual initial footprint
+  will be smaller — see the status box.)
 - You get **points per epoch** for: uptime, certs observed,
   intents committed, and bugs reported via the disclosure
   process in [`SECURITY.md`](../../SECURITY.md).
-- Points convert to mainnet token at TGE per the formula in
-  [`POINTS.md`](POINTS.md). Total testnet allocation is capped
-  at **5–8% of mainnet supply**.
+- **Proposed, not committed:** points may convert to mainnet token at
+  TGE per the formula in [`POINTS.md`](POINTS.md), under a testnet
+  allocation discussed at 5–8% of mainnet supply. This has **not** been
+  decided — see the status box.
 
 ## Eligibility
 
@@ -37,10 +72,28 @@ Minimum:
 | Component | Spec |
 |---|---|
 | vCPU | 16 |
-| RAM | 64 GB |
-| NVMe SSD | 2 TB (state grows ~10 GB/month) |
-| Network | 1 Gbps symmetric, ≤ 50 ms RTT to ≥ 3 of the 7 seed regions |
-| OS | Linux x86_64 or arm64; tested on Ubuntu 24.04 LTS |
+| RAM | 64 GB — **and this is the resource that actually binds; see below** |
+| NVMe SSD | 2 TB |
+| Network | 1 Gbps symmetric, ≤ 50 ms RTT to ≥ 3 seed regions |
+| OS | Linux x86_64 or arm64; tested on Ubuntu 24.04 LTS. **Use 24.04 or newer** — release binaries are glibc-linked and built on GitHub's `ubuntu-latest`, so an older distro fails at startup with `GLIBC_x.yz not found`. |
+
+> **Correction — the node has no persistence.** An earlier version of
+> this table said "state grows ~10 GB/month" on disk. That is wrong and
+> the error mattered, so it is called out rather than quietly edited:
+> the DAG store is **in-memory and never prunes**. Consequences you must
+> plan for:
+> - **RAM grows without bound** for as long as a node stays up. The 64 GB
+>   figure is a starting point, not a steady state — watch RSS.
+> - **A restart loses all history.** There is no on-disk state to reload;
+>   a restarted node re-syncs from peers, and can only go back as far as
+>   its peers have held *in their own memory* since *their* last restart.
+> - Operations therefore depend on **periodic regenesis** until snapshot
+>   persistence lands (`/goal` A6/A7). Expect scheduled restarts of the
+>   whole network, not just your node.
+>
+> Disk is used for the event log (`event_log_path`) and little else, so
+> the 2 TB figure is generous — but do not size RAM as if the 2 TB were
+> absorbing chain growth.
 
 If you can't hit the network RTT requirement (e.g. you're on
 mobile-tier home internet), you'll see more dropped certs and
@@ -59,9 +112,13 @@ under-performing validators after 30 days; you can re-apply.
    producing the co-signature. Your `authority_id` is assigned at
    this step; it's `≥ 8` (ids 0–6 are seed validators, 7 is the
    faucet).
-3. **You receive your IAM credentials** (out-of-band, via Signal
-   or a 1Password secure share). These let you upload your
-   event log to the foundation's S3 bucket; no other AWS access.
+3. **Event-log submission — mechanism TBD.** This step previously
+   issued you AWS IAM credentials for an S3 bucket. **The project no
+   longer has AWS**, so that path is gone and no replacement has been
+   chosen yet (it needs to work on the non-AWS footprint in
+   [`NON-AWS-DEPLOY.md`](NON-AWS-DEPLOY.md)). Until it is decided, keep
+   your `event_log_path` file locally; the foundation will publish a
+   submission method before points accrual starts.
 4. **Wait one epoch boundary** for the admit Intent to land on
    chain. Once your `authority_id` shows up in
    `suwappu_getAuthorityRegistry`, you're admitted. Your node —
@@ -78,9 +135,12 @@ under-performing validators after 30 days; you can re-apply.
 # 1. Mint your ML-DSA-65 + BLS12-381 keypairs OFF-HOST (e.g. on a
 #    fresh laptop you'll later wipe) — these will be your
 #    validator's signing keys.
-cargo build --release -p suwappu-crypto --bin suwappu-keygen
-./target/release/suwappu-keygen --algo mldsa --sk ./mldsa.sk --pk ./mldsa.pk
-./target/release/suwappu-keygen --algo bls --sk ./bls.sk --pk ./bls.pk
+#    `suwappu-keygen` ships in the release tarball (step 3a), so you do
+#    NOT need to build from source — which matters because the
+#    `suwappu-db` dependency is private and external operators cannot
+#    build the workspace.
+./suwappu-keygen --algo mldsa --sk ./mldsa.sk --pk ./mldsa.pk
+./suwappu-keygen --algo bls --sk ./bls.sk --pk ./bls.pk
 
 # 2. Send only the public keys to the foundation (the ML-DSA
 #    pubkey goes into the admit Intent). The secret keys NEVER
@@ -91,9 +151,13 @@ cat ./bls.pk | base64
 # 3. Get your authority_id back from the foundation once admit
 #    lands. Then on your validator hardware:
 
-# 3a. Pull the testnet binary release.
-gh release download suwappu-dag-v0.X.Y --pattern '*linux-musl*'
-tar -xzf suwappu-dag-0.X.Y-x86_64-unknown-linux-musl.tar.gz
+# 3a. Pull the testnet binary release. Linux builds are glibc, not
+#     musl (the musl target does not build — see the header of
+#     .github/workflows/release.yml). Pick the tarball for your arch:
+#       x86_64  -> x86_64-unknown-linux-gnu
+#       arm64   -> aarch64-unknown-linux-gnu
+gh release download suwappu-dag-v0.X.Y --pattern '*x86_64-unknown-linux-gnu*'
+tar -xzf suwappu-dag-0.X.Y-x86_64-unknown-linux-gnu.tar.gz
 
 # 3b. Pull the public testnet genesis.
 curl -fsSL https://testnet.suwappu.bot/genesis.toml \
@@ -195,6 +259,14 @@ of the total testnet allocation.
 - **Equivocation** (signing two conflicting certs at the same
   round). 100% slash of testnet stake, immediate dequeue from
   the program. Per Paper §6.4.
+
+  > Note on what "slash" currently means: equivocation **detection** is
+  > implemented and a detected equivocator is ejected, but testnet stake
+  > is a **declared integer in the admit intent, not an escrowed bond**
+  > (`/goal` A9). So the enforceable penalty today is expulsion and loss
+  > of accrued points — there is no posted collateral to confiscate.
+  > Bonding is a separate, unlanded change; this line will become
+  > literal when it lands.
 - **Sustained downtime** (uptime < 80% over 14 days). Soft slash:
   loss of all accumulated points for the affected window. Re-
   apply allowed after 30 days.
