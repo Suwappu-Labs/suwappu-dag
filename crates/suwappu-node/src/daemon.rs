@@ -660,7 +660,7 @@ impl Daemon {
             let peer_label = peer_id.0.clone();
             tasks.push(tokio::spawn(async move {
                 tracing::debug!(peer = %peer_label, "inbox task: starting");
-                run_inbox(self_label, self_id, state, outbound, log, peer_inbox).await;
+                run_inbox(self_label, self_id, state, outbound, log, peer_inbox, false).await;
                 tracing::debug!(peer = %peer_label, "inbox task: exiting");
             }));
         }
@@ -675,7 +675,7 @@ impl Daemon {
             let log = log.clone();
             let self_label = self_label.clone();
             tasks.push(tokio::spawn(async move {
-                run_inbox(self_label, self_id, state, outbound, log, dyn_inbox).await;
+                run_inbox(self_label, self_id, state, outbound, log, dyn_inbox, true).await;
             }));
         }
 
@@ -797,6 +797,16 @@ impl Daemon {
     }
 }
 
+/// A [`BlockPayload`] is self-consistent when its `payload_digest`
+/// equals `blake3(bincode(intents))` — the same digest the authoring
+/// cert commits to and signs. A block failing this check is a forgery
+/// (or corruption) and must never enter `state.blocks`.
+fn block_payload_is_consistent(block: &BlockPayload) -> bool {
+    let computed: [u8; 32] =
+        blake3::hash(&crate::codec::encode(&block.intents).unwrap_or_default()).into();
+    computed == block.payload_digest
+}
+
 async fn run_inbox(
     self_label: String,
     self_id: AuthorityId,
@@ -804,6 +814,13 @@ async fn run_inbox(
     outbound: Arc<HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>>,
     log: EventLog,
     mut inbox: tokio::sync::mpsc::Receiver<WireEvent>,
+    // Dynamic peers are unauthenticated internet dialers (late-joiners
+    // not in the configured set). They may only drive the sync protocol
+    // and receive signature-gated Cert responses — never inject a Vote
+    // (unsigned; would forge Validator-Ring stake and collapse the
+    // Theorem-2 AND-gate) or a Tip (would poison the backfill target).
+    // See the consensus-reviewer finding on 62cce31.
+    is_dynamic: bool,
 ) {
     while let Some(ev) = inbox.recv().await {
         let WireEvent { from, msg, reply } = ev;
@@ -841,16 +858,36 @@ async fn run_inbox(
                 try_commit(&state, &self_label, &log).await;
             }
             WireMessage::Block(block) => {
-                state.blocks.lock().insert(block.cert_hash, block);
+                // Verify the payload is self-consistent
+                // (blake3(intents) == payload_digest) before storing, and
+                // never overwrite a block already held for this cert
+                // (first-write-wins). Without this, any peer — including
+                // an unauthenticated dynamic one — could overwrite a
+                // not-yet-committed cert's payload with forged intents,
+                // diverging honest nodes' state (consensus-reviewer,
+                // 62cce31). The cert's own signed `payload_digest` binds
+                // this to the authored cert when it arrives.
+                if !block_payload_is_consistent(&block) {
+                    debug!(peer = %from.0, "inbox: block payload digest mismatch, dropping");
+                } else {
+                    state.blocks.lock().entry(block.cert_hash).or_insert(block);
+                }
             }
             WireMessage::Vote(vote) => {
-                state
-                    .votes
-                    .lock()
-                    .entry(vote.candidate)
-                    .or_default()
-                    .push(vote);
-                try_commit(&state, &self_label, &log).await;
+                // Votes are unsigned; only trusted configured peers may
+                // deliver them. A dynamic (unauthenticated) peer's vote
+                // would forge Validator-Ring stake.
+                if is_dynamic {
+                    debug!(peer = %from.0, "inbox: dropping Vote from dynamic peer");
+                } else {
+                    state
+                        .votes
+                        .lock()
+                        .entry(vote.candidate)
+                        .or_default()
+                        .push(vote);
+                    try_commit(&state, &self_label, &log).await;
+                }
             }
             WireMessage::GetCert(hash) => {
                 let cert_opt = state.dag.read().await.get(&hash).cloned();
@@ -859,10 +896,21 @@ async fn run_inbox(
                 }
             }
             WireMessage::FastPath(cert) => {
-                handle_fastpath_cert(&state, self_id, cert, &self_label, &log, &outbound).await;
+                // Fast-path and LTP frames mutate consensus / attestation
+                // state and re-broadcast; only trusted configured peers
+                // may drive them. Dynamic peers are sync-only.
+                if is_dynamic {
+                    debug!(peer = %from.0, "inbox: dropping FastPath from dynamic peer");
+                } else {
+                    handle_fastpath_cert(&state, self_id, cert, &self_label, &log, &outbound).await;
+                }
             }
             WireMessage::Ltp(att) => {
-                handle_ltp_attestation(&state, att, &self_label, &log).await;
+                if is_dynamic {
+                    debug!(peer = %from.0, "inbox: dropping Ltp from dynamic peer");
+                } else {
+                    handle_ltp_attestation(&state, att, &self_label, &log).await;
+                }
             }
             WireMessage::Ping(t) => {
                 reply_to(&outbound, &from, &reply, WireMessage::Pong(t));
@@ -873,9 +921,16 @@ async fn run_inbox(
                 reply_to(&outbound, &from, &reply, WireMessage::Tip(tip));
             }
             WireMessage::Tip(r) => {
-                let mut inner = state.inner.lock().await;
-                if r > inner.sync_tip {
-                    inner.sync_tip = r;
+                // Only configured peers set the backfill target: a
+                // dynamic peer could send Tip(u64::MAX) and pin this node
+                // into perpetual (futile) backfill.
+                if is_dynamic {
+                    debug!(peer = %from.0, "inbox: ignoring Tip from dynamic peer");
+                } else {
+                    let mut inner = state.inner.lock().await;
+                    if r > inner.sync_tip {
+                        inner.sync_tip = r;
+                    }
                 }
             }
             WireMessage::GetCertsByRound(round) => {
@@ -961,10 +1016,19 @@ async fn run_backfill(
         let to_round = from_round
             .saturating_add(BACKFILL_BATCH_ROUNDS - 1)
             .min(target);
+        // Snapshot senders once; rotate the fan-out start per round so a
+        // fixed pair of alive-but-behind peers doesn't absorb every
+        // request (consensus-reviewer fairness finding).
+        let senders: Vec<_> = outbound.values().collect();
+        if senders.is_empty() {
+            continue;
+        }
         for round in from_round..=to_round {
             // Two-peer fan-out, mirroring `fetch_cert_from_peers`.
+            let start = (round as usize) % senders.len();
             let mut sent = 0usize;
-            for tx in outbound.values() {
+            for offset in 0..senders.len() {
+                let tx = senders[(start + offset) % senders.len()];
                 if tx.try_send(WireMessage::GetCertsByRound(round)).is_ok() {
                     sent += 1;
                     if sent >= 2 {
@@ -2088,6 +2152,38 @@ async fn run_round_driver(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn block_payload_consistency_rejects_forgery() {
+        use crate::wire::BlockPayload;
+        use suwappu_consensus::cert::CertHash;
+        let intents = vec![suwappu_execution::Intent::Transfer {
+            from: [1u8; 20],
+            to: [2u8; 20],
+            amount: 7,
+        }];
+        let good_digest: [u8; 32] = blake3::hash(&crate::codec::encode(&intents).unwrap()).into();
+        let good = BlockPayload {
+            payload_digest: good_digest,
+            author: 0,
+            round: 1,
+            cert_hash: CertHash([9u8; 32]),
+            intents: intents.clone(),
+        };
+        assert!(block_payload_is_consistent(&good));
+
+        // Same digest, tampered intents (the overwrite-forgery vector).
+        let mut forged = good.clone();
+        forged.intents = vec![suwappu_execution::Intent::Transfer {
+            from: [1u8; 20],
+            to: [2u8; 20],
+            amount: 1_000_000,
+        }];
+        assert!(
+            !block_payload_is_consistent(&forged),
+            "a block whose intents don't match its committed digest must be rejected"
+        );
+    }
     use std::net::SocketAddr;
 
     use super::*;
