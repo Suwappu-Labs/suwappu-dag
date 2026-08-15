@@ -58,6 +58,13 @@ pub struct BlockPayload {
     pub cert_hash: CertHash,
     /// Ordered list of intents in this block.
     pub intents: Vec<Intent>,
+    /// On-chain governance authorization envelopes, keyed by the index
+    /// of the governance intent within `intents`. Every committer
+    /// re-verifies these at the epoch-boundary apply, so a governance
+    /// intent whose envelope is missing or invalid is dropped rather
+    /// than applied. Empty for the common case (no governance intents).
+    #[serde(default)]
+    pub governance_auth: Vec<(u32, crate::client::GovAuth)>,
 }
 
 /// Per-cluster peer identifier. Carries a human label so logs are readable

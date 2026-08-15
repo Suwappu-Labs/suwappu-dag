@@ -160,19 +160,10 @@ pub enum ClientMessage {
     SubmitGoverned {
         /// The governance intent.
         intent: Intent,
-        /// Sponsor: detached ML-DSA-65 signature over
-        /// [`intent_signing_digest`]`(network_id, &intent)` by a seated
-        /// Authority Ring member.
-        signature: Vec<u8>,
-        /// blake3 hash of the sponsor's public-key bytes.
-        signer_pubkey_hash: [u8; 32],
-        /// Co-signature over the SAME digest. `AdmitAuthority`: by the
-        /// candidate's key embedded in the intent (proof of possession).
-        /// `ExitAuthority`/`EjectAuthority`: by a second, distinct
-        /// seated Authority.
-        co_signature: Vec<u8>,
-        /// blake3 hash of the co-signer's public-key bytes.
-        co_signer_pubkey_hash: [u8; 32],
+        /// On-chain authorization envelope (sponsor + second seated
+        /// authority + optional candidate PoP). Verified at ingress AND
+        /// re-verified at commit.
+        auth: GovAuth,
     },
 }
 
@@ -371,6 +362,34 @@ pub(crate) enum AuthOutcome {
 /// reinventing the lookup + verify dance — otherwise the two wires
 /// drift on what "signed intent" means and security audits get
 /// nightmarish.
+/// On-chain authorization envelope for a governance intent. Travels with
+/// the intent inside the `BlockPayload` so EVERY committer can re-verify
+/// it at the epoch-boundary apply — making governance authorization a
+/// consensus rule, not just an ingress filter. A Byzantine block author
+/// gains nothing by forging or omitting this: honest nodes re-verify it
+/// against their own seated registry and drop the intent on failure.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GovAuth {
+    /// blake3 hash of the SPONSOR's ML-DSA-65 public key. Must be a
+    /// seated Authority Ring member.
+    pub sponsor_pubkey_hash: [u8; 32],
+    /// Sponsor's detached ML-DSA-65 signature over
+    /// `intent_signing_digest(network_id, &intent)`.
+    pub sponsor_signature: Vec<u8>,
+    /// blake3 hash of the CO-SIGNER's ML-DSA-65 public key. A SECOND,
+    /// distinct seated Authority — for every governance action, including
+    /// `AdmitAuthority`. (Candidate proof-of-possession is separate; see
+    /// `candidate_pop_signature`.)
+    pub co_signer_pubkey_hash: [u8; 32],
+    /// Co-signer's detached signature over the same digest.
+    pub co_signature: Vec<u8>,
+    /// `AdmitAuthority` only: the CANDIDATE's proof-of-possession
+    /// signature over the same digest, verified against the ML-DSA key
+    /// embedded in the intent (an admit cannot be forged for a key the
+    /// candidate does not hold). Empty for `ExitAuthority`/`EjectAuthority`.
+    pub candidate_pop_signature: Vec<u8>,
+}
+
 /// True for the authority-management intents that require the
 /// dual-signature rule.
 pub(crate) fn is_governance_intent(intent: &Intent) -> bool {
@@ -466,20 +485,18 @@ pub(crate) async fn verify_governed_intent(
     state: &State,
     network_id: &str,
     intent: &Intent,
-    signature_bytes: &[u8],
-    signer_pubkey_hash: &[u8; 32],
-    co_signature_bytes: &[u8],
-    co_signer_pubkey_hash: &[u8; 32],
+    auth: &GovAuth,
 ) -> Result<(), String> {
     if !is_governance_intent(intent) {
         return Err("governed submit: not a governance intent".to_string());
     }
+    // SPONSOR: a seated authority, signature valid over the digest.
     match verify_single_signature(
         state,
         network_id,
         intent,
-        signature_bytes,
-        signer_pubkey_hash,
+        &auth.sponsor_signature,
+        &auth.sponsor_pubkey_hash,
     )
     .await
     {
@@ -493,55 +510,51 @@ pub(crate) async fn verify_governed_intent(
         AuthOutcome::GovernanceRequiresCoSignature => unreachable!("no gate in single-sig core"),
     }
 
-    let digest = intent_signing_digest(network_id, intent);
-    match intent {
-        Intent::AdmitAuthority {
-            mldsa_public_key, ..
-        } => {
-            let expected: [u8; 32] = *blake3::hash(mldsa_public_key).as_bytes();
-            if co_signer_pubkey_hash != &expected {
-                return Err(
-                    "governed submit: co-signer hash does not match the candidate key in the intent"
-                        .to_string(),
-                );
-            }
-            let pubkey = mldsa::PublicKey::from_bytes(mldsa_public_key)
-                .map_err(|_| "governed submit: malformed candidate public key".to_string())?;
-            let signature = mldsa::Signature::from_bytes(co_signature_bytes)
-                .map_err(|_| "governed submit: malformed candidate co-signature".to_string())?;
-            mldsa::verify(&digest, &signature, &pubkey).map_err(|_| {
-                "governed submit: candidate proof-of-possession signature invalid".to_string()
-            })?;
+    // CO-SIGNER: a SECOND, distinct seated authority — for every
+    // governance action. This is what stops a single compromised
+    // authority key (or a single Byzantine authoring node, once this
+    // envelope is re-verified at commit) from unilaterally reshaping the
+    // validator set.
+    if auth.co_signer_pubkey_hash == auth.sponsor_pubkey_hash {
+        return Err(
+            "governed submit: co-signer must be a second, distinct seated authority".to_string(),
+        );
+    }
+    match verify_single_signature(
+        state,
+        network_id,
+        intent,
+        &auth.co_signature,
+        &auth.co_signer_pubkey_hash,
+    )
+    .await
+    {
+        AuthOutcome::Ok => {}
+        AuthOutcome::UnknownSigner => {
+            return Err("governed submit: co-signer not a seated authority".to_string());
         }
-        Intent::ExitAuthority { .. } | Intent::EjectAuthority { .. } => {
-            if co_signer_pubkey_hash == signer_pubkey_hash {
-                return Err(
-                    "governed submit: co-signer must be a second, distinct seated authority"
-                        .to_string(),
-                );
-            }
-            match verify_single_signature(
-                state,
-                network_id,
-                intent,
-                co_signature_bytes,
-                co_signer_pubkey_hash,
-            )
-            .await
-            {
-                AuthOutcome::Ok => {}
-                AuthOutcome::UnknownSigner => {
-                    return Err("governed submit: co-signer not a seated authority".to_string());
-                }
-                AuthOutcome::BadSignature => {
-                    return Err("governed submit: bad co-signature".to_string());
-                }
-                AuthOutcome::GovernanceRequiresCoSignature => {
-                    unreachable!("no gate in single-sig core")
-                }
-            }
+        AuthOutcome::BadSignature => {
+            return Err("governed submit: bad co-signature".to_string());
         }
-        _ => unreachable!("guarded by is_governance_intent"),
+        AuthOutcome::GovernanceRequiresCoSignature => unreachable!("no gate in single-sig core"),
+    }
+
+    // CANDIDATE proof-of-possession (AdmitAuthority only): the key being
+    // admitted must itself sign the digest, so an admit cannot be forged
+    // for a key nobody holds. This is IN ADDITION to the two seated
+    // authorities above, not a substitute for the second one.
+    if let Intent::AdmitAuthority {
+        mldsa_public_key, ..
+    } = intent
+    {
+        let digest = intent_signing_digest(network_id, intent);
+        let pubkey = mldsa::PublicKey::from_bytes(mldsa_public_key)
+            .map_err(|_| "governed submit: malformed candidate public key".to_string())?;
+        let signature = mldsa::Signature::from_bytes(&auth.candidate_pop_signature)
+            .map_err(|_| "governed submit: malformed candidate PoP signature".to_string())?;
+        mldsa::verify(&digest, &signature, &pubkey).map_err(|_| {
+            "governed submit: candidate proof-of-possession signature invalid".to_string()
+        })?;
     }
     Ok(())
 }
@@ -728,23 +741,8 @@ async fn handle_conn(
                 )
                 .await?;
             }
-            ClientMessage::SubmitGoverned {
-                intent,
-                signature,
-                signer_pubkey_hash,
-                co_signature,
-                co_signer_pubkey_hash,
-            } => {
-                if let Err(msg) = verify_governed_intent(
-                    &state,
-                    &network_id,
-                    &intent,
-                    &signature,
-                    &signer_pubkey_hash,
-                    &co_signature,
-                    &co_signer_pubkey_hash,
-                )
-                .await
+            ClientMessage::SubmitGoverned { intent, auth } => {
+                if let Err(msg) = verify_governed_intent(&state, &network_id, &intent, &auth).await
                 {
                     let resp = ClientResponse::Err(msg);
                     let _ = write_response(&mut stream, &resp).await;
@@ -752,6 +750,10 @@ async fn handle_conn(
                 }
                 let intent_hash: [u8; 32] =
                     blake3::hash(&crate::codec::encode(&intent).expect("intent serialize")).into();
+                // Retain the verified envelope so THIS node — the one that
+                // will author the block for this intent — can attach it to
+                // the BlockPayload for every committer to re-verify.
+                state.remember_governance_envelope(intent_hash, auth);
                 match state.mempool.submit(
                     intent,
                     DEFAULT_INTENT_PRIORITY,
@@ -911,19 +913,29 @@ impl LoadGenClient {
         intent: Intent,
         co_public_key: &mldsa::PublicKey,
         co_secret_key: &mldsa::SecretKey,
+        candidate: Option<(&mldsa::PublicKey, &mldsa::SecretKey)>,
     ) -> io::Result<[u8; 32]> {
         let digest = intent_signing_digest(&self.network_id, &intent);
         let signature = mldsa::sign(&digest, &self.secret_key)
             .map_err(|e| io::Error::other(format!("sign: {:?}", e)))?;
         let co_signature = mldsa::sign(&digest, co_secret_key)
             .map_err(|e| io::Error::other(format!("co-sign: {:?}", e)))?;
-        let msg = ClientMessage::SubmitGoverned {
-            intent,
-            signature: signature.as_bytes().to_vec(),
-            signer_pubkey_hash: self.signer_pubkey_hash(),
-            co_signature: co_signature.as_bytes().to_vec(),
-            co_signer_pubkey_hash: signer_pubkey_hash(co_public_key.as_bytes()),
+        // AdmitAuthority additionally needs the candidate's PoP signature.
+        let candidate_pop_signature = match candidate {
+            Some((_pk, sk)) => mldsa::sign(&digest, sk)
+                .map_err(|e| io::Error::other(format!("candidate PoP sign: {:?}", e)))?
+                .as_bytes()
+                .to_vec(),
+            None => Vec::new(),
         };
+        let auth = GovAuth {
+            sponsor_pubkey_hash: self.signer_pubkey_hash(),
+            sponsor_signature: signature.as_bytes().to_vec(),
+            co_signer_pubkey_hash: signer_pubkey_hash(co_public_key.as_bytes()),
+            co_signature: co_signature.as_bytes().to_vec(),
+            candidate_pop_signature,
+        };
+        let msg = ClientMessage::SubmitGoverned { intent, auth };
         let bytes = crate::codec::encode_frame(&msg)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
         let len = (bytes.len() as u32).to_be_bytes();

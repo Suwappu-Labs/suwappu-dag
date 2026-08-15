@@ -98,6 +98,16 @@ pub(crate) struct State {
     /// verified against the author's genesis-registered public key in
     /// `ingest_cert`, not against this key.
     pub(crate) self_secret_key: suwappu_crypto::mldsa::SecretKey,
+    /// Manifest network id (string form) used to recompute the
+    /// `intent_signing_digest` when re-verifying governance envelopes at
+    /// commit. Distinct from the `[u8;32]` bridge `network_id` below.
+    pub(crate) manifest_network_id: String,
+    /// Governance authorization envelopes retained at ingest
+    /// (`SubmitGoverned`), keyed by intent hash, so the block author can
+    /// attach them to the `BlockPayload` for every committer to
+    /// re-verify. Bounded (governance intents are rare); the map is
+    /// cleared past the cap.
+    pub(crate) governance_envelopes: parking_lot::Mutex<HashMap<[u8; 32], crate::client::GovAuth>>,
     /// Bridge header-attestation signer, or `None` when header attestation is
     /// not configured (no `bridge_oracle_address`, or the ML-DSA key could not
     /// be loaded). When `None`, `suwappu_getHeaderAttestation` returns `null`.
@@ -293,7 +303,7 @@ pub(crate) struct StateInner {
     /// eject path briefly disagrees on what constitutes a valid
     /// round-completion). Draining at the epoch boundary makes the
     /// transition atomic across the mesh.
-    pub(crate) pending_governance: Vec<Intent>,
+    pub(crate) pending_governance: Vec<(Intent, Option<crate::client::GovAuth>)>,
     /// `(author, round) → first cert hash observed` (DAG-S30.1).
     /// Equivocation detection O(1) per insert instead of O(dag)
     /// per try_commit.
@@ -426,6 +436,30 @@ fn load_corridors(manifest: &GenesisManifest) -> HashMap<(ChainId, ChainId), Cor
 }
 
 impl State {
+    /// Retain a verified governance envelope for later block attachment.
+    /// Governance intents are rare; if the map grows past the cap
+    /// (submissions never mined), clear it — a dropped envelope only
+    /// means the submitter must resubmit.
+    pub(crate) fn remember_governance_envelope(
+        &self,
+        intent_hash: [u8; 32],
+        auth: crate::client::GovAuth,
+    ) {
+        let mut map = self.governance_envelopes.lock();
+        if map.len() >= 4096 {
+            map.clear();
+        }
+        map.insert(intent_hash, auth);
+    }
+
+    /// Take (remove) a retained envelope by intent hash, if present.
+    pub(crate) fn take_governance_envelope(
+        &self,
+        intent_hash: &[u8; 32],
+    ) -> Option<crate::client::GovAuth> {
+        self.governance_envelopes.lock().remove(intent_hash)
+    }
+
     fn new(
         manifest: &GenesisManifest,
         self_secret_key: suwappu_crypto::mldsa::SecretKey,
@@ -523,6 +557,8 @@ impl State {
                 suwappu_mempool::MempoolConfig::default(),
             )),
             self_secret_key,
+            manifest_network_id: manifest.network_id.clone(),
+            governance_envelopes: parking_lot::Mutex::new(HashMap::new()),
             bridge_signer,
             bridge_attestation_cache: parking_lot::Mutex::new(None),
         }
@@ -1661,11 +1697,11 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
                 Some(c) => c.round,
                 None => continue,
             };
-            let intents = state
+            let (intents, block_gov_auth) = state
                 .blocks
                 .lock()
                 .get(&h)
-                .map(|b| b.intents.clone())
+                .map(|b| (b.intents.clone(), b.governance_auth.clone()))
                 .unwrap_or_default();
             // DAG-S26.1: capture intent hashes for compliance trace.
             // Computed once and reused for the `tx_to_block` index below
@@ -1722,14 +1758,23 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
             // via execute_block above — they are unchanged.
             {
                 let mut inner = state.inner.lock().await;
-                for intent in &intents {
+                for (idx, intent) in intents.iter().enumerate() {
                     if matches!(
                         intent,
                         Intent::AdmitAuthority { .. }
                             | Intent::ExitAuthority { .. }
                             | Intent::EjectAuthority { .. }
                     ) {
-                        inner.pending_governance.push(intent.clone());
+                        // Carry the block's authorization envelope for this
+                        // intent (by index) into the pending queue so it is
+                        // re-verified at the epoch boundary. A Byzantine
+                        // author that omits it leaves `None`, and the apply
+                        // path then drops the intent.
+                        let env = block_gov_auth
+                            .iter()
+                            .find(|(i, _)| *i as usize == idx)
+                            .map(|(_, a)| a.clone());
+                        inner.pending_governance.push((intent.clone(), env));
                     }
                 }
             }
@@ -1757,12 +1802,20 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
                 }
             };
             if boundary_crossed {
-                let queued: Vec<Intent> = {
+                let queued: Vec<(Intent, Option<crate::client::GovAuth>)> = {
                     let mut inner = state.inner.lock().await;
                     inner.pending_governance.drain(..).collect()
                 };
-                for intent in &queued {
-                    apply_governance_intent(state, intent, cert_round, self_label, log).await;
+                for (intent, env) in &queued {
+                    apply_governance_intent(
+                        state,
+                        intent,
+                        env.as_ref(),
+                        cert_round,
+                        self_label,
+                        log,
+                    )
+                    .await;
                 }
                 log.emit(
                     Event::now(self_label, Lane::Main, "epoch_boundary").with_round(cert_round),
@@ -1850,10 +1903,44 @@ fn intent_to_main_lane_tx(intent: &Intent, round: Round, lineage: CertHash) -> O
 async fn apply_governance_intent(
     state: &State,
     intent: &Intent,
+    auth: Option<&crate::client::GovAuth>,
     cert_round: u64,
     self_label: &str,
     log: &EventLog,
 ) {
+    // Governance authorization as a CONSENSUS rule: re-verify the
+    // on-chain envelope against THIS node's seated Authority Ring before
+    // mutating the registries. Every honest node reaches this epoch
+    // boundary with the same committed registry and the same manifest
+    // network id, so the verify decision is deterministic across the
+    // mesh — and a Byzantine block author that embedded an un-cosigned
+    // (or forged) governance intent has it dropped here, closing the
+    // block-author bypass of the ingress dual-signature gate.
+    match auth {
+        Some(a) => {
+            if let Err(reason) =
+                crate::client::verify_governed_intent(state, &state.manifest_network_id, intent, a)
+                    .await
+            {
+                tracing::warn!(round = cert_round, %reason, "governance intent failed commit-time verification; dropping");
+                log.emit(
+                    Event::now(self_label, Lane::Main, "governance_rejected")
+                        .with_round(cert_round),
+                );
+                return;
+            }
+        }
+        None => {
+            tracing::warn!(
+                round = cert_round,
+                "governance intent has no authorization envelope; dropping"
+            );
+            log.emit(
+                Event::now(self_label, Lane::Main, "governance_rejected").with_round(cert_round),
+            );
+            return;
+        }
+    }
     match intent {
         Intent::AdmitAuthority {
             authority_id,
@@ -2096,12 +2183,38 @@ async fn run_round_driver(
             .map(|i| *blake3::hash(&crate::codec::encode(i).expect("intent serialize")).as_bytes())
             .collect();
 
+        // Attach the on-chain governance authorization envelope for every
+        // governance intent in this block (looked up by intent hash from
+        // the ingest-time store and consumed). Committers re-verify these
+        // at the epoch boundary; a governance intent authored without a
+        // retained envelope carries none and will be dropped on apply
+        // (including by this author), so authoring one is a no-op rather
+        // than an unauthorized mutation.
+        let governance_auth: Vec<(u32, crate::client::GovAuth)> = intents
+            .iter()
+            .enumerate()
+            .filter(|(_, i)| {
+                matches!(
+                    i,
+                    Intent::AdmitAuthority { .. }
+                        | Intent::ExitAuthority { .. }
+                        | Intent::EjectAuthority { .. }
+                )
+            })
+            .filter_map(|(idx, _)| {
+                state
+                    .take_governance_envelope(&intent_hash_bytes[idx])
+                    .map(|a| (idx as u32, a))
+            })
+            .collect();
+
         let block = BlockPayload {
             payload_digest,
             author: self_id,
             round: target_round,
             cert_hash,
             intents,
+            governance_auth,
         };
 
         // Phase 3 (locked): brief — insert cert + block + update
@@ -2169,6 +2282,7 @@ mod tests {
             round: 1,
             cert_hash: CertHash([9u8; 32]),
             intents: intents.clone(),
+            governance_auth: vec![],
         };
         assert!(block_payload_is_consistent(&good));
 
@@ -2756,10 +2870,16 @@ mod tests {
     /// every node's registry, panicking with a full per-node diagnostic
     /// on timeout. Shared by both `phase_g_admit` and `phase_g_eject`
     /// (the latter needs authority 4 admitted before it can eject it).
-    async fn admit_authority_4(daemons: &[Daemon], client: &mut crate::client::LoadGenClient) {
-        // Dual-signature rule (wire v3): the candidate co-signs with the
-        // key being admitted (proof of possession), so the candidate
-        // key must be a REAL ML-DSA keypair, not filler bytes.
+    async fn admit_authority_4(
+        daemons: &[Daemon],
+        client: &mut crate::client::LoadGenClient,
+        co_pk: &suwappu_crypto::mldsa::PublicKey,
+        co_sk: &suwappu_crypto::mldsa::SecretKey,
+    ) {
+        // Governance rule (wire v3): AdmitAuthority needs the sponsor
+        // (client = v0), a SECOND distinct seated authority (co_pk/co_sk =
+        // v1), and the candidate's proof-of-possession over its own
+        // freshly-minted key.
         let (cand_pk, cand_sk) = suwappu_crypto::mldsa::keypair();
         let admit = suwappu_execution::Intent::AdmitAuthority {
             authority_id: 4,
@@ -2768,7 +2888,7 @@ mod tests {
             bls_public_key: vec![0u8; 48],
         };
         client
-            .submit_governed(admit, &cand_pk, &cand_sk)
+            .submit_governed(admit, co_pk, co_sk, Some((&cand_pk, &cand_sk)))
             .await
             .unwrap();
 
@@ -2862,9 +2982,16 @@ mod tests {
     /// `quorum_threshold(4)=3` during the n=5→n=4 window.
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn phase_g_admit() {
-        let (daemons, mut client, _other_keypairs) =
+        let (daemons, mut client, other_keypairs) =
             spawn_phase_g_cluster(19_700, "phase-g-admit-4n").await;
-        admit_authority_4(&daemons, &mut client).await;
+        // v1 is the required second seated authority co-signer.
+        admit_authority_4(
+            &daemons,
+            &mut client,
+            &other_keypairs[0].0,
+            &other_keypairs[0].1,
+        )
+        .await;
     }
 
     /// Phase G eject half (DAG-S27.5, split from the former combined
@@ -2902,17 +3029,20 @@ mod tests {
     async fn phase_g_eject() {
         let (daemons, mut client, other_keypairs) =
             spawn_phase_g_cluster(19_800, "phase-g-eject-4n").await;
-        admit_authority_4(&daemons, &mut client).await;
-
-        // Eject the new authority. Dual-signature rule: v0 sponsors
-        // (the client's own key) and v1 — a second, distinct seated
-        // authority — co-signs.
         let (co_pk, co_sk) = (&other_keypairs[0].0, &other_keypairs[0].1);
+        admit_authority_4(&daemons, &mut client, co_pk, co_sk).await;
+
+        // Eject the new authority. Governance rule: v0 sponsors (the
+        // client's own key) and v1 — a second, distinct seated authority
+        // — co-signs. No candidate PoP for an eject.
         let eject = suwappu_execution::Intent::EjectAuthority {
             authority_id: 4,
             proof_ref: [0u8; 32],
         };
-        client.submit_governed(eject, co_pk, co_sk).await.unwrap();
+        client
+            .submit_governed(eject, co_pk, co_sk, None)
+            .await
+            .unwrap();
 
         // F3 stage-A probe: before entering the long convergence
         // loop below, give every daemon a bounded window to RECEIVE
@@ -2954,7 +3084,7 @@ mod tests {
                     authority_id: 4,
                     proof_ref: [0u8; 32],
                 };
-                let _ = client.submit_governed(resubmit, co_pk, co_sk).await;
+                let _ = client.submit_governed(resubmit, co_pk, co_sk, None).await;
                 propagate_last_resubmit = std::time::Instant::now();
             }
             if std::time::Instant::now() >= propagate_deadline {
@@ -3029,7 +3159,7 @@ mod tests {
                     authority_id: 4,
                     proof_ref: [0u8; 32],
                 };
-                let _ = client.submit_governed(resubmit, co_pk, co_sk).await;
+                let _ = client.submit_governed(resubmit, co_pk, co_sk, None).await;
                 last_resubmit = std::time::Instant::now();
             }
             if std::time::Instant::now() >= eject_deadline {
@@ -3103,7 +3233,7 @@ mod tests {
                     let stake_thresh =
                         suwappu_consensus::joint::validator_quorum_threshold(&stake_table);
                     let pending_gov = inner.pending_governance.len();
-                    let pending_gov_has_eject = inner.pending_governance.iter().any(|x| {
+                    let pending_gov_has_eject = inner.pending_governance.iter().any(|(x, _)| {
                         matches!(
                             x,
                             Intent::EjectAuthority {
