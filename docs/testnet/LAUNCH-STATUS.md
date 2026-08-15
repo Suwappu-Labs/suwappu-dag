@@ -118,6 +118,15 @@ for TLS (any registrar + a reverse proxy / Caddy / Cloudflare in front of
 the seeds — the double-`suwappu` FQDN fixes on this branch still apply to
 whatever domain you pick).
 
+**A concrete $0/month path is written up in
+[`NON-AWS-DEPLOY.md`](NON-AWS-DEPLOY.md)** — Oracle Cloud "Always Free"
+Ampere A1 (ARM64) seeds, GHCR multi-arch image + `aarch64` release binary
+(both added on this branch), GitHub Pages/Releases for genesis/peers/
+explorer/status, and Cloudflare free DNS/TLS. Read its "Honest caveats"
+section first: one box is not fault-independent, node RAM grows unbounded
+(plan periodic regenesis), and throughput is ~0.125 TPS (launch
+un-incentivized).
+
 ## Requires human action (cannot be done from a repo)
 
 1. ~~AWS: profile `gsn`…~~ **OBSOLETE — no AWS.** Stand the seeds up on a
