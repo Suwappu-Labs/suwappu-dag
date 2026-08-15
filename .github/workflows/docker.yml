@@ -11,6 +11,15 @@ name: docker
 # dependency, so this workflow forwards the SSH deploy key into the
 # BuildKit build via `ssh: default` (the Dockerfile's cargo RUN steps
 # use `--mount=type=ssh`). Same deploy-key pattern as ci.yml.
+#
+# Multi-arch: images are built for linux/amd64 AND linux/arm64 so a node
+# runs on ARM hosts — notably the Oracle Cloud "Always Free" Ampere A1
+# VMs the non-AWS testnet targets (see docs/testnet/NON-AWS-DEPLOY.md).
+# The arm64 leg is built under QEMU emulation on the standard x86 runner
+# (free), which is correct but SLOW for a Rust workspace with C crypto
+# deps. If arm64 build time becomes a problem, split the arm64 leg onto a
+# native `ubuntu-24.04-arm` runner (free for public repos; billed for
+# private) with a manifest-merge step.
 
 on:
   push:
@@ -41,6 +50,11 @@ jobs:
       - name: Rewrite https://github.com → git@github.com for cargo
         run: git config --global url."git@github.com:".insteadOf "https://github.com/"
 
+      # Register QEMU so the x86 runner can build the linux/arm64 image.
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
       - uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
@@ -68,8 +82,12 @@ jobs:
         with:
           context: .
           push: true
+          # amd64 for normal cloud VMs; arm64 for the Oracle Free Ampere
+          # A1 testnet host (and Apple-silicon local runs).
+          platforms: linux/amd64,linux/arm64
           # Forward the runner's ssh-agent (holding the suwappu-db
           # deploy key) into the BuildKit build for the private git dep.
           ssh: default
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          provenance: false
