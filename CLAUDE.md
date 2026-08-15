@@ -171,6 +171,7 @@ Subagent definitions live in `claude-code/`.
 
 | Command | What it does |
 |---|---|
+| `/goal` | Standing goal: public testnet + external validators + bot settling over it. The launch backlog. |
 | `/sprint <id>` | Drive a sprint from start to PR |
 | `/check` | Run `cargo fmt`, `cargo clippy`, `cargo test --workspace`, `check-crypto-boundary.sh`, `cargo deny check` |
 | `/check-10k` | Run all proptests at `PROPTEST_CASES=10000 --release` |
