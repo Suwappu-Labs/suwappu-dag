@@ -6,12 +6,33 @@ name: release
 # source.
 #
 # Matrix:
-#   - linux-x86_64-musl   (ubuntu-latest + musl-tools)
+#   - linux-x86_64-gnu    (ubuntu-latest)
 #   - linux-aarch64-gnu   (ubuntu-latest, cross-compiled — for the Oracle
 #                          Free Ampere A1 ARM testnet host; glibc target
 #                          matches Oracle's Ubuntu/Oracle-Linux images)
 #   - macos-x86_64        (macos-13, Intel)
 #   - macos-aarch64       (macos-14, Apple Silicon)
+#
+# Why glibc and not musl for the x86_64 Linux leg: the musl target does
+# not build, and never did (this workflow had never been run before
+# 2026-08-15). Two independent blockers, verified locally:
+#   1. PQClean's `common/compat.h` guards a pre-GCC-7.1 AVX polyfill with
+#      `__GNUC_PREREQ(7, 1)`, which is a glibc <features.h> macro that musl
+#      does not define — the preprocessor then errors with "missing binary
+#      operator before token '('" while building pqcrypto-mlkem.
+#   2. Behind that, `openssl-sys` needs a musl-linked OpenSSL, i.e. we would
+#      have to vendor and build OpenSSL from source.
+# Clearing those would mean patching a PQ crypto dependency's C build and
+# vendoring OpenSSL, purely to gain static linking. Not worth it on a chain
+# whose crypto surface is load-bearing. Both glibc legs are verified to
+# produce all 7 binaries. Do NOT "restore" the musl target without
+# re-checking both blockers above.
+#
+# glibc floor: binaries are built on `ubuntu-latest` and therefore require
+# that runner's glibc or newer on the target host. Deploy onto an Ubuntu
+# release at least as new as the builder (see docs/testnet/NON-AWS-DEPLOY.md).
+# If an older floor is ever needed, pin the two Linux legs to an older
+# `runs-on` image rather than switching back to musl.
 #
 # The arm64 leg cross-compiles on the standard x86 runner: cargo runs on
 # the host (so the private suwappu-db SSH fetch works exactly like the
@@ -59,7 +80,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-musl
+          - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             archive: tar.gz
           - target: aarch64-unknown-linux-gnu
@@ -95,12 +116,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-
-      - name: Install musl tools (linux x86_64 only)
-        if: matrix.target == 'x86_64-unknown-linux-musl'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y musl-tools
 
       - name: Install aarch64 cross toolchain (linux arm64 only)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
@@ -153,6 +168,24 @@ jobs:
               echo "packaged: $b"
             fi
           done
+
+          # Fail loudly on an incomplete tarball. The copy loop above skips
+          # anything missing, so without this check a partially-built target
+          # would publish a half-empty archive that looks successful — the
+          # exact shape of "silent truncation" we want to avoid on a release
+          # artifact operators depend on. suwappu-faucet stays optional
+          # (gated on its crate existing); the other six are mandatory.
+          MISSING=""
+          for b in suwappu-node suwappu-loadgen suwappu-metrics suwappu-indexer suwappu-keygen suwappu-validator-program; do
+            [ -f "$STAGING/$b" ] || MISSING="$MISSING $b"
+          done
+          if [ -d crates/suwappu-faucet ] && [ ! -f "$STAGING/suwappu-faucet" ]; then
+            MISSING="$MISSING suwappu-faucet(crate present but binary absent)"
+          fi
+          if [ -n "$MISSING" ]; then
+            echo "::error::${TARGET}: expected binaries missing from the archive:$MISSING"
+            exit 1
+          fi
 
           # Bundle a minimal README inside the tarball so the unzipped
           # directory is self-documenting.

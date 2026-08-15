@@ -42,8 +42,16 @@ service / the raw IP). The DNS *zone* is free on Cloudflare.
 ## 1. Provision the Oracle A1 VM
 
 1. Oracle Cloud → Create Instance → shape **VM.Standard.A1.Flex**
-   (Ampere/ARM), 2 OCPU / 12 GB, image **Ubuntu 22.04 (aarch64)**. Assign
+   (Ampere/ARM), 2 OCPU / 12 GB, image **Ubuntu 24.04 (aarch64)**. Assign
    a public IPv4. Save the SSH key.
+
+   > **Pick 24.04, not 22.04.** The release binaries are glibc (not
+   > static/musl — see the header of `.github/workflows/release.yml` for
+   > why musl was dropped) and are built on GitHub's `ubuntu-latest`
+   > runner, so they need that runner's glibc **or newer**. An older
+   > distro will fail at startup with a `GLIBC_x.yz not found` link error.
+   > If you must run an older distro, build on the box instead (§2) or
+   > pin the workflow's Linux legs to an older runner image.
 2. Open the p2p/client/RPC ports. In the subnet **Security List** (or an
    NSG) add ingress `0.0.0.0/0` TCP for **9090** (peer), **9091**
    (client), **9092** (RPC). Then on the box:
