@@ -2438,6 +2438,29 @@ async fn run_round_driver(
 
 #[cfg(test)]
 mod tests {
+    // ---- TCP port allocation for the daemon tests in this module ----
+    //
+    // These tests bind real loopback sockets and cargo runs them in
+    // PARALLEL, so every test needs an EXCLUSIVE band. A single-node test
+    // consumes `base .. base+200` (listen, +100 client, +200 rpc); a 4-node
+    // cluster consumes `base .. base+200` too (listen base+0..3, client
+    // base+100..103). Overlapping bands surface as a flaky
+    // "Address already in use (os error 98)" in whichever test loses the
+    // race — which is exactly how the three collisions below were found.
+    //
+    //   19_000  four_node_main_lane_commits (4n)
+    //   19_500  client_listener_accepts_intent
+    //   20_000  client_listener_accepts_intent_batch
+    //   20_500  client_listener_enforces_mldsa_signature
+    //   21_000  rpc_binding_returns_epoch_over_http
+    //   21_300  try_commit_populates_blocks_by_round_and_tx_to_block
+    //   21_500  rpc_submit_intent_round_trips_through_consensus
+    //   21_800  rpc_submit_intent_unknown_signer
+    //   23_000  phase_g_admit (4n)
+    //   23_200  phase_g_eject (4n)
+    //   23_400  phase_g_growing_prefix_under_transient_unavailability (4n)
+    //
+    // Adding a test? Take the next free 200-wide band and list it here.
 
     #[test]
     fn block_payload_consistency_rejects_forgery() {
@@ -3192,7 +3215,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn phase_g_admit() {
         let (daemons, mut client, other_keypairs) =
-            spawn_phase_g_cluster(19_700, "phase-g-admit-4n").await;
+            spawn_phase_g_cluster(23_000, "phase-g-admit-4n").await;
         // v1 is the required second seated authority co-signer.
         admit_authority_4(
             &daemons,
@@ -3203,29 +3226,39 @@ mod tests {
         .await;
     }
 
-    /// IQ-007: strictly-growing finalize prefix under transient block/vote
-    /// absence, plus identical governance apply across the mesh.
+    /// IQ-007: no commit retraction under transient block/vote absence,
+    /// plus one agreed settlement order and identical governance apply.
     ///
     /// The joint-gated commit rule must, when a leader's block or its
     /// validator-vote quorum is momentarily unavailable, DEFER the whole
-    /// commit walk (`break 'commit`) rather than skip ahead — so every
-    /// honest node only ever APPENDS to its finalize order
-    /// (`blocks_by_round`) and never rewrites the cert already finalized at
-    /// a round, even while it is back-filling missing blocks over
-    /// `GetBlock`. That "strictly-growing prefix under selective block/vote
-    /// unavailability" property is the one IQ-007 flagged as unguarded.
+    /// commit walk (`break 'commit`) rather than skip ahead — so an honest
+    /// node's finalized set only ever GROWS, and nodes never disagree about
+    /// where a transaction settled, even while back-filling missing blocks
+    /// over `GetBlock`. That is the property IQ-007 flagged as unguarded.
     ///
-    /// We exercise it on a real 4-node loopback cluster (which naturally
-    /// produces transient block/vote gaps + `GetBlock` recovery — the same
-    /// mechanism `admit_authority_4` relies on) carrying a multi-round mix
-    /// of transfers and a governed `AdmitAuthority`, and assert:
-    ///   1. per node, `blocks_by_round` never REWRITES a round it already
-    ///      finalized (append-only / no reorder), sampled continuously as
-    ///      the mesh commits and back-fills;
-    ///   2. across nodes, the finalize orders agree on every commonly-held
-    ///      round (one joint-gated total order — no fork); and
-    ///   3. every node makes the identical governance apply decision
-    ///      (registries converge to exactly {0,1,2,3,4}).
+    /// Observable choice (learned the hard way — do not "simplify" this
+    /// back): `inner.blocks_by_round` is NOT the finalize order and must
+    /// not be asserted append-only. It is a lossy `round -> cert` lookup
+    /// index for `suwappu_getBlock(round)`, written last-writer-wins at
+    /// `blocks_by_round.insert(cert_round, h)`. A DAG round holds one cert
+    /// PER AUTHORITY, and a later leader's `causal_history` sweep
+    /// legitimately pulls in a straggler cert at an already-swept round,
+    /// overwriting that entry. An earlier draft of this test asserted
+    /// append-only on it and correctly failed ("v0 rewrote finalized round
+    /// 29") against entirely healthy behaviour.
+    ///
+    /// So we assert on the two observables that ARE sound:
+    ///   1. `state.committed` never loses a member (no retraction) —
+    ///      sampled continuously while the mesh commits and back-fills.
+    ///      This is exactly what `break 'commit` must guarantee: halt,
+    ///      never roll back.
+    ///   2. `inner.tx_to_block` agrees across every pair of nodes on the
+    ///      (round, cert) a transaction settled in. Disagreement there is a
+    ///      fork of the joint-gated order on the settlement-relevant axis.
+    ///      (Sound here because every intent is submitted through a single
+    ///      client to v0, so each is authored into exactly one block.)
+    ///   3. Every node makes the identical governance apply decision —
+    ///      registries converge to exactly {0,1,2,3,4}.
     ///
     /// Scope note: the *pure-consensus* append-only ordering property is
     /// already covered at 10k in
@@ -3240,7 +3273,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn phase_g_growing_prefix_under_transient_unavailability() {
         let (daemons, mut client, other_keypairs) =
-            spawn_phase_g_cluster(22_000, "iq007-growing-prefix-4n").await;
+            spawn_phase_g_cluster(23_400, "iq007-growing-prefix-4n").await;
 
         // Pre-admit transfer traffic so the finalize order already spans
         // several rounds before governance lands (more room for a reorder
@@ -3284,33 +3317,31 @@ mod tests {
             .collect();
         client.submit_batch(post).await.unwrap();
 
-        // Per-node last-observed finalize order (typed by real clones, so
-        // we never have to name the CertHash type). Assert append-only on
-        // every sample until the admission converges everywhere.
-        let mut last: Vec<_> = Vec::new();
-        for d in &daemons {
-            last.push(d.state.inner.lock().await.blocks_by_round.clone());
-        }
+        // Per-node last-observed committed set. `committed` is a
+        // parking_lot mutex, so snapshot out of the guard before any
+        // .await (guards must not cross await points here).
+        let mut last_committed: Vec<_> = daemons
+            .iter()
+            .map(|d| d.state.committed.lock().clone())
+            .collect();
 
         let deadline = std::time::Instant::now() + Duration::from_secs(60);
         loop {
             let mut all_at_5 = true;
             for (i, d) in daemons.iter().enumerate() {
-                let snap = { d.state.inner.lock().await.blocks_by_round.clone() };
-                // (1) Append-only: any round this node had already finalized
-                // must still map to the SAME cert (never a reorder/rewrite).
-                // A round legitimately disappearing is not what we're
-                // guarding against, so only compare rounds still present.
-                for (round, cert) in last[i].iter() {
-                    if let Some(now) = snap.get(round) {
-                        assert_eq!(
-                            now, cert,
-                            "node v{} rewrote finalized round {} — finalize order is not append-only",
-                            i, round,
-                        );
-                    }
+                let snap = { d.state.committed.lock().clone() };
+                // (1) No retraction: every cert this node had already
+                // committed must still be committed. Deferring on a missing
+                // block/vote must HALT the walk, never roll one back.
+                for h in last_committed[i].iter() {
+                    assert!(
+                        snap.contains(h),
+                        "node v{} un-committed cert {:?} — commit retraction, finalized set must only grow",
+                        i,
+                        h,
+                    );
                 }
-                last[i] = snap;
+                last_committed[i] = snap;
                 let reg = d.state.authority_registry.read().await;
                 if reg.len() != 5 || !reg.contains(4) {
                     all_at_5 = false;
@@ -3326,28 +3357,36 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
 
-        // (2) Cross-node agreement: any round finalized by two nodes maps
-        // to the same cert (one joint-gated total order — no fork).
-        let orders: Vec<_> = {
-            let mut v = Vec::new();
-            for d in &daemons {
-                v.push(d.state.inner.lock().await.blocks_by_round.clone());
-            }
-            v
-        };
-        for a in 0..orders.len() {
-            for b in (a + 1)..orders.len() {
-                for (round, cert) in orders[a].iter() {
-                    if let Some(other) = orders[b].get(round) {
+        // (2) Cross-node settlement agreement: any transaction indexed by
+        // two nodes must have settled at the same (round, cert) on both.
+        let mut placements = Vec::new();
+        for d in &daemons {
+            placements.push(d.state.inner.lock().await.tx_to_block.clone());
+        }
+        let mut compared = 0usize;
+        for a in 0..placements.len() {
+            for b in (a + 1)..placements.len() {
+                for (tx, av) in placements[a].iter() {
+                    if let Some(bv) = placements[b].get(tx) {
                         assert_eq!(
-                            cert, other,
-                            "nodes v{} and v{} disagree on the finalized cert at round {} — the joint-gated order forked",
-                            a, b, round,
+                            av.0, bv.0,
+                            "nodes v{} and v{} disagree on the round tx {:?} settled in — joint order forked",
+                            a, b, tx,
                         );
+                        assert_eq!(
+                            av.1, bv.1,
+                            "nodes v{} and v{} disagree on the cert tx {:?} settled in — joint order forked",
+                            a, b, tx,
+                        );
+                        compared += 1;
                     }
                 }
             }
         }
+        assert!(
+            compared > 0,
+            "no transaction was indexed on two nodes — the cross-node settlement-agreement check never ran",
+        );
 
         // (3) Identical governance apply: every node converged to exactly
         // the same authority set {0,1,2,3,4}.
@@ -3394,7 +3433,7 @@ mod tests {
     #[ignore = "test-split mitigation for #171 not yet confirmed against loaded CI; un-ignore after a clean CI run"]
     async fn phase_g_eject() {
         let (daemons, mut client, other_keypairs) =
-            spawn_phase_g_cluster(19_800, "phase-g-eject-4n").await;
+            spawn_phase_g_cluster(23_200, "phase-g-eject-4n").await;
         let (co_pk, co_sk) = (&other_keypairs[0].0, &other_keypairs[0].1);
         admit_authority_4(&daemons, &mut client, co_pk, co_sk).await;
 
@@ -4353,7 +4392,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn try_commit_populates_blocks_by_round_and_tx_to_block() {
         let n = 1u32;
-        let base_port: u16 = 21_000;
+        let base_port: u16 = 21_300;
         let network_id = "blocks-idx-1n".to_string();
         let (pk, sk) = suwappu_crypto::mldsa::keypair();
         let pk_hex = hex::encode(pk.as_bytes());
@@ -4591,7 +4630,7 @@ mod tests {
     async fn rpc_submit_intent_unknown_signer() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        let base_port: u16 = 21_600;
+        let base_port: u16 = 21_800;
         let network_id = "rpc-submit-bad-1n".to_string();
         // v0's own real keypair — needed so the daemon can sign its own
         // certs (DAG-S6). The test's "unknown signer" case submits a
