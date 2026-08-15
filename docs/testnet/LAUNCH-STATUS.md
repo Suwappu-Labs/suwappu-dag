@@ -73,12 +73,14 @@ Gaps 1–3 below were closed on this branch (2026-08-15):
    Byzantine seated AUTHORITY can still embed intents directly in its
    own authored blocks, bypassing client ingress — block-level intent
    auth is tracked below.
-4. **Block-level governance intent authentication.** Intents inside
-   committed blocks are applied without re-checking submission auth —
-   the ingress gate binds honest clients, not a Byzantine block author.
-   The apply path (`apply_governance_intent`) should re-verify the
-   dual-signature envelope once intents carry their signatures
-   on-chain.
+4. ~~**Block-level governance intent authentication.**~~ CLOSED
+   (IQ-007): governance intents now carry an on-chain `GovAuth` envelope
+   (sponsor + second distinct seated authority + candidate PoP) in the
+   `BlockPayload`, re-verified deterministically at the epoch-boundary
+   apply against each node's own seated registry. No single key — client
+   or node — can reshape the validator set; it takes two distinct seated
+   authorities. Residual (future): stake is still a claimed integer, not
+   an escrowed bond.
 5. **Validator Ring ≠ Authority Ring.** `AdmitAuthority` mirrors the
    same identity into both registries; the paper's open PoS Validator
    Ring has no join path. Either implement it or present the testnet as
