@@ -270,6 +270,11 @@ pub(crate) struct StateInner {
     pub(crate) orphans: HashMap<CertHash, Vec<Certificate>>,
     /// Cert hashes for which a `GetCert` request is outstanding.
     pub(crate) inflight_fetches: HashSet<CertHash>,
+    /// Committed certs whose authentic (cert-digest-matching) block is not
+    /// yet available, so commit was deferred. The sync sweeper issues
+    /// `GetBlock` for these; entries are removed once the block arrives
+    /// (and the cert commits) or is otherwise no longer needed.
+    pub(crate) needed_blocks: HashSet<CertHash>,
     /// DAG-S32: per-orphan (last_attempt_unix_ms, attempt_count).
     /// Set on first request and on every sweeper-driven retry. Removed
     /// when the orphan is finally inserted into the DAG (alongside the
@@ -539,6 +544,7 @@ impl State {
                 n_authorities: n,
                 orphans: HashMap::new(),
                 inflight_fetches: HashSet::new(),
+                needed_blocks: HashSet::new(),
                 inflight_fetch_history: HashMap::new(),
                 fastpath_pending: HashMap::new(),
                 fastpath_committed: HashSet::new(),
@@ -927,12 +933,35 @@ async fn run_inbox(
                     // Self-consistency: payload_digest must equal
                     // compute_payload_digest(intents, governance_auth), so a
                     // relay cannot strip/mutate the intents OR the governance
-                    // envelopes. First-write-wins; the committed cert's
-                    // signed payload_digest binds the block to the cert at
-                    // consumption in try_commit.
+                    // envelopes.
                     debug!(peer = %from.0, "inbox: block payload digest mismatch, dropping");
                 } else {
-                    state.blocks.lock().entry(block.cert_hash).or_insert(block);
+                    // Bind to the SIGNED cert when we already have it: only
+                    // accept a block whose digest matches the cert's signed
+                    // payload_digest, and OVERWRITE any previously-stored
+                    // (e.g. relay-poisoned stripped) block for this cert with
+                    // the authentic one. When the cert isn't known yet, store
+                    // best-effort (first-write-wins); `ingest_cert` purges a
+                    // mismatched squatter when the cert arrives. This closes
+                    // the stripped-block poison that first-write-wins alone
+                    // left open (consensus-review of 8eefd3d).
+                    let cert_digest = state
+                        .dag
+                        .read()
+                        .await
+                        .get(&block.cert_hash)
+                        .map(|c| c.payload_digest);
+                    match cert_digest {
+                        Some(cd) if cd == block.payload_digest => {
+                            state.blocks.lock().insert(block.cert_hash, block);
+                        }
+                        Some(_) => {
+                            debug!(peer = %from.0, "inbox: block does not match known cert digest, dropping");
+                        }
+                        None => {
+                            state.blocks.lock().entry(block.cert_hash).or_insert(block);
+                        }
+                    }
                 }
             }
             WireMessage::Vote(vote) => {
@@ -1154,9 +1183,23 @@ async fn ingest_cert(
         }
 
         // Acquire dag write lock briefly for the insert.
+        let cert_payload_digest = c.payload_digest;
         let insert_result = state.dag.write().await.insert(c.clone());
         match insert_result {
             Ok(_) => {
+                // Now that the SIGNED cert is known, evict any stored block
+                // for it that does not match the cert's payload_digest — a
+                // relay-poisoned stripped block cannot squat past cert
+                // arrival and block the authentic one from being stored.
+                {
+                    let mut blocks = state.blocks.lock();
+                    if blocks
+                        .get(&h)
+                        .is_some_and(|b| b.payload_digest != cert_payload_digest)
+                    {
+                        blocks.remove(&h);
+                    }
+                }
                 // Update cold-path inner state.
                 let promote_stake: Option<(AuthorityId, suwappu_consensus::Stake)>;
                 let unblocked: Option<Vec<Certificate>>;
@@ -1627,6 +1670,46 @@ async fn run_sync_sweeper(
         for h in due {
             fetch_cert_from_peers(h, None, &outbound);
         }
+
+        // Fetch deferred blocks: certs committed-in-order-blocked on a
+        // missing authentic block. Two-peer fan-out per block, mirroring
+        // the cert path. Entries are cleared by try_commit once the block
+        // arrives; prune any that have since committed.
+        let needed: Vec<CertHash> = {
+            let mut inner = state.inner.lock().await;
+            let committed_prune: Vec<CertHash> = inner
+                .needed_blocks
+                .iter()
+                .copied()
+                .filter(|h| state.committed.lock().contains(h))
+                .collect();
+            for h in committed_prune {
+                inner.needed_blocks.remove(&h);
+            }
+            inner.needed_blocks.iter().copied().collect()
+        };
+        for h in needed {
+            fetch_block_from_peers(h, &outbound);
+        }
+    }
+}
+
+/// Unicast `GetBlock(hash)` to up to two peers — mirrors
+/// `fetch_cert_from_peers` for the block-availability layer. Used to
+/// repair a deferred commit whose authentic (cert-digest-matching) block
+/// hasn't arrived (or was poisoned by a stripped-block relay).
+fn fetch_block_from_peers(
+    hash: CertHash,
+    outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
+) {
+    let mut sent = 0usize;
+    for tx in outbound.values() {
+        if tx.try_send(WireMessage::GetBlock(hash)).is_ok() {
+            sent += 1;
+            if sent >= 2 {
+                return;
+            }
+        }
     }
 }
 
@@ -1716,7 +1799,7 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
             suwappu_consensus::causal_history(&dag, leader_hash)
         };
         for h in history {
-            if !state.committed.lock().insert(h) {
+            if state.committed.lock().contains(&h) {
                 continue;
             }
             let (cert_round, cert_payload_digest) = match state.dag.read().await.get(&h) {
@@ -1725,20 +1808,43 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
             };
             // Bind the block to the SIGNED cert: only consume a block whose
             // payload digest equals the committed cert's payload_digest
-            // (which the author signed). Combined with
-            // `block_payload_is_consistent` at ingest, this means the
-            // intents AND governance envelopes we apply are exactly what
-            // the author committed — a stripped/mutated block for this
-            // cert has a different digest and is treated as missing rather
-            // than applied. This is what makes governance verification
-            // deterministic mesh-wide (IQ-007; consensus-review of b6c60ad).
-            let (intents, block_gov_auth) = state
+            // (which the author signed). This means the intents AND the
+            // governance envelopes we apply are exactly what the author
+            // committed.
+            //
+            // If a cert-matching block is NOT yet available (never arrived,
+            // or a Byzantine relay poisoned the slot with a self-consistent
+            // stripped block), we must NOT commit an empty block — doing so
+            // would diverge our state from peers that have the full block.
+            // Instead we DEFER: request the block and break out of the
+            // history walk so commit order is preserved. The cert stays
+            // uncommitted and is retried on the next try_commit once the
+            // authentic block arrives (consensus-review of 8eefd3d).
+            let block_payload = state
                 .blocks
                 .lock()
                 .get(&h)
                 .filter(|b| b.payload_digest == cert_payload_digest)
-                .map(|b| (b.intents.clone(), b.governance_auth.clone()))
-                .unwrap_or_default();
+                .map(|b| (b.intents.clone(), b.governance_auth.clone()));
+            let (intents, block_gov_auth) = match block_payload {
+                Some(p) => p,
+                None => {
+                    // Record the missing block for the sync sweeper to
+                    // fetch (try_commit has no outbound handle), and defer.
+                    state.inner.lock().await.needed_blocks.insert(h);
+                    break;
+                }
+            };
+            // Atomically CLAIM the cert only now that its block is in hand.
+            // `insert` returns false if a concurrent per-peer inbox task
+            // already claimed it — skip to avoid double-application. The
+            // block-availability check above happens BEFORE the claim, so
+            // we never claim-then-commit-empty.
+            if !state.committed.lock().insert(h) {
+                continue;
+            }
+            // No longer waiting on this block.
+            state.inner.lock().await.needed_blocks.remove(&h);
             // DAG-S26.1: capture intent hashes for compliance trace.
             // Computed once and reused for the `tx_to_block` index below
             // so we don't pay blake3 twice per intent.
