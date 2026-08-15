@@ -50,28 +50,40 @@ is live and `VALIDATOR-OPERATORS.md` describes reality.
 
 ## Remaining code gaps (in-repo, non-trivial)
 
-Ordered by how hard they block "others able to join":
+Gaps 1–3 below were closed on this branch (2026-08-15):
 
-1. **Late join.** `GenesisManifest::validate_against`
-   (`crates/suwappu-node/src/config.rs`) rejects any `authority_id` not
-   in genesis, and there is no state sync — a validator admitted
-   post-genesis via `AdmitAuthority` (ids ≥ 8 per
-   `VALIDATOR-OPERATORS.md`) cannot boot. Needs: manifest validation
-   that tolerates post-genesis members + a catch-up path.
-2. **Peer discovery.** `peers` is a static TOML list; seeds only learn
-   of a new node when a human re-renders configs and restarts all seven.
-   Needs: dynamic peer registration, or an automated seed-side reconfig
-   triggered by the admit intent.
-3. **Single-signature governance admit.**
-   `crates/suwappu-node/src/client.rs` accepts ANY one seated
-   authority's signature for `AdmitAuthority`/`EjectAuthority` — one
-   compromised seed can reshape the validator set. Dual-signature (or
-   quorum) admit must land before any external party is seated.
-4. **Validator Ring ≠ Authority Ring.** `AdmitAuthority` mirrors the
+1. ~~**Late join.**~~ CLOSED: `allow_post_genesis_join` boots a
+   non-genesis node in passive-sync mode; the new wire sync protocol
+   (`GetTip`/`GetCertsByRound`/`GetBlock`) backfills forward through
+   the ordinary verified ingest path, and authoring/voting begin only
+   once the node observes itself seated. Caveat: catch-up replays from
+   peers' in-memory history — nodes still have no persistence, so a
+   joiner can only sync back to what its peers have held since their
+   own boot. Snapshot/checkpoint sync remains future work.
+2. ~~**Peer discovery.**~~ CLOSED (minimally): seeds now accept up to 64
+   dynamic inbound peers full-duplex on the joiner's own connection —
+   no seed config edit or restart needed for a joiner to sync and, once
+   seated, to submit certs. Adding the joiner to seeds' static configs
+   (for push gossip toward it) can happen at the next convenient
+   restart; until then it tails via pull.
+3. ~~**Single-signature governance admit.**~~ CLOSED at the ingress
+   wires: `AdmitAuthority` now requires a seated sponsor plus the
+   candidate's proof-of-possession co-signature; Exit/Eject require two
+   distinct seated authorities (client wire v3). Residual risk: a
+   Byzantine seated AUTHORITY can still embed intents directly in its
+   own authored blocks, bypassing client ingress — block-level intent
+   auth is tracked below.
+4. **Block-level governance intent authentication.** Intents inside
+   committed blocks are applied without re-checking submission auth —
+   the ingress gate binds honest clients, not a Byzantine block author.
+   The apply path (`apply_governance_intent`) should re-verify the
+   dual-signature envelope once intents carry their signatures
+   on-chain.
+5. **Validator Ring ≠ Authority Ring.** `AdmitAuthority` mirrors the
    same identity into both registries; the paper's open PoS Validator
    Ring has no join path. Either implement it or present the testnet as
    single-ring PoA and reconcile `VALIDATOR-OPERATORS.md`.
-5. **Corridor daemon (lattice repo).** `src/ltp/corridor/` is a
+6. **Corridor daemon (lattice repo).** `src/ltp/corridor/` is a
    byte-parity library; there is no membership registry, PoP exchange,
    or partial-signature transport for the 7-of-9 super-node quorum, and
    no relayer transport (`Relayer.relay()` returns an in-process
@@ -115,6 +127,9 @@ Ordered by how hard they block "others able to join":
 Genesis funding + keygen shipping (done on this branch) → cut
 `v0.1.0` → GHCR image publishes → human: AWS + DNS + terraform apply →
 genesis ceremony + publish genesis/peers → verify 7-seed mesh, faucet,
-explorer, status → announce. External validators join only after gaps
-1–3 above close; the corridor/bridge re-legging (8) can proceed in
-parallel once RPC is stable.
+explorer, status → announce. The external-validator join path (late
+join + dynamic peers + dual-sig admit) landed on this branch; before
+seating a real third party, close gap 4 (block-level governance intent
+auth) and re-verify the flow end-to-end on the live testnet. The
+corridor/bridge re-legging (8) can proceed in parallel once RPC is
+stable.
