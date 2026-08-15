@@ -71,6 +71,15 @@ Both authority signatures bind the same digest, so the domain-separation
   the governance intent's index within `intents`. The authoring node
   attaches the envelope it verified at ingest (retained in a bounded
   `State` map, consumed at block build).
+- **The envelope is bound into the signed cert.** `payload_digest` is
+  computed by `compute_payload_digest(intents, governance_auth)` — over
+  BOTH the intents and the envelopes — and the `Certificate` commits to
+  and signs that digest. `block_payload_is_consistent` recomputes it, so
+  a relayed block with a stripped or mutated envelope has a different
+  digest and is rejected at ingest; and `try_commit` only consumes a
+  block whose `payload_digest` equals the committed cert's signed
+  `payload_digest`. A `Block` frame from an unauthenticated dynamic peer
+  is dropped outright.
 - `apply_governance_intent` re-verifies the envelope against **this
   node's** seated Authority Ring and the manifest `network_id` before any
   registry mutation, and drops the intent if the envelope is missing or
@@ -78,14 +87,27 @@ Both authority signatures bind the same digest, so the domain-separation
 
 ### Determinism argument
 
-Every honest node reaches a given epoch boundary having committed the
-same blocks, so it holds the same Authority Registry and the same
-manifest `network_id`. `verify_governed_intent` is a pure function of
-(intent, envelope, registry, network_id). Therefore all honest nodes make
-the identical apply/drop decision for each queued governance intent, in
-the identical drained order — no state divergence. A Byzantine block
-author gains nothing by forging or omitting the envelope: the envelope is
-*verified, not trusted*, and a failure is a deterministic drop everywhere.
+Every honest node that commits a given cert has, by cert-binding above,
+the byte-identical `governance_auth` the author signed — the envelope is
+covered by the cert signature, not merely delivered alongside it. At a
+given epoch boundary every honest node has committed the same certs (leader-commit
+total order) and holds the same Authority Registry and manifest
+`network_id`. `verify_governed_intent` is a pure function of (intent,
+envelope, registry, network_id), and the drain order is the deterministic
+commit order. Therefore all honest nodes make the identical apply/drop
+decision for each queued governance intent — no state divergence. A
+Byzantine block author gains nothing by forging or omitting the envelope
+(verified, not trusted → deterministic drop everywhere), and a Byzantine
+relay cannot strip the envelope from a committed cert's block (digest
+mismatch → rejected).
+
+> Design-history note: the initial implementation (commit b6c60ad) carried
+> `governance_auth` in the block but did NOT bind it into `payload_digest`.
+> A consensus review correctly found that a relay could strip the envelope
+> from one copy of an otherwise-identical block, splitting honest nodes
+> into apply-vs-drop and diverging the registries. The digest binding and
+> cert-binding above were added in response and are load-bearing for this
+> argument.
 
 ## Consequences
 

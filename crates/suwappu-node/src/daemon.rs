@@ -446,8 +446,15 @@ impl State {
         auth: crate::client::GovAuth,
     ) {
         let mut map = self.governance_envelopes.lock();
-        if map.len() >= 4096 {
-            map.clear();
+        // Drop the NEW envelope when at capacity rather than clearing the
+        // map: never evict an already-pending (legitimately dual-signed)
+        // envelope, so a flood can't censor an honest admit. The dropped
+        // submission simply needs resubmission. Reaching the cap requires
+        // 4096 ingress-valid (two-authority-signed) submissions, so this
+        // is a soft bound, not an attack surface.
+        if map.len() >= 4096 && !map.contains_key(&intent_hash) {
+            tracing::warn!("governance envelope store full; dropping new envelope (resubmit)");
+            return;
         }
         map.insert(intent_hash, auth);
     }
@@ -833,14 +840,29 @@ impl Daemon {
     }
 }
 
-/// A [`BlockPayload`] is self-consistent when its `payload_digest`
-/// equals `blake3(bincode(intents))` — the same digest the authoring
-/// cert commits to and signs. A block failing this check is a forgery
-/// (or corruption) and must never enter `state.blocks`.
+/// Canonical block payload digest, binding BOTH the intents AND the
+/// governance authorization envelopes. The authoring cert commits to and
+/// signs this value, so the envelopes are covered by the cert signature —
+/// a relay cannot strip or mutate `governance_auth` for a committed cert
+/// without producing a digest mismatch. Two independent blake3 updates
+/// (rather than encoding a tuple) keep the encoding unambiguous.
+fn compute_payload_digest(
+    intents: &[Intent],
+    governance_auth: &[(u32, crate::client::GovAuth)],
+) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(&crate::codec::encode(&intents).unwrap_or_default());
+    h.update(&crate::codec::encode(&governance_auth).unwrap_or_default());
+    *h.finalize().as_bytes()
+}
+
+/// A [`BlockPayload`] is self-consistent when its `payload_digest` equals
+/// [`compute_payload_digest`] over its intents AND governance envelopes.
+/// A block failing this check is a forgery (or corruption) — including a
+/// relay that stripped/mutated `governance_auth` — and must never enter
+/// `state.blocks`.
 fn block_payload_is_consistent(block: &BlockPayload) -> bool {
-    let computed: [u8; 32] =
-        blake3::hash(&crate::codec::encode(&block.intents).unwrap_or_default()).into();
-    computed == block.payload_digest
+    compute_payload_digest(&block.intents, &block.governance_auth) == block.payload_digest
 }
 
 async fn run_inbox(
@@ -894,16 +916,20 @@ async fn run_inbox(
                 try_commit(&state, &self_label, &log).await;
             }
             WireMessage::Block(block) => {
-                // Verify the payload is self-consistent
-                // (blake3(intents) == payload_digest) before storing, and
-                // never overwrite a block already held for this cert
-                // (first-write-wins). Without this, any peer — including
-                // an unauthenticated dynamic one — could overwrite a
-                // not-yet-committed cert's payload with forged intents,
-                // diverging honest nodes' state (consensus-reviewer,
-                // 62cce31). The cert's own signed `payload_digest` binds
-                // this to the authored cert when it arrives.
-                if !block_payload_is_consistent(&block) {
+                // Dynamic (unauthenticated) peers only ever REQUEST blocks
+                // (GetBlock / GetCertsByRound); a Block frame from one is
+                // never a legitimate flow, so drop it rather than let it
+                // populate state.blocks. Configured peers and dial-return
+                // responses are is_dynamic == false.
+                if is_dynamic {
+                    debug!(peer = %from.0, "inbox: dropping Block from dynamic peer");
+                } else if !block_payload_is_consistent(&block) {
+                    // Self-consistency: payload_digest must equal
+                    // compute_payload_digest(intents, governance_auth), so a
+                    // relay cannot strip/mutate the intents OR the governance
+                    // envelopes. First-write-wins; the committed cert's
+                    // signed payload_digest binds the block to the cert at
+                    // consumption in try_commit.
                     debug!(peer = %from.0, "inbox: block payload digest mismatch, dropping");
                 } else {
                     state.blocks.lock().entry(block.cert_hash).or_insert(block);
@@ -1693,14 +1719,24 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
             if !state.committed.lock().insert(h) {
                 continue;
             }
-            let cert_round = match state.dag.read().await.get(&h) {
-                Some(c) => c.round,
+            let (cert_round, cert_payload_digest) = match state.dag.read().await.get(&h) {
+                Some(c) => (c.round, c.payload_digest),
                 None => continue,
             };
+            // Bind the block to the SIGNED cert: only consume a block whose
+            // payload digest equals the committed cert's payload_digest
+            // (which the author signed). Combined with
+            // `block_payload_is_consistent` at ingest, this means the
+            // intents AND governance envelopes we apply are exactly what
+            // the author committed — a stripped/mutated block for this
+            // cert has a different digest and is treated as missing rather
+            // than applied. This is what makes governance verification
+            // deterministic mesh-wide (IQ-007; consensus-review of b6c60ad).
             let (intents, block_gov_auth) = state
                 .blocks
                 .lock()
                 .get(&h)
+                .filter(|b| b.payload_digest == cert_payload_digest)
                 .map(|b| (b.intents.clone(), b.governance_auth.clone()))
                 .unwrap_or_default();
             // DAG-S26.1: capture intent hashes for compliance trace.
@@ -2160,24 +2196,9 @@ async fn run_round_driver(
         // driver simply pops the top-priority intents at propose time.
         let intents: Vec<suwappu_execution::Intent> =
             state.mempool.drain_for_block(MAX_INTENTS_PER_BLOCK);
-        let payload_digest: [u8; 32] =
-            blake3::hash(&crate::codec::encode(&intents).expect("intents serialize")).into();
-        let mut cert = Certificate {
-            author: self_id,
-            round: target_round,
-            parents,
-            payload_digest,
-            signature: Vec::new(),
-        };
-        cert.sign(&state.self_secret_key);
-        let cert_hash = cert.hash();
 
-        // Per-intent hashes for the `tx_to_block` secondary index.
-        // Computed BEFORE moving `intents` into the `BlockPayload`.
-        // `try_commit` populates the same indices on the peer-receive
-        // path; this site mirrors it for the self-propose path so
-        // single-node and multi-node clusters both expose
-        // `blocks_by_round` and `tx_to_block`.
+        // Per-intent hashes for the `tx_to_block` secondary index and the
+        // governance-envelope lookup. Computed BEFORE the payload digest.
         let intent_hash_bytes: Vec<[u8; 32]> = intents
             .iter()
             .map(|i| *blake3::hash(&crate::codec::encode(i).expect("intent serialize")).as_bytes())
@@ -2186,10 +2207,7 @@ async fn run_round_driver(
         // Attach the on-chain governance authorization envelope for every
         // governance intent in this block (looked up by intent hash from
         // the ingest-time store and consumed). Committers re-verify these
-        // at the epoch boundary; a governance intent authored without a
-        // retained envelope carries none and will be dropped on apply
-        // (including by this author), so authoring one is a no-op rather
-        // than an unauthorized mutation.
+        // at the epoch boundary.
         let governance_auth: Vec<(u32, crate::client::GovAuth)> = intents
             .iter()
             .enumerate()
@@ -2207,6 +2225,26 @@ async fn run_round_driver(
                     .map(|a| (idx as u32, a))
             })
             .collect();
+
+        // The payload digest binds BOTH the intents AND the governance
+        // authorization envelopes, so the signed cert transitively
+        // commits to the envelopes. A relay that strips or mutates
+        // `governance_auth` produces a different digest and is rejected by
+        // `block_payload_is_consistent` — every honest node that commits
+        // this cert therefore holds byte-identical envelopes, which is
+        // what makes the commit-time governance verification deterministic
+        // mesh-wide (see IQ-007 and the consensus-reviewer finding on
+        // b6c60ad).
+        let payload_digest: [u8; 32] = compute_payload_digest(&intents, &governance_auth);
+        let mut cert = Certificate {
+            author: self_id,
+            round: target_round,
+            parents,
+            payload_digest,
+            signature: Vec::new(),
+        };
+        cert.sign(&state.self_secret_key);
+        let cert_hash = cert.hash();
 
         let block = BlockPayload {
             payload_digest,
@@ -2275,18 +2313,43 @@ mod tests {
             to: [2u8; 20],
             amount: 7,
         }];
-        let good_digest: [u8; 32] = blake3::hash(&crate::codec::encode(&intents).unwrap()).into();
+        // A governance-carrying block: the digest binds intents AND the
+        // envelope, so it must be computed with compute_payload_digest.
+        let gov_intents = vec![suwappu_execution::Intent::EjectAuthority {
+            authority_id: 4,
+            proof_ref: [0u8; 32],
+        }];
+        let env = crate::client::GovAuth {
+            sponsor_pubkey_hash: [1u8; 32],
+            sponsor_signature: vec![9u8; 8],
+            co_signer_pubkey_hash: [2u8; 32],
+            co_signature: vec![8u8; 8],
+            candidate_pop_signature: vec![],
+        };
+        let gov_auth = vec![(0u32, env)];
         let good = BlockPayload {
-            payload_digest: good_digest,
+            payload_digest: compute_payload_digest(&gov_intents, &gov_auth),
             author: 0,
             round: 1,
             cert_hash: CertHash([9u8; 32]),
-            intents: intents.clone(),
-            governance_auth: vec![],
+            intents: gov_intents.clone(),
+            governance_auth: gov_auth.clone(),
         };
         assert!(block_payload_is_consistent(&good));
 
-        // Same digest, tampered intents (the overwrite-forgery vector).
+        // Same intents + same payload_digest, but the governance envelope
+        // STRIPPED — the exact divergence vector the consensus review
+        // found. The digest must no longer match, so honest nodes reject
+        // it rather than commit a cert with a different envelope than
+        // their peers.
+        let mut stripped = good.clone();
+        stripped.governance_auth = vec![];
+        assert!(
+            !block_payload_is_consistent(&stripped),
+            "a block with a stripped governance envelope must fail the digest check"
+        );
+
+        // Tampered intents (the original overwrite-forgery vector).
         let mut forged = good.clone();
         forged.intents = vec![suwappu_execution::Intent::Transfer {
             from: [1u8; 20],
@@ -2297,6 +2360,17 @@ mod tests {
             !block_payload_is_consistent(&forged),
             "a block whose intents don't match its committed digest must be rejected"
         );
+
+        // A plain (non-governance) block still validates.
+        let plain = BlockPayload {
+            payload_digest: compute_payload_digest(&intents, &[]),
+            author: 0,
+            round: 2,
+            cert_hash: CertHash([7u8; 32]),
+            intents: intents.clone(),
+            governance_auth: vec![],
+        };
+        assert!(block_payload_is_consistent(&plain));
     }
     use std::net::SocketAddr;
 
