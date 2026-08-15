@@ -43,8 +43,10 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      # Enforce the workspace lint policy (clippy::all = deny) without -D warnings,
-      # which over-promoted the advisory `pedantic = warn` lints to hard errors.
+      # Warnings are denied via the workflow-level RUSTFLAGS="-D warnings",
+      # the same bar `scripts/check.sh` applies locally with an explicit
+      # `-- -D warnings`. There is no [workspace.lints] table (yet); this
+      # env var is the single enforcement point.
       - run: cargo clippy --workspace --all-targets
 
   test:
@@ -83,3 +85,14 @@ jobs:
         run: cargo install --locked cargo-deny
       - name: cargo-deny check
         run: cargo deny check
+
+  crypto-boundary:
+    name: crypto lane separation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # Pure-manifest check (no toolchain, no private-dep access): enforces
+      # the lane-separation rule deny.toml points at — primitive crypto
+      # crates only inside the audited boundary crates. See
+      # scripts/check-crypto-boundary.sh for the allow-list and rationale.
+      - run: ./scripts/check-crypto-boundary.sh
