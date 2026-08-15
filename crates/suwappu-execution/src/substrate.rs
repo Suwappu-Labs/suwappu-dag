@@ -861,7 +861,8 @@ pub trait Substrate {
     }
 
     /// Set the ambient block height. Called by
-    /// [`execute_block`] before iterating the block's intents.
+    /// [`execute_block`](crate::execute_block) before iterating the
+    /// block's intents.
     /// Default impl is a no-op for adapters that don't carry
     /// block context.
     fn set_current_block_height(&mut self, _height: u64) {}
