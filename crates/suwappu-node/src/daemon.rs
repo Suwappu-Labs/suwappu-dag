@@ -1771,7 +1771,14 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
         dag.rounds().collect()
     };
 
-    for round in candidate_rounds {
+    // Labeled so a deferred cert (missing authentic block) stops the
+    // ENTIRE commit walk, not just the current leader's causal history:
+    // committing a later leader's certs while an earlier finalize-ordered
+    // cert is deferred would apply intents out of the canonical order and
+    // diverge post-roots between honest nodes (round-4 consensus review).
+    // Every node therefore commits a strictly-growing prefix of the
+    // canonical finalize order.
+    'commit: for round in candidate_rounds {
         let status = {
             let dag = state.dag.read().await;
             decide_slot(&dag, round, n)
@@ -1830,9 +1837,11 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
                 Some(p) => p,
                 None => {
                     // Record the missing block for the sync sweeper to
-                    // fetch (try_commit has no outbound handle), and defer.
+                    // fetch (try_commit has no outbound handle), and defer
+                    // the WHOLE commit walk — no finalize-later cert may
+                    // commit ahead of this one, on any node.
                     state.inner.lock().await.needed_blocks.insert(h);
-                    break;
+                    break 'commit;
                 }
             };
             // Atomically CLAIM the cert only now that its block is in hand.

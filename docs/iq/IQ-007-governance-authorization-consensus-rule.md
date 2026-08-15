@@ -1,8 +1,17 @@
 # IQ-007 — Governance authorization as a consensus rule
 
 **Status:** Recommendation, implemented on branch
-`claude/lattice-chain-quality-parity-x78o7d`; pending specialist
-(consensus-reviewer + crypto-reviewer) sign-off before merge.
+`claude/lattice-chain-quality-parity-x78o7d`. Hardened across four
+adversarial consensus-review rounds (each closed a real finding:
+dynamic-peer unsigned Vote/Block; envelope not bound to the signed cert;
+block-availability first-write-wins poison; commit-order defer scope).
+**Because this touches BFT commit ordering and block availability on a
+settlement chain and repeatedly surfaced subtle safety issues under
+review, it MUST NOT merge without human consensus-team sign-off and a
+loaded multi-node devnet run with fault injection (block-withholding /
+stripped-block relay / straggler-cert ordering), on top of the CI
+proptests.** The subagent reviews and CI are necessary but not
+sufficient for a change of this class.
 **Owner:** consensus
 **Date:** 2026-08-15
 **Tracking:** external-validator-join effort; supersedes the
