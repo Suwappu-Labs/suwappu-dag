@@ -1,16 +1,16 @@
 # Track B — points accumulator infrastructure.
 #
-# The points-accumulator daemon (lands in a follow-up PR as
-# `crates/suwappu-validator-program/`) runs on this EC2, reads from
+# The points-accumulator daemon
+# (`crates/suwappu-validator-program/`) runs on this EC2, reads from
 # the external-uploads S3 bucket on a 5-minute schedule, computes
 # the weekly leaderboard, writes results into the RDS instance,
 # and exposes a public read API at
-# `program.testnet.suwappu.suwappu.bot/leaderboard`.
+# `program.testnet.suwappu.bot/leaderboard`.
 #
-# For this terraform PR we provision the INFRASTRUCTURE only —
-# the daemon binary itself lands separately so a fresh foundation
-# operator can run `./scripts/testnet/deploy.sh apply` today and
-# have the EC2 + RDS sitting idle, ready to receive the binary.
+# This stack provisions the INFRASTRUCTURE only — the daemon binary
+# deploys separately via SSM (OPERATIONS.md § 10.3), so a fresh
+# foundation operator can run `./scripts/testnet/deploy.sh apply`
+# and have the EC2 + RDS ready to receive the binary.
 
 # RDS for storing leaderboard + per-validator uptime history.
 # Small (db.t4g.small) — the workload is single-digit writes per

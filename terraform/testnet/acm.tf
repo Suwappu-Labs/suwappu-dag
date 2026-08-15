@@ -1,6 +1,6 @@
 # ACM certificate for the testnet subdomain.
 #
-# Wildcard cert: `*.testnet.suwappu.suwappu.bot` covers
+# Wildcard cert: `*.testnet.suwappu.bot` covers
 # rpc / ws / faucet / explorer / status / program. Same shape as
 # terraform/devnet/acm.tf.
 
@@ -45,6 +45,6 @@ resource "aws_acm_certificate_validation" "wildcard" {
 }
 
 output "wildcard_cert_arn" {
-  description = "ACM certificate ARN covering *.testnet.suwappu.suwappu.bot."
+  description = "ACM certificate ARN covering *.testnet.suwappu.bot."
   value       = aws_acm_certificate_validation.wildcard.certificate_arn
 }

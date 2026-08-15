@@ -56,6 +56,37 @@ FAUCET_AUTHORITY_ID = 4
 FAUCET_LABEL = "faucet"
 
 
+def blake3_address(pubkey: bytes) -> str:
+    """CANONICAL SUWAPPU address derivation: blake3(pubkey_bytes)[:20],
+    0x-prefixed hex.
+
+    This MUST byte-match `suwappu_faucet::address_from_pubkey` (blake3
+    truncated to 20 bytes) and the chain-wide reserved-address scheme in
+    `suwappu_execution::reserved` ("leading 20 bytes of BLAKE3(...)").
+    Do NOT substitute blake2b here — hashlib has no blake3, so this
+    helper needs the `blake3` pip package or the `b3sum` CLI. A wrong
+    hash silently funds an address the faucet never spends from.
+    """
+    try:
+        import blake3  # type: ignore
+
+        digest = blake3.blake3(pubkey).digest()
+    except ImportError:
+        b3sum = shutil.which("b3sum")
+        if b3sum is None:
+            sys.exit(
+                "ERROR: computing the faucet address requires blake3 "
+                "(canonical address derivation is blake3(pk)[:20]; see "
+                "crates/suwappu-faucet/src/lib.rs address_from_pubkey). "
+                "Install with `pip install blake3` or put `b3sum` on PATH."
+            )
+        out = subprocess.run(
+            [b3sum, "--no-names"], input=pubkey, capture_output=True, check=True
+        )
+        digest = bytes.fromhex(out.stdout.decode().strip())
+    return "0x" + digest[:20].hex()
+
+
 def placeholder_key(seed: bytes, length: int) -> bytes:
     """Deterministic byte stream from a seed. Not cryptographically random —
     only used as a fallback when suwappu-keygen isn't on PATH."""
@@ -193,19 +224,28 @@ def main() -> int:
         f.write(f"validator_stake_suwappu = 1\n")
         f.write(f"authority_stake_suwappu = 1\n\n")
 
-    # Pre-balances file — applied by the daemon at genesis-load time so
-    # the faucet address starts with enough tokens to drip. The faucet
-    # address is the blake3 hash of its ML-DSA pubkey, truncated to 20
-    # bytes (matches the suwappu-execution Address derivation).
-    import hashlib as _h
-    faucet_addr_20 = _h.blake2b(faucet_pk, digest_size=32).digest()[:20]
-    faucet_addr_hex = "0x" + faucet_addr_20.hex()
+        # Genesis pre-balances — embedded in genesis.toml (the source of
+        # truth: the daemon's GenesisManifest parses [[prebalances]] and
+        # State::new credits each entry via Intent::GenesisAllocation at
+        # height 0). Field names must match
+        # crates/suwappu-node/src/config.rs GenesisPrebalance exactly.
+        # Address derivation is the canonical blake3(pk)[:20] — see
+        # blake3_address().
+        faucet_addr_hex = blake3_address(faucet_pk)
+        f.write("[[prebalances]]\n")
+        f.write(f'address = "{faucet_addr_hex}"\n')
+        f.write(f"balance_suwappu = {args.faucet_initial_balance_suwappu}\n")
+        f.write(f'role = "faucet"\n\n')
 
+    # Standalone prebalances.toml — kept for tooling that still reads it
+    # (e.g. OPERATIONS.md references). genesis.toml above is the source
+    # of truth; this file is a derived convenience copy.
     prebalances = args.out_dir / "prebalances.toml"
     with prebalances.open("w") as f:
         f.write("# Devnet pre-balances applied at genesis. Each address starts\n")
         f.write("# with the listed balance before round 0. The faucet's pre-balance\n")
-        f.write("# is the entire devnet token supply for the foreseeable future.\n\n")
+        f.write("# is the entire devnet token supply for the foreseeable future.\n")
+        f.write("# DERIVED COPY — genesis.toml's [[prebalances]] is the source of truth.\n\n")
         f.write("[[balances]]\n")
         f.write(f'address = "{faucet_addr_hex}"\n')
         f.write(f"balance_suwappu = {args.faucet_initial_balance_suwappu}\n")

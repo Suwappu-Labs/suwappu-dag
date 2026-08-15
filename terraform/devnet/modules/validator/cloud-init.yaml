@@ -124,7 +124,7 @@ write_files:
           "run_as_user": "cwagent"
         },
         "metrics": {
-          "namespace": "suwappu-devnet",
+          "namespace": "${cloudwatch_namespace}",
           "metrics_collected": {
             "prometheus": {
               "prometheus_config_path": "/opt/aws/amazon-cloudwatch-agent/etc/prometheus.yaml",

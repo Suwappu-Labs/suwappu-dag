@@ -3,7 +3,7 @@
 # Same shape as explorer.tf — S3 + CloudFront + Route53 + wildcard
 # ACM. The only differences:
 #   * Bucket name `suwappu-dag-devnet-status` (separate from explorer).
-#   * DNS alias `status.devnet.suwappu.suwappu.bot`.
+#   * DNS alias `status.devnet.suwappu.bot`.
 #   * No SPA fallback — status page is a single index.html + app.js,
 #     no client-side routing.
 

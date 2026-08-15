@@ -70,19 +70,28 @@ validator_stake_suwappu = 1
 authority_stake_suwappu = 1
 ```
 
-`docs/devnet/prebalances.toml` (committed) declares the faucet's
-genesis balance:
+The faucet's genesis balance is embedded in `genesis.toml` itself, as
+a `[[prebalances]]` section (the daemon's `GenesisManifest` parses it
+and `State::new` credits each entry via `Intent::GenesisAllocation`
+at block height 0 — every validator applies the identical, shared
+genesis.toml, so funding is deterministic across the mesh):
 
 ```toml
-[[balances]]
+[[prebalances]]
 address = "0x<faucet 20-byte address>"
 balance_suwappu = 1000000000   # 1 billion SUWAPPU
 role = "faucet"
 ```
 
+`gen-genesis.py` also emits a standalone `prebalances.toml` next to
+`genesis.toml` as a derived convenience copy for operator tooling;
+`genesis.toml`'s `[[prebalances]]` is the source of truth — the
+daemon reads only `genesis.toml`.
+
 The address derivation is `blake3(public_key_bytes)[..20]` — see
 `suwappu_faucet::address_from_pubkey` and
-`scripts/devnet/gen-genesis.py` for the matching recipe.
+`scripts/devnet/gen-genesis.py` (`blake3_address`) for the matching
+recipe.
 
 ## Rolling the key
 

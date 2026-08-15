@@ -42,10 +42,18 @@
 //! submitters is tracked as a follow-up.
 //!
 //! Authority-management intents (`AdmitAuthority`, `ExitAuthority`,
-//! `EjectAuthority`): for Phase 2.6 these accept ANY one valid signature
-//! from a currently-seated Authority. The fully-correct dual-signature
-//! design (existing-Authority + candidate-Authority) is deferred to a
-//! follow-up — see Issue #28 discussion.
+//! `EjectAuthority`) require DUAL signatures (wire v3, closing the
+//! Issue #28 deferral): a SPONSOR signature from a currently-seated
+//! Authority, plus a CO-SIGNATURE — for `AdmitAuthority` the candidate
+//! signs with the ML-DSA key embedded in the intent (proof of
+//! possession); for `ExitAuthority` / `EjectAuthority` a SECOND,
+//! DISTINCT seated Authority signs. Both signatures bind the same
+//! `intent_signing_digest`, preserving the network-id replay defense.
+//! Single-signature submission of a governance intent is rejected on
+//! BOTH ingress wires (TCP `Submit`/`SubmitBatch` and JSON-RPC) with
+//! `GovernanceRequiresCoSignature` — use `SubmitGoverned`. Without
+//! this, any single compromised seed key could reshape the validator
+//! set.
 //!
 //! ### Breaking wire change
 //!
@@ -76,7 +84,7 @@ use crate::{
 /// exchanged on the wire today — bincode decode failure is the signal —
 /// but is documented here so a future framed-handshake version exchange
 /// has the canonical value to use.
-pub const CLIENT_WIRE_VERSION: u32 = 2;
+pub const CLIENT_WIRE_VERSION: u32 = 3;
 
 /// Domain-separation tag mixed into every signed intent payload. Bound
 /// alongside the genesis `network_id` and the bincoded intent to bind
@@ -146,6 +154,17 @@ pub enum ClientMessage {
     },
     /// No-op liveness probe.
     Ping(u64),
+    /// Submit one GOVERNANCE intent (`AdmitAuthority` / `ExitAuthority` /
+    /// `EjectAuthority`) under the dual-signature rule. Appended in wire
+    /// v3; earlier variants keep their bincode indexes.
+    SubmitGoverned {
+        /// The governance intent.
+        intent: Intent,
+        /// On-chain authorization envelope (sponsor + second seated
+        /// authority + optional candidate PoP). Verified at ingress AND
+        /// re-verified at commit.
+        auth: GovAuth,
+    },
 }
 
 /// Validator → client messages.
@@ -325,6 +344,10 @@ pub(crate) enum AuthOutcome {
     UnknownSigner,
     /// Signer resolved but the signature failed ML-DSA verification.
     BadSignature,
+    /// The intent is a governance intent (`AdmitAuthority` /
+    /// `ExitAuthority` / `EjectAuthority`), which requires the
+    /// dual-signature rule — submit via `SubmitGoverned` instead.
+    GovernanceRequiresCoSignature,
 }
 
 /// Resolve a `signer_pubkey_hash` against the seated Authority Ring and
@@ -339,7 +362,73 @@ pub(crate) enum AuthOutcome {
 /// reinventing the lookup + verify dance — otherwise the two wires
 /// drift on what "signed intent" means and security audits get
 /// nightmarish.
+/// On-chain authorization envelope for a governance intent. Travels with
+/// the intent inside the `BlockPayload` so EVERY committer can re-verify
+/// it at the epoch-boundary apply — making governance authorization a
+/// consensus rule, not just an ingress filter. A Byzantine block author
+/// gains nothing by forging or omitting this: honest nodes re-verify it
+/// against their own seated registry and drop the intent on failure.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GovAuth {
+    /// blake3 hash of the SPONSOR's ML-DSA-65 public key. Must be a
+    /// seated Authority Ring member.
+    pub sponsor_pubkey_hash: [u8; 32],
+    /// Sponsor's detached ML-DSA-65 signature over
+    /// `intent_signing_digest(network_id, &intent)`.
+    pub sponsor_signature: Vec<u8>,
+    /// blake3 hash of the CO-SIGNER's ML-DSA-65 public key. A SECOND,
+    /// distinct seated Authority — for every governance action, including
+    /// `AdmitAuthority`. (Candidate proof-of-possession is separate; see
+    /// `candidate_pop_signature`.)
+    pub co_signer_pubkey_hash: [u8; 32],
+    /// Co-signer's detached signature over the same digest.
+    pub co_signature: Vec<u8>,
+    /// `AdmitAuthority` only: the CANDIDATE's proof-of-possession
+    /// signature over the same digest, verified against the ML-DSA key
+    /// embedded in the intent (an admit cannot be forged for a key the
+    /// candidate does not hold). Empty for `ExitAuthority`/`EjectAuthority`.
+    pub candidate_pop_signature: Vec<u8>,
+}
+
+/// True for the authority-management intents that require the
+/// dual-signature rule.
+pub(crate) fn is_governance_intent(intent: &Intent) -> bool {
+    matches!(
+        intent,
+        Intent::AdmitAuthority { .. }
+            | Intent::ExitAuthority { .. }
+            | Intent::EjectAuthority { .. }
+    )
+}
+
 pub(crate) async fn verify_signed_intent(
+    state: &State,
+    network_id: &str,
+    intent: &Intent,
+    signature_bytes: &[u8],
+    signer_pubkey_hash: &[u8; 32],
+) -> AuthOutcome {
+    // Dual-signature rule (wire v3): governance intents can never be
+    // authorized by a single signature — reject on this shared gate so
+    // BOTH ingress wires (TCP + JSON-RPC) inherit the rule. Governed
+    // submissions go through `verify_governed_intent`.
+    if is_governance_intent(intent) {
+        return AuthOutcome::GovernanceRequiresCoSignature;
+    }
+    verify_single_signature(
+        state,
+        network_id,
+        intent,
+        signature_bytes,
+        signer_pubkey_hash,
+    )
+    .await
+}
+
+/// Resolve one `signer_pubkey_hash` against the seated Authority Ring
+/// and verify one detached ML-DSA-65 signature over the intent's
+/// signing digest. No governance gate — callers decide policy.
+pub(crate) async fn verify_single_signature(
     state: &State,
     network_id: &str,
     intent: &Intent,
@@ -374,6 +463,100 @@ pub(crate) async fn verify_signed_intent(
         Ok(()) => AuthOutcome::Ok,
         Err(_) => AuthOutcome::BadSignature,
     }
+}
+
+/// Verify a dual-signed governance intent (wire v3).
+///
+/// Rules:
+/// - The SPONSOR must be a seated Authority Ring member and its
+///   signature must verify over `intent_signing_digest`.
+/// - `AdmitAuthority`: the co-signer is the CANDIDATE — its pubkey hash
+///   must equal `blake3(mldsa_public_key)` for the key embedded in the
+///   intent, and the co-signature must verify against that key (proof
+///   of possession; an admit cannot be forged for a key the candidate
+///   doesn't hold).
+/// - `ExitAuthority` / `EjectAuthority`: the co-signer must be a
+///   SECOND seated Authority, DISTINCT from the sponsor.
+/// - Any non-governance intent is rejected (wrong endpoint).
+///
+/// Both signatures bind the same digest, so the domain-separation and
+/// network-id replay defenses apply to each independently.
+pub(crate) async fn verify_governed_intent(
+    state: &State,
+    network_id: &str,
+    intent: &Intent,
+    auth: &GovAuth,
+) -> Result<(), String> {
+    if !is_governance_intent(intent) {
+        return Err("governed submit: not a governance intent".to_string());
+    }
+    // SPONSOR: a seated authority, signature valid over the digest.
+    match verify_single_signature(
+        state,
+        network_id,
+        intent,
+        &auth.sponsor_signature,
+        &auth.sponsor_pubkey_hash,
+    )
+    .await
+    {
+        AuthOutcome::Ok => {}
+        AuthOutcome::UnknownSigner => {
+            return Err("governed submit: sponsor not a seated authority".to_string());
+        }
+        AuthOutcome::BadSignature => {
+            return Err("governed submit: bad sponsor signature".to_string());
+        }
+        AuthOutcome::GovernanceRequiresCoSignature => unreachable!("no gate in single-sig core"),
+    }
+
+    // CO-SIGNER: a SECOND, distinct seated authority — for every
+    // governance action. This is what stops a single compromised
+    // authority key (or a single Byzantine authoring node, once this
+    // envelope is re-verified at commit) from unilaterally reshaping the
+    // validator set.
+    if auth.co_signer_pubkey_hash == auth.sponsor_pubkey_hash {
+        return Err(
+            "governed submit: co-signer must be a second, distinct seated authority".to_string(),
+        );
+    }
+    match verify_single_signature(
+        state,
+        network_id,
+        intent,
+        &auth.co_signature,
+        &auth.co_signer_pubkey_hash,
+    )
+    .await
+    {
+        AuthOutcome::Ok => {}
+        AuthOutcome::UnknownSigner => {
+            return Err("governed submit: co-signer not a seated authority".to_string());
+        }
+        AuthOutcome::BadSignature => {
+            return Err("governed submit: bad co-signature".to_string());
+        }
+        AuthOutcome::GovernanceRequiresCoSignature => unreachable!("no gate in single-sig core"),
+    }
+
+    // CANDIDATE proof-of-possession (AdmitAuthority only): the key being
+    // admitted must itself sign the digest, so an admit cannot be forged
+    // for a key nobody holds. This is IN ADDITION to the two seated
+    // authorities above, not a substitute for the second one.
+    if let Intent::AdmitAuthority {
+        mldsa_public_key, ..
+    } = intent
+    {
+        let digest = intent_signing_digest(network_id, intent);
+        let pubkey = mldsa::PublicKey::from_bytes(mldsa_public_key)
+            .map_err(|_| "governed submit: malformed candidate public key".to_string())?;
+        let signature = mldsa::Signature::from_bytes(&auth.candidate_pop_signature)
+            .map_err(|_| "governed submit: malformed candidate PoP signature".to_string())?;
+        mldsa::verify(&digest, &signature, &pubkey).map_err(|_| {
+            "governed submit: candidate proof-of-possession signature invalid".to_string()
+        })?;
+    }
+    Ok(())
 }
 
 /// Default priority for intents submitted via the TCP wire — no fee
@@ -441,6 +624,14 @@ async fn handle_conn(
                         let _ = write_response(&mut stream, &resp).await;
                         return Ok(());
                     }
+                    AuthOutcome::GovernanceRequiresCoSignature => {
+                        let resp = ClientResponse::Err(
+                            "auth: governance intents require dual signatures (SubmitGoverned)"
+                                .to_string(),
+                        );
+                        let _ = write_response(&mut stream, &resp).await;
+                        return Ok(());
+                    }
                 }
                 let intent_hash: [u8; 32] =
                     blake3::hash(&crate::codec::encode(&intent).expect("intent serialize")).into();
@@ -505,6 +696,14 @@ async fn handle_conn(
                             let _ = write_response(&mut stream, &resp).await;
                             return Ok(());
                         }
+                        AuthOutcome::GovernanceRequiresCoSignature => {
+                            let resp = ClientResponse::Err(
+                                "auth: governance intents require dual signatures (SubmitGoverned)"
+                                    .to_string(),
+                            );
+                            let _ = write_response(&mut stream, &resp).await;
+                            return Ok(());
+                        }
                     }
                 }
                 // DAG-S29.2 + A3: amortise the ack roundtrip across N
@@ -541,6 +740,37 @@ async fn handle_conn(
                     },
                 )
                 .await?;
+            }
+            ClientMessage::SubmitGoverned { intent, auth } => {
+                if let Err(msg) = verify_governed_intent(&state, &network_id, &intent, &auth).await
+                {
+                    let resp = ClientResponse::Err(msg);
+                    let _ = write_response(&mut stream, &resp).await;
+                    return Ok(());
+                }
+                let intent_hash: [u8; 32] =
+                    blake3::hash(&crate::codec::encode(&intent).expect("intent serialize")).into();
+                // Retain the verified envelope so THIS node — the one that
+                // will author the block for this intent — can attach it to
+                // the BlockPayload for every committer to re-verify.
+                state.remember_governance_envelope(intent_hash, auth);
+                match state.mempool.submit(
+                    intent,
+                    DEFAULT_INTENT_PRIORITY,
+                    Some(peer_label.clone()),
+                    now_ms(),
+                ) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        let resp = ClientResponse::Err(format!("mempool: {}", e));
+                        let _ = write_response(&mut stream, &resp).await;
+                        return Ok(());
+                    }
+                }
+                log.emit(
+                    Event::now(&self_label, Lane::Client, "submitted").with_tx_hash(&intent_hash),
+                );
+                write_response(&mut stream, &ClientResponse::Ack { intent_hash }).await?;
             }
             ClientMessage::Ping(t) => {
                 write_response(&mut stream, &ClientResponse::Pong(t)).await?;
@@ -670,6 +900,58 @@ impl LoadGenClient {
             ClientResponse::AckBatch { .. } | ClientResponse::Pong(_) => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "unexpected response for Submit",
+            )),
+        }
+    }
+
+    /// Submit one GOVERNANCE intent under the dual-signature rule.
+    /// `self` signs as the SPONSOR; `co_public_key`/`co_secret_key` sign
+    /// the co-signature — the candidate's keypair for `AdmitAuthority`,
+    /// or a second seated authority's keypair for Exit/Eject.
+    pub async fn submit_governed(
+        &mut self,
+        intent: Intent,
+        co_public_key: &mldsa::PublicKey,
+        co_secret_key: &mldsa::SecretKey,
+        candidate: Option<(&mldsa::PublicKey, &mldsa::SecretKey)>,
+    ) -> io::Result<[u8; 32]> {
+        let digest = intent_signing_digest(&self.network_id, &intent);
+        let signature = mldsa::sign(&digest, &self.secret_key)
+            .map_err(|e| io::Error::other(format!("sign: {:?}", e)))?;
+        let co_signature = mldsa::sign(&digest, co_secret_key)
+            .map_err(|e| io::Error::other(format!("co-sign: {:?}", e)))?;
+        // AdmitAuthority additionally needs the candidate's PoP signature.
+        let candidate_pop_signature = match candidate {
+            Some((_pk, sk)) => mldsa::sign(&digest, sk)
+                .map_err(|e| io::Error::other(format!("candidate PoP sign: {:?}", e)))?
+                .as_bytes()
+                .to_vec(),
+            None => Vec::new(),
+        };
+        let auth = GovAuth {
+            sponsor_pubkey_hash: self.signer_pubkey_hash(),
+            sponsor_signature: signature.as_bytes().to_vec(),
+            co_signer_pubkey_hash: signer_pubkey_hash(co_public_key.as_bytes()),
+            co_signature: co_signature.as_bytes().to_vec(),
+            candidate_pop_signature,
+        };
+        let msg = ClientMessage::SubmitGoverned { intent, auth };
+        let bytes = crate::codec::encode_frame(&msg)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        let len = (bytes.len() as u32).to_be_bytes();
+        self.stream.write_all(&len).await?;
+        self.stream.write_all(&bytes).await?;
+        self.stream.flush().await?;
+
+        let resp_bytes = read_frame(&mut self.stream).await?;
+        let resp: ClientResponse = crate::codec::decode_frame(&resp_bytes)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        match resp {
+            ClientResponse::Ack { intent_hash } => Ok(intent_hash),
+            ClientResponse::Err(e) => Err(io::Error::new(io::ErrorKind::InvalidData, e)),
+            ClientResponse::AckBatch { .. } | ClientResponse::Pong(_) => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unexpected response for SubmitGoverned",
             )),
         }
     }

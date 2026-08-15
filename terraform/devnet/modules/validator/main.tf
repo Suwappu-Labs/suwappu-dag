@@ -241,11 +241,12 @@ resource "aws_instance" "validator" {
   }
 
   user_data = templatefile("${path.module}/cloud-init.yaml", {
-    artifact_bucket = var.artifact_bucket
-    region_label    = var.region_label
-    authority_id    = var.authority_id
-    state_device    = "/dev/nvme1n1" # First non-root NVMe maps to /dev/sdf on Nitro instances
-    metrics_port    = var.metrics_port
+    artifact_bucket      = var.artifact_bucket
+    region_label         = var.region_label
+    authority_id         = var.authority_id
+    state_device         = "/dev/nvme1n1" # First non-root NVMe maps to /dev/sdf on Nitro instances
+    metrics_port         = var.metrics_port
+    cloudwatch_namespace = var.cloudwatch_namespace
   })
 
   tags = {

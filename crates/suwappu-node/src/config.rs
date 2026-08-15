@@ -51,6 +51,15 @@ pub struct NodeConfig {
 
     /// Peers this node should dial. List excludes self.
     pub peers: Vec<Peer>,
+    /// Allow this node to start even when its `authority_id` is absent
+    /// from the genesis manifest — a post-genesis joiner admitted via a
+    /// governed `AdmitAuthority` intent. The node boots in passive sync
+    /// mode (ingest + backfill + serve) and begins authoring/voting only
+    /// once it observes itself seated in the Authority Ring. Genesis
+    /// validators keep the default `false` and the strict manifest
+    /// cross-check.
+    #[serde(default)]
+    pub allow_post_genesis_join: bool,
 
     /// Round cadence in milliseconds. DagBft-C round = one DAG layer.
     /// Paper uses ~250 ms for the testnet; tune down for low-latency regions.
@@ -178,6 +187,57 @@ pub struct GenesisManifest {
     /// boundary work doesn't dominate the round budget.
     #[serde(default = "default_rounds_per_epoch")]
     pub rounds_per_epoch: u64,
+
+    /// Genesis pre-balances. Each entry is credited to the substrate
+    /// exactly once when a fresh node constructs its state (block
+    /// height 0), via `Intent::GenesisAllocation` — see
+    /// `State::new` in `daemon.rs`. The faucet's initial balance is
+    /// the canonical use case. Optional for backward compatibility —
+    /// manifests without a `[[prebalances]]` section fund nothing
+    /// (matches pre-fix behavior).
+    #[serde(default)]
+    pub prebalances: Vec<GenesisPrebalance>,
+}
+
+/// One genesis pre-balance entry inside [`GenesisManifest::prebalances`].
+/// Mirrors one `(Address, Balance)` allocation of
+/// `suwappu_execution::Intent::GenesisAllocation`.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GenesisPrebalance {
+    /// 20-byte account address, 0x-prefixed hex (40 hex chars).
+    ///
+    /// Canonical derivation for pubkey-backed accounts:
+    /// `blake3(pubkey_bytes)[..20]` — the same recipe as
+    /// `suwappu_faucet::address_from_pubkey` and the reserved-address
+    /// scheme in `suwappu_execution::reserved` ("leading 20 bytes of
+    /// BLAKE3(domain_tag)"). `scripts/{devnet,testnet}/gen-genesis.py`
+    /// emit addresses with this recipe.
+    pub address: String,
+    /// Initial balance in SUWAPPU. `u64` rather than `u128` because the
+    /// `toml` crate doesn't deserialize `u128` (same rationale as the
+    /// stake fields above); widened to `u128` at the
+    /// `Intent::GenesisAllocation` boundary, matching the execution
+    /// crate's `Balance` type.
+    pub balance_suwappu: u64,
+    /// Optional human-readable role tag (e.g. `"faucet"`). Documentation
+    /// only — the daemon does not read it.
+    #[serde(default)]
+    pub role: Option<String>,
+}
+
+impl GenesisPrebalance {
+    /// Parse [`Self::address`] into the 20-byte substrate address.
+    /// Accepts an optional `0x` prefix; anything that doesn't decode
+    /// to exactly 20 bytes is rejected.
+    pub fn address_bytes(&self) -> Result<[u8; 20], ConfigError> {
+        let trimmed = self.address.strip_prefix("0x").unwrap_or(&self.address);
+        let bytes = hex::decode(trimmed)
+            .map_err(|_| ConfigError::BadPrebalanceAddress(self.address.clone()))?;
+        bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| ConfigError::BadPrebalanceAddress(self.address.clone()))
+    }
 }
 
 /// One LTP corridor — exactly 9 super-nodes attesting for a (source, target)
@@ -267,6 +327,10 @@ pub enum ConfigError {
     /// Genesis manifest is missing the entry for the configured authority id.
     #[error("authority_id {0} not found in genesis manifest")]
     MissingAuthority(u32),
+    /// A `[[prebalances]]` entry's address is not 20-byte hex
+    /// (with or without `0x` prefix).
+    #[error("prebalance address '{0}' is not 0x-prefixed 20-byte hex")]
+    BadPrebalanceAddress(String),
     /// authority_id present in genesis but label doesn't match self_id —
     /// indicates a config/manifest desync.
     #[error("self_id '{self_id}' does not match genesis label '{manifest}' at authority_id {id}")]
@@ -366,6 +430,7 @@ mod tests {
             }],
             corridors: Vec::new(),
             rounds_per_epoch: 1024,
+            prebalances: Vec::new(),
         };
         let cfg = NodeConfig {
             self_id: "us-east-1".into(),
@@ -374,6 +439,7 @@ mod tests {
             client_listen: "0.0.0.0:9091".parse().unwrap(),
             rpc_listen: None,
             peers: vec![],
+            allow_post_genesis_join: false,
             round_ms: 250,
             checkpoint_cadence_rounds: 1,
             mldsa_secret_key_path: "/x".into(),
@@ -392,5 +458,76 @@ mod tests {
         };
         let err = manifest.validate_against(&cfg).unwrap_err();
         assert!(matches!(err, ConfigError::LabelMismatch { id: 0, .. }));
+    }
+
+    /// A manifest WITHOUT a `[[prebalances]]` section still parses
+    /// (serde default → empty vec) — existing genesis files stay valid.
+    #[test]
+    fn manifest_parses_without_prebalances() {
+        let toml_src = r#"
+            network_id = "suwappu-devnet"
+
+            [[validators]]
+            authority_id = 0
+            label = "us-east-1"
+            mldsa_public_key_hex = "00"
+            bls_public_key_hex = "00"
+            validator_stake_suwappu = 1
+            authority_stake_suwappu = 1
+        "#;
+        let manifest: GenesisManifest = toml::from_str(toml_src).unwrap();
+        assert!(manifest.prebalances.is_empty());
+    }
+
+    /// A manifest WITH `[[prebalances]]` parses, and the entry's hex
+    /// address decodes to the expected 20 bytes.
+    #[test]
+    fn manifest_parses_with_prebalances() {
+        let toml_src = r#"
+            network_id = "suwappu-devnet"
+
+            [[validators]]
+            authority_id = 0
+            label = "us-east-1"
+            mldsa_public_key_hex = "00"
+            bls_public_key_hex = "00"
+            validator_stake_suwappu = 1
+            authority_stake_suwappu = 1
+
+            [[prebalances]]
+            address = "0x00112233445566778899aabbccddeeff00112233"
+            balance_suwappu = 10000000000
+            role = "faucet"
+        "#;
+        let manifest: GenesisManifest = toml::from_str(toml_src).unwrap();
+        assert_eq!(manifest.prebalances.len(), 1);
+        let p = &manifest.prebalances[0];
+        assert_eq!(p.balance_suwappu, 10_000_000_000);
+        assert_eq!(p.role.as_deref(), Some("faucet"));
+        let addr = p.address_bytes().unwrap();
+        assert_eq!(addr[0], 0x00);
+        assert_eq!(addr[1], 0x11);
+        assert_eq!(addr[19], 0x33);
+    }
+
+    /// Address parsing rejects non-hex and wrong-length inputs.
+    #[test]
+    fn prebalance_rejects_bad_address() {
+        for bad in [
+            "0xzz",
+            "0x0011",
+            "",
+            "0x00112233445566778899aabbccddeeff0011223344",
+        ] {
+            let p = GenesisPrebalance {
+                address: bad.into(),
+                balance_suwappu: 1,
+                role: None,
+            };
+            assert!(
+                matches!(p.address_bytes(), Err(ConfigError::BadPrebalanceAddress(_))),
+                "expected rejection for {bad:?}"
+            );
+        }
     }
 }

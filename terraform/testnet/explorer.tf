@@ -2,7 +2,7 @@
 #
 # Fork of terraform/devnet/explorer.tf. Differences:
 #   * Bucket name `suwappu-dag-testnet-explorer`.
-#   * Alias `explorer.testnet.suwappu.suwappu.bot`.
+#   * Alias `explorer.testnet.suwappu.bot`.
 #   * Reuses this stack's wildcard ACM from acm.tf.
 
 resource "aws_s3_bucket" "explorer" {

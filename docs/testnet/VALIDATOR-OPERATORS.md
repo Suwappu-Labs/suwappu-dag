@@ -51,16 +51,26 @@ under-performing validators after 30 days; you can re-apply.
 
 1. **Apply** at `https://testnet.suwappu.bot/apply`.
    Foundation runs basic identity + jurisdictional checks.
-2. **Foundation submits an `AdmitAuthority` governance Intent**
-   with the ML-DSA-65 pubkey you mint locally (next step). Your
-   `authority_id` is assigned at this step; it's `≥ 8` (ids 0–6
-   are seed validators, 7 is the faucet).
+2. **Foundation submits a dual-signed `AdmitAuthority` governance
+   Intent** (client wire v3) with the ML-DSA-65 pubkey you mint
+   locally (next step). You co-sign the intent digest with that same
+   key — a proof of possession, so an admit cannot be forged for a
+   key you don't hold; the foundation's tooling walks you through
+   producing the co-signature. Your `authority_id` is assigned at
+   this step; it's `≥ 8` (ids 0–6 are seed validators, 7 is the
+   faucet).
 3. **You receive your IAM credentials** (out-of-band, via Signal
    or a 1Password secure share). These let you upload your
    event log to the foundation's S3 bucket; no other AWS access.
 4. **Wait one epoch boundary** for the admit Intent to land on
    chain. Once your `authority_id` shows up in
-   `suwappu_getAuthorityRegistry`, you're live.
+   `suwappu_getAuthorityRegistry`, you're admitted. Your node —
+   started with `allow_post_genesis_join = true` (see the config
+   template below) — will have been syncing passively the whole
+   time via the wire sync protocol, and begins authoring
+   certificates automatically once it observes itself seated. No
+   seed-side config change is needed for you to sync: seeds accept
+   late-joiner connections dynamically.
 
 ## Local setup
 
@@ -82,7 +92,7 @@ cat ./bls.pk | base64
 #    lands. Then on your validator hardware:
 
 # 3a. Pull the testnet binary release.
-gh release download suwappu-dag-v0.X.Y --pattern '*linux-musl-x86_64*'
+gh release download suwappu-dag-v0.X.Y --pattern '*linux-musl*'
 tar -xzf suwappu-dag-0.X.Y-x86_64-unknown-linux-musl.tar.gz
 
 # 3b. Pull the public testnet genesis.
@@ -94,6 +104,10 @@ curl -fsSL https://testnet.suwappu.bot/genesis.toml \
 cat > /etc/suwappu/node.toml <<EOF
 self_id = "<your-operator-label>"
 authority_id = <your-assigned-id>
+# Post-genesis joiners MUST set this: your id is not in the published
+# genesis. The node boots in passive-sync mode and starts authoring
+# only once it observes itself seated in the Authority Ring.
+allow_post_genesis_join = true
 listen = "0.0.0.0:9090"
 client_listen = "0.0.0.0:9091"
 rpc_listen = "127.0.0.1:9092"

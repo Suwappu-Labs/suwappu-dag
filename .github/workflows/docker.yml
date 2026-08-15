@@ -1,0 +1,75 @@
+name: docker
+
+# Build + publish the suwappu-dag container image to GHCR.
+#
+# Tags pushed to ghcr.io/suwappu-labs/suwappu-dag:
+#   - `latest`          on every push to main
+#   - `<version>`       on tag pushes matching suwappu-dag-v* (e.g. 0.1.0)
+#   - `sha-<shortsha>`  always
+#
+# The Dockerfile's cargo build fetches the private suwappu-db git
+# dependency, so this workflow forwards the SSH deploy key into the
+# BuildKit build via `ssh: default` (the Dockerfile's cargo RUN steps
+# use `--mount=type=ssh`). Same deploy-key pattern as ci.yml.
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - 'suwappu-dag-v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/suwappu-labs/suwappu-dag
+
+jobs:
+  build-push:
+    name: build + push image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup suwappu-db deploy key
+        uses: webfactory/ssh-agent@v0.10.0
+        with:
+          ssh-private-key: ${{ secrets.SUWAPPU_DB_DEPLOY_KEY }}
+
+      - name: Rewrite https://github.com → git@github.com for cargo
+        run: git config --global url."git@github.com:".insteadOf "https://github.com/"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata (tags + labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            # `latest` tracks main only.
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            # Version tag from `suwappu-dag-v<version>` release tags.
+            type=match,pattern=suwappu-dag-v(.*),group=1
+            # Immutable per-commit tag, always.
+            type=sha
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          # Forward the runner's ssh-agent (holding the suwappu-db
+          # deploy key) into the BuildKit build for the private git dep.
+          ssh: default
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

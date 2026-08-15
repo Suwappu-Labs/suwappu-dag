@@ -52,3 +52,9 @@ variable "state_volume_gb" {
   description = "Persistent EBS volume size (gp3) mounted at /var/lib/suwappu."
   type        = number
 }
+
+variable "cloudwatch_namespace" {
+  description = "CloudWatch metric namespace the instance's CloudWatch agent publishes Prometheus metrics under. Default keeps devnet's historical namespace; testnet instantiations override to suwappu-testnet so the two environments' metrics don't mix."
+  type        = string
+  default     = "suwappu-devnet"
+}

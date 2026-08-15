@@ -12,6 +12,23 @@ will coincide with mainnet genesis.
 
 ## [Unreleased]
 
+### Added
+
+- Quality-parity pass (cross-repo bar set by suwappubot): shipped the
+  agent infrastructure `CLAUDE.md` documents but the tree lacked —
+  `claude-code/settings.json` (three permission tiers + hook wiring),
+  `claude-code/hooks/` (rustfmt drift hint, destructive-command
+  blocker), `claude-code/commands/` (all six slash commands) and a
+  wiring README; `scripts/check-crypto-boundary.sh` lane-separation
+  gate (referenced by `deny.toml` but previously missing) plus a
+  `crypto-boundary` CI job; CodeQL analysis workflow
+  (javascript-typescript + actions, SHA-pinned); `.github/dependabot.yml`
+  (cargo, npm, actions, docker); tracked `clients/ts-sdk`
+  `package-lock.json` with `npm ci` + npm cache in the ts-sdk workflow;
+  root `CODE_OF_CONDUCT.md` and `SUPPORT.md`; `scripts/check.sh` now
+  runs the crypto-boundary check and `cargo deny check` (matching the
+  documented `/check` gate set)
+
 ### Changed
 
 - Renamed our consensus's internal identifier from `Mysticeti-C` to

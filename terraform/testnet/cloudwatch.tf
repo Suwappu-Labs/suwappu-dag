@@ -4,7 +4,7 @@
 #   * 7 silent-peer alarms (one per seed validator) instead of 4.
 #   * Metric namespace `suwappu-testnet` (vs `suwappu-devnet`).
 #   * Halt alarm + faucet alarm target the testnet's Route53 health
-#     check on `faucet.testnet.suwappu.suwappu.bot`.
+#     check on `faucet.testnet.suwappu.bot`.
 #   * SNS topic name `suwappu-testnet-ops-pages`.
 
 resource "aws_sns_topic" "ops_pages" {

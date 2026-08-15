@@ -534,7 +534,7 @@ diffs:
 - **External validators** join via the points program — see
   § 10.2 below.
 - **Validator-program EC2 + RDS** runs the points accumulator
-  daemon (forthcoming) — see § 10.3.
+  daemon (`crates/suwappu-validator-program/`) — see § 10.3.
 - **DNS surface** is `*.testnet.suwappu.bot`
   (devnet uses `*.devnet.suwappu.*`).
 - **Chain id 20251**, network_id `suwappu-testnet-v1`.
@@ -630,8 +630,9 @@ for their setup procedure.
 
 ### 10.3 Deploy the points-accumulator daemon
 
-The daemon binary (`crates/suwappu-validator-program/`) is a
-forthcoming PR. Once it lands + a tagged release publishes
+The daemon binary (`crates/suwappu-validator-program/`) is
+implemented in this repo and ships in tagged releases (see
+`.github/workflows/release.yml`). Once a tagged release publishes
 the binary, deploy via SSM:
 
 ```sh
@@ -700,7 +701,8 @@ If (b) — formal tear-down:
    this is the canonical record of operator points that
    converts to mainnet token.
 3. Snapshot every state volume one final time.
-4. Edit `terraform/testnet/modules/validator/main.tf` —
+4. Edit `terraform/devnet/modules/validator/main.tf` (the testnet
+   stack reuses the devnet validator module) —
    remove `prevent_destroy = true` on `aws_ebs_volume.state`.
 5. Edit `terraform/testnet/validator-program.tf` — set
    `deletion_protection = false` on the RDS instance.

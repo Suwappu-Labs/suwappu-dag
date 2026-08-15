@@ -6,7 +6,7 @@
 #   * Separate Secrets Manager secret + IAM role + S3 bucket
 #     references.
 #   * cloud-init env vars point at the testnet RPC DNS (rpc.
-#     testnet.suwappu.suwappu.bot).
+#     testnet.suwappu.bot).
 
 resource "aws_vpc" "faucet" {
   provider             = aws.us_east_1

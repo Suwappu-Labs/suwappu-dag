@@ -278,6 +278,12 @@ pub async fn submit_intent<S: StateView>(state: &S, params: &Value) -> Result<Va
         Err(SubmitIntentError::BadSignature) => {
             Err(RpcError::BadSignature("ML-DSA-65 verify failed".into()))
         }
+        Err(SubmitIntentError::GovernanceRequiresCoSignature) => {
+            Err(RpcError::GovernanceRequiresCoSignature(
+                "governance intents require dual signatures; submit via the governed client wire"
+                    .to_string(),
+            ))
+        }
         Err(SubmitIntentError::EnqueueFull) => Err(RpcError::EnqueueFull(
             "intent channel full or closed; retry".into(),
         )),
