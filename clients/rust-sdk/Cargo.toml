@@ -17,7 +17,7 @@ suwappu-rpc = { workspace = true }
 # rest of the workspace already pulls in via suwappudb-bridge → reqwest,
 # avoids dragging in a second TLS stack with webpki-related advisories
 # (RUSTSEC name-constraints family) that cargo-deny would reject.
-reqwest = { version = "0.11", features = ["json"] }
+reqwest = { version = "0.12", features = ["json"] }
 hex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
