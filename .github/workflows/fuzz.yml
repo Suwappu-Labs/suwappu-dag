@@ -53,7 +53,7 @@ jobs:
           cargo install cargo-fuzz --locked --version "^0.12"
 
       - name: Cache fuzz corpus
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: fuzz/corpus/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-${{ github.sha }}

@@ -43,3 +43,5 @@ scripts/testnet/__pycache__/
 clients/explorer/node_modules/
 clients/explorer/dist/
 *.tsbuildinfo
+clients/ts-sdk/docs-out/
+clients/ts-sdk/dist/
