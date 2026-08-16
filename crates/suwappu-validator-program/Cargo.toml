@@ -25,7 +25,7 @@ suwappu-client = { workspace = true }
 axum = { version = "0.7", features = ["macros"] }
 
 # Postgres via sqlx — matches suwappu-indexer's posture.
-sqlx = { version = "0.8", default-features = false, features = [
+sqlx = { version = "0.9", default-features = false, features = [
     "runtime-tokio",
     "tls-rustls",
     "postgres",

@@ -33,6 +33,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      # Dependabot-triggered runs read from the *Dependabot* secret store,
+      # not Actions secrets, so `secrets.SUWAPPU_DB_DEPLOY_KEY` resolves
+      # empty and this job dies inside ssh-agent with the unhelpful
+      # "The ssh-private-key argument is empty". Every Dependabot PR on
+      # this repo failed that way (PRs #46-#55, 2026-08-15) and looked
+      # like ten broken dependency bumps rather than one missing secret.
+      # Fail fast with the actual fix instead.
+      - name: Preflight — suwappu-db deploy key present
+        env:
+          KEY: ${{ secrets.SUWAPPU_DB_DEPLOY_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::error::SUWAPPU_DB_DEPLOY_KEY is empty for this run (actor: ${{ github.actor }})."
+            echo "::error::Dependabot runs do NOT see Actions secrets. Add the same key under" \
+                 "Settings -> Secrets and variables -> Dependabot, or this job can never pass on a Dependabot PR."
+            exit 1
+          fi
+          echo "deploy key present"
       - name: Setup suwappu-db deploy key
         uses: webfactory/ssh-agent@v0.10.0
         with:
@@ -54,6 +72,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      # Dependabot-triggered runs read from the *Dependabot* secret store,
+      # not Actions secrets, so `secrets.SUWAPPU_DB_DEPLOY_KEY` resolves
+      # empty and this job dies inside ssh-agent with the unhelpful
+      # "The ssh-private-key argument is empty". Every Dependabot PR on
+      # this repo failed that way (PRs #46-#55, 2026-08-15) and looked
+      # like ten broken dependency bumps rather than one missing secret.
+      # Fail fast with the actual fix instead.
+      - name: Preflight — suwappu-db deploy key present
+        env:
+          KEY: ${{ secrets.SUWAPPU_DB_DEPLOY_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::error::SUWAPPU_DB_DEPLOY_KEY is empty for this run (actor: ${{ github.actor }})."
+            echo "::error::Dependabot runs do NOT see Actions secrets. Add the same key under" \
+                 "Settings -> Secrets and variables -> Dependabot, or this job can never pass on a Dependabot PR."
+            exit 1
+          fi
+          echo "deploy key present"
       - name: Setup suwappu-db deploy key
         uses: webfactory/ssh-agent@v0.10.0
         with:
@@ -69,6 +105,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      # Dependabot-triggered runs read from the *Dependabot* secret store,
+      # not Actions secrets, so `secrets.SUWAPPU_DB_DEPLOY_KEY` resolves
+      # empty and this job dies inside ssh-agent with the unhelpful
+      # "The ssh-private-key argument is empty". Every Dependabot PR on
+      # this repo failed that way (PRs #46-#55, 2026-08-15) and looked
+      # like ten broken dependency bumps rather than one missing secret.
+      # Fail fast with the actual fix instead.
+      - name: Preflight — suwappu-db deploy key present
+        env:
+          KEY: ${{ secrets.SUWAPPU_DB_DEPLOY_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::error::SUWAPPU_DB_DEPLOY_KEY is empty for this run (actor: ${{ github.actor }})."
+            echo "::error::Dependabot runs do NOT see Actions secrets. Add the same key under" \
+                 "Settings -> Secrets and variables -> Dependabot, or this job can never pass on a Dependabot PR."
+            exit 1
+          fi
+          echo "deploy key present"
       - name: Setup suwappu-db deploy key
         uses: webfactory/ssh-agent@v0.10.0
         with:

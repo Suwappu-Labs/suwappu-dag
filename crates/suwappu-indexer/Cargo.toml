@@ -40,7 +40,7 @@ futures-util = "0.3"
 # `--features postgres` pulls in sqlx and enables the
 # `PostgresStore` adapter selected at runtime via
 # `--database-url`/`SUWAPPU_INDEXER_DATABASE_URL`.
-sqlx = { version = "0.8", default-features = false, features = [
+sqlx = { version = "0.9", default-features = false, features = [
     "runtime-tokio",
     "tls-rustls",
     "postgres",
