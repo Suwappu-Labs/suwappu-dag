@@ -1974,12 +1974,7 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
             {
                 let mut inner = state.inner.lock().await;
                 for (idx, intent) in intents.iter().enumerate() {
-                    if matches!(
-                        intent,
-                        Intent::AdmitAuthority { .. }
-                            | Intent::ExitAuthority { .. }
-                            | Intent::EjectAuthority { .. }
-                    ) {
+                    if crate::client::is_governance_intent(intent) {
                         // Carry the block's authorization envelope for this
                         // intent (by index) into the pending queue so it is
                         // re-verified at the epoch boundary. A Byzantine
@@ -2254,6 +2249,32 @@ async fn apply_governance_intent(
                 );
             }
         }
+        // TGE distribution root (MerkleDistributor pattern): the
+        // in-block substrate arm is a validated no-op, so this
+        // envelope-verified epoch-boundary apply is the ONLY path
+        // that opens a claim round. The write is deterministic
+        // mesh-wide: every honest node drains the same committed
+        // `pending_governance` queue at the same boundary and the
+        // envelope re-verification above already passed.
+        Intent::SetTgeRoot { pool, merkle_root } => {
+            let mut inner = state.inner.lock().await;
+            match inner.substrate.apply_tge_root(pool, merkle_root) {
+                Ok(round) => {
+                    tracing::info!(
+                        round = cert_round,
+                        pool = %hex::encode(pool),
+                        tge_round = round,
+                        "TGE distribution root set"
+                    );
+                    log.emit(
+                        Event::now(self_label, Lane::Main, "tge_root_set").with_round(cert_round),
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(pool = %hex::encode(pool), err = %e, "SetTgeRoot rejected at apply");
+                }
+            }
+        }
         Intent::Transfer { .. } => {}
         // `Intent` is `#[non_exhaustive]` (C4). Future variants
         // default to no governance-side effect; substrate or
@@ -2390,14 +2411,7 @@ async fn run_round_driver(
         let governance_auth: Vec<(u32, crate::client::GovAuth)> = intents
             .iter()
             .enumerate()
-            .filter(|(_, i)| {
-                matches!(
-                    i,
-                    Intent::AdmitAuthority { .. }
-                        | Intent::ExitAuthority { .. }
-                        | Intent::EjectAuthority { .. }
-                )
-            })
+            .filter(|(_, i)| crate::client::is_governance_intent(i))
             .filter_map(|(idx, _)| {
                 state
                     .take_governance_envelope(&intent_hash_bytes[idx])

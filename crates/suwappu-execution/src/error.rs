@@ -513,6 +513,36 @@ pub enum ExecutionError {
         index: u32,
     },
 
+    /// `TgeClaim` carried a `round` that is not the pool's active
+    /// distribution round — the claim's tree was superseded by a
+    /// rotation (or the round hasn't opened yet). Fail-loud
+    /// replacement for silently evaluating a stale proof against
+    /// the wrong tree.
+    #[error(
+        "stale TGE claim round for pool 0x{p}: claim built for round {claimed_round}, active round is {active_round}",
+        p = hex::encode(pool),
+    )]
+    TgeStaleRound {
+        /// The pool.
+        pool: Address,
+        /// The pool's active round.
+        active_round: u32,
+        /// The round the claim carried.
+        claimed_round: u32,
+    },
+
+    /// `TgeClaim` carried a leaf index above
+    /// `tge_claim::MAX_TGE_CLAIM_INDEX`. Bounding the index bounds
+    /// the claimed-bitmap record (an unbounded index would let one
+    /// claim grow it to 512 MiB inside `state_root`).
+    #[error("TGE claim index {index} exceeds maximum {max}")]
+    TgeIndexOutOfRange {
+        /// The index the claim carried.
+        index: u32,
+        /// The maximum allowed index.
+        max: u32,
+    },
+
     /// `TgeClaim` whose Merkle proof does not connect the claimed
     /// `(index, account, amount)` leaf to the active round's root.
     #[error("invalid TGE claim proof for leaf {index} of pool 0x{p}", p = hex::encode(pool))]

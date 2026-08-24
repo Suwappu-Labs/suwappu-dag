@@ -152,9 +152,53 @@ impl Substrate for SuwappuDbSubstrate {
             | Intent::GenesisAllocation { .. }
             | Intent::MintInflation { .. }
             | Intent::DistributeRewards { .. }
-            | Intent::Delegate { .. }
-            | Intent::SetTgeRoot { .. }
-            | Intent::TgeClaim { .. } => Ok(()),
+            | Intent::Delegate { .. } => Ok(()),
+            // TGE intents: run the same static validation gates as
+            // the in-memory impl (per the CommitL2StateRoot
+            // precedent — invalid inputs must reject uniformly
+            // across both impls) but apply no state effect: this
+            // substrate holds no TGE distribution records, so
+            // record-dependent checks (round, bitmap, proof-vs-
+            // root) and the pool→account move do not run here.
+            // Divergence on the state effect is the documented
+            // drop-in caveat; do not switch production execution
+            // to this impl before hoisting the TGE surface.
+            Intent::SetTgeRoot { pool, merkle_root } => {
+                if !reserved::is_tge_claim_pool(pool) {
+                    return Err(ExecutionError::TgeUnknownPool { addr: *pool });
+                }
+                if merkle_root == &[0u8; 32] {
+                    return Err(ExecutionError::TgeRootAllZeros);
+                }
+                Ok(())
+            }
+            Intent::TgeClaim {
+                pool,
+                index,
+                account,
+                proof,
+                ..
+            } => {
+                if !reserved::is_tge_claim_pool(pool) {
+                    return Err(ExecutionError::TgeUnknownPool { addr: *pool });
+                }
+                if reserved::is_reserved(account) {
+                    return Err(ExecutionError::ReservedAddressTransferDenied { addr: *account });
+                }
+                if *index > crate::tge_claim::MAX_TGE_CLAIM_INDEX {
+                    return Err(ExecutionError::TgeIndexOutOfRange {
+                        index: *index,
+                        max: crate::tge_claim::MAX_TGE_CLAIM_INDEX,
+                    });
+                }
+                if proof.len() > crate::tge_claim::MAX_TGE_PROOF_LEN {
+                    return Err(ExecutionError::TgeProofInvalid {
+                        pool: *pool,
+                        index: *index,
+                    });
+                }
+                Ok(())
+            }
             // Track G Phase G2.2 (#97): wired through the
             // suwappu-l2-verifier-precompile crate. The verifier
             // format gates (proof = 260 B, public_inputs = 240 B,

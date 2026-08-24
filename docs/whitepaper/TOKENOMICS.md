@@ -115,14 +115,27 @@ The fair-launch, Seasons, and testnet-points pools distribute through the
 `Intent::SetTgeRoot` publishes a distribution round's Merkle root
 (governance-gated — sponsor **plus a second, distinct seated authority**,
 the same dual-signature wire rule as validator-set changes), and
-`Intent::TgeClaim` is **permissionless**: anyone may submit a proof, funds
-move pool → the leaf's committed account, each index claims once per round,
-and a round can never pay out more than the pool holds. Claims are
+`Intent::TgeClaim` needs no authorization beyond the Merkle proof itself:
+funds move pool → the leaf's committed account (never the submitter), each
+index claims once per round, every leaf commits its pool AND round (a
+rotated-out round's proofs are dead; a root built for one pool cannot pay
+from another), and a round can never pay out more than the pool holds.
+*Deployment caveat:* today's intent wires only accept submissions signed by
+seated authorities, so claims are relayed by validators until the
+unauthenticated proof-carrying submit lane ships (tracked in
+LAUNCH-STATUS). **Publication rule:** each round's tree is delta-only —
+amounts are the increment owed since the prior round, never cumulative
+totals — because rotation resets the claimed set. Claims are
 transfers, not issuance — the sealed supply ledger is untouched. Rotating
 the root starts a fresh round (the analogue of deploying a new distributor
-per drop, which is how the Seasons schedule runs). Remaining before TGE:
-an external audit of this path and the public root-publication ceremony —
-tracked in `docs/testnet/LAUNCH-STATUS.md`. The staking pools distribute
+per drop, which is how the Seasons schedule runs). Root-setting is enforced as a
+consensus rule, not just at ingress: the in-block intent is a validated
+no-op, and the round opens only at the epoch boundary after every node
+re-verifies the dual-authority envelope against its own seated registry
+(the same IQ-007 pipeline as validator-set changes). Remaining before TGE:
+an external audit of this path, the unauthenticated claim-submit lane, and
+the public root-publication ceremony — tracked in
+`docs/testnet/LAUNCH-STATUS.md`. The staking pools distribute
 via `Intent::DistributeRewards` instead.
 
 ## 4. Operational path to TGE

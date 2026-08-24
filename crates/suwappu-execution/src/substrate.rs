@@ -791,7 +791,14 @@ pub enum Intent {
     TgeClaim {
         /// The TGE claim pool.
         pool: Address,
-        /// Leaf index in the distribution set.
+        /// The distribution round this claim's tree was built
+        /// for. Must equal the pool's active round — a claim
+        /// that straddles a root rotation fails loudly instead
+        /// of being evaluated against the wrong tree. Also
+        /// committed inside the leaf hash.
+        round: u32,
+        /// Leaf index in the distribution set. Bounded by
+        /// `tge_claim::MAX_TGE_CLAIM_INDEX`.
         index: u32,
         /// Recipient committed in the leaf.
         account: Address,
@@ -1084,6 +1091,40 @@ impl InMemorySubstrate {
             Balance::from_be_bytes(bytes[0..16].try_into().unwrap()),
             Balance::from_be_bytes(bytes[16..32].try_into().unwrap()),
         )))
+    }
+
+    /// Open (or rotate to) a new TGE distribution round for `pool`
+    /// with `merkle_root`. This is the ONLY path that writes a TGE
+    /// distribution record — `Intent::SetTgeRoot`'s in-block arm is
+    /// a validated no-op, and the daemon calls this at the epoch
+    /// boundary strictly after re-verifying the intent's
+    /// dual-authority GovAuth envelope against its own seated
+    /// registry (the IQ-007 consensus rule). Callers other than
+    /// that path (tests aside) would bypass governance — don't.
+    pub fn apply_tge_root(
+        &mut self,
+        pool: &Address,
+        merkle_root: &[u8; 32],
+    ) -> Result<u32, ExecutionError> {
+        if !reserved::is_tge_claim_pool(pool) {
+            return Err(ExecutionError::TgeUnknownPool { addr: *pool });
+        }
+        if merkle_root == &[0u8; 32] {
+            return Err(ExecutionError::TgeRootAllZeros);
+        }
+        let prev = match self.read_bytes(pool) {
+            None => None,
+            Some(bytes) => Some(crate::tge_claim::TgeDistribution::decode(&bytes).ok_or(
+                ExecutionError::CorruptStateRecord {
+                    addr: *pool,
+                    reason: "TGE distribution record malformed",
+                },
+            )?),
+        };
+        let next = crate::tge_claim::TgeDistribution::new_round(prev.as_ref(), *merkle_root);
+        let round = next.round;
+        self.write_bytes_unchecked(*pool, next.encode());
+        Ok(round)
     }
 
     /// Internal: (re)write the supply ledger record.
@@ -3284,6 +3325,15 @@ impl Substrate for InMemorySubstrate {
             // substrate's job is the deterministic state effect:
             // start a new claim round on the pool's own
             // bytes_state record.
+            // In-block application is a validated NO-OP: the state
+            // effect (opening the round) happens ONLY through
+            // `apply_tge_root`, which the daemon invokes at the
+            // epoch boundary after re-verifying the dual-authority
+            // GovAuth envelope against its own seated registry —
+            // the same consensus rule as Admit/Exit/Eject (IQ-007).
+            // A Byzantine author embedding a bare SetTgeRoot in its
+            // own block therefore changes nothing: `execute_block`
+            // applies this arm, which writes nothing.
             Intent::SetTgeRoot { pool, merkle_root } => {
                 if !reserved::is_tge_claim_pool(pool) {
                     return Err(ExecutionError::TgeUnknownPool { addr: *pool });
@@ -3291,18 +3341,6 @@ impl Substrate for InMemorySubstrate {
                 if merkle_root == &[0u8; 32] {
                     return Err(ExecutionError::TgeRootAllZeros);
                 }
-                let prev = match self.read_bytes(pool) {
-                    None => None,
-                    Some(bytes) => Some(crate::tge_claim::TgeDistribution::decode(&bytes).ok_or(
-                        ExecutionError::CorruptStateRecord {
-                            addr: *pool,
-                            reason: "TGE distribution record malformed",
-                        },
-                    )?),
-                };
-                let next =
-                    crate::tge_claim::TgeDistribution::new_round(prev.as_ref(), *merkle_root);
-                self.write_bytes_unchecked(*pool, next.encode());
                 Ok(())
             }
             // Permissionless proof-carrying claim against the
@@ -3312,6 +3350,7 @@ impl Substrate for InMemorySubstrate {
             // moves nothing and burns no index.
             Intent::TgeClaim {
                 pool,
+                round,
                 index,
                 account,
                 amount,
@@ -3323,6 +3362,22 @@ impl Substrate for InMemorySubstrate {
                 if reserved::is_reserved(account) {
                     return Err(ExecutionError::ReservedAddressTransferDenied { addr: *account });
                 }
+                // Bounds BEFORE any record work: an unbounded index
+                // would let one claim grow the bitmap record to
+                // 512 MiB (re-hashed into state_root every block);
+                // an unbounded proof is free hash-grinding.
+                if *index > crate::tge_claim::MAX_TGE_CLAIM_INDEX {
+                    return Err(ExecutionError::TgeIndexOutOfRange {
+                        index: *index,
+                        max: crate::tge_claim::MAX_TGE_CLAIM_INDEX,
+                    });
+                }
+                if proof.len() > crate::tge_claim::MAX_TGE_PROOF_LEN {
+                    return Err(ExecutionError::TgeProofInvalid {
+                        pool: *pool,
+                        index: *index,
+                    });
+                }
                 let bytes = self
                     .read_bytes(pool)
                     .ok_or(ExecutionError::TgeRootNotSet { pool: *pool })?;
@@ -3332,6 +3387,13 @@ impl Substrate for InMemorySubstrate {
                         reason: "TGE distribution record malformed",
                     },
                 )?;
+                if *round != dist.round {
+                    return Err(ExecutionError::TgeStaleRound {
+                        pool: *pool,
+                        active_round: dist.round,
+                        claimed_round: *round,
+                    });
+                }
                 if dist.is_claimed(*index) {
                     return Err(ExecutionError::TgeAlreadyClaimed {
                         pool: *pool,
@@ -3339,7 +3401,7 @@ impl Substrate for InMemorySubstrate {
                         index: *index,
                     });
                 }
-                let leaf = crate::tge_claim::leaf_hash(*index, account, *amount);
+                let leaf = crate::tge_claim::leaf_hash(pool, *round, *index, account, *amount);
                 if !crate::tge_claim::verify_proof(&dist.merkle_root, &leaf, proof) {
                     return Err(ExecutionError::TgeProofInvalid {
                         pool: *pool,
@@ -8595,20 +8657,26 @@ mod tests {
 
         let entries: Vec<(Address, Balance)> =
             vec![([0x11; 20], 400), ([0x22; 20], 350), ([0x33; 20], 250)];
-        let root = tge_claim::build_root(&entries);
+        let root = tge_claim::build_root(&pool, 1, &entries);
+        // In-block SetTgeRoot is a validated NO-OP (the Byzantine-
+        // author bypass fix): the round opens only via the
+        // envelope-gated apply_tge_root.
         s.apply_intent(&Intent::SetTgeRoot {
             pool,
             merkle_root: root,
         })
         .unwrap();
+        assert!(s.read_bytes(&pool).is_none());
+        assert_eq!(s.apply_tge_root(&pool, &root).unwrap(), 1);
 
         // Claim leaf 1.
         s.apply_intent(&Intent::TgeClaim {
             pool,
+            round: 1,
             index: 1,
             account: [0x22; 20],
             amount: 350,
-            proof: tge_claim::build_proof(&entries, 1),
+            proof: tge_claim::build_proof(&pool, 1, &entries, 1),
         })
         .unwrap();
         assert_eq!(s.balance(&[0x22; 20]), 350);
@@ -8622,10 +8690,11 @@ mod tests {
         assert!(matches!(
             s.apply_intent(&Intent::TgeClaim {
                 pool,
+                round: 1,
                 index: 1,
                 account: [0x22; 20],
                 amount: 350,
-                proof: tge_claim::build_proof(&entries, 1),
+                proof: tge_claim::build_proof(&pool, 1, &entries, 1),
             }),
             Err(ExecutionError::TgeAlreadyClaimed {
                 round: 1,
@@ -8637,10 +8706,11 @@ mod tests {
         assert!(matches!(
             s.apply_intent(&Intent::TgeClaim {
                 pool,
+                round: 1,
                 index: 0,
                 account: [0x11; 20],
                 amount: 999,
-                proof: tge_claim::build_proof(&entries, 0),
+                proof: tge_claim::build_proof(&pool, 1, &entries, 0),
             }),
             Err(ExecutionError::TgeProofInvalid { index: 0, .. })
         ));
@@ -8673,6 +8743,7 @@ mod tests {
         assert!(matches!(
             s.apply_intent(&Intent::TgeClaim {
                 pool,
+                round: 1,
                 index: 0,
                 account: [0x11; 20],
                 amount: 1,
@@ -8692,44 +8763,68 @@ mod tests {
         // Over-committed round: the tree promises 150 but the pool
         // holds 100 — the second claim fails on pool balance.
         let entries: Vec<(Address, Balance)> = vec![([0x11; 20], 90), ([0x22; 20], 60)];
-        s.apply_intent(&Intent::SetTgeRoot {
-            pool,
-            merkle_root: tge_claim::build_root(&entries),
-        })
-        .unwrap();
+        s.apply_tge_root(&pool, &tge_claim::build_root(&pool, 1, &entries))
+            .unwrap();
+        // Bounds reject before any record work; stale rounds fail loud.
+        assert!(matches!(
+            s.apply_intent(&Intent::TgeClaim {
+                pool,
+                round: 1,
+                index: u32::MAX,
+                account: [0x11; 20],
+                amount: 1,
+                proof: vec![],
+            }),
+            Err(ExecutionError::TgeIndexOutOfRange { .. })
+        ));
+        assert!(matches!(
+            s.apply_intent(&Intent::TgeClaim {
+                pool,
+                round: 2,
+                index: 0,
+                account: [0x11; 20],
+                amount: 90,
+                proof: tge_claim::build_proof(&pool, 1, &entries, 0),
+            }),
+            Err(ExecutionError::TgeStaleRound {
+                active_round: 1,
+                claimed_round: 2,
+                ..
+            })
+        ));
         s.apply_intent(&Intent::TgeClaim {
             pool,
+            round: 1,
             index: 0,
             account: [0x11; 20],
             amount: 90,
-            proof: tge_claim::build_proof(&entries, 0),
+            proof: tge_claim::build_proof(&pool, 1, &entries, 0),
         })
         .unwrap();
         assert!(matches!(
             s.apply_intent(&Intent::TgeClaim {
                 pool,
+                round: 1,
                 index: 1,
                 account: [0x22; 20],
                 amount: 60,
-                proof: tge_claim::build_proof(&entries, 1),
+                proof: tge_claim::build_proof(&pool, 1, &entries, 1),
             }),
             Err(ExecutionError::InsufficientBalance { .. })
         ));
 
         // Reserved recipients can never be claim targets.
         let reserved_entries: Vec<(Address, Balance)> = vec![(reserved::treasury_address(), 1)];
-        s.apply_intent(&Intent::SetTgeRoot {
-            pool,
-            merkle_root: tge_claim::build_root(&reserved_entries),
-        })
-        .unwrap();
+        s.apply_tge_root(&pool, &tge_claim::build_root(&pool, 2, &reserved_entries))
+            .unwrap();
         assert!(matches!(
             s.apply_intent(&Intent::TgeClaim {
                 pool,
+                round: 2,
                 index: 0,
                 account: reserved::treasury_address(),
                 amount: 1,
-                proof: tge_claim::build_proof(&reserved_entries, 0),
+                proof: tge_claim::build_proof(&pool, 2, &reserved_entries, 0),
             }),
             Err(ExecutionError::ReservedAddressTransferDenied { .. })
         ));
@@ -8750,33 +8845,56 @@ mod tests {
         .unwrap();
 
         let season1: Vec<(Address, Balance)> = vec![([0x11; 20], 100)];
-        s.apply_intent(&Intent::SetTgeRoot {
-            pool,
-            merkle_root: tge_claim::build_root(&season1),
-        })
-        .unwrap();
+        s.apply_tge_root(&pool, &tge_claim::build_root(&pool, 1, &season1))
+            .unwrap();
+        let season1_proof = tge_claim::build_proof(&pool, 1, &season1, 0);
         s.apply_intent(&Intent::TgeClaim {
             pool,
+            round: 1,
             index: 0,
             account: [0x11; 20],
             amount: 100,
-            proof: tge_claim::build_proof(&season1, 0),
+            proof: season1_proof.clone(),
         })
         .unwrap();
 
         let season2: Vec<(Address, Balance)> = vec![([0x11; 20], 75)];
-        s.apply_intent(&Intent::SetTgeRoot {
-            pool,
-            merkle_root: tge_claim::build_root(&season2),
-        })
-        .unwrap();
-        // Same index, new round, new tree: claimable again.
+        s.apply_tge_root(&pool, &tge_claim::build_root(&pool, 2, &season2))
+            .unwrap();
+        // The round is committed inside every leaf: the season-1
+        // proof is dead after rotation (stale round up-front; lying
+        // about the round breaks the leaf hash) — the cross-round
+        // double-payment hole is closed.
+        assert!(matches!(
+            s.apply_intent(&Intent::TgeClaim {
+                pool,
+                round: 1,
+                index: 0,
+                account: [0x11; 20],
+                amount: 100,
+                proof: season1_proof.clone(),
+            }),
+            Err(ExecutionError::TgeStaleRound { .. })
+        ));
+        assert!(matches!(
+            s.apply_intent(&Intent::TgeClaim {
+                pool,
+                round: 2,
+                index: 0,
+                account: [0x11; 20],
+                amount: 100,
+                proof: season1_proof,
+            }),
+            Err(ExecutionError::TgeProofInvalid { .. })
+        ));
+        // The season-2 entitlement claims normally.
         s.apply_intent(&Intent::TgeClaim {
             pool,
+            round: 2,
             index: 0,
             account: [0x11; 20],
             amount: 75,
-            proof: tge_claim::build_proof(&season2, 0),
+            proof: tge_claim::build_proof(&pool, 2, &season2, 0),
         })
         .unwrap();
         assert_eq!(s.balance(&[0x11; 20]), 175);

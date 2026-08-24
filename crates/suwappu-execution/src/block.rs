@@ -43,7 +43,9 @@ pub struct ExecutionReport {
     /// First error encountered, if any. Phase-1 stops on first error;
     /// later intents are reported as `skipped`.
     pub first_error: Option<(usize, ExecutionError)>,
-    /// Number of intents skipped after the first error.
+    /// Number of intents skipped: everything after the first
+    /// error, plus benign no-op replays (an already-claimed
+    /// `TgeClaim`), which do not halt the block.
     pub skipped: usize,
     /// State root after the block.
     pub post_root: [u8; 32],
@@ -69,6 +71,13 @@ pub fn execute_block<S: Substrate>(substrate: &mut S, block: &Block) -> Executio
         }
         match substrate.apply_intent(intent) {
             Ok(()) => applied += 1,
+            // A replayed TgeClaim is the EXPECTED outcome of wide
+            // broadcast + per-node content-hash mempool dedup (two
+            // proposers can include the same claim). The
+            // idempotency guard already made it a no-op — treat it
+            // as a benign skip instead of letting one duplicate
+            // halt every intent behind it in the block.
+            Err(ExecutionError::TgeAlreadyClaimed { .. }) => skipped += 1,
             Err(e) => first_error = Some((idx, e)),
         }
     }
