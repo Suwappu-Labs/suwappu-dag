@@ -9,9 +9,15 @@ reverse auction; here **the protocol itself is the buyer**. Validator
 work (certificates, attestations, storage, DA serving) is metered by
 proofs and paid per epoch.
 
-Intended deployment: static hosting behind
-`compute.suwappu.bot` (S3 + CloudFront, like the explorer), but the
-page runs from any static server.
+Deployment: `compute.testnet.suwappu.bot` — S3 + CloudFront defined
+in `terraform/testnet/compute-portal.tf`, synced by
+`.github/workflows/compute-portal-testnet.yml` on pushes to `main`
+touching this directory (devnet hostnames in the source are
+sed-rewritten to testnet at upload, same scheme as the status page).
+The workflow needs the one-time `COMPUTE_TESTNET_DEPLOY_ROLE` repo
+secret, and the terraform is applied by an operator via
+`scripts/deploy-aws.sh` — until both happen the workflow verifies the
+build and skips the deploy. The page also runs from any static server.
 
 ## Product scope (v0.1)
 

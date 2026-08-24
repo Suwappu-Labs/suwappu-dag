@@ -14,6 +14,11 @@ will coincide with mainnet genesis.
 
 ### Added
 
+- Compute-provider portal deploy surface: `terraform/testnet/compute-portal.tf`
+  (S3 + CloudFront + Route53 for `compute.testnet.suwappu.bot`, same shape
+  as the status page) and `.github/workflows/compute-portal-testnet.yml`
+  (sed-rewrite devnet→testnet hostnames, sync, invalidate; skips cleanly
+  until the `COMPUTE_TESTNET_DEPLOY_ROLE` secret is set)
 - Validator compute-incentive settlement (`suwappu-precompiles::rewards`):
   per-epoch stablecoin rewards for proven validator work
   (`ComputeReceipt`: certificates signed, uptime samples, corridor
