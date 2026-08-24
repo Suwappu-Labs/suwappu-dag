@@ -37,15 +37,20 @@
 //! (no proof) is unchanged and still available for phase-1 callers.
 //!
 //! Mint integration (binding `ReserveCoverageChecker` into
-//! `IssuerRegistry::mint`) is a follow-up; today this sprint delivers
-//! the predicate logic and the breaker state machine.
+//! `IssuerRegistry::mint`) is delivered by [`mint_with_coverage`]: it
+//! evaluates the coverage predicate at the *projected post-mint*
+//! outstanding supply and only then mints, so a mint can never push
+//! outstanding supply past what the latest attestation covers. Callers
+//! that mint stablecoin-denominated value (e.g. the compute-reward
+//! settlement in [`crate::rewards`]) go through it rather than calling
+//! `IssuerRegistry::mint` directly.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::issuer::{AssetId, IssuerId};
+use crate::issuer::{AssetId, IssuerError, IssuerId, IssuerRegistry};
 
 /// Issuer-class-applicable coverage rule (paper §8.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -325,6 +330,43 @@ impl ReserveCoverageChecker {
     }
 }
 
+/// Error from a coverage-gated mint: either the breaker refused, or
+/// the issuer registry did.
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+pub enum GatedMintError {
+    /// The reserve-coverage breaker refused the mint.
+    #[error("coverage check failed: {0}")]
+    Coverage(#[from] CoverageError),
+    /// The issuer registry refused the mint.
+    #[error("issuer mint failed: {0}")]
+    Issuer(#[from] IssuerError),
+}
+
+/// Mint `amount` of `asset` for `issuer` only if the reserve-coverage
+/// predicate holds at the **projected post-mint** outstanding supply.
+///
+/// This is the §8.3 breaker bound into the §8.2 mint surface: the
+/// registered rule must pass against the latest fresh attestation's
+/// reserves and `outstanding + amount`, so a mint can never take the
+/// asset out of coverage. On any error nothing is minted; once a fresh
+/// passing attestation is posted, the same mint becomes possible again.
+pub fn mint_with_coverage(
+    registry: &mut IssuerRegistry,
+    checker: &ReserveCoverageChecker,
+    issuer: IssuerId,
+    asset: AssetId,
+    amount: u128,
+    now_round: u64,
+) -> Result<(), GatedMintError> {
+    let outstanding = registry.supply(asset, issuer).outstanding();
+    let projected = outstanding
+        .checked_add(amount)
+        .ok_or(GatedMintError::Coverage(CoverageError::Overflow))?;
+    checker.can_mint(issuer, asset, projected, now_round)?;
+    registry.mint(issuer, asset, amount)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -418,6 +460,110 @@ mod tests {
         // But current outstanding has grown to 200; reserves 100 < 200.
         let err = c.can_mint(0, asset, 200, 50);
         assert!(matches!(err, Err(CoverageError::PredicateFailed { .. })));
+    }
+
+    mod gated_mint {
+        use super::*;
+        use crate::did::Did;
+        use crate::issuer::Issuer;
+
+        fn registry_with_issuer(cap: u128) -> IssuerRegistry {
+            let mut r = IssuerRegistry::new();
+            r.register(Issuer {
+                id: 0,
+                principal_did: Did([0; 32]),
+                delegation_cap: cap,
+                reserve_schema_version: 1,
+                policy_vocabulary_version: 1,
+            })
+            .unwrap();
+            r
+        }
+
+        #[test]
+        fn mint_within_coverage_succeeds() {
+            let asset = AssetId([1; 32]);
+            let mut registry = registry_with_issuer(1_000);
+            let mut checker = ReserveCoverageChecker::with_ttl(1_000);
+            checker.set_rule(0, asset, CoverageRule::OneToOnePar);
+            checker
+                .submit_attestation(att(0, asset, 100, 0, 10))
+                .unwrap();
+            mint_with_coverage(&mut registry, &checker, 0, asset, 100, 20).unwrap();
+            assert_eq!(registry.supply(asset, 0).outstanding(), 100);
+        }
+
+        #[test]
+        fn mint_past_coverage_fails_closed() {
+            let asset = AssetId([1; 32]);
+            let mut registry = registry_with_issuer(1_000);
+            let mut checker = ReserveCoverageChecker::with_ttl(1_000);
+            checker.set_rule(0, asset, CoverageRule::OneToOnePar);
+            checker
+                .submit_attestation(att(0, asset, 100, 0, 10))
+                .unwrap();
+            // 100 reserves cover 100; the 101st unit must be refused.
+            let err = mint_with_coverage(&mut registry, &checker, 0, asset, 101, 20);
+            assert!(matches!(
+                err,
+                Err(GatedMintError::Coverage(
+                    CoverageError::PredicateFailed { .. }
+                ))
+            ));
+            assert_eq!(registry.supply(asset, 0).outstanding(), 0);
+        }
+
+        #[test]
+        fn projected_outstanding_includes_prior_mints() {
+            let asset = AssetId([1; 32]);
+            let mut registry = registry_with_issuer(1_000);
+            let mut checker = ReserveCoverageChecker::with_ttl(1_000);
+            checker.set_rule(0, asset, CoverageRule::OneToOnePar);
+            checker
+                .submit_attestation(att(0, asset, 100, 0, 10))
+                .unwrap();
+            mint_with_coverage(&mut registry, &checker, 0, asset, 60, 20).unwrap();
+            // 60 outstanding; 41 more would project to 101 > 100 reserves.
+            let err = mint_with_coverage(&mut registry, &checker, 0, asset, 41, 20);
+            assert!(matches!(err, Err(GatedMintError::Coverage(_))));
+            mint_with_coverage(&mut registry, &checker, 0, asset, 40, 20).unwrap();
+            assert_eq!(registry.supply(asset, 0).outstanding(), 100);
+        }
+
+        #[test]
+        fn stale_attestation_pauses_gated_mint() {
+            let asset = AssetId([1; 32]);
+            let mut registry = registry_with_issuer(1_000);
+            let mut checker = ReserveCoverageChecker::with_ttl(100);
+            checker.set_rule(0, asset, CoverageRule::OneToOnePar);
+            checker
+                .submit_attestation(att(0, asset, 100, 0, 10))
+                .unwrap();
+            let err = mint_with_coverage(&mut registry, &checker, 0, asset, 10, 111);
+            assert!(matches!(
+                err,
+                Err(GatedMintError::Coverage(CoverageError::NoFreshAttestation))
+            ));
+        }
+
+        #[test]
+        fn delegation_cap_still_enforced() {
+            let asset = AssetId([1; 32]);
+            let mut registry = registry_with_issuer(50);
+            let mut checker = ReserveCoverageChecker::with_ttl(1_000);
+            checker.set_rule(0, asset, CoverageRule::OneToOnePar);
+            checker
+                .submit_attestation(att(0, asset, 100, 0, 10))
+                .unwrap();
+            let err = mint_with_coverage(&mut registry, &checker, 0, asset, 60, 20);
+            assert!(matches!(
+                err,
+                Err(GatedMintError::Issuer(
+                    IssuerError::DelegationCapExceeded { .. }
+                ))
+            ));
+            assert_eq!(registry.supply(asset, 0).outstanding(), 0);
+        }
     }
 
     /// Real end-to-end tests against the real

@@ -14,6 +14,22 @@ will coincide with mainnet genesis.
 
 ### Added
 
+- Validator compute-incentive settlement (`suwappu-precompiles::rewards`):
+  per-epoch stablecoin rewards for proven validator work
+  (`ComputeReceipt`: certificates signed, uptime samples, corridor
+  attestations, DA bytes served), priced under `RewardParams`, clamped
+  pro-rata to a hard epoch budget, and minted only through the new
+  `reserve::mint_with_coverage` — the §8.3 reserve-coverage breaker
+  bound into the §8.2 issuer mint surface (the follow-up DAG-S14 left
+  open), evaluated at the projected post-mint outstanding supply and
+  failing closed. Uptime gating mirrors `docs/testnet/POINTS.md`
+  (≥99% full rate, ≥95% half, below zero); output recipient lists are
+  shaped for the substrate's existing `Intent::DistributeRewards`.
+  Exit gate: `tests/proptest_compute_rewards.rs`, 4 properties
+  (conservation + reserve backing, coverage fail-closed, work
+  monotonicity, epoch replay), green at `PROPTEST_CASES=10000
+  --release`. Design doc:
+  `suwappu-lattice-protocol/docs/economics/VALIDATOR_COMPUTE_INCENTIVES.md`
 - Quality-parity pass (cross-repo bar set by suwappubot): shipped the
   agent infrastructure `CLAUDE.md` documents but the tree lacked —
   `claude-code/settings.json` (three permission tiers + hook wiring),
