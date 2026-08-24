@@ -160,7 +160,14 @@ pub struct Peer {
 
 /// Shared genesis manifest. Identical across every validator's filesystem.
 /// Generated once via `scripts/perf/gen-genesis.sh` and shipped via S3.
+///
+/// `deny_unknown_fields` is load-bearing: a binary that predates a
+/// manifest field would otherwise parse the file, silently skip the
+/// field, and diverge from the rest of the mesh at genesis (the
+/// supply-ledger seal is part of the state root). Unknown field =
+/// loud parse failure = "upgrade your node", never a silent fork.
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct GenesisManifest {
     /// Network identifier — included in every signed payload so cross-network
     /// replay attacks are impossible. Free-form ASCII, e.g. `"suwappu-perf-7r"`.
@@ -208,8 +215,8 @@ pub struct GenesisManifest {
     /// impossible. Optional for backward compatibility —
     /// absent means uncapped (legacy testnet/devnet behavior).
     /// `from_path` rejects a manifest whose prebalances already
-    /// exceed it.
-    #[serde(default)]
+    /// exceed it, and `State::new` re-checks before sealing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_supply_suwappu: Option<u64>,
 }
 
@@ -634,6 +641,26 @@ mod tests {
         let manifest = GenesisManifest::from_path(&exact);
         let _ = std::fs::remove_file(&exact);
         assert_eq!(manifest.unwrap().max_supply_suwappu, Some(100));
+    }
+
+    /// Unknown manifest fields are a parse error, not a silent
+    /// skip — a binary that predates a field must fail loudly
+    /// rather than diverge from the mesh at genesis.
+    #[test]
+    fn manifest_rejects_unknown_fields() {
+        let toml_src = r#"
+            network_id = "suwappu-mainnet"
+            some_future_field = 7
+
+            [[validators]]
+            authority_id = 0
+            label = "us-east-1"
+            mldsa_public_key_hex = "00"
+            bls_public_key_hex = "00"
+            validator_stake_suwappu = 1
+            authority_stake_suwappu = 1
+        "#;
+        assert!(toml::from_str::<GenesisManifest>(toml_src).is_err());
     }
 
     /// Address parsing rejects non-hex and wrong-length inputs.

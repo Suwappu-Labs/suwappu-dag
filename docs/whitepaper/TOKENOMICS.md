@@ -93,11 +93,16 @@ is enforced by a specific mechanism, not by policy:
    the public does. *(Checkable: the genesis `[[prebalances]]` contain only
    the five pool addresses above, each re-derivable from its domain tag.)*
 2. **No hidden issuance.** Supply is exactly the sum of the published
-   `[[prebalances]]`. *(Enforced three times: `gen-tge-prebalances.py`
+   `[[prebalances]]`. *(Enforced in depth: `gen-tge-prebalances.py`
    refuses a ledger that doesn't sum to the cap; `GenesisManifest::from_path`
-   refuses a manifest whose prebalances exceed `max_supply_suwappu`; the
-   sealed supply ledger makes `Intent::MintInflation` fail with
-   `MaxSupplyExceeded` forever after.)*
+   refuses a manifest whose prebalances exceed `max_supply_suwappu` — and
+   rejects unknown fields outright, so an outdated binary fails loudly
+   instead of silently forking; `State::new` re-verifies the sums, refuses
+   to boot on any skipped prebalance, and seals the ledger exactly once;
+   after the seal, `Intent::MintInflation` fails with `MaxSupplyExceeded`,
+   `Intent::GenesisAllocation` is rejected outright (round-0 blocks cannot
+   re-open genesis), and `Intent::DistributeSlashedFunds` — the one other
+   credit-without-debit arm — is held under the same cap.)*
 3. **No pre-launch transfers.** *(Enforced: every pool address is in
    `reserved::is_reserved`, so `Intent::Transfer` from or to a pool is
    rejected by both substrate implementations.)*

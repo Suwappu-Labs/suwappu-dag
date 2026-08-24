@@ -425,6 +425,15 @@ pub enum ExecutionError {
         current_block_height: u64,
     },
 
+    /// `Intent::GenesisAllocation` arrived after the supply ledger
+    /// was sealed. `State::new` seals immediately after applying the
+    /// manifest prebalances, so a sealed ledger means genesis is
+    /// over — regardless of block height, which is re-set per block
+    /// (round 0 included) and therefore not a trustworthy
+    /// genesis-is-over signal on its own.
+    #[error("genesis allocation attempted after the supply ledger was sealed")]
+    GenesisAfterSupplySealed,
+
     /// `Intent::MintInflation { epoch, .. }` carried an
     /// epoch number ≤ the last minted epoch on record.
     /// Replay defense — the substrate keeps the last

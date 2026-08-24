@@ -999,12 +999,18 @@ impl InMemorySubstrate {
     /// `max_supply`. Call once, after genesis allocations are
     /// applied — a fair-launch genesis where the pre-mine equals
     /// `max_supply` makes every future mint fail by construction.
-    pub fn seal_supply_ledger(&mut self, max_supply: Balance) {
-        let issued = self.total_supply();
-        let mut bytes = Vec::with_capacity(32);
-        bytes.extend_from_slice(&max_supply.to_be_bytes());
-        bytes.extend_from_slice(&issued.to_be_bytes());
-        self.write_bytes_unchecked(reserved::supply_registry_address(), bytes);
+    /// One-shot: returns `false` (and writes nothing) if a ledger
+    /// is already sealed — re-sealing would reset `issued` to the
+    /// current balance sum and silently grant fresh mint headroom.
+    pub fn seal_supply_ledger(&mut self, max_supply: Balance) -> bool {
+        if self
+            .read_bytes(&reserved::supply_registry_address())
+            .is_some()
+        {
+            return false;
+        }
+        self.record_issuance(max_supply, self.total_supply());
+        true
     }
 
     /// Read the supply ledger as `(max_supply, issued)`. `None`
@@ -1018,6 +1024,36 @@ impl InMemorySubstrate {
         let max = Balance::from_be_bytes(bytes[0..16].try_into().unwrap());
         let issued = Balance::from_be_bytes(bytes[16..32].try_into().unwrap());
         Some((max, issued))
+    }
+
+    /// Internal: read the sealed supply ledger for an intent arm.
+    /// `Ok(None)` = never sealed (legacy, uncapped); a record of
+    /// the wrong width fails closed as state corruption rather
+    /// than the reader-convenience `None` of [`Self::supply_ledger`].
+    fn sealed_supply_ledger(&self) -> Result<Option<(Balance, Balance)>, ExecutionError> {
+        let addr = reserved::supply_registry_address();
+        let bytes = self.read_bytes(&addr).unwrap_or_default();
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        if bytes.len() != 32 {
+            return Err(ExecutionError::CorruptStateRecord {
+                addr,
+                reason: "supply registry size mismatch",
+            });
+        }
+        Ok(Some((
+            Balance::from_be_bytes(bytes[0..16].try_into().unwrap()),
+            Balance::from_be_bytes(bytes[16..32].try_into().unwrap()),
+        )))
+    }
+
+    /// Internal: (re)write the supply ledger record.
+    fn record_issuance(&mut self, max_supply: Balance, issued: Balance) {
+        let mut bytes = Vec::with_capacity(32);
+        bytes.extend_from_slice(&max_supply.to_be_bytes());
+        bytes.extend_from_slice(&issued.to_be_bytes());
+        self.write_bytes_unchecked(reserved::supply_registry_address(), bytes);
     }
 
     /// Iterate `(address, balance)` pairs in canonical (ascending-
@@ -1688,6 +1724,20 @@ impl Substrate for InMemorySubstrate {
                         current_block_height: height,
                     });
                 }
+                // Fair-launch hardening: the height gate alone
+                // cannot end genesis — the round driver's first
+                // proposal IS round 0, and `execute_block` re-sets
+                // the ambient height per block, so a single seated
+                // authority could otherwise smuggle a
+                // GenesisAllocation into a round-0 block and mint
+                // outside the supply cap. `State::new` seals the
+                // supply ledger immediately after applying the
+                // manifest prebalances, so "sealed" means genesis
+                // is over: reject outright. Unsealed (legacy
+                // manifests) keeps the height-0-only behavior.
+                if self.sealed_supply_ledger()?.is_some() {
+                    return Err(ExecutionError::GenesisAfterSupplySealed);
+                }
                 // Atomic across all entries: any single entry
                 // overflowing rolls back the whole list. Same
                 // address appearing multiple times accumulates
@@ -1739,20 +1789,7 @@ impl Substrate for InMemorySubstrate {
                 // issued total moves. Absent ledger = legacy
                 // uncapped behavior.
                 let supply_addr = reserved::supply_registry_address();
-                let ledger_bytes = self.read_bytes(&supply_addr).unwrap_or_default();
-                let sealed = if ledger_bytes.is_empty() {
-                    None
-                } else if ledger_bytes.len() == 32 {
-                    Some((
-                        Balance::from_be_bytes(ledger_bytes[0..16].try_into().unwrap()),
-                        Balance::from_be_bytes(ledger_bytes[16..32].try_into().unwrap()),
-                    ))
-                } else {
-                    return Err(ExecutionError::CorruptStateRecord {
-                        addr: supply_addr,
-                        reason: "supply registry size mismatch",
-                    });
-                };
+                let sealed = self.sealed_supply_ledger()?;
                 let tranche = authority_share
                     .checked_add(*validator_share)
                     .and_then(|s| s.checked_add(*treasury_share))
@@ -1780,10 +1817,7 @@ impl Substrate for InMemorySubstrate {
                 ])?;
                 self.write_bytes_unchecked(registry_addr, epoch.to_be_bytes().to_vec());
                 if let Some((max_supply, issued)) = sealed {
-                    let mut bytes = Vec::with_capacity(32);
-                    bytes.extend_from_slice(&max_supply.to_be_bytes());
-                    bytes.extend_from_slice(&(issued + tranche).to_be_bytes());
-                    self.write_bytes_unchecked(supply_addr, bytes);
+                    self.record_issuance(max_supply, issued + tranche);
                 }
                 Ok(())
             }
@@ -3074,6 +3108,34 @@ impl Substrate for InMemorySubstrate {
                         });
                     }
                 }
+                // Fair-launch supply cap: this arm credits with no
+                // linked debit (the slashing debit is a separate
+                // intent), so under a sealed ledger its credits are
+                // issuance and must fit under max_supply — otherwise
+                // one seated authority could mint through the
+                // waterfall what MintInflation now refuses. Checked
+                // BEFORE any credit. The real pre-mainnet fix is an
+                // escrow linkage (slash arms credit an escrow this
+                // arm drains); tracked in
+                // docs/testnet/LAUNCH-STATUS.md.
+                let sealed = self.sealed_supply_ledger()?;
+                let total = counterparties
+                    .iter()
+                    .try_fold(0 as Balance, |acc, (_, share)| acc.checked_add(*share))
+                    .and_then(|s| s.checked_add(*insurance_share))
+                    .and_then(|s| s.checked_add(*treasury_share))
+                    .ok_or(ExecutionError::BalanceOverflow {
+                        to: reserved::supply_registry_address(),
+                    })?;
+                if let Some((max_supply, issued)) = sealed {
+                    if !issued.checked_add(total).is_some_and(|t| t <= max_supply) {
+                        return Err(ExecutionError::MaxSupplyExceeded {
+                            attempted_mint: total,
+                            issued,
+                            max_supply,
+                        });
+                    }
+                }
                 // Step 1: reimburse counterparties.
                 for (addr, share) in counterparties.iter() {
                     self.credit_unchecked(*addr, *share)?;
@@ -3082,6 +3144,9 @@ impl Substrate for InMemorySubstrate {
                 self.credit_unchecked(reserved::insurance_pool_address(), *insurance_share)?;
                 // Step 3: protocol treasury.
                 self.credit_unchecked(reserved::treasury_address(), *treasury_share)?;
+                if let Some((max_supply, issued)) = sealed {
+                    self.record_issuance(max_supply, issued + total);
+                }
                 Ok(())
             }
             // Track I I.5 (#166): asset whitelist governance.
@@ -8314,6 +8379,91 @@ mod tests {
         })
         .unwrap();
         assert_eq!(s.supply_ledger(), Some((1_000, 1_000)));
+    }
+
+    /// A sealed supply ledger ends genesis: `GenesisAllocation`
+    /// is rejected even at block height 0 (the round driver's
+    /// first proposal IS round 0, so the height gate alone can't
+    /// stop a post-seal allocation), and rejection moves nothing.
+    #[test]
+    fn genesis_allocation_rejected_once_supply_sealed() {
+        let mut s = InMemorySubstrate::new();
+        s.apply_intent(&Intent::GenesisAllocation {
+            allocations: vec![(reserved::tge_fair_launch_pool_address(), 1_000)],
+        })
+        .unwrap();
+        assert!(s.seal_supply_ledger(1_000));
+        assert_eq!(s.current_block_height(), 0);
+        let before = s.state_root();
+        let err = s.apply_intent(&Intent::GenesisAllocation {
+            allocations: vec![([0x42u8; 20], u64::MAX as Balance)],
+        });
+        assert!(matches!(err, Err(ExecutionError::GenesisAfterSupplySealed)));
+        assert_eq!(s.state_root(), before);
+        assert_eq!(s.total_supply(), 1_000);
+    }
+
+    /// Sealing is one-shot: a second seal writes nothing (it would
+    /// reset `issued` to the current balance sum and hand out fresh
+    /// mint headroom).
+    #[test]
+    fn seal_supply_ledger_is_one_shot() {
+        let mut s = InMemorySubstrate::new();
+        s.apply_intent(&Intent::GenesisAllocation {
+            allocations: vec![(reserved::tge_seasons_pool_address(), 500)],
+        })
+        .unwrap();
+        assert!(s.seal_supply_ledger(500));
+        assert!(!s.seal_supply_ledger(1_000_000));
+        assert_eq!(s.supply_ledger(), Some((500, 500)));
+    }
+
+    /// `DistributeSlashedFunds` credits with no linked debit, so
+    /// under a sealed ledger its credits count as issuance: at the
+    /// cap the whole waterfall is rejected before any credit; under
+    /// the cap it lands and draws down `issued` headroom.
+    #[test]
+    fn distribute_slashed_funds_respects_supply_cap() {
+        // At the cap: rejected, nothing moves.
+        let mut s = InMemorySubstrate::new();
+        s.apply_intent(&Intent::GenesisAllocation {
+            allocations: vec![(reserved::tge_fair_launch_pool_address(), 1_000)],
+        })
+        .unwrap();
+        assert!(s.seal_supply_ledger(1_000));
+        let before = s.state_root();
+        let err = s.apply_intent(&Intent::DistributeSlashedFunds {
+            slash_event_id: [0xaa; 32],
+            counterparties: vec![([0x11u8; 20], 1)],
+            insurance_share: 0,
+            treasury_share: 0,
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::MaxSupplyExceeded {
+                attempted_mint: 1,
+                issued: 1_000,
+                max_supply: 1_000,
+            })
+        ));
+        assert_eq!(s.state_root(), before);
+
+        // With headroom: lands and advances `issued`.
+        let mut s = InMemorySubstrate::new();
+        s.apply_intent(&Intent::GenesisAllocation {
+            allocations: vec![(reserved::tge_fair_launch_pool_address(), 700)],
+        })
+        .unwrap();
+        assert!(s.seal_supply_ledger(1_000));
+        s.apply_intent(&Intent::DistributeSlashedFunds {
+            slash_event_id: [0xbb; 32],
+            counterparties: vec![([0x11u8; 20], 100)],
+            insurance_share: 100,
+            treasury_share: 100,
+        })
+        .unwrap();
+        assert_eq!(s.supply_ledger(), Some((1_000, 1_000)));
+        assert_eq!(s.total_supply(), 1_000);
     }
 
     /// No sealed ledger (legacy manifests) = uncapped mint,

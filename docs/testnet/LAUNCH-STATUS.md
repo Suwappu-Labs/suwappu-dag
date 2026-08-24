@@ -98,6 +98,20 @@ Gaps 1–3 below were closed on this branch (2026-08-15):
    cannot execute until a claim intent or precompile ships and is
    audited. Staking pools are exempt (`Intent::DistributeRewards`
    already drains them).
+8. **Supply-invariant hardening residuals (pre-mainnet).** From the
+   adversarial review of the supply-cap change: (a) the slashing
+   waterfall (`Intent::DistributeSlashedFunds`) still credits with no
+   linked debit — it is now held under the sealed supply cap, which
+   under a fair-launch genesis (issued == max) blocks it entirely, so
+   the proper escrow linkage (slash arms credit an escrow the
+   waterfall drains) must land before mainnet slashing can pay out;
+   (b) the supply ledger lives on `InMemorySubstrate` only —
+   `SuwappuDbSubstrate` no-ops the mint/genesis arms, so if the
+   db-backed substrate ever becomes the production execution path,
+   the seal/cap must be hoisted onto the `Substrate` trait with a
+   cross-impl parity test; (c) a workspace proptest asserting
+   `total_supply() <= max_supply` over arbitrary intent sequences
+   would pin the invariant class, not just the known arms.
 
 ## ⚠️ Hosting: AWS is no longer available (2026-08-15)
 

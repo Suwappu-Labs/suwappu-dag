@@ -511,37 +511,65 @@ impl State {
         // at 0) — the same code path the execution crate's own genesis
         // tests exercise.
         let mut substrate = InMemorySubstrate::new();
-        let allocations: Vec<(suwappu_execution::Address, suwappu_execution::Balance)> = manifest
-            .prebalances
-            .iter()
-            .filter_map(|p| match p.address_bytes() {
-                Ok(addr) => Some((addr, p.balance_suwappu as u128)),
+        // Under a committed max supply, genesis funding is strict:
+        // a silently-skipped prebalance would seal the ledger with
+        // `issued < max_supply`, handing the gap to MintInflation as
+        // free headroom. Refuse to boot instead. Legacy manifests
+        // (no cap) keep the lenient warn-and-continue behavior.
+        let strict_supply = manifest.max_supply_suwappu.is_some();
+        let mut allocations: Vec<(suwappu_execution::Address, suwappu_execution::Balance)> =
+            Vec::with_capacity(manifest.prebalances.len());
+        for p in &manifest.prebalances {
+            match p.address_bytes() {
+                Ok(addr) => allocations.push((addr, p.balance_suwappu as u128)),
+                Err(e) if strict_supply => panic!(
+                    "genesis: malformed prebalance entry under max_supply_suwappu — refusing to boot: {e}"
+                ),
                 Err(e) => {
                     tracing::warn!(err = %e, "genesis: skipping malformed prebalance entry");
-                    None
                 }
-            })
-            .collect();
+            }
+        }
         if !allocations.is_empty() {
             if let Err(e) = substrate.apply_intent(&Intent::GenesisAllocation { allocations }) {
+                if strict_supply {
+                    panic!(
+                        "genesis: prebalance application failed under max_supply_suwappu — refusing to boot: {e}"
+                    );
+                }
                 tracing::warn!(err = %e, "genesis: prebalance application failed");
             }
         }
         // Fair-launch supply cap: seal the supply ledger with the
         // manifest's committed max supply so `Intent::MintInflation`
-        // fail-closes past it. Sealed AFTER the prebalances so the
+        // fail-closes past it and any later `GenesisAllocation` is
+        // rejected outright. Sealed AFTER the prebalances so the
         // pre-mine counts as issued; every validator shares the same
         // genesis.toml, so the ledger (and state root) stay
-        // deterministic across the mesh. `GenesisManifest::from_path`
-        // already refused any manifest whose prebalances exceed the
-        // cap.
+        // deterministic across the mesh. The cap invariants are
+        // re-checked here rather than trusted to
+        // `GenesisManifest::from_path`, which not every construction
+        // path goes through.
         if let Some(max_supply) = manifest.max_supply_suwappu {
-            substrate.seal_supply_ledger(max_supply as u128);
-            tracing::info!(
-                max_supply,
-                issued = %substrate.total_supply(),
-                "genesis: supply ledger sealed"
+            let manifest_sum: u128 = manifest
+                .prebalances
+                .iter()
+                .map(|p| p.balance_suwappu as u128)
+                .sum();
+            assert!(
+                manifest_sum <= max_supply as u128,
+                "genesis: prebalances ({manifest_sum}) exceed max_supply_suwappu ({max_supply}) — refusing to boot"
             );
+            let issued = substrate.total_supply();
+            assert_eq!(
+                issued, manifest_sum,
+                "genesis: credited supply differs from manifest prebalance sum — refusing to boot"
+            );
+            assert!(
+                substrate.seal_supply_ledger(max_supply as u128),
+                "genesis: supply ledger was already sealed on a fresh substrate"
+            );
+            tracing::info!(max_supply, issued = %issued, "genesis: supply ledger sealed");
         }
         let n = manifest.validators.len() as u32;
         Self {
