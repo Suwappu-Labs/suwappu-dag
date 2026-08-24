@@ -142,9 +142,12 @@ and throughput is ~0.125 TPS (launch un-incentivized).
 5. Genesis ceremony: run `scripts/testnet/gen-genesis.py` with real keys
    (`suwappu-keygen` on PATH — placeholder fallback keys cannot sign),
    publish `genesis.toml` + `peers.txt` at the documented URLs.
-6. Program scaffolding: apply form, Discord, leaderboard host, and a
-   decision on the points→token conversion claim
-   (`POINTS.md` vs the deferred-token architecture).
+6. Program scaffolding: apply form, Discord, leaderboard host.
+   ~~A decision on the points→token conversion claim~~ DECIDED
+   (2026-08-24): SUWP launches with the chain — genesis pre-mine,
+   fair-launch distribution, points convert from a published 8% pool.
+   See `docs/whitepaper/TOKENOMICS.md`; ledger + address tooling in
+   `scripts/tge/`.
 7. Performance go/no-go: `.sprint-state.md` records 0.125 TPS p50
    against a 1–5k target with S31 partially landed. An incentivized
    points-per-cert testnet at that throughput is self-defeating —

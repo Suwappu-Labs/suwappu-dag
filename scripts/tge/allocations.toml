@@ -1,0 +1,52 @@
+# SUWP mainnet genesis allocation ledger (the pre-mine, published).
+#
+# This file is the auditable source of truth for the fair-launch
+# pre-mine: 100% of the fixed 1,000,000,000 SUWP supply is minted in
+# the genesis block into the pools below. There is no other issuance
+# path — the mainnet genesis manifest carries no inflation budget
+# (`Intent::MintInflation` budget = 0), so total supply never exceeds
+# this ledger's sum.
+#
+# Fair-launch constraint (docs/whitepaper/TOKENOMICS.md): no team,
+# investor, private-sale, or foundation-treasury allocation. Every
+# pool below is distributed through an open, published program.
+#
+# Pool addresses are NOT free-form: each is derived as the leading
+# 20 bytes of BLAKE3(domain_tag), the chain's reserved-address scheme
+# (crates/suwappu-execution/src/reserved.rs). Run
+#
+#     python3 scripts/tge/gen-tge-prebalances.py --check
+#
+# to verify (a) each address matches its domain tag, (b) the amounts
+# sum to exactly total_supply_suwappu, and to emit the genesis.toml
+# [[prebalances]] fragment.
+
+total_supply_suwappu = 1_000_000_000
+
+[[pools]]
+name = "tge-fair-launch"
+domain_tag = "suwappu-tge-fair-launch-pool-v1"
+address = "0xf9e86688d4afeeff73b01067237e5529149905f0"
+amount_suwappu = 420_000_000
+distribution = "Open public distribution at TGE — pro-rata, no allowlist, no private tranche."
+
+[[pools]]
+name = "tge-seasons-program"
+domain_tag = "suwappu-tge-seasons-pool-v1"
+address = "0xae360caae624555b7fc6a2b7a96def76780d9e43"
+amount_suwappu = 300_000_000
+distribution = "8-season decaying usage-reward schedule per suwappubot/docs/economics/SEASONS_TOKENOMICS.md (A = 30%, delta = 0.75)."
+
+[[pools]]
+name = "tge-staking-rewards"
+domain_tag = "suwappu-tge-staking-rewards-pool-v1"
+address = "0x1749c422bc9da089f43ef0c3628b5344c35fba12"
+amount_suwappu = 200_000_000
+distribution = "Validator/authority staking rewards drawn down per epoch. Replaces open-ended MintInflation (UNIFIED_TOKENOMICS §2.1 follow-up); pool exhaustion = no further rewards."
+
+[[pools]]
+name = "tge-testnet-points"
+domain_tag = "suwappu-tge-testnet-points-pool-v1"
+address = "0x9e28b89b1c3b49a75f3b782e0ac9ee5919b340f9"
+amount_suwappu = 80_000_000
+distribution = "Testnet validator points conversion per docs/testnet/POINTS.md. 8% ceiling reserved; board pins final % in [5, 8] >= 90 days pre-TGE; the un-pinned remainder and unclaimed balances are burned 180 days after TGE."

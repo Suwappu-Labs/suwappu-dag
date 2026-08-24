@@ -100,10 +100,13 @@ divergence is a bug, not a "the formula was unclear" defence.
   onboarding flow.
 - [`../../SECURITY.md`](../../SECURITY.md) — disclosure path
   (the only way to earn the bug-bounty tier).
-- [`../whitepaper/`](../whitepaper/) — token economic design
-  (forthcoming; testnet allocation lives here).
-- [`suwappu-lattice-protocol/docs/economics/DEFERRED_TOKEN_ARCHITECTURE.md`](https://github.com/Suwappu-Labs/suwappu-lattice-protocol/blob/main/docs/economics/DEFERRED_TOKEN_ARCHITECTURE.md) —
-  a "mainnet token" here is not a given: mainnet validator security is designed to
-  bootstrap via bonded/restaked stablecoins, with any native token (SUWP or otherwise)
-  deferred until after the bridge and chain have real usage to design its economics
-  from. Treat this testnet allocation formula as provisional pending that decision.
+- [`../whitepaper/TOKENOMICS.md`](../whitepaper/TOKENOMICS.md) — token
+  economic design. **Decision made 2026-08-24**: SUWP launches with the
+  chain — full supply pre-mined at genesis, fair-launch distribution, no
+  insider allocation. This formula is no longer provisional: an 8%-of-supply
+  pool (the ceiling of the [5%, 8%] range above) is reserved at a published
+  genesis address; the board still pins the final percentage ≥ 90 days
+  pre-TGE, and the gap plus unclaimed balances burn 180 days after TGE.
+  The earlier deferred-token stance
+  ([`DEFERRED_TOKEN_ARCHITECTURE.md`](https://github.com/Suwappu-Labs/suwappu-lattice-protocol/blob/main/docs/economics/DEFERRED_TOKEN_ARCHITECTURE.md))
+  is superseded on this point.
