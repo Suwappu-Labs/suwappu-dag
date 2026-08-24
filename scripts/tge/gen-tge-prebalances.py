@@ -113,6 +113,12 @@ def emit_prebalances(ledger: dict, out: Path) -> None:
         f.write("# scripts/tge/gen-tge-prebalances.py from allocations.toml.\n")
         f.write("# Paste/include into the mainnet genesis.toml. Field names match\n")
         f.write("# crates/suwappu-node/src/config.rs GenesisPrebalance.\n\n")
+        f.write("# Supply cap: State::new seals the substrate's supply ledger\n")
+        f.write("# with this value after applying the prebalances below. Since\n")
+        f.write("# the prebalances sum to exactly this cap, every future\n")
+        f.write("# Intent::MintInflation fails with MaxSupplyExceeded — the\n")
+        f.write("# pre-mine is the chain's only issuance event.\n")
+        f.write(f"max_supply_suwappu = {ledger['total_supply_suwappu']}\n\n")
         for pool in ledger["pools"]:
             f.write("[[prebalances]]\n")
             f.write(f'address = "{pool["address"]}"\n')

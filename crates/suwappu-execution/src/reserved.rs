@@ -149,6 +149,32 @@ pub const REWARDS_DISTRIBUTION_REGISTRY_DOMAIN: &[u8] = b"suwappu-rewards-distri
 /// `Intent::Delegate` (Tokenomics §4 delegated PoS).
 pub const VALIDATOR_DELEGATION_REGISTRY_DOMAIN: &[u8] = b"suwappu-validator-delegation-registry-v1";
 
+/// Domain tag for the TGE fair-launch distribution pool.
+/// Holds the open-public-distribution share of the genesis
+/// pre-mine until the TGE claim path drains it (fair-launch
+/// tokenomics, `docs/whitepaper/TOKENOMICS.md` §2.1). Ledger
+/// entry: `scripts/tge/allocations.toml`.
+pub const TGE_FAIR_LAUNCH_POOL_DOMAIN: &[u8] = b"suwappu-tge-fair-launch-pool-v1";
+
+/// Domain tag for the TGE Seasons-program pool. Funds the
+/// suwappubot Seasons usage-reward schedule (30% of supply,
+/// `TOKENOMICS.md` §2.2) from genesis.
+pub const TGE_SEASONS_POOL_DOMAIN: &[u8] = b"suwappu-tge-seasons-pool-v1";
+
+/// Domain tag for the TGE testnet-points pool. Funds the
+/// testnet validator points→token conversion
+/// (`docs/testnet/POINTS.md`; 8%-of-supply ceiling,
+/// `TOKENOMICS.md` §2.4).
+pub const TGE_TESTNET_POINTS_POOL_DOMAIN: &[u8] = b"suwappu-tge-testnet-points-pool-v1";
+
+/// Domain tag for the supply registry. Bytes_state holds
+/// `max_supply ‖ issued` (32 BE bytes: two u128s). Written once
+/// at genesis when the manifest sets `max_supply_suwappu`;
+/// `Intent::MintInflation` fail-closes against it so total
+/// issuance can never exceed the genesis-committed max supply.
+/// Absent (legacy manifests) = no cap.
+pub const SUPPLY_REGISTRY_DOMAIN: &[u8] = b"suwappu-supply-registry-v1";
+
 /// Compute the reserved address corresponding to `domain` —
 /// `BLAKE3(domain)[..20]`. Used by the three exposed helpers below.
 /// Inlined per call site (BLAKE3 is sub-microsecond).
@@ -304,6 +330,33 @@ pub fn validator_delegation_registry_address() -> Address {
     derive(VALIDATOR_DELEGATION_REGISTRY_DOMAIN)
 }
 
+/// Reserved address for the TGE fair-launch distribution pool
+/// (`TOKENOMICS.md` §2.1). Credited by genesis prebalances;
+/// drained only by the TGE claim path (pre-TGE gap tracked in
+/// `docs/testnet/LAUNCH-STATUS.md`).
+pub fn tge_fair_launch_pool_address() -> Address {
+    derive(TGE_FAIR_LAUNCH_POOL_DOMAIN)
+}
+
+/// Reserved address for the TGE Seasons-program pool
+/// (`TOKENOMICS.md` §2.2).
+pub fn tge_seasons_pool_address() -> Address {
+    derive(TGE_SEASONS_POOL_DOMAIN)
+}
+
+/// Reserved address for the TGE testnet-points pool
+/// (`TOKENOMICS.md` §2.4).
+pub fn tge_testnet_points_pool_address() -> Address {
+    derive(TGE_TESTNET_POINTS_POOL_DOMAIN)
+}
+
+/// Reserved address for the supply registry. Bytes_state holds
+/// `max_supply ‖ issued` (32 BE bytes: two u128s); see
+/// `SUPPLY_REGISTRY_DOMAIN`.
+pub fn supply_registry_address() -> Address {
+    derive(SUPPLY_REGISTRY_DOMAIN)
+}
+
 /// Returns true if `addr` is a reserved protocol-owned registry
 /// account. Both `Substrate` impls reject `Intent::Transfer` into
 /// or out of a reserved address.
@@ -328,6 +381,10 @@ pub fn is_reserved(addr: &Address) -> bool {
         || addr == &inflation_registry_address()
         || addr == &rewards_distribution_registry_address()
         || addr == &validator_delegation_registry_address()
+        || addr == &tge_fair_launch_pool_address()
+        || addr == &tge_seasons_pool_address()
+        || addr == &tge_testnet_points_pool_address()
+        || addr == &supply_registry_address()
 }
 
 #[cfg(test)]
@@ -357,6 +414,10 @@ mod tests {
             inflation_registry_address(),
             rewards_distribution_registry_address(),
             validator_delegation_registry_address(),
+            tge_fair_launch_pool_address(),
+            tge_seasons_pool_address(),
+            tge_testnet_points_pool_address(),
+            supply_registry_address(),
         ];
         for (i, a) in all.iter().enumerate() {
             for (j, b) in all.iter().enumerate() {
@@ -418,6 +479,48 @@ mod tests {
         assert!(is_reserved(&validator_registry_address()));
         assert!(is_reserved(&authority_stake_pool_address()));
         assert!(is_reserved(&validator_stake_pool_address()));
+        assert!(is_reserved(&tge_fair_launch_pool_address()));
+        assert!(is_reserved(&tge_seasons_pool_address()));
+        assert!(is_reserved(&tge_testnet_points_pool_address()));
+        assert!(is_reserved(&supply_registry_address()));
+    }
+
+    /// Cross-language parity pin: the TGE pool addresses published in
+    /// `scripts/tge/allocations.toml` (derived by the Python tooling
+    /// via `blake3(domain_tag)[:20]`) must byte-match this crate's
+    /// derivation. A drift here silently pre-mines into addresses the
+    /// chain does not protect. Updating any pinned hex requires
+    /// updating the published ledger + `docs/whitepaper/TOKENOMICS.md`
+    /// in the same commit.
+    #[test]
+    fn tge_pool_addresses_match_published_ledger() {
+        let cases: [(&str, Address); 4] = [
+            (
+                "f9e86688d4afeeff73b01067237e5529149905f0",
+                tge_fair_launch_pool_address(),
+            ),
+            (
+                "ae360caae624555b7fc6a2b7a96def76780d9e43",
+                tge_seasons_pool_address(),
+            ),
+            (
+                "9e28b89b1c3b49a75f3b782e0ac9ee5919b340f9",
+                tge_testnet_points_pool_address(),
+            ),
+            // Staking-rewards pre-mine lands directly in the existing
+            // per-ring rewards pools (drained by DistributeRewards):
+            (
+                "1148457e50ba9ee1b9197e98dd0efc096063a50c",
+                authority_rewards_pool_address(),
+            ),
+        ];
+        for (expected_hex, addr) in cases {
+            assert_eq!(hex::encode(addr), expected_hex);
+        }
+        assert_eq!(
+            hex::encode(validator_rewards_pool_address()),
+            "ef9bd42745ebdf4dbcb15e21426a670efbc407f5"
+        );
     }
 
     #[test]

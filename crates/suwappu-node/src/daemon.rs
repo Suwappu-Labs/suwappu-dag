@@ -527,6 +527,22 @@ impl State {
                 tracing::warn!(err = %e, "genesis: prebalance application failed");
             }
         }
+        // Fair-launch supply cap: seal the supply ledger with the
+        // manifest's committed max supply so `Intent::MintInflation`
+        // fail-closes past it. Sealed AFTER the prebalances so the
+        // pre-mine counts as issued; every validator shares the same
+        // genesis.toml, so the ledger (and state root) stay
+        // deterministic across the mesh. `GenesisManifest::from_path`
+        // already refused any manifest whose prebalances exceed the
+        // cap.
+        if let Some(max_supply) = manifest.max_supply_suwappu {
+            substrate.seal_supply_ledger(max_supply as u128);
+            tracing::info!(
+                max_supply,
+                issued = %substrate.total_supply(),
+                "genesis: supply ledger sealed"
+            );
+        }
         let n = manifest.validators.len() as u32;
         Self {
             dag: tokio::sync::RwLock::new(DagStore::new()),
@@ -2674,6 +2690,7 @@ mod tests {
         let (pk, sk) = suwappu_crypto::mldsa::keypair();
         let pk_hex = hex::encode(pk.as_bytes());
         let manifest = GenesisManifest {
+            max_supply_suwappu: None,
             network_id: network_id.clone(),
             validators: (0..n)
                 .map(|i| GenesisValidator {
@@ -2764,6 +2781,7 @@ mod tests {
         let (pk, sk) = suwappu_crypto::mldsa::keypair();
         let pk_hex = hex::encode(pk.as_bytes());
         let manifest = GenesisManifest {
+            max_supply_suwappu: None,
             network_id: network_id.clone(),
             validators: (0..n)
                 .map(|i| GenesisValidator {
@@ -2860,6 +2878,7 @@ mod tests {
         )> = (0..n).map(|_| suwappu_crypto::mldsa::keypair()).collect();
 
         let manifest = GenesisManifest {
+            max_supply_suwappu: None,
             network_id: "test-4n".into(),
             validators: (0..n)
                 .map(|i| GenesisValidator {
@@ -2999,6 +3018,7 @@ mod tests {
         )> = (1..n).map(|_| suwappu_crypto::mldsa::keypair()).collect();
 
         let manifest = GenesisManifest {
+            max_supply_suwappu: None,
             network_id: network_id.to_string(),
             validators: (0..n)
                 .map(|i| GenesisValidator {
@@ -3699,6 +3719,7 @@ mod tests {
         let (pk, sk) = suwappu_crypto::mldsa::keypair();
         let pk_hex = hex::encode(pk.as_bytes());
         let manifest = GenesisManifest {
+            max_supply_suwappu: None,
             network_id: network_id.clone(),
             validators: (0..n)
                 .map(|i| GenesisValidator {
@@ -3874,6 +3895,7 @@ mod tests {
         let faucet_addr: [u8; 20] = [0xAB; 20];
         let other_addr: [u8; 20] = [0xCD; 20];
         let mut manifest = GenesisManifest {
+            max_supply_suwappu: None,
             network_id: "prebalance-test".into(),
             validators: vec![GenesisValidator {
                 authority_id: 0,
@@ -3937,6 +3959,7 @@ mod tests {
     async fn fastpath_receiver_accumulates_to_quorum_and_slashes_equivocation() {
         let n = 4u32;
         let manifest = GenesisManifest {
+            max_supply_suwappu: None,
             network_id: "fp-4n".into(),
             validators: (0..n)
                 .map(|i| GenesisValidator {
@@ -4038,6 +4061,7 @@ mod tests {
     async fn fastpath_k_binding_slashes_on_main_lane_conflict() {
         let n = 4u32;
         let manifest = GenesisManifest {
+            max_supply_suwappu: None,
             network_id: "fp-k-binding-4n".into(),
             validators: (0..n)
                 .map(|i| GenesisValidator {
@@ -4146,6 +4170,7 @@ mod tests {
     async fn ltp_receiver_records_attestation() {
         let n = 4u32;
         let manifest = GenesisManifest {
+            max_supply_suwappu: None,
             network_id: "ltp-4n".into(),
             validators: (0..n)
                 .map(|i| GenesisValidator {
@@ -4249,6 +4274,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ltp_unverified_path_when_no_corridor_registered() {
         let manifest = GenesisManifest {
+            max_supply_suwappu: None,
             network_id: "ltp-unreg".into(),
             validators: (0..4u32)
                 .map(|i| GenesisValidator {
@@ -4307,6 +4333,7 @@ mod tests {
         let base_port: u16 = 21_000;
         let (rpc_pk, rpc_sk) = suwappu_crypto::mldsa::keypair();
         let manifest = GenesisManifest {
+            max_supply_suwappu: None,
             network_id: "rpc-bind-1n".into(),
             validators: vec![GenesisValidator {
                 authority_id: 0,
@@ -4397,6 +4424,7 @@ mod tests {
         let (pk, sk) = suwappu_crypto::mldsa::keypair();
         let pk_hex = hex::encode(pk.as_bytes());
         let manifest = GenesisManifest {
+            max_supply_suwappu: None,
             network_id: network_id.clone(),
             validators: (0..n)
                 .map(|i| GenesisValidator {
@@ -4519,6 +4547,7 @@ mod tests {
         let (pk, sk) = suwappu_crypto::mldsa::keypair();
         let pk_hex = hex::encode(pk.as_bytes());
         let manifest = GenesisManifest {
+            max_supply_suwappu: None,
             network_id: network_id.clone(),
             validators: vec![GenesisValidator {
                 authority_id: 0,
@@ -4639,6 +4668,7 @@ mod tests {
         let (pk, sk) = suwappu_crypto::mldsa::keypair();
         let pk_hex = hex::encode(pk.as_bytes());
         let manifest = GenesisManifest {
+            max_supply_suwappu: None,
             network_id,
             validators: vec![GenesisValidator {
                 authority_id: 0,

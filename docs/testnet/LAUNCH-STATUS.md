@@ -90,6 +90,14 @@ Gaps 1–3 below were closed on this branch (2026-08-15):
    or partial-signature transport for the 7-of-9 super-node quorum, and
    no relayer transport (`Relayer.relay()` returns an in-process
    object). "Joining a corridor" is currently a human arrangement.
+7. **TGE claim path (mainnet-gating, not testnet-gating).** The genesis
+   pre-mine pools (`docs/whitepaper/TOKENOMICS.md`) are reserved
+   addresses with no outbound arm: fail-safe (nothing can move them,
+   including us — enforced by `reserved::is_reserved` + the sealed
+   supply ledger), but the fair-launch / Seasons / points distributions
+   cannot execute until a claim intent or precompile ships and is
+   audited. Staking pools are exempt (`Intent::DistributeRewards`
+   already drains them).
 
 ## ⚠️ Hosting: AWS is no longer available (2026-08-15)
 

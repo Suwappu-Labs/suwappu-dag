@@ -455,4 +455,18 @@ pub enum ExecutionError {
         /// for this ring.
         last_distributed_epoch: u64,
     },
+
+    /// `Intent::MintInflation` would push total issuance past the
+    /// genesis-committed max supply sealed in the supply registry
+    /// (`reserved::supply_registry_address`). A fair-launch genesis
+    /// pre-mines issued == max_supply, so every mint lands here.
+    #[error("mint of {attempted_mint} exceeds max supply: {issued} issued of {max_supply} max")]
+    MaxSupplyExceeded {
+        /// Sum of the attempted tranche's three shares.
+        attempted_mint: Balance,
+        /// Total already issued (genesis pre-mine + prior mints).
+        issued: Balance,
+        /// Genesis-committed max supply.
+        max_supply: Balance,
+    },
 }

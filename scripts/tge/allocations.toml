@@ -3,9 +3,11 @@
 # This file is the auditable source of truth for the fair-launch
 # pre-mine: 100% of the fixed 1,000,000,000 SUWP supply is minted in
 # the genesis block into the pools below. There is no other issuance
-# path — the mainnet genesis manifest carries no inflation budget
-# (`Intent::MintInflation` budget = 0), so total supply never exceeds
-# this ledger's sum.
+# path — the emitted fragment carries `max_supply_suwappu` equal to
+# this ledger's sum, the manifest loader refuses prebalances above
+# it, and the sealed on-chain supply ledger makes every
+# `Intent::MintInflation` fail with `MaxSupplyExceeded`
+# (crates/suwappu-execution/src/substrate.rs).
 #
 # Fair-launch constraint (docs/whitepaper/TOKENOMICS.md): no team,
 # investor, private-sale, or foundation-treasury allocation. Every
@@ -38,11 +40,18 @@ amount_suwappu = 300_000_000
 distribution = "8-season decaying usage-reward schedule per suwappubot/docs/economics/SEASONS_TOKENOMICS.md (A = 30%, delta = 0.75)."
 
 [[pools]]
-name = "tge-staking-rewards"
-domain_tag = "suwappu-tge-staking-rewards-pool-v1"
-address = "0x1749c422bc9da089f43ef0c3628b5344c35fba12"
-amount_suwappu = 200_000_000
-distribution = "Validator/authority staking rewards drawn down per epoch. Replaces open-ended MintInflation (UNIFIED_TOKENOMICS §2.1 follow-up); pool exhaustion = no further rewards."
+name = "tge-staking-rewards-authority"
+domain_tag = "suwappu-authority-rewards-pool-v1"
+address = "0x1148457e50ba9ee1b9197e98dd0efc096063a50c"
+amount_suwappu = 100_000_000
+distribution = "Authority Ring staking rewards. Pre-mined directly into the EXISTING authority rewards pool, drained per epoch by Intent::DistributeRewards (replay-defended, reserved-recipient-rejecting) — no new distribution code needed. Replaces open-ended MintInflation, which the sealed supply ledger fail-closes. Pool exhaustion = fee-funded rewards only."
+
+[[pools]]
+name = "tge-staking-rewards-validator"
+domain_tag = "suwappu-validator-rewards-pool-v1"
+address = "0xef9bd42745ebdf4dbcb15e21426a670efbc407f5"
+amount_suwappu = 100_000_000
+distribution = "Validator Ring staking rewards — mirror of the authority entry via the existing validator rewards pool + Intent::DistributeRewards."
 
 [[pools]]
 name = "tge-testnet-points"

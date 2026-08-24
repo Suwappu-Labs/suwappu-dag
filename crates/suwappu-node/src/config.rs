@@ -197,6 +197,20 @@ pub struct GenesisManifest {
     /// (matches pre-fix behavior).
     #[serde(default)]
     pub prebalances: Vec<GenesisPrebalance>,
+
+    /// Genesis-committed max supply, in SUWAPPU. When set,
+    /// `State::new` seals the substrate's supply ledger after
+    /// applying `[[prebalances]]`, and `Intent::MintInflation`
+    /// fail-closes once total issuance would exceed it. The
+    /// fair-launch mainnet genesis sets this equal to the
+    /// pre-mine sum (1,000,000,000 — `docs/whitepaper/
+    /// TOKENOMICS.md`), making all post-genesis minting
+    /// impossible. Optional for backward compatibility —
+    /// absent means uncapped (legacy testnet/devnet behavior).
+    /// `from_path` rejects a manifest whose prebalances already
+    /// exceed it.
+    #[serde(default)]
+    pub max_supply_suwappu: Option<u64>,
 }
 
 /// One genesis pre-balance entry inside [`GenesisManifest::prebalances`].
@@ -331,6 +345,16 @@ pub enum ConfigError {
     /// (with or without `0x` prefix).
     #[error("prebalance address '{0}' is not 0x-prefixed 20-byte hex")]
     BadPrebalanceAddress(String),
+    /// The manifest's `[[prebalances]]` sum to more than its own
+    /// `max_supply_suwappu` — a self-contradictory genesis that
+    /// would brick the supply ledger. Refused at load.
+    #[error("prebalances sum to {premined} SUWAPPU, exceeding max_supply_suwappu {max_supply}")]
+    PrebalancesExceedMaxSupply {
+        /// Sum of every `[[prebalances]]` entry.
+        premined: u128,
+        /// The manifest's `max_supply_suwappu`.
+        max_supply: u64,
+    },
     /// authority_id present in genesis but label doesn't match self_id —
     /// indicates a config/manifest desync.
     #[error("self_id '{self_id}' does not match genesis label '{manifest}' at authority_id {id}")]
@@ -355,12 +379,30 @@ impl NodeConfig {
 }
 
 impl GenesisManifest {
-    /// Load from a TOML file.
+    /// Load from a TOML file. Rejects a manifest whose
+    /// `[[prebalances]]` sum past its own `max_supply_suwappu` —
+    /// better a loud boot failure than a chain whose supply
+    /// ledger contradicts its genesis.
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
         let path = path.as_ref();
         let text =
             std::fs::read_to_string(path).map_err(|e| ConfigError::Read(path.to_path_buf(), e))?;
-        toml::from_str(&text).map_err(|e| ConfigError::Parse(path.to_path_buf(), e))
+        let manifest: Self =
+            toml::from_str(&text).map_err(|e| ConfigError::Parse(path.to_path_buf(), e))?;
+        if let Some(max_supply) = manifest.max_supply_suwappu {
+            let premined: u128 = manifest
+                .prebalances
+                .iter()
+                .map(|p| p.balance_suwappu as u128)
+                .sum();
+            if premined > max_supply as u128 {
+                return Err(ConfigError::PrebalancesExceedMaxSupply {
+                    premined,
+                    max_supply,
+                });
+            }
+        }
+        Ok(manifest)
     }
 
     /// Cross-check the manifest against a [`NodeConfig`]: the configured
@@ -419,6 +461,7 @@ mod tests {
     #[test]
     fn genesis_validate_catches_label_mismatch() {
         let manifest = GenesisManifest {
+            max_supply_suwappu: None,
             network_id: "perf".into(),
             validators: vec![GenesisValidator {
                 authority_id: 0,
@@ -508,6 +551,89 @@ mod tests {
         assert_eq!(addr[0], 0x00);
         assert_eq!(addr[1], 0x11);
         assert_eq!(addr[19], 0x33);
+    }
+
+    /// `max_supply_suwappu` parses when present and defaults to
+    /// `None` (uncapped, legacy behavior) when absent.
+    #[test]
+    fn manifest_parses_max_supply() {
+        let toml_src = r#"
+            network_id = "suwappu-mainnet"
+            max_supply_suwappu = 1000000000
+
+            [[validators]]
+            authority_id = 0
+            label = "us-east-1"
+            mldsa_public_key_hex = "00"
+            bls_public_key_hex = "00"
+            validator_stake_suwappu = 1
+            authority_stake_suwappu = 1
+        "#;
+        let manifest: GenesisManifest = toml::from_str(toml_src).unwrap();
+        assert_eq!(manifest.max_supply_suwappu, Some(1_000_000_000));
+
+        let legacy: GenesisManifest = toml::from_str(
+            r#"
+            network_id = "suwappu-devnet"
+
+            [[validators]]
+            authority_id = 0
+            label = "us-east-1"
+            mldsa_public_key_hex = "00"
+            bls_public_key_hex = "00"
+            validator_stake_suwappu = 1
+            authority_stake_suwappu = 1
+        "#,
+        )
+        .unwrap();
+        assert_eq!(legacy.max_supply_suwappu, None);
+    }
+
+    /// `from_path` refuses a self-contradictory genesis whose
+    /// prebalances exceed its own committed max supply, and
+    /// accepts one that pre-mines the max exactly (the
+    /// fair-launch shape).
+    #[test]
+    fn from_path_gates_prebalances_against_max_supply() {
+        let manifest_toml = |balance: u64| {
+            format!(
+                r#"
+                network_id = "suwappu-mainnet"
+                max_supply_suwappu = 100
+
+                [[validators]]
+                authority_id = 0
+                label = "us-east-1"
+                mldsa_public_key_hex = "00"
+                bls_public_key_hex = "00"
+                validator_stake_suwappu = 1
+                authority_stake_suwappu = 1
+
+                [[prebalances]]
+                address = "0x00112233445566778899aabbccddeeff00112233"
+                balance_suwappu = {balance}
+            "#
+            )
+        };
+        let dir = std::env::temp_dir();
+
+        let over = dir.join("suwappu-test-genesis-over-cap.toml");
+        std::fs::write(&over, manifest_toml(101)).unwrap();
+        let err = GenesisManifest::from_path(&over);
+        let _ = std::fs::remove_file(&over);
+        assert!(matches!(
+            err,
+            Err(ConfigError::PrebalancesExceedMaxSupply {
+                premined: 101,
+                max_supply: 100,
+            })
+        ));
+
+        let exact = dir.join("suwappu-test-genesis-exact-cap.toml");
+        std::fs::write(&exact, manifest_toml(100)).unwrap();
+        let manifest = GenesisManifest::from_path(&exact);
+        let _ = std::fs::remove_file(&exact);
+        assert_eq!(manifest.unwrap().max_supply_suwappu, Some(100));
     }
 
     /// Address parsing rejects non-hex and wrong-length inputs.

@@ -991,6 +991,35 @@ impl InMemorySubstrate {
         self.balances.values().sum()
     }
 
+    /// Seal the supply ledger at genesis: record `max_supply` plus
+    /// the currently-issued total (the genesis pre-mine) in the
+    /// supply registry (`reserved::supply_registry_address`).
+    /// `Intent::MintInflation` fail-closes against this record, so
+    /// post-genesis issuance can never push the total past
+    /// `max_supply`. Call once, after genesis allocations are
+    /// applied — a fair-launch genesis where the pre-mine equals
+    /// `max_supply` makes every future mint fail by construction.
+    pub fn seal_supply_ledger(&mut self, max_supply: Balance) {
+        let issued = self.total_supply();
+        let mut bytes = Vec::with_capacity(32);
+        bytes.extend_from_slice(&max_supply.to_be_bytes());
+        bytes.extend_from_slice(&issued.to_be_bytes());
+        self.write_bytes_unchecked(reserved::supply_registry_address(), bytes);
+    }
+
+    /// Read the supply ledger as `(max_supply, issued)`. `None`
+    /// when no cap was sealed at genesis (legacy manifests: mint
+    /// remains uncapped, matching pre-cap behavior).
+    pub fn supply_ledger(&self) -> Option<(Balance, Balance)> {
+        let bytes = self.read_bytes(&reserved::supply_registry_address())?;
+        if bytes.len() != 32 {
+            return None;
+        }
+        let max = Balance::from_be_bytes(bytes[0..16].try_into().unwrap());
+        let issued = Balance::from_be_bytes(bytes[16..32].try_into().unwrap());
+        Some((max, issued))
+    }
+
     /// Iterate `(address, balance)` pairs in canonical (ascending-
     /// address) order.
     pub fn entries(&self) -> impl Iterator<Item = (&Address, &Balance)> {
@@ -1702,6 +1731,43 @@ impl Substrate for InMemorySubstrate {
                         last_minted_epoch: last_epoch,
                     });
                 }
+                // Genesis-committed supply cap (fair-launch
+                // invariant, TOKENOMICS.md §1): when the supply
+                // ledger is sealed, the tranche must fit under
+                // max_supply. Checked BEFORE any credit; on
+                // failure neither the epoch counter nor the
+                // issued total moves. Absent ledger = legacy
+                // uncapped behavior.
+                let supply_addr = reserved::supply_registry_address();
+                let ledger_bytes = self.read_bytes(&supply_addr).unwrap_or_default();
+                let sealed = if ledger_bytes.is_empty() {
+                    None
+                } else if ledger_bytes.len() == 32 {
+                    Some((
+                        Balance::from_be_bytes(ledger_bytes[0..16].try_into().unwrap()),
+                        Balance::from_be_bytes(ledger_bytes[16..32].try_into().unwrap()),
+                    ))
+                } else {
+                    return Err(ExecutionError::CorruptStateRecord {
+                        addr: supply_addr,
+                        reason: "supply registry size mismatch",
+                    });
+                };
+                let tranche = authority_share
+                    .checked_add(*validator_share)
+                    .and_then(|s| s.checked_add(*treasury_share))
+                    .ok_or(ExecutionError::BalanceOverflow { to: supply_addr })?;
+                if let Some((max_supply, issued)) = sealed {
+                    // `checked_add` overflow counts as exceeded (MSRV
+                    // 1.78 — `Option::is_none_or` lands in 1.82).
+                    if !issued.checked_add(tranche).is_some_and(|t| t <= max_supply) {
+                        return Err(ExecutionError::MaxSupplyExceeded {
+                            attempted_mint: tranche,
+                            issued,
+                            max_supply,
+                        });
+                    }
+                }
                 // Atomic across all three credits: if any of
                 // the pool balances would overflow, no credit
                 // lands and the epoch counter is NOT bumped
@@ -1713,6 +1779,12 @@ impl Substrate for InMemorySubstrate {
                     (reserved::treasury_address(), *treasury_share),
                 ])?;
                 self.write_bytes_unchecked(registry_addr, epoch.to_be_bytes().to_vec());
+                if let Some((max_supply, issued)) = sealed {
+                    let mut bytes = Vec::with_capacity(32);
+                    bytes.extend_from_slice(&max_supply.to_be_bytes());
+                    bytes.extend_from_slice(&(issued + tranche).to_be_bytes());
+                    self.write_bytes_unchecked(supply_addr, bytes);
+                }
                 Ok(())
             }
             // Per-epoch reward payout from the named ring's
@@ -8153,6 +8225,111 @@ mod tests {
             })
         ));
         assert_eq!(s.state_root(), before);
+    }
+
+    /// Fair-launch invariant: a genesis that pre-mines the full
+    /// max supply (issued == max) makes EVERY subsequent mint
+    /// fail, and the failure moves nothing — no pool credit, no
+    /// epoch bump, no issued change.
+    #[test]
+    fn mint_inflation_rejected_when_premine_equals_max_supply() {
+        let mut s = InMemorySubstrate::new();
+        s.apply_intent(&Intent::GenesisAllocation {
+            allocations: vec![(reserved::tge_fair_launch_pool_address(), 1_000_000_000)],
+        })
+        .unwrap();
+        s.seal_supply_ledger(1_000_000_000);
+        assert_eq!(s.supply_ledger(), Some((1_000_000_000, 1_000_000_000)));
+        let before = s.state_root();
+        let err = s.apply_intent(&Intent::MintInflation {
+            epoch: 1,
+            authority_share: 1,
+            validator_share: 0,
+            treasury_share: 0,
+        });
+        assert!(matches!(
+            err,
+            Err(ExecutionError::MaxSupplyExceeded {
+                attempted_mint: 1,
+                issued: 1_000_000_000,
+                max_supply: 1_000_000_000,
+            })
+        ));
+        assert_eq!(s.state_root(), before);
+        assert_eq!(s.last_minted_inflation_epoch(), 0);
+        assert_eq!(s.supply_ledger(), Some((1_000_000_000, 1_000_000_000)));
+    }
+
+    /// Under-cap mints succeed and draw down the remaining
+    /// headroom until the cap binds exactly; a zero-amount mint
+    /// still succeeds at the cap (it issues nothing).
+    #[test]
+    fn mint_inflation_capped_headroom_draws_down_to_exact_cap() {
+        let mut s = InMemorySubstrate::new();
+        s.apply_intent(&Intent::GenesisAllocation {
+            allocations: vec![(reserved::tge_seasons_pool_address(), 700)],
+        })
+        .unwrap();
+        s.seal_supply_ledger(1_000);
+        // 200 of the 300 headroom.
+        s.apply_intent(&Intent::MintInflation {
+            epoch: 1,
+            authority_share: 100,
+            validator_share: 50,
+            treasury_share: 50,
+        })
+        .unwrap();
+        assert_eq!(s.supply_ledger(), Some((1_000, 900)));
+        // 101 > the 100 remaining: rejected, ledger unmoved.
+        assert!(matches!(
+            s.apply_intent(&Intent::MintInflation {
+                epoch: 2,
+                authority_share: 101,
+                validator_share: 0,
+                treasury_share: 0,
+            }),
+            Err(ExecutionError::MaxSupplyExceeded {
+                attempted_mint: 101,
+                issued: 900,
+                max_supply: 1_000,
+            })
+        ));
+        assert_eq!(s.last_minted_inflation_epoch(), 1);
+        // Exactly the remaining 100: lands, cap now binds.
+        s.apply_intent(&Intent::MintInflation {
+            epoch: 2,
+            authority_share: 100,
+            validator_share: 0,
+            treasury_share: 0,
+        })
+        .unwrap();
+        assert_eq!(s.supply_ledger(), Some((1_000, 1_000)));
+        assert_eq!(s.total_supply(), 1_000);
+        // Zero-amount mint at the bound cap still succeeds.
+        s.apply_intent(&Intent::MintInflation {
+            epoch: 3,
+            authority_share: 0,
+            validator_share: 0,
+            treasury_share: 0,
+        })
+        .unwrap();
+        assert_eq!(s.supply_ledger(), Some((1_000, 1_000)));
+    }
+
+    /// No sealed ledger (legacy manifests) = uncapped mint,
+    /// matching pre-cap behavior byte-for-byte.
+    #[test]
+    fn mint_inflation_uncapped_without_supply_ledger() {
+        let mut s = InMemorySubstrate::new();
+        assert_eq!(s.supply_ledger(), None);
+        s.apply_intent(&Intent::MintInflation {
+            epoch: 1,
+            authority_share: u64::MAX as Balance,
+            validator_share: 0,
+            treasury_share: 0,
+        })
+        .unwrap();
+        assert_eq!(s.supply_ledger(), None);
     }
 
     /// Earlier epoch (backwards) rejects.
