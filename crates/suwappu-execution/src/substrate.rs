@@ -763,6 +763,44 @@ pub enum Intent {
         /// Asset identifier.
         asset_id: [u8; 32],
     },
+    /// Set (or rotate) the Merkle distribution root for a TGE
+    /// claim pool — the `MerkleDistributor` pattern from live
+    /// Ethereum airdrops (Uniswap's distributor, verified on
+    /// mainnet at `0x090D4613473dEE047c3f2706764f49E0821D256e`;
+    /// Arbitrum's `TokenDistributor`), ported per
+    /// `crate::tge_claim`. Governance intent: ingress requires a
+    /// sponsor plus a second, distinct seated authority (same
+    /// wire-v3 dual-signature rule as `AdmitAuthority`; enforced
+    /// in the suwappu-node client, not here). Rotating starts a
+    /// new round with a fresh claimed-set — the analogue of
+    /// deploying a new distributor per drop (Seasons pool's
+    /// recurring schedule). The pool's remaining balance is the
+    /// only budget a round can pay from.
+    SetTgeRoot {
+        /// Which TGE claim pool (one of the reserved
+        /// fair-launch / seasons / testnet-points addresses).
+        pool: Address,
+        /// Merkle root of this round's `(index, account,
+        /// amount)` distribution set.
+        merkle_root: [u8; 32],
+    },
+    /// Claim one leaf of a TGE pool's active distribution round.
+    /// Permissionless — anyone may submit a valid proof; funds
+    /// go to the leaf's committed `account`, never the
+    /// submitter. Each index claims once per round.
+    TgeClaim {
+        /// The TGE claim pool.
+        pool: Address,
+        /// Leaf index in the distribution set.
+        index: u32,
+        /// Recipient committed in the leaf.
+        account: Address,
+        /// Amount committed in the leaf.
+        amount: Balance,
+        /// Sibling hashes, leaf → root (sorted-pair convention,
+        /// no direction bits).
+        proof: Vec<[u8; 32]>,
+    },
 }
 
 /// Classification of a sequencer slashing event. Drives the
@@ -3238,6 +3276,79 @@ impl Substrate for InMemorySubstrate {
                 rec.status = AssetStatus::Removed;
                 let new_bytes = encode(&registry);
                 self.write_bytes_unchecked(registry_addr, new_bytes);
+                Ok(())
+            }
+            // TGE distribution root — MerkleDistributor pattern
+            // (see crate::tge_claim). Governance-gated at the
+            // node's ingress (dual-authority co-signature);
+            // substrate's job is the deterministic state effect:
+            // start a new claim round on the pool's own
+            // bytes_state record.
+            Intent::SetTgeRoot { pool, merkle_root } => {
+                if !reserved::is_tge_claim_pool(pool) {
+                    return Err(ExecutionError::TgeUnknownPool { addr: *pool });
+                }
+                if merkle_root == &[0u8; 32] {
+                    return Err(ExecutionError::TgeRootAllZeros);
+                }
+                let prev = match self.read_bytes(pool) {
+                    None => None,
+                    Some(bytes) => Some(crate::tge_claim::TgeDistribution::decode(&bytes).ok_or(
+                        ExecutionError::CorruptStateRecord {
+                            addr: *pool,
+                            reason: "TGE distribution record malformed",
+                        },
+                    )?),
+                };
+                let next =
+                    crate::tge_claim::TgeDistribution::new_round(prev.as_ref(), *merkle_root);
+                self.write_bytes_unchecked(*pool, next.encode());
+                Ok(())
+            }
+            // Permissionless proof-carrying claim against the
+            // pool's active round. All checks precede any
+            // mutation; the pool→account move itself is the
+            // atomic `transfer_internal`, so a failed claim
+            // moves nothing and burns no index.
+            Intent::TgeClaim {
+                pool,
+                index,
+                account,
+                amount,
+                proof,
+            } => {
+                if !reserved::is_tge_claim_pool(pool) {
+                    return Err(ExecutionError::TgeUnknownPool { addr: *pool });
+                }
+                if reserved::is_reserved(account) {
+                    return Err(ExecutionError::ReservedAddressTransferDenied { addr: *account });
+                }
+                let bytes = self
+                    .read_bytes(pool)
+                    .ok_or(ExecutionError::TgeRootNotSet { pool: *pool })?;
+                let mut dist = crate::tge_claim::TgeDistribution::decode(&bytes).ok_or(
+                    ExecutionError::CorruptStateRecord {
+                        addr: *pool,
+                        reason: "TGE distribution record malformed",
+                    },
+                )?;
+                if dist.is_claimed(*index) {
+                    return Err(ExecutionError::TgeAlreadyClaimed {
+                        pool: *pool,
+                        round: dist.round,
+                        index: *index,
+                    });
+                }
+                let leaf = crate::tge_claim::leaf_hash(*index, account, *amount);
+                if !crate::tge_claim::verify_proof(&dist.merkle_root, &leaf, proof) {
+                    return Err(ExecutionError::TgeProofInvalid {
+                        pool: *pool,
+                        index: *index,
+                    });
+                }
+                self.transfer_internal(*pool, *account, *amount)?;
+                dist.set_claimed(*index);
+                self.write_bytes_unchecked(*pool, dist.encode());
                 Ok(())
             }
         }
@@ -8464,6 +8575,212 @@ mod tests {
         .unwrap();
         assert_eq!(s.supply_ledger(), Some((1_000, 1_000)));
         assert_eq!(s.total_supply(), 1_000);
+    }
+
+    /// MerkleDistributor happy path under a fair-launch genesis:
+    /// root set → proof-carrying claim moves pool→account, marks
+    /// the index, and — because a claim is a transfer, not
+    /// issuance — leaves the sealed supply ledger and total supply
+    /// untouched. Replays and forged leaves are rejected.
+    #[test]
+    fn tge_claim_distributes_from_pool_under_sealed_supply() {
+        use crate::tge_claim;
+        let pool = reserved::tge_fair_launch_pool_address();
+        let mut s = InMemorySubstrate::new();
+        s.apply_intent(&Intent::GenesisAllocation {
+            allocations: vec![(pool, 1_000)],
+        })
+        .unwrap();
+        assert!(s.seal_supply_ledger(1_000));
+
+        let entries: Vec<(Address, Balance)> =
+            vec![([0x11; 20], 400), ([0x22; 20], 350), ([0x33; 20], 250)];
+        let root = tge_claim::build_root(&entries);
+        s.apply_intent(&Intent::SetTgeRoot {
+            pool,
+            merkle_root: root,
+        })
+        .unwrap();
+
+        // Claim leaf 1.
+        s.apply_intent(&Intent::TgeClaim {
+            pool,
+            index: 1,
+            account: [0x22; 20],
+            amount: 350,
+            proof: tge_claim::build_proof(&entries, 1),
+        })
+        .unwrap();
+        assert_eq!(s.balance(&[0x22; 20]), 350);
+        assert_eq!(s.balance(&pool), 650);
+        // A claim is a transfer: supply accounting must not move.
+        assert_eq!(s.supply_ledger(), Some((1_000, 1_000)));
+        assert_eq!(s.total_supply(), 1_000);
+
+        // Replay of the same index rejects, moving nothing.
+        let before = s.state_root();
+        assert!(matches!(
+            s.apply_intent(&Intent::TgeClaim {
+                pool,
+                index: 1,
+                account: [0x22; 20],
+                amount: 350,
+                proof: tge_claim::build_proof(&entries, 1),
+            }),
+            Err(ExecutionError::TgeAlreadyClaimed {
+                round: 1,
+                index: 1,
+                ..
+            })
+        ));
+        // A forged amount fails proof verification.
+        assert!(matches!(
+            s.apply_intent(&Intent::TgeClaim {
+                pool,
+                index: 0,
+                account: [0x11; 20],
+                amount: 999,
+                proof: tge_claim::build_proof(&entries, 0),
+            }),
+            Err(ExecutionError::TgeProofInvalid { index: 0, .. })
+        ));
+        assert_eq!(s.state_root(), before);
+    }
+
+    /// Guard rails: non-claim pools (staking pools included) are
+    /// rejected, claims need an active round, all-zero roots are
+    /// refused, reserved recipients are refused, and a round can
+    /// never pay out more than the pool holds.
+    #[test]
+    fn tge_claim_guard_rails() {
+        use crate::tge_claim;
+        let pool = reserved::tge_testnet_points_pool_address();
+        let mut s = InMemorySubstrate::new();
+        s.apply_intent(&Intent::GenesisAllocation {
+            allocations: vec![(pool, 100)],
+        })
+        .unwrap();
+
+        // Staking pools distribute via DistributeRewards, not claims.
+        assert!(matches!(
+            s.apply_intent(&Intent::SetTgeRoot {
+                pool: reserved::authority_rewards_pool_address(),
+                merkle_root: [1; 32],
+            }),
+            Err(ExecutionError::TgeUnknownPool { .. })
+        ));
+        // No round yet → claims reject.
+        assert!(matches!(
+            s.apply_intent(&Intent::TgeClaim {
+                pool,
+                index: 0,
+                account: [0x11; 20],
+                amount: 1,
+                proof: vec![],
+            }),
+            Err(ExecutionError::TgeRootNotSet { .. })
+        ));
+        // All-zeros root refused.
+        assert!(matches!(
+            s.apply_intent(&Intent::SetTgeRoot {
+                pool,
+                merkle_root: [0; 32],
+            }),
+            Err(ExecutionError::TgeRootAllZeros)
+        ));
+
+        // Over-committed round: the tree promises 150 but the pool
+        // holds 100 — the second claim fails on pool balance.
+        let entries: Vec<(Address, Balance)> = vec![([0x11; 20], 90), ([0x22; 20], 60)];
+        s.apply_intent(&Intent::SetTgeRoot {
+            pool,
+            merkle_root: tge_claim::build_root(&entries),
+        })
+        .unwrap();
+        s.apply_intent(&Intent::TgeClaim {
+            pool,
+            index: 0,
+            account: [0x11; 20],
+            amount: 90,
+            proof: tge_claim::build_proof(&entries, 0),
+        })
+        .unwrap();
+        assert!(matches!(
+            s.apply_intent(&Intent::TgeClaim {
+                pool,
+                index: 1,
+                account: [0x22; 20],
+                amount: 60,
+                proof: tge_claim::build_proof(&entries, 1),
+            }),
+            Err(ExecutionError::InsufficientBalance { .. })
+        ));
+
+        // Reserved recipients can never be claim targets.
+        let reserved_entries: Vec<(Address, Balance)> = vec![(reserved::treasury_address(), 1)];
+        s.apply_intent(&Intent::SetTgeRoot {
+            pool,
+            merkle_root: tge_claim::build_root(&reserved_entries),
+        })
+        .unwrap();
+        assert!(matches!(
+            s.apply_intent(&Intent::TgeClaim {
+                pool,
+                index: 0,
+                account: reserved::treasury_address(),
+                amount: 1,
+                proof: tge_claim::build_proof(&reserved_entries, 0),
+            }),
+            Err(ExecutionError::ReservedAddressTransferDenied { .. })
+        ));
+    }
+
+    /// Rotating the root (SetTgeRoot again) starts a fresh round:
+    /// the claimed bitmap resets, so the same index becomes
+    /// claimable under the new tree — the per-drop analogue of
+    /// deploying a new distributor.
+    #[test]
+    fn tge_root_rotation_starts_fresh_round() {
+        use crate::tge_claim;
+        let pool = reserved::tge_seasons_pool_address();
+        let mut s = InMemorySubstrate::new();
+        s.apply_intent(&Intent::GenesisAllocation {
+            allocations: vec![(pool, 1_000)],
+        })
+        .unwrap();
+
+        let season1: Vec<(Address, Balance)> = vec![([0x11; 20], 100)];
+        s.apply_intent(&Intent::SetTgeRoot {
+            pool,
+            merkle_root: tge_claim::build_root(&season1),
+        })
+        .unwrap();
+        s.apply_intent(&Intent::TgeClaim {
+            pool,
+            index: 0,
+            account: [0x11; 20],
+            amount: 100,
+            proof: tge_claim::build_proof(&season1, 0),
+        })
+        .unwrap();
+
+        let season2: Vec<(Address, Balance)> = vec![([0x11; 20], 75)];
+        s.apply_intent(&Intent::SetTgeRoot {
+            pool,
+            merkle_root: tge_claim::build_root(&season2),
+        })
+        .unwrap();
+        // Same index, new round, new tree: claimable again.
+        s.apply_intent(&Intent::TgeClaim {
+            pool,
+            index: 0,
+            account: [0x11; 20],
+            amount: 75,
+            proof: tge_claim::build_proof(&season2, 0),
+        })
+        .unwrap();
+        assert_eq!(s.balance(&[0x11; 20]), 175);
+        assert_eq!(s.balance(&pool), 825);
     }
 
     /// No sealed ledger (legacy manifests) = uncapped mint,

@@ -478,4 +478,48 @@ pub enum ExecutionError {
         /// Genesis-committed max supply.
         max_supply: Balance,
     },
+
+    /// `SetTgeRoot`/`TgeClaim` named an address that is not one of
+    /// the TGE claim pools (fair-launch / seasons / testnet-points
+    /// reserved addresses).
+    #[error("not a TGE claim pool: 0x{a}", a = hex::encode(addr))]
+    TgeUnknownPool {
+        /// The address the intent named.
+        addr: Address,
+    },
+
+    /// `SetTgeRoot` carried an all-zeros Merkle root. Defense
+    /// against accidentally opening a round nothing can claim
+    /// against (mirrors `SetL2VkAllZeros`).
+    #[error("SetTgeRoot rejected: merkle_root is all-zeros")]
+    TgeRootAllZeros,
+
+    /// `TgeClaim` against a pool whose distribution root was never
+    /// set — no active round exists.
+    #[error("no TGE distribution round is active for pool 0x{p}", p = hex::encode(pool))]
+    TgeRootNotSet {
+        /// The pool the claim named.
+        pool: Address,
+    },
+
+    /// `TgeClaim` for a leaf index already claimed this round.
+    #[error("TGE leaf {index} already claimed in round {round} of pool 0x{p}", p = hex::encode(pool))]
+    TgeAlreadyClaimed {
+        /// The pool.
+        pool: Address,
+        /// The active round.
+        round: u32,
+        /// The leaf index.
+        index: u32,
+    },
+
+    /// `TgeClaim` whose Merkle proof does not connect the claimed
+    /// `(index, account, amount)` leaf to the active round's root.
+    #[error("invalid TGE claim proof for leaf {index} of pool 0x{p}", p = hex::encode(pool))]
+    TgeProofInvalid {
+        /// The pool.
+        pool: Address,
+        /// The leaf index.
+        index: u32,
+    },
 }

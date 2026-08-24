@@ -42,6 +42,7 @@ pub mod l2_state;
 pub mod reserved;
 pub mod substrate;
 pub mod suwappu_db_substrate;
+pub mod tge_claim;
 pub mod validator_registry;
 
 pub use block::{execute_block, Block, ExecutionReport};

@@ -398,6 +398,13 @@ pub(crate) fn is_governance_intent(intent: &Intent) -> bool {
         Intent::AdmitAuthority { .. }
             | Intent::ExitAuthority { .. }
             | Intent::EjectAuthority { .. }
+            // Setting a TGE distribution root moves the spend
+            // authority over a genesis pre-mine pool: dual-sig,
+            // same as reshaping the validator set. (TgeClaim is
+            // deliberately NOT here — claims are permissionless
+            // and proof-carrying; the Merkle proof is the
+            // authorization.)
+            | Intent::SetTgeRoot { .. }
     )
 }
 

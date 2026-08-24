@@ -109,13 +109,21 @@ is enforced by a specific mechanism, not by policy:
 4. **Testnet ≠ mainnet.** Testnet SUWAPPU balances (faucet-issued) are
    worthless and do not convert; only testnet *points* convert, per §2.4.
 
-**Known gap, stated plainly:** the fair-launch, Seasons, and testnet-points
-pools currently have *no outbound path at all* — reserved addresses reject
-transfers and no claim arm exists yet. That is fail-safe (funds cannot move,
-by anyone), but a TGE claim mechanism (dedicated intent or precompile, with
-its own audit) **must ship before TGE** or the distribution cannot happen.
-Tracked in `docs/testnet/LAUNCH-STATUS.md`. The staking pools are the
-exception — `Intent::DistributeRewards` already drains them.
+**The claim path is implemented — as the pattern live chains actually use.**
+The fair-launch, Seasons, and testnet-points pools distribute through the
+**MerkleDistributor mechanism** (`crates/suwappu-execution/src/tge_claim.rs`):
+`Intent::SetTgeRoot` publishes a distribution round's Merkle root
+(governance-gated — sponsor **plus a second, distinct seated authority**,
+the same dual-signature wire rule as validator-set changes), and
+`Intent::TgeClaim` is **permissionless**: anyone may submit a proof, funds
+move pool → the leaf's committed account, each index claims once per round,
+and a round can never pay out more than the pool holds. Claims are
+transfers, not issuance — the sealed supply ledger is untouched. Rotating
+the root starts a fresh round (the analogue of deploying a new distributor
+per drop, which is how the Seasons schedule runs). Remaining before TGE:
+an external audit of this path and the public root-publication ceremony —
+tracked in `docs/testnet/LAUNCH-STATUS.md`. The staking pools distribute
+via `Intent::DistributeRewards` instead.
 
 ## 4. Operational path to TGE
 
@@ -126,10 +134,45 @@ exception — `Intent::DistributeRewards` already drains them.
    `genesis.toml` alongside the seed validator set
    (`docs/releasing-mainnet.md` owns the ceremony). The loader refuses the
    manifest if the fragment was tampered past the cap.
-3. TGE claim path: design, implement, and audit the distribution arm for the
-   fair-launch / Seasons / points pools (see §3's known gap) — this is the
-   one remaining code prerequisite for TGE.
+3. TGE claim path: implemented (`Intent::SetTgeRoot` / `Intent::TgeClaim`,
+   §3) — remaining is an external audit plus the public root-publication
+   ceremony: each round's full `(index, account, amount)` set is published
+   before its root is set, so anyone can rebuild the root and their own
+   proof (exactly how live airdrop distributors publish their trees).
 4. Fair-launch mechanism spec published ≥ 30 days pre-TGE; testnet-points
    percentage pinned ≥ 90 days pre-TGE.
 5. Third-party verification: anyone re-derives the five addresses from their
    domain tags and re-sums the ledger against the live genesis block.
+
+## 5. Alignment with live chains and EIPs
+
+This design is deliberately grounded in mechanisms that are running in
+production with real value at stake, not in papers:
+
+- **Distribution = MerkleDistributor.** The claim mechanism ports Uniswap's
+  `MerkleDistributor` — verified and live on Ethereum mainnet at
+  [`0x090D4613473dEE047c3f2706764f49E0821D256e`](https://eth.blockscout.com/address/0x090D4613473dEE047c3f2706764f49E0821D256e)
+  since 2020-09-16 — the same shape Arbitrum's `TokenDistributor` and the
+  Optimism airdrops used. Divergences are documented in
+  `crates/suwappu-execution/src/tge_claim.rs`: SHA3-256 with distinct
+  leaf/node domain tags (the chain's PQ-conservative hash surface; the
+  domain split structurally prevents the leaf/internal-node second-preimage
+  splice that Solidity distributors handle by OpenZeppelin-style double
+  hashing), sorted-pair nodes per OpenZeppelin `MerkleProof`, and root
+  rotation instead of one contract per drop.
+- **Fee policy direction = EIP-1559.** The chain has no fee market yet
+  (priority is a constant at the intent wire; the fee surface is scheduled
+  work). When it lands, the committed direction is EIP-1559-shaped: a
+  protocol base fee that is **burned**, priority tips to the proposer. With
+  a fixed pre-mined supply and zero issuance, burn makes SUWP net-
+  deflationary under load — the post-merge ETH dynamic, without an
+  issuance offset. Burn accounting will extend the supply ledger
+  (`issued` down, never up); no new supply path is created.
+- **EVM-side SUWP = plain ERC-20.** On EVM chains SUWP travels through the
+  existing bridge surface (`SuwappuDagQuorumHeaderOracle` /
+  `SuwappuDagValidatorRegistry` in `suwappu-revm`) as a standard ERC-20 —
+  no bespoke token standard.
+- **Airdrop hygiene from observed history.** Per-operator caps and KYC in
+  the points program (`docs/testnet/POINTS.md`), vesting + revenue-capped
+  emission in Seasons — parameters chosen against the live airdrops'
+  outcomes (ARB/OP/Jito/HYPE), as those documents already record.

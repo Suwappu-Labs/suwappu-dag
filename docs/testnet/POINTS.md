@@ -45,6 +45,13 @@ mainnet_tokens = (your_total_points / sum(all_operators_points)) × testnet_allo
 testnet_allocation ∈ [5%, 8%] of mainnet supply
 ```
 
+Payout executes on-chain through the TGE Merkle claim path
+(`Intent::TgeClaim` against the testnet-points pool — the
+MerkleDistributor pattern live Ethereum airdrops use): the full
+`(index, address, amount)` set is published with the final
+leaderboard, so every operator can rebuild the tree, check their
+leaf, and claim permissionlessly with their own proof.
+
 The exact `testnet_allocation` percentage is set by the
 foundation board ≥ 90 days pre-TGE, weighting toward 5% if the
 program runs lean (~50 operators) and toward 8% if the program

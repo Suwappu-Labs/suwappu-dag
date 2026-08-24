@@ -90,14 +90,19 @@ Gaps 1–3 below were closed on this branch (2026-08-15):
    or partial-signature transport for the 7-of-9 super-node quorum, and
    no relayer transport (`Relayer.relay()` returns an in-process
    object). "Joining a corridor" is currently a human arrangement.
-7. **TGE claim path (mainnet-gating, not testnet-gating).** The genesis
-   pre-mine pools (`docs/whitepaper/TOKENOMICS.md`) are reserved
-   addresses with no outbound arm: fail-safe (nothing can move them,
-   including us — enforced by `reserved::is_reserved` + the sealed
-   supply ledger), but the fair-launch / Seasons / points distributions
-   cannot execute until a claim intent or precompile ships and is
-   audited. Staking pools are exempt (`Intent::DistributeRewards`
-   already drains them).
+7. **TGE claim path — IMPLEMENTED, audit pending (mainnet-gating, not
+   testnet-gating).** The MerkleDistributor pattern (Uniswap's live
+   mainnet distributor is the reference deployment) is ported in
+   `crates/suwappu-execution/src/tge_claim.rs`: `Intent::SetTgeRoot`
+   (dual-authority governance, wire v3) opens a claim round per pool;
+   `Intent::TgeClaim` is permissionless and proof-carrying; rounds
+   rotate for the Seasons schedule; a round can't overspend its pool;
+   claims don't touch the sealed supply ledger. Remaining before TGE:
+   external audit of this path + the public tree-publication ceremony.
+   Residual (same class as gov gap 4's history): a Byzantine authority
+   embedding `SetTgeRoot` directly in its own authored block bypasses
+   the ingress dual-sig — block-level re-verification of the GovAuth
+   envelope should be extended to `SetTgeRoot` before mainnet.
 8. **Supply-invariant hardening residuals (pre-mainnet).** From the
    adversarial review of the supply-cap change: (a) the slashing
    waterfall (`Intent::DistributeSlashedFunds`) still credits with no

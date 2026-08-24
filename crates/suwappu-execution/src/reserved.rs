@@ -357,6 +357,17 @@ pub fn supply_registry_address() -> Address {
     derive(SUPPLY_REGISTRY_DOMAIN)
 }
 
+/// Returns true if `addr` is one of the TGE claim pools — the
+/// pools whose distribution runs through the MerkleDistributor
+/// path (`Intent::SetTgeRoot` / `Intent::TgeClaim`, see
+/// `crate::tge_claim`). The staking-rewards pools are deliberately
+/// NOT claim pools — they distribute via `Intent::DistributeRewards`.
+pub fn is_tge_claim_pool(addr: &Address) -> bool {
+    addr == &tge_fair_launch_pool_address()
+        || addr == &tge_seasons_pool_address()
+        || addr == &tge_testnet_points_pool_address()
+}
+
 /// Returns true if `addr` is a reserved protocol-owned registry
 /// account. Both `Substrate` impls reject `Intent::Transfer` into
 /// or out of a reserved address.
