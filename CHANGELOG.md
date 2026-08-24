@@ -14,6 +14,14 @@ will coincide with mainnet genesis.
 
 ### Added
 
+- Portal live points lookup: the provider portal reads an operator's real
+  points + TGE share estimate (2%-of-allocation cap honored) from the
+  leaderboard API. Enabled by `Access-Control-Allow-Origin: *` on the
+  validator-program public read routes only (admin stays un-layered;
+  `leaderboard::add_public_cors`, with tests) and a TLS front for the
+  HTTP-only program origin (`terraform/testnet/leaderboard-cdn.tf`,
+  `leaderboard.testnet.suwappu.bot` -> program EC2 :8090, caching
+  disabled, `program.` A record untouched)
 - Compute-provider portal deploy surface: `terraform/testnet/compute-portal.tf`
   (S3 + CloudFront + Route53 for `compute.testnet.suwappu.bot`, same shape
   as the status page) and `.github/workflows/compute-portal-testnet.yml`

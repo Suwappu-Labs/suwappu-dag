@@ -48,7 +48,14 @@ What a prospective provider gets, in order:
    `suwappu-lattice-protocol` `ltp/incentives.py`.
 5. **Join steps** — hardware, devnet sync (`DEVNET.md`), points-program
    KYC + leaderboard, TGE conversion, mainnet epochs (badged "next").
-6. **Live tiles** — polls `rpc.devnet.suwappu.bot/suwappu_getEpoch`
+6. **Live points lookup** — enter an authority id, read the operator's
+   real points + breakdown from the public leaderboard API
+   (`leaderboard.<env>.suwappu.bot`, the TLS front defined in
+   `terraform/testnet/leaderboard-cdn.tf` over the validator-program
+   daemon, which stamps CORS on its public routes), plus a TGE share
+   estimate honoring the 2%-of-allocation cap. Degrades to a link to
+   the leaderboard page when unreachable.
+7. **Live tiles** — polls `rpc.devnet.suwappu.bot/suwappu_getEpoch`
    every 15 s for tip/epoch; degrades to "unreachable from here"
    without breaking the page (the calculator works fully offline).
 
@@ -59,9 +66,6 @@ What a prospective provider gets, in order:
   in-page application flow needs the admission service that
   `suwappu-lattice-protocol`'s external-validator-onboarding plan
   (Phase 2) describes, which doesn't exist yet.
-- **No live earnings from the leaderboard API.** Wiring
-  `validator-program`'s leaderboard into a per-operator earnings view
-  is the obvious v0.2 once CORS is opened on that endpoint.
 - **No mainnet rate table.** `RewardParams` are governance-set and
   have no ratified numbers; publishing a table now would just get
   screenshotted as a promise. The calculator labels them placeholder

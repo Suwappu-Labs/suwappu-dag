@@ -241,6 +241,31 @@
     </div>
   </div>
 
+  <h2>Check your points <span class="badge live">live</span></h2>
+  <div class="calc">
+    <div class="cols">
+      <div>
+        <label for="lb-id">Your authority id</label>
+        <input id="lb-id" type="number" min="0" placeholder="e.g. 12">
+      </div>
+      <div style="align-self:end">
+        <button class="btn primary" style="width:100%" onclick="lookupPoints()">Look up</button>
+      </div>
+    </div>
+    <div class="result" id="lb-result" style="display:none">
+      <span class="big" id="lb-total">—</span>
+      <span class="unit">total points</span>
+      <div class="breakdown" id="lb-breakdown"></div>
+      <div class="breakdown" id="lb-share"></div>
+    </div>
+    <p class="footnote" id="lb-note">
+      Reads the public
+      <a href="https://leaderboard.devnet.suwappu.bot/leaderboard">leaderboard API</a>
+      — the same raw numbers every operator can audit. Share estimate assumes
+      the current point distribution and the published 5–8% testnet allocation.
+    </p>
+  </div>
+
   <h2>How the pay stays honest</h2>
   <table>
     <tr><th>Guarantee</th><th>Mechanism</th></tr>

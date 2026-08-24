@@ -139,6 +139,77 @@ async function pollEpoch() {
   }
 }
 
+// --- Live points lookup --------------------------------------------------
+
+const LEADERBOARD_URL = "https://leaderboard.devnet.suwappu.bot/leaderboard";
+// Published TGE conversion band: testnet allocation is 5-8% of mainnet
+// supply, set by the foundation board >= 90 days pre-TGE (POINTS.md).
+const TGE_ALLOCATION_LOW = 0.05;
+const TGE_ALLOCATION_HIGH = 0.08;
+
+async function lookupPoints() {
+  const id = num("lb-id");
+  const result = document.getElementById("lb-result");
+  const note = document.getElementById("lb-note");
+  const total = document.getElementById("lb-total");
+  const breakdown = document.getElementById("lb-breakdown");
+  const share = document.getElementById("lb-share");
+  result.style.display = "";
+  total.textContent = "…";
+  breakdown.textContent = "";
+  share.textContent = "";
+  try {
+    const res = await fetch(LEADERBOARD_URL, { signal: AbortSignal.timeout(8000) });
+    if (!res.ok) throw new Error("http " + res.status);
+    const snap = await res.json();
+    const entries = snap.entries || [];
+    const mine = entries.find((e) => e.authority_id === id);
+    if (!mine) {
+      total.textContent = "not found";
+      breakdown.textContent =
+        `Authority id ${id} is not on the leaderboard yet — points appear ` +
+        "after your first scored epoch (registration + one probe cycle).";
+      return;
+    }
+    total.textContent = fmt(mine.total_points, 0);
+    const parts = [
+      ["uptime", mine.uptime_points],
+      ["certs", mine.cert_points],
+      ["bug bounty", mine.bug_bounty_points],
+      ["hackathon", mine.hackathon_points],
+    ].filter(([, v]) => typeof v === "number" && v > 0);
+    breakdown.textContent =
+      (mine.label ? mine.label + " — " : "") +
+      (parts.length
+        ? parts.map(([k, v]) => `${k} ${fmt(v, 0)}`).join(" + ")
+        : "no per-category points recorded yet") +
+      (mine.is_seed ? " (foundation seed — not TGE-eligible)" : "");
+    // Share of the eligible pool -> TGE allocation band.
+    const eligibleTotal = entries
+      .filter((e) => !e.is_seed)
+      .reduce((sum, e) => sum + (e.total_points || 0), 0);
+    if (!mine.is_seed && eligibleTotal > 0 && mine.total_points > 0) {
+      const frac = mine.total_points / eligibleTotal;
+      // POINTS.md hard ceiling: no operator takes more than 2% of the
+      // testnet allocation, whatever their share of points.
+      const capped = Math.min(frac, 0.02);
+      share.textContent =
+        `Current share of eligible points: ${fmt(frac * 100, 2)}%` +
+        (capped < frac ? " (capped at 2% of the allocation)" : "") +
+        ` — at TGE that converts to ${fmt(capped * TGE_ALLOCATION_LOW * 100, 3)}%–` +
+        `${fmt(capped * TGE_ALLOCATION_HIGH * 100, 3)}% of mainnet supply ` +
+        "(if the distribution held, which it won't — more operators join).";
+    }
+  } catch (_err) {
+    total.textContent = "—";
+    breakdown.textContent = "";
+    note.innerHTML =
+      "The leaderboard API is not reachable from your browser right now. " +
+      'The public <a href="https://testnet.suwappu.bot/leaderboard">leaderboard page</a> ' +
+      "has the same numbers.";
+  }
+}
+
 // --- Boot ----------------------------------------------------------------
 
 recalc();
