@@ -1975,7 +1975,7 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
             if boundary_crossed {
                 let queued: Vec<(Intent, Option<crate::client::GovAuth>)> = {
                     let mut inner = state.inner.lock().await;
-                    inner.pending_governance.drain(..).collect()
+                    std::mem::take(&mut inner.pending_governance)
                 };
                 for (intent, env) in &queued {
                     apply_governance_intent(
@@ -2003,13 +2003,8 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
     }
 
     // DAG-S30.1: drain the equivocation queue.
-    let proofs: Vec<EquivocationProof> = state
-        .inner
-        .lock()
-        .await
-        .detected_equivocations
-        .drain(..)
-        .collect();
+    let proofs: Vec<EquivocationProof> =
+        std::mem::take(&mut state.inner.lock().await.detected_equivocations);
     for proof in proofs {
         let id = proof.author;
         if state.authority_registry.read().await.contains(id) {

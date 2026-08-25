@@ -12,6 +12,36 @@ will coincide with mainnet genesis.
 
 ## [Unreleased]
 
+### Fixed
+
+- CI is green again on `main`'s own code. Three findings, one cause:
+  every job used `dtolnay/rust-toolchain@stable` with nothing pinning
+  what "stable" resolves to. Rust 1.98.0 shipped 2026-08-18, two days
+  after the last green run, and made `clippy::drain_collect` fire under
+  the workspace's `-D warnings` — turning `crates/suwappu-node/src/daemon.rs`
+  red with no commit touching it.
+  - Rewrote both `drain(..).collect()` sites as `std::mem::take`, which
+    is what clippy asked for and also avoids a needless allocation.
+    Behaviour is identical: both drained the whole collection.
+  - Added `rust-toolchain.toml` pinning 1.98.0 with `rustfmt` + `clippy`.
+    Single source of truth — the workflows are untouched, since a
+    toolchain file takes precedence over `rustup default` and duplicating
+    the version across five job definitions would be worse. Raising the
+    pin is now a deliberate PR that carries its own lint fixes, instead
+    of new enforcement landing as unrelated red on someone else's branch.
+  - RUSTSEC-2026-0258 (h2 unbounded empty DATA frames, low severity):
+    bumped the 0.4 tree 0.4.15 -> 0.4.19, past the 0.4.16 fix. The 0.3
+    tree cannot be fixed here — no patched 0.3.x exists (0.3.27 is the
+    newest 0.3 release) and it arrives via
+    `suwappudb-bridge -> reqwest 0.11 -> hyper 0.14`, the same upstream
+    gate already recorded for RUSTSEC-2025-0134, so both ignores drop in
+    the same future PR. cargo-deny 0.20's `[advisories].ignore` table
+    accepts only `id` and `reason`, so the advisory cannot be scoped to
+    one crate version; a `[[bans.deny]]` entry on `h2:>=0.4.0, <0.4.16`
+    restores the coverage the bare-id ignore would otherwise lose on the
+    0.4 tree — the tree our own axum / reqwest-0.12 listeners use.
+    Verified the ban fires by downgrading h2 to 0.4.15 and re-running.
+
 ### Added
 
 - Portal live points lookup: the provider portal reads an operator's real
