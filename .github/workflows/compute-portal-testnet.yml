@@ -1,0 +1,96 @@
+name: compute-portal-testnet
+
+# Deploy the suwappu-testnet compute-provider portal
+# (clients/provider-portal) to compute.testnet.suwappu.bot.
+# Same shape as status-testnet.yml: the source tree references the
+# devnet hostnames, and this workflow sed-rewrites them to testnet at
+# upload time so one source tree powers both environments.
+#
+# Pre-reqs (one-time, set by an operator):
+#   - `COMPUTE_TESTNET_DEPLOY_ROLE` repo secret: IAM role ARN with
+#     s3:PutObject + cloudfront:CreateInvalidation on the testnet
+#     compute bucket + distribution (terraform/testnet/compute-portal.tf).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'clients/provider-portal/**'
+      - '.github/workflows/compute-portal-testnet.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: compute-portal-testnet-deploy
+  cancel-in-progress: true
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  deploy:
+    name: rewrite + sync + invalidate (testnet)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Rewrite devnet URLs to testnet
+        run: |
+          mkdir -p ./build/compute
+          # The portal's own logic is environment-agnostic; only the
+          # RPC/explorer/status hostnames differ between environments.
+          sed 's/devnet\.suwappu\.bot/testnet.suwappu.bot/g' \
+              ./clients/provider-portal/app.js > ./build/compute/app.js
+          sed 's/devnet\.suwappu\.bot/testnet.suwappu.bot/g' \
+              ./clients/provider-portal/index.html > ./build/compute/index.html
+
+          # Sanity: confirm no devnet refs remain in the testnet build.
+          if grep -q "devnet.suwappu" ./build/compute/app.js ./build/compute/index.html; then
+            echo "ERROR: devnet.suwappu references survived the rewrite; aborting deploy" >&2
+            grep -n "devnet.suwappu" ./build/compute/app.js ./build/compute/index.html
+            exit 1
+          fi
+
+      - name: Configure AWS credentials
+        if: ${{ env.COMPUTE_TESTNET_DEPLOY_ROLE != '' }}
+        env:
+          COMPUTE_TESTNET_DEPLOY_ROLE: ${{ secrets.COMPUTE_TESTNET_DEPLOY_ROLE }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.COMPUTE_TESTNET_DEPLOY_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Sync to S3
+        if: ${{ env.COMPUTE_TESTNET_DEPLOY_ROLE != '' }}
+        env:
+          COMPUTE_TESTNET_DEPLOY_ROLE: ${{ secrets.COMPUTE_TESTNET_DEPLOY_ROLE }}
+        run: |
+          aws s3 sync ./build/compute/ s3://suwappu-dag-testnet-compute/ \
+              --delete \
+              --cache-control "public, max-age=60, must-revalidate"
+          aws s3 cp ./build/compute/index.html s3://suwappu-dag-testnet-compute/index.html \
+              --cache-control "no-cache, no-store, must-revalidate"
+          aws s3 cp ./build/compute/app.js s3://suwappu-dag-testnet-compute/app.js \
+              --cache-control "no-cache, no-store, must-revalidate"
+
+      - name: Invalidate CloudFront
+        if: ${{ env.COMPUTE_TESTNET_DEPLOY_ROLE != '' }}
+        env:
+          COMPUTE_TESTNET_DEPLOY_ROLE: ${{ secrets.COMPUTE_TESTNET_DEPLOY_ROLE }}
+        run: |
+          DIST_ID=$(aws cloudfront list-distributions \
+              --query "DistributionList.Items[?Aliases.Items[?contains(@, 'compute.testnet.suwappu')]].Id | [0]" \
+              --output text)
+          aws cloudfront create-invalidation \
+              --distribution-id "$DIST_ID" \
+              --paths "/*"
+
+      - name: Deploy step skipped
+        if: ${{ env.COMPUTE_TESTNET_DEPLOY_ROLE == '' }}
+        env:
+          COMPUTE_TESTNET_DEPLOY_ROLE: ${{ secrets.COMPUTE_TESTNET_DEPLOY_ROLE }}
+        run: |
+          echo "COMPUTE_TESTNET_DEPLOY_ROLE secret not set; build verified but nothing to deploy."

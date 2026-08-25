@@ -44,6 +44,35 @@ will coincide with mainnet genesis.
 
 ### Added
 
+- Portal live points lookup: the provider portal reads an operator's real
+  points + TGE share estimate (2%-of-allocation cap honored) from the
+  leaderboard API. Enabled by `Access-Control-Allow-Origin: *` on the
+  validator-program public read routes only (admin stays un-layered;
+  `leaderboard::add_public_cors`, with tests) and a TLS front for the
+  HTTP-only program origin (`terraform/testnet/leaderboard-cdn.tf`,
+  `leaderboard.testnet.suwappu.bot` -> program EC2 :8090, caching
+  disabled, `program.` A record untouched)
+- Compute-provider portal deploy surface: `terraform/testnet/compute-portal.tf`
+  (S3 + CloudFront + Route53 for `compute.testnet.suwappu.bot`, same shape
+  as the status page) and `.github/workflows/compute-portal-testnet.yml`
+  (sed-rewrite devnet→testnet hostnames, sync, invalidate; skips cleanly
+  until the `COMPUTE_TESTNET_DEPLOY_ROLE` secret is set)
+- Validator compute-incentive settlement (`suwappu-precompiles::rewards`):
+  per-epoch stablecoin rewards for proven validator work
+  (`ComputeReceipt`: certificates signed, uptime samples, corridor
+  attestations, DA bytes served), priced under `RewardParams`, clamped
+  pro-rata to a hard epoch budget, and minted only through the new
+  `reserve::mint_with_coverage` — the §8.3 reserve-coverage breaker
+  bound into the §8.2 issuer mint surface (the follow-up DAG-S14 left
+  open), evaluated at the projected post-mint outstanding supply and
+  failing closed. Uptime gating mirrors `docs/testnet/POINTS.md`
+  (≥99% full rate, ≥95% half, below zero); output recipient lists are
+  shaped for the substrate's existing `Intent::DistributeRewards`.
+  Exit gate: `tests/proptest_compute_rewards.rs`, 4 properties
+  (conservation + reserve backing, coverage fail-closed, work
+  monotonicity, epoch replay), green at `PROPTEST_CASES=10000
+  --release`. Design doc:
+  `suwappu-lattice-protocol/docs/economics/VALIDATOR_COMPUTE_INCENTIVES.md`
 - Quality-parity pass (cross-repo bar set by suwappubot): shipped the
   agent infrastructure `CLAUDE.md` documents but the tree lacked —
   `claude-code/settings.json` (three permission tiers + hook wiring),

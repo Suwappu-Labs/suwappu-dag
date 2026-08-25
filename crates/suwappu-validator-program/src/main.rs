@@ -6,6 +6,7 @@
 use std::net::SocketAddr;
 
 use axum::{
+    middleware::map_response,
     routing::{get, post},
     Router,
 };
@@ -17,7 +18,7 @@ use suwappu_validator_program::{
         handle_register_operator, AdminState,
     },
     init_db,
-    leaderboard::handle_leaderboard,
+    leaderboard::{add_public_cors, handle_leaderboard},
     probe, score,
 };
 use tracing::info;
@@ -98,9 +99,11 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let app = Router::new()
-        // Public read.
+        // Public read. CORS wildcard applies to these routes only —
+        // they are unauthenticated public data; admin stays un-layered.
         .route("/leaderboard", get(handle_leaderboard))
         .route("/health", get(handle_health))
+        .layer(map_response(add_public_cors))
         .with_state(pool.clone())
         .merge(
             Router::new()

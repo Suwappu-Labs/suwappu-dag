@@ -1,0 +1,387 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Suwappu Compute — run validators, earn stablecoins</title>
+  <meta name="description" content="Provider portal for the SUWAPPU network: run post-quantum validator compute, prove your work, get paid in stablecoins.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23000'/%3E%3Ctext x='32' y='44' font-family='monospace' font-size='28' fill='%23fff' text-anchor='middle'%3E%24%3C/text%3E%3C/svg%3E">
+  <style>
+    :root {
+      --bg: #0a0a0a; --fg: #e8e8e8; --fg-muted: #888;
+      --green: #4c6; --yellow: #db4; --red: #e44; --accent: #6ae;
+      --border: #222; --row-alt: #111; --card: #101010;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #fff; --fg: #111; --fg-muted: #666;
+        --green: #0a7; --yellow: #c80; --red: #c00; --accent: #06c;
+        --border: #ddd; --row-alt: #f7f7f7; --card: #fafafa;
+      }
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg);
+      font: 15px/1.55 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .wrap { max-width: 860px; margin: 0 auto; padding: 2.5rem 1rem 4rem; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    h1 { font-weight: 600; margin: 0 0 0.4rem; font-size: 2.1rem; letter-spacing: -0.02em; }
+    h2 { font-weight: 600; margin: 2.8rem 0 0.8rem; font-size: 1.25rem; }
+    .subtitle { color: var(--fg-muted); font-size: 1.05rem; margin-bottom: 1.6rem; max-width: 620px; }
+    .cta-row { display: flex; gap: 0.7rem; flex-wrap: wrap; margin-bottom: 1rem; }
+    .btn {
+      display: inline-block; padding: 0.6rem 1.1rem; border-radius: 8px;
+      border: 1px solid var(--border); font-weight: 600; font-size: 0.95rem;
+      background: var(--card); color: var(--fg); cursor: pointer;
+    }
+    .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .btn.primary:hover { text-decoration: none; filter: brightness(1.1); }
+    .grid { display: grid; gap: 0.8rem; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+    .card {
+      border: 1px solid var(--border); border-radius: 10px; padding: 1.1rem 1.2rem;
+      background: var(--card);
+    }
+    .card h3 { margin: 0 0 0.4rem; font-size: 1rem; font-weight: 600; }
+    .card p { margin: 0; color: var(--fg-muted); font-size: 0.92rem; }
+    .badge {
+      display: inline-block; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em;
+      text-transform: uppercase; padding: 0.15rem 0.5rem; border-radius: 99px;
+      border: 1px solid var(--border); color: var(--fg-muted); margin-left: 0.5rem;
+      vertical-align: middle;
+    }
+    .badge.live { color: var(--green); border-color: var(--green); }
+    .badge.soon { color: var(--yellow); border-color: var(--yellow); }
+    /* calculator */
+    .calc { border: 1px solid var(--border); border-radius: 12px; background: var(--card); padding: 1.3rem; }
+    .calc .mode-row { display: flex; gap: 0.5rem; margin-bottom: 1.1rem; }
+    .mode-btn {
+      flex: 1; padding: 0.55rem; border-radius: 8px; border: 1px solid var(--border);
+      background: transparent; color: var(--fg-muted); font-weight: 600; cursor: pointer; font-size: 0.92rem;
+    }
+    .mode-btn.active { background: var(--bg); color: var(--fg); border-color: var(--accent); }
+    .calc label { display: block; font-size: 0.85rem; color: var(--fg-muted); margin: 0.7rem 0 0.2rem; }
+    .calc input[type=number], .calc select {
+      width: 100%; padding: 0.5rem 0.6rem; border-radius: 8px; border: 1px solid var(--border);
+      background: var(--bg); color: var(--fg); font: inherit;
+    }
+    .calc .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 0 1rem; }
+    @media (max-width: 560px) { .calc .cols { grid-template-columns: 1fr; } }
+    .result {
+      margin-top: 1.2rem; padding: 1rem 1.2rem; border-radius: 10px;
+      background: var(--row-alt); border: 1px solid var(--border);
+    }
+    .result .big { font-size: 1.9rem; font-weight: 700; letter-spacing: -0.02em; }
+    .result .unit { color: var(--fg-muted); font-size: 0.95rem; font-weight: 500; }
+    .result .breakdown { margin-top: 0.5rem; font-size: 0.85rem; color: var(--fg-muted); }
+    .footnote { font-size: 0.8rem; color: var(--fg-muted); margin-top: 0.8rem; }
+    /* tables */
+    table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+    th, td { text-align: left; padding: 0.5rem 0.7rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+    th { color: var(--fg-muted); font-weight: 600; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.03em; }
+    tr:nth-child(even) td { background: var(--row-alt); }
+    ol.steps { padding-left: 1.2rem; margin: 0.5rem 0 0; }
+    ol.steps li { margin-bottom: 0.55rem; }
+    /* live tiles */
+    .tiles { display: grid; gap: 0.8rem; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+    .tile { border: 1px solid var(--border); border-radius: 10px; padding: 0.9rem 1rem; background: var(--card); }
+    .tile .k { font-size: 0.78rem; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+    .tile .v { font-size: 1.3rem; font-weight: 650; margin-top: 0.15rem; }
+    .tile .v.muted { color: var(--fg-muted); font-weight: 500; font-size: 1rem; }
+    footer { margin-top: 3.5rem; padding-top: 1.2rem; border-top: 1px solid var(--border);
+      color: var(--fg-muted); font-size: 0.85rem; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>Suwappu Compute</h1>
+  <p class="subtitle">
+    Run post-quantum validator infrastructure. Prove the work. Get paid in
+    stablecoins — dollars, not a token you have to believe in first.
+  </p>
+  <div class="cta-row">
+    <a class="btn primary" href="#join">Become a provider</a>
+    <a class="btn" href="#calculator">Estimate earnings</a>
+    <a class="btn" href="https://status.devnet.suwappu.bot/">Network status</a>
+  </div>
+
+  <h2>Why provide compute here</h2>
+  <div class="grid">
+    <div class="card">
+      <h3>The protocol is your customer</h3>
+      <p>No marketplace bidding, no idle inventory. The network itself buys
+         your work every epoch: certificate ordering, PQ attestations,
+         shard storage, and data-availability serving.</p>
+    </div>
+    <div class="card">
+      <h3>Dollar-denominated pay</h3>
+      <p>Rewards settle in a reserve-backed stablecoin. Your revenue does not
+         ride a token chart — the design goal is boring, predictable
+         infrastructure income.</p>
+    </div>
+    <div class="card">
+      <h3>Provably backed, or it doesn't pay</h3>
+      <p>Every payout is minted only while an on-chain reserve-coverage proof
+         shows the stablecoin is fully backed — including your payout. If
+         coverage ever fails, payouts pause; they never debase.</p>
+    </div>
+    <div class="card">
+      <h3>No proof, no pay — for everyone</h3>
+      <p>Rewards are computed from observed work: uptime probes, committed
+         certificates, quorum signatures, SLA-checked serving. Nobody —
+         including us — can pay a node that didn't do the work.</p>
+    </div>
+  </div>
+
+  <h2>Three ways to earn</h2>
+  <table>
+    <tr><th>Role</th><th>What you run</th><th>What you're paid for</th></tr>
+    <tr>
+      <td><strong>DAG validator</strong></td>
+      <td>A <code>suwappu-node</code> in the Validator Ring</td>
+      <td>Certificates signed that reach commit, uptime (probed every 60&nbsp;s),
+          LTP corridor attestations witnessed</td>
+    </tr>
+    <tr>
+      <td><strong>LTP commitment node</strong></td>
+      <td>An LTP node storing and serving erasure-coded shards</td>
+      <td>Audited byte-months stored (PDP storage proofs), bytes served
+          within the DA latency SLA</td>
+    </tr>
+    <tr>
+      <td><strong>Inference node (GPU)</strong></td>
+      <td>The network's model runtime behind the LTP gateway</td>
+      <td>Metered tokens served — the operator share of each request's
+          stablecoin fee, with a digest-audited billing trail</td>
+    </tr>
+  </table>
+
+  <h2 id="calculator">Earnings calculator</h2>
+  <div class="calc">
+    <div class="mode-row">
+      <button class="mode-btn active" id="mode-testnet" onclick="setMode('testnet')">
+        Testnet points — live now
+      </button>
+      <button class="mode-btn" id="mode-mainnet" onclick="setMode('mainnet')">
+        Mainnet stablecoin — preview
+      </button>
+    </div>
+
+    <div id="panel-testnet">
+      <div class="cols">
+        <div>
+          <label for="t-uptime">Expected uptime</label>
+          <select id="t-uptime" onchange="recalc()">
+            <option value="100">≥ 99% (full rate)</option>
+            <option value="50">95–99% (half rate)</option>
+            <option value="0">&lt; 95% (no points)</option>
+          </select>
+        </div>
+        <div>
+          <label for="t-certs">Certificates per epoch (typical: 500–5,000)</label>
+          <input id="t-certs" type="number" min="0" value="2000" oninput="recalc()">
+        </div>
+        <div>
+          <label for="t-commits">Leader-slot commits per epoch (typical: 0–30)</label>
+          <input id="t-commits" type="number" min="0" max="30" value="10" oninput="recalc()">
+        </div>
+      </div>
+      <div class="result">
+        <span class="big" id="t-result">—</span>
+        <span class="unit">points / week</span>
+        <div class="breakdown" id="t-breakdown"></div>
+      </div>
+      <p class="footnote">
+        Formula is the published testnet contract
+        (<code>docs/testnet/POINTS.md</code>): epochs ≈ 17 minutes; points
+        convert pro-rata into <strong>5–8% of mainnet supply</strong> at TGE.
+        Per-operator cap 2% of the allocation; KYC required, one operator =
+        one validator.
+      </p>
+    </div>
+
+    <div id="panel-mainnet" style="display:none">
+      <div class="cols">
+        <div>
+          <label for="m-role">Role</label>
+          <select id="m-role" onchange="recalc()">
+            <option value="ltp">LTP commitment node</option>
+            <option value="dag">DAG validator</option>
+            <option value="gpu">Inference node (GPU)</option>
+          </select>
+        </div>
+        <div>
+          <label for="m-uptime">Expected uptime</label>
+          <select id="m-uptime" onchange="recalc()">
+            <option value="1">≥ 99% (full rate)</option>
+            <option value="0.5">95–99% (half rate)</option>
+            <option value="0">&lt; 95% (unpaid)</option>
+          </select>
+        </div>
+        <div id="m-ltp-fields">
+          <label for="m-storage">Storage offered (GiB)</label>
+          <input id="m-storage" type="number" min="0" value="2048" oninput="recalc()">
+          <label for="m-served">Data served (GiB / month)</label>
+          <input id="m-served" type="number" min="0" value="512" oninput="recalc()">
+        </div>
+        <div id="m-dag-fields" style="display:none">
+          <label for="m-certs">Certificates per epoch</label>
+          <input id="m-certs" type="number" min="0" value="2000" oninput="recalc()">
+          <label for="m-attests">Corridor attestations per epoch</label>
+          <input id="m-attests" type="number" min="0" value="20" oninput="recalc()">
+        </div>
+        <div id="m-gpu-fields" style="display:none">
+          <label for="m-mtok-in">Input tokens served (MTok / day)</label>
+          <input id="m-mtok-in" type="number" min="0" value="50" oninput="recalc()">
+          <label for="m-mtok-out">Output tokens served (MTok / day)</label>
+          <input id="m-mtok-out" type="number" min="0" value="10" oninput="recalc()">
+        </div>
+      </div>
+      <div class="result">
+        <span class="big" id="m-result">—</span>
+        <span class="unit">stablecoin / month (illustrative)</span>
+        <div class="breakdown" id="m-breakdown"></div>
+      </div>
+      <p class="footnote">
+        Illustrative, using the current in-repo default parameters
+        (<code>ltp.incentives.IncentiveConfig</code>: $0.02/GiB-month stored,
+        $0.01/GiB served; <code>suwappu-precompiles::rewards::RewardParams</code>
+        rates are governance-set and shown here with placeholder values).
+        Mainnet rates are set by governance against real network revenue, are
+        budget-capped per epoch, and settle only while reserve coverage holds.
+        This is a model, not an offer.
+      </p>
+    </div>
+  </div>
+
+  <h2>Check your points <span class="badge live">live</span></h2>
+  <div class="calc">
+    <div class="cols">
+      <div>
+        <label for="lb-id">Your authority id</label>
+        <input id="lb-id" type="number" min="0" placeholder="e.g. 12">
+      </div>
+      <div style="align-self:end">
+        <button class="btn primary" style="width:100%" onclick="lookupPoints()">Look up</button>
+      </div>
+    </div>
+    <div class="result" id="lb-result" style="display:none">
+      <span class="big" id="lb-total">—</span>
+      <span class="unit">total points</span>
+      <div class="breakdown" id="lb-breakdown"></div>
+      <div class="breakdown" id="lb-share"></div>
+    </div>
+    <p class="footnote" id="lb-note">
+      Reads the public
+      <a href="https://leaderboard.devnet.suwappu.bot/leaderboard">leaderboard API</a>
+      — the same raw numbers every operator can audit. Share estimate assumes
+      the current point distribution and the published 5–8% testnet allocation.
+    </p>
+  </div>
+
+  <h2>How the pay stays honest</h2>
+  <table>
+    <tr><th>Guarantee</th><th>Mechanism</th></tr>
+    <tr>
+      <td><strong>Proof-gated</strong></td>
+      <td>Zero passed storage audits, or zero answered uptime probes, earn
+          zero. Pay scales with the audit pass ratio. Enforced in
+          <code>ltp/incentives.py</code> and <code>suwappu-precompiles::rewards</code>.</td>
+    </tr>
+    <tr>
+      <td><strong>Reserve-backed</strong></td>
+      <td>Reward mints route through the reserve-coverage circuit breaker and
+          are checked at the <em>post-mint</em> supply. Coverage stale or
+          short → the epoch's payout waits for a fresh attestation. Payouts
+          can pause; they cannot be printed unbacked.</td>
+    </tr>
+    <tr>
+      <td><strong>Budget-capped</strong></td>
+      <td>Each epoch has a hard payout ceiling. Oversubscribed epochs scale
+          pro-rata — the schedule cannot run away.</td>
+    </tr>
+    <tr>
+      <td><strong>Bond-secured</strong></td>
+      <td>Providers bond stablecoins (default posture $1,000). Failed audits
+          slash the bond into the insurance pool on a progressive schedule;
+          equivocation on the fast path forfeits 100%.</td>
+    </tr>
+  </table>
+
+  <h2 id="join">Become a provider <span class="badge live">testnet open</span></h2>
+  <ol class="steps">
+    <li><strong>Check hardware.</strong> A modern 8-core machine, 32&nbsp;GB RAM,
+        NVMe storage, and a stable 100&nbsp;Mbps+ link is enough for the
+        testnet. Signing keys are ML-DSA-65 (post-quantum) — generated by the
+        node tooling, no HSM required until mainnet tiers.</li>
+    <li><strong>Sync the devnet.</strong> Follow
+        <a href="https://github.com/Suwappu-Labs/suwappu-dag/blob/main/DEVNET.md">DEVNET.md</a>,
+        point your node at <code>rpc.devnet.suwappu.bot</code>, and watch it
+        on the <a href="https://explorer.devnet.suwappu.bot/">explorer</a>.</li>
+    <li><strong>Register for the points program.</strong> KYC (one operator,
+        one validator), then your uptime and certificate work starts accruing
+        weekly points on the public
+        <a href="https://testnet.suwappu.bot/leaderboard">leaderboard</a>.</li>
+    <li><strong>TGE conversion.</strong> Testnet points convert pro-rata into
+        the 5–8% testnet allocation of mainnet supply.</li>
+    <li><strong>Mainnet epochs</strong> <span class="badge soon">next</span> —
+        the same node, the same proofs, settling per-epoch in reserve-backed
+        stablecoin under the mechanism above.</li>
+  </ol>
+
+  <h2>Buy inference <span class="badge soon">preview</span></h2>
+  <p class="subtitle" style="margin-bottom:0.8rem">
+    The demand side of the same loop: completions against the network's own
+    model, priced per million tokens, paid in stablecoins. Every response
+    carries SHA3-256 request/response digests committed to a signed,
+    append-only log, so your invoice can be independently audited and
+    neither side can revise it after the fact. That is billing integrity
+    — it proves what you were charged for, not that a particular model
+    ran; those need attestation, and compose with this.
+  </p>
+  <div class="calc">
+    <pre style="margin:0;overflow-x:auto;font-size:0.85rem;line-height:1.5"><code>curl https://gateway.suwappu.bot/inference/v1/chat/completions \
+  -H "Authorization: Bearer $SUWAPPU_TOKEN" \
+  -d '{"model": "suwappu-1",
+       "messages": [{"role": "user", "content": "hello"}]}'
+
+# response includes:
+#   "usage":   {"prompt_tokens": ..., "completion_tokens": ...}
+#   "billing": {"settled_micro": ..., "request_digest": "...",
+#               "response_digest": "..."}</code></pre>
+    <p class="footnote">
+      OpenAI-shaped endpoint — existing SDKs work with a base-URL change.
+      The revenue funds the provider pool above: your inference spend is
+      what pays the operators securing the chain. Endpoint goes live with
+      the gateway deployment; the API surface is in the repo today
+      (<code>src/ltp/gateway/routers/inference.py</code>).
+    </p>
+  </div>
+
+  <h2>Network right now</h2>
+  <div class="tiles">
+    <div class="tile"><div class="k">Devnet tip</div><div class="v" id="tile-tip">…</div></div>
+    <div class="tile"><div class="k">Epoch</div><div class="v" id="tile-epoch">…</div></div>
+    <div class="tile"><div class="k">Epoch length</div><div class="v muted" id="tile-rpe">…</div></div>
+    <div class="tile"><div class="k">RPC</div><div class="v muted" id="tile-rpc">checking…</div></div>
+  </div>
+
+  <footer>
+    Suwappu Compute is the provider surface of the SUWAPPU DAG L1 + Lattice
+    Transfer Protocol. Economics:
+    <a href="https://github.com/Suwappu-Labs/suwappu-lattice-protocol/blob/main/docs/economics/VALIDATOR_COMPUTE_INCENTIVES.md">Validator
+    Compute Incentives</a> ·
+    <a href="https://github.com/Suwappu-Labs/suwappu-lattice-protocol/blob/main/docs/economics/DEFERRED_TOKEN_ARCHITECTURE.md">Deferred-Token
+    Architecture</a> ·
+    <a href="https://github.com/Suwappu-Labs/suwappu-dag/blob/main/docs/testnet/POINTS.md">Points
+    program</a> ·
+    <a href="https://github.com/Suwappu-Labs/suwappu-dag/blob/main/docs/validator-sla-slashing.md">SLA
+    &amp; slashing</a>. Nothing on this page is investment advice or an offer;
+    testnet points and illustrative mainnet figures are governed by the linked
+    public documents.
+  </footer>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

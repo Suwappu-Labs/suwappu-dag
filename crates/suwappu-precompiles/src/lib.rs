@@ -14,6 +14,10 @@
 //! - DAG-S12: DID resolver + W3C DID document validation ✅
 //! - DAG-S13: registered-issuer mint/burn surface ✅
 //! - DAG-S14: reserve-coverage circuit breaker (predicate + state machine) ✅
+//! - Compute-incentive settlement (`rewards`): stablecoin validator
+//!   rewards for proven work, minted through the §8.2 issuer surface
+//!   only when the §8.3 breaker attests coverage at the projected
+//!   post-mint outstanding supply (`reserve::mint_with_coverage`) ✅
 //!
 //! Phased rollout (paper §8.1):
 //!
@@ -28,6 +32,7 @@ pub mod did;
 pub mod did_resolver;
 pub mod issuer;
 pub mod reserve;
+pub mod rewards;
 
 pub use did::{
     Did, DidDocument, DidError, KeyAlgorithm, Service, VerificationMethod, VerificationMethodId,
@@ -39,6 +44,10 @@ pub use issuer::{
     PaymentReceiptAttestation, PendingBurn, DEFAULT_BURN_SLA_ROUNDS,
 };
 pub use reserve::{
-    predicate_satisfied, CoverageError, CoverageRule, DisclosureTier, ReserveAttestation,
-    ReserveCoverageChecker, DEFAULT_ATTESTATION_TTL_ROUNDS,
+    mint_with_coverage, predicate_satisfied, CoverageError, CoverageRule, DisclosureTier,
+    GatedMintError, ReserveAttestation, ReserveCoverageChecker, DEFAULT_ATTESTATION_TTL_ROUNDS,
+};
+pub use rewards::{
+    price_receipt, uptime_multiplier_bps, ComputeReceipt, EpochSettlement, RewardError,
+    RewardParams, RewardRecipient, RewardSettlement, UPTIME_FULL_RATE_BPS, UPTIME_HALF_RATE_BPS,
 };
