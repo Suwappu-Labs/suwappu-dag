@@ -3464,7 +3464,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn try_commit_populates_blocks_by_round_and_tx_to_block() {
         let n = 1u32;
-        let base_port: u16 = 21_000;
+        let base_port: u16 = 22_000;
         let network_id = "blocks-idx-1n".to_string();
         let (pk, sk) = suwappu_crypto::mldsa::keypair();
         let pk_hex = hex::encode(pk.as_bytes());
@@ -3698,7 +3698,7 @@ mod tests {
     async fn rpc_submit_intent_unknown_signer() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        let base_port: u16 = 21_600;
+        let base_port: u16 = 22_500;
         let network_id = "rpc-submit-bad-1n".to_string();
         // v0's own real keypair — needed so the daemon can sign its own
         // certs (DAG-S6). The test's "unknown signer" case submits a
