@@ -2703,7 +2703,7 @@ dependencies = [
  "p3-mds",
  "p3-poseidon2",
  "p3-symmetric",
- "rand 0.8.7",
+ "rand 0.8.8",
  "rustc_version",
  "serde",
 ]
@@ -2719,7 +2719,7 @@ dependencies = [
  "p3-field",
  "p3-poseidon2",
  "p3-symmetric",
- "rand 0.8.7",
+ "rand 0.8.8",
  "serde",
 ]
 
@@ -2774,7 +2774,7 @@ dependencies = [
  "num-bigint 0.4.8",
  "num-traits",
  "p3-util",
- "rand 0.8.7",
+ "rand 0.8.8",
  "serde",
 ]
 
@@ -2834,7 +2834,7 @@ dependencies = [
  "p3-mds",
  "p3-poseidon2",
  "p3-symmetric",
- "rand 0.8.7",
+ "rand 0.8.8",
  "rustc_version",
  "serde",
 ]
@@ -2849,7 +2849,7 @@ dependencies = [
  "p3-field",
  "p3-maybe-rayon",
  "p3-util",
- "rand 0.8.7",
+ "rand 0.8.8",
  "serde",
  "tracing",
 ]
@@ -2875,7 +2875,7 @@ dependencies = [
  "p3-matrix",
  "p3-symmetric",
  "p3-util",
- "rand 0.8.7",
+ "rand 0.8.8",
 ]
 
 [[package]]
@@ -2905,7 +2905,7 @@ dependencies = [
  "p3-field",
  "p3-mds",
  "p3-symmetric",
- "rand 0.8.7",
+ "rand 0.8.8",
  "serde",
 ]
 
@@ -3388,9 +3388,9 @@ checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
 
 [[package]]
 name = "rand"
-version = "0.8.7"
+version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22f6172bdec972074665ed81ed53b71da00bfc44b65a753cfde883ec4c702a1a"
+checksum = "e058c7de0b26af77780c769414d6257830bb240f3c38477dbc2c16e5f54d6d4c"
 dependencies = [
  "libc",
  "rand_chacha 0.3.1",
@@ -4234,7 +4234,7 @@ checksum = "a9322a50315808f06a40271123e6e587750fa2e17715a110b067575afd22ccbb"
 dependencies = [
  "derive-where",
  "itertools 0.14.0",
- "rand 0.8.7",
+ "rand 0.8.8",
  "serde",
  "slop-algebra",
  "slop-alloc",
@@ -4340,7 +4340,7 @@ dependencies = [
  "futures",
  "itertools 0.14.0",
  "num_cpus",
- "rand 0.8.7",
+ "rand 0.8.8",
  "rayon",
  "serde",
  "slop-algebra",
@@ -4441,7 +4441,7 @@ dependencies = [
  "derive-where",
  "futures",
  "num_cpus",
- "rand 0.8.7",
+ "rand 0.8.8",
  "rayon",
  "serde",
  "slop-algebra",
@@ -4530,7 +4530,7 @@ dependencies = [
  "arrayvec",
  "derive-where",
  "itertools 0.14.0",
- "rand 0.8.7",
+ "rand 0.8.8",
  "rayon",
  "serde",
  "slop-algebra",
@@ -4570,7 +4570,7 @@ dependencies = [
  "derive-where",
  "futures",
  "itertools 0.14.0",
- "rand 0.8.7",
+ "rand 0.8.8",
  "rayon",
  "serde",
  "slop-algebra",
@@ -4917,7 +4917,7 @@ dependencies = [
  "num-bigint 0.4.8",
  "opentelemetry",
  "pin-project",
- "rand 0.8.7",
+ "rand 0.8.8",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -4990,7 +4990,7 @@ checksum = "f58681fd1d6103ae82defd3c1a95eac0d5f54235512a2a962648fcd6d44002dd"
 dependencies = [
  "bincode 1.3.3",
  "itertools 0.14.0",
- "rand 0.8.7",
+ "rand 0.8.8",
  "rayon",
  "serde",
  "slop-air",
@@ -5098,7 +5098,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "359102596c4df100156febfd2d5a6a3e72f37f2e951274d27d3523e0fd6063fd"
 dependencies = [
  "itertools 0.14.0",
- "rand 0.8.7",
+ "rand 0.8.8",
  "slop-air",
  "slop-algebra",
  "slop-basefold",
@@ -5473,7 +5473,7 @@ dependencies = [
  "crunchy",
  "lazy_static",
  "num-bigint 0.4.8",
- "rand 0.8.7",
+ "rand 0.8.8",
  "rustc-hex",
 ]
 
@@ -5515,7 +5515,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "proptest",
- "rand 0.8.7",
+ "rand 0.10.2",
  "serde",
  "sha3",
  "suwappu-crypto",
@@ -5535,7 +5535,7 @@ dependencies = [
  "pqcrypto-mlkem",
  "pqcrypto-traits",
  "proptest",
- "rand 0.8.7",
+ "rand 0.10.2",
  "rand_chacha 0.3.1",
  "serde",
  "sha3",
@@ -5549,7 +5549,7 @@ dependencies = [
  "blake3",
  "hex",
  "proptest",
- "rand 0.8.7",
+ "rand 0.10.2",
  "serde",
  "suwappu-authority",
  "suwappu-consensus",
@@ -5664,7 +5664,7 @@ version = "0.1.0"
 dependencies = [
  "blst",
  "proptest",
- "rand 0.8.7",
+ "rand 0.10.2",
  "serde",
  "suwappu-crypto",
  "suwappu-precompiles",
@@ -5705,7 +5705,7 @@ dependencies = [
  "openssl-sys",
  "parking_lot",
  "proptest",
- "rand 0.8.7",
+ "rand 0.10.2",
  "serde",
  "serde_json",
  "suwappu-authority",
@@ -5732,7 +5732,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "proptest",
- "rand 0.8.7",
+ "rand 0.10.2",
  "reserve-coverage-host",
  "serde",
  "suwappu-crypto",
@@ -5767,7 +5767,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "proptest",
- "rand 0.8.7",
+ "rand 0.10.2",
  "raptorq",
  "serde",
  "suwappu-crypto",
@@ -6342,7 +6342,7 @@ dependencies = [
  "indexmap 1.9.3",
  "pin-project",
  "pin-project-lite",
- "rand 0.8.7",
+ "rand 0.8.8",
  "slab",
  "tokio",
  "tokio-util",
@@ -6532,7 +6532,7 @@ dependencies = [
  "http 1.5.0",
  "httparse",
  "log",
- "rand 0.8.7",
+ "rand 0.8.8",
  "sha1 0.10.7",
  "thiserror 1.0.69",
  "url",
@@ -6551,7 +6551,7 @@ dependencies = [
  "http 1.5.0",
  "httparse",
  "log",
- "rand 0.8.7",
+ "rand 0.8.8",
  "sha1 0.10.7",
  "thiserror 1.0.69",
  "utf-8",
