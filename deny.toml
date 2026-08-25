@@ -49,6 +49,23 @@ ignore = [
     "RUSTSEC-2026-0162",
     "RUSTSEC-2026-0163",
     "RUSTSEC-2026-0166",
+    # h2 unbounded empty DATA frames (low severity). Two h2 trees are in
+    # the graph and only one is fixable here:
+    #   * h2 0.4.x — FIXED in this repo by bumping 0.4.15 -> 0.4.19
+    #     (advisory patch landed in 0.4.16). Not ignored.
+    #   * h2 0.3.27 — no patched 0.3.x exists; upstream's only remedy is
+    #     ">=0.4.16", and 0.3.27 is already the newest 0.3 release. It
+    #     arrives via suwappudb-bridge -> reqwest 0.11 -> hyper 0.14, the
+    #     same upstream blocker as RUSTSEC-2025-0134 above.
+    # Scoped to the 0.3.27 crate deliberately, NOT to the bare advisory
+    # id: a bare ignore would also silence a future regression on the
+    # 0.4 tree, which is the tree our own axum/reqwest 0.12 listeners
+    # actually use.
+    # Gate: suwappu-db's suwappudb-bridge bumps to reqwest 0.12 (hyper 1.x,
+    # h2 0.4.x) — the same gate as RUSTSEC-2025-0134, so both ignores drop
+    # in the same PR.
+    # Re-check: when suwappu-db releases the reqwest-0.12 bump.
+    { id = "RUSTSEC-2026-0258", reason = "only h2 0.3.27 is affected here and no patched 0.3.x exists; the 0.4 tree is bumped to 0.4.19 and pinned above the fix by a [[bans.deny]] entry" },
 ]
 
 [licenses]
@@ -78,6 +95,18 @@ wildcards = "deny"
 # cargo-deny without this flag — the workspace itself is the version source.
 allow-wildcard-paths = true
 highlight = "all"
+
+# RUSTSEC-2026-0258 compensating control. The advisory ignore above has to
+# be a bare id — cargo-deny 0.20's `[advisories].ignore` table accepts only
+# `id` and `reason`, so an advisory cannot be scoped to one crate version.
+# A bare ignore would therefore also silence a future regression on the h2
+# 0.4 tree, which is the tree our own axum / reqwest-0.12 listeners use.
+# This ban restores that coverage: h2 0.4.x below the patched 0.4.16 is
+# refused outright, while 0.3.27 (unfixable, gated on suwappu-db) is not
+# matched by the range.
+[[bans.deny]]
+crate = "h2:>=0.4.0, <0.4.16"
+reason = "RUSTSEC-2026-0258 is patched in h2 0.4.16; do not regress the 0.4 tree below it"
 
 # Lane separation analog: forbid pulling unaudited crypto into non-crypto crates.
 # Enforced separately by scripts/check-crypto-boundary.sh in CI.
