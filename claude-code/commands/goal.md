@@ -102,12 +102,25 @@ requires an upgrade plan under `plans/`.
   `bridge/wire.py` closes the relayer half: `RelayPacket` had no serialization
   at all, so `Relayer.relay()` and `L2Materializer.materialize()` could only
   run in one process.
-  **Still open**, and why this is `[~]` not `[x]`: everything above is
-  transport-agnostic library code — no sockets, no process, no supervision, no
-  peer discovery. And nothing decides *who is entitled* to a seat; an
-  announcement proves intent and key possession, but an allowlist / stake
-  check / governance vote is a policy decision nobody has made yet. Pick that
-  before writing the daemon, because it determines what the daemon enforces.
+  Seat entitlement is now decided too (`policy.py`, 2026-08-25): the binding
+  stops a *replay*, but not a stranger announcing for your seat with their own
+  freshly generated key — that announcement is genuinely signed and verifies.
+  `enroll_announcement` is fail-closed and requires a policy; `SeatAllowlist`
+  binds a seat to a specific published key. Stake and governance policies were
+  ruled out as unimplementable rather than unwanted: there is no escrowed bond
+  to check a claim against (this repo's own A9) and no corridor governance
+  surface, so `EnrollmentPolicy` is a Protocol and they land later as
+  implementations.
+  And it is runnable: `scripts/corridor_ceremony.py` covers the whole ceremony
+  — keygen, allowlist, announce, roster, payload, sign, aggregate, verify — as
+  file-based commands, no network, no new dependencies. That is what an
+  external corridor operator would actually follow, so it is the E-track
+  counterpart to D5.
+  **Still open**, and why this is `[~]` not `[x]`: there is still no daemon.
+  No sockets, no process, no supervision, no peer discovery — the ceremony is
+  operator-driven, one command at a time. That is a deliberate stopping point
+  (a daemon needs a transport decision the corridor has not made) rather than
+  an oversight, but it means a corridor cannot yet run unattended.
 - [ ] E2. Deploy `LTPAnchorRegistry` (+ bridge pair) on the new chain once D4
   passes. **Already done on the interim legs** (2026-08-24): Ethereum Sepolia
   `11155111` and Tempo testnet `42431`, both registry v6 behind a UUPS proxy
