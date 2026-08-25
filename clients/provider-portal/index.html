@@ -133,7 +133,7 @@
     </div>
   </div>
 
-  <h2>Two ways to earn</h2>
+  <h2>Three ways to earn</h2>
   <table>
     <tr><th>Role</th><th>What you run</th><th>What you're paid for</th></tr>
     <tr>
@@ -147,6 +147,12 @@
       <td>An LTP node storing and serving erasure-coded shards</td>
       <td>Audited byte-months stored (PDP storage proofs), bytes served
           within the DA latency SLA</td>
+    </tr>
+    <tr>
+      <td><strong>Inference node (GPU)</strong></td>
+      <td>The network's model runtime behind the LTP gateway</td>
+      <td>Metered tokens served — the operator share of each request's
+          stablecoin fee, with a digest-audited billing trail</td>
     </tr>
   </table>
 
@@ -201,6 +207,7 @@
           <select id="m-role" onchange="recalc()">
             <option value="ltp">LTP commitment node</option>
             <option value="dag">DAG validator</option>
+            <option value="gpu">Inference node (GPU)</option>
           </select>
         </div>
         <div>
@@ -222,6 +229,12 @@
           <input id="m-certs" type="number" min="0" value="2000" oninput="recalc()">
           <label for="m-attests">Corridor attestations per epoch</label>
           <input id="m-attests" type="number" min="0" value="20" oninput="recalc()">
+        </div>
+        <div id="m-gpu-fields" style="display:none">
+          <label for="m-mtok-in">Input tokens served (MTok / day)</label>
+          <input id="m-mtok-in" type="number" min="0" value="50" oninput="recalc()">
+          <label for="m-mtok-out">Output tokens served (MTok / day)</label>
+          <input id="m-mtok-out" type="number" min="0" value="10" oninput="recalc()">
         </div>
       </div>
       <div class="result">
@@ -315,6 +328,33 @@
         the same node, the same proofs, settling per-epoch in reserve-backed
         stablecoin under the mechanism above.</li>
   </ol>
+
+  <h2>Buy inference <span class="badge soon">preview</span></h2>
+  <p class="subtitle" style="margin-bottom:0.8rem">
+    The demand side of the same loop: completions against the network's own
+    model, priced per million tokens, paid in stablecoins. Every response
+    carries SHA3-256 request/response digests, so your bill is auditable
+    against the post-quantum commitment log — no other inference provider
+    can hand you that.
+  </p>
+  <div class="calc">
+    <pre style="margin:0;overflow-x:auto;font-size:0.85rem;line-height:1.5"><code>curl https://gateway.suwappu.bot/inference/v1/chat/completions \
+  -H "Authorization: Bearer $SUWAPPU_TOKEN" \
+  -d '{"model": "suwappu-1",
+       "messages": [{"role": "user", "content": "hello"}]}'
+
+# response includes:
+#   "usage":   {"prompt_tokens": ..., "completion_tokens": ...}
+#   "billing": {"settled_micro": ..., "request_digest": "...",
+#               "response_digest": "..."}</code></pre>
+    <p class="footnote">
+      OpenAI-shaped endpoint — existing SDKs work with a base-URL change.
+      The revenue funds the provider pool above: your inference spend is
+      what pays the operators securing the chain. Endpoint goes live with
+      the gateway deployment; the API surface is in the repo today
+      (<code>src/ltp/gateway/routers/inference.py</code>).
+    </p>
+  </div>
 
   <h2>Network right now</h2>
   <div class="tiles">

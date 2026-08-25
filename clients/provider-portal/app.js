@@ -30,6 +30,11 @@ const PRICE_PER_GIB_MONTH_MICRO = 20_000; // $0.02 / GiB-month stored
 const PRICE_PER_GIB_SERVED_MICRO = 10_000; // $0.01 / GiB served
 const PER_CERTIFICATE_MICRO = 100; // $0.0001 (illustrative)
 const PER_ATTESTATION_MICRO = 1_000; // $0.001 (illustrative)
+// Inference listing rates (illustrative; per million tokens) and the
+// operator share of each request's fee (IncentiveConfig fee split).
+const INFER_IN_MICRO_PER_MTOK = 250_000; // $0.25 / MTok in
+const INFER_OUT_MICRO_PER_MTOK = 1_000_000; // $1.00 / MTok out
+const OPERATOR_SHARE = 0.8;
 
 // --- Mode toggle ---------------------------------------------------------
 
@@ -76,10 +81,21 @@ function recalcMainnet() {
   const uptime = parseFloat(document.getElementById("m-uptime").value);
   document.getElementById("m-ltp-fields").style.display = role === "ltp" ? "" : "none";
   document.getElementById("m-dag-fields").style.display = role === "dag" ? "" : "none";
+  document.getElementById("m-gpu-fields").style.display = role === "gpu" ? "" : "none";
 
   let monthlyMicro = 0;
   let breakdown = "";
-  if (role === "ltp") {
+  if (role === "gpu") {
+    // Inference revenue is per-request, not uptime-multiplied: a node
+    // that is down simply serves (and earns) nothing.
+    const daily =
+      num("m-mtok-in") * INFER_IN_MICRO_PER_MTOK +
+      num("m-mtok-out") * INFER_OUT_MICRO_PER_MTOK;
+    monthlyMicro = daily * 30 * OPERATOR_SHARE;
+    breakdown =
+      `$${fmt(daily / MICRO, 2)}/day revenue x 30 days x ${OPERATOR_SHARE * 100}% ` +
+      "operator share — insurance and treasury take the rest";
+  } else if (role === "ltp") {
     const storage = num("m-storage") * PRICE_PER_GIB_MONTH_MICRO;
     const served = num("m-served") * PRICE_PER_GIB_SERVED_MICRO;
     monthlyMicro = (storage + served) * uptime;
