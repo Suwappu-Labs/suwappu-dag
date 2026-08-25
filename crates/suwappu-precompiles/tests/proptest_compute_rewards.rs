@@ -112,10 +112,18 @@ fn params_strategy() -> impl Strategy<Value = RewardParams> {
 }
 
 proptest! {
-    // No explicit `cases` override: proptest's default is 256, and
-    // leaving it unset lets `PROPTEST_CASES=10000` (the sprint exit
-    // gate) actually take effect — an inline `cases: 256` would
-    // silently pin the count and ignore the environment variable.
+    // Case count is proptest's default of 256, raised to the sprint exit
+    // gate with `PROPTEST_CASES=10000`.
+    //
+    // An earlier version of this comment claimed an inline `cases:` would
+    // pin the count and defeat that variable. That is wrong: the
+    // `proptest!` macro passes whatever config you write through
+    // `contextualize_config()`, which applies `PROPTEST_CASES` *after*
+    // the struct literal, so the environment always wins. Verified
+    // against proptest 1.11 — a block with `cases: 256` runs 1000 cases
+    // under `PROPTEST_CASES=1000`. The sibling files that set an explicit
+    // `cases:` are therefore correct as written, and their values are
+    // deliberate per-test defaults, not overrides to strip.
     #![proptest_config(ProptestConfig {
         max_shrink_iters: 32,
         .. ProptestConfig::default()
