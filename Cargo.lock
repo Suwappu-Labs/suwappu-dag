@@ -5803,6 +5803,7 @@ dependencies = [
  "suwappu-client",
  "thiserror 2.0.20",
  "tokio",
+ "tower 0.5.3",
  "tracing",
  "tracing-subscriber",
 ]
