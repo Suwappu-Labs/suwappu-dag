@@ -1,0 +1,17 @@
+# Pin the toolchain CI and contributors build with.
+#
+# Why this file exists: every CI job used `dtolnay/rust-toolchain@stable`
+# with nothing pinning what "stable" resolves to. On 2026-08-18 Rust
+# 1.98.0 shipped and made `clippy::drain_collect` fire under the
+# workspace's `-D warnings`, turning `crates/suwappu-node/src/daemon.rs`
+# red with no commit touching it — the last green run on `main` was
+# 2026-08-16. A floating toolchain means a PR's CI result depends on the
+# day it runs, which makes "is this failure mine?" unanswerable.
+#
+# Bumping this pin is a deliberate PR: raise the version, run clippy, fix
+# whatever new lints fire, land it together. That way new lint enforcement
+# arrives as reviewable work instead of as unrelated red on someone else's
+# pull request.
+[toolchain]
+channel = "1.98.0"
+components = ["rustfmt", "clippy"]
