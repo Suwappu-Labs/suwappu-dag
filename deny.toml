@@ -41,10 +41,14 @@ ignore = [
     # Re-check: 2026-Q4.
     "RUSTSEC-2025-0141",
     # pqcrypto-{mlkem,traits,internals,mldsa} unmaintained: upstream PQClean
-    # archived (2026). No vulnerability — these are the ML-KEM-768 / ML-DSA-65
-    # (FIPS 203/204) bindings central to the chain's PQ consensus + LTP. The
-    # pure-Rust `ml-dsa`/`ml-kem` (RustCrypto) crates are the migration target;
-    # until they're production-ready, the PQClean-backed impls are the reference.
+    # archived (2026). No vulnerability. The migration to the pure-Rust
+    # `ml-dsa`/`ml-kem` (RustCrypto) crates has landed, so these no longer reach
+    # any shipped artifact: they survive as dev-dependencies of suwappu-crypto and
+    # suwappu-mldsa-precompile only, generating the vectors that
+    # tests/pqclean_interop.rs uses to prove the new implementations are
+    # byte-compatible with the ones they replaced.
+    # Drop these entries together with that dev-dependency, once the pure-Rust
+    # backend has held for a release. Re-check: 2026-Q4.
     "RUSTSEC-2026-0161",
     "RUSTSEC-2026-0162",
     "RUSTSEC-2026-0163",
