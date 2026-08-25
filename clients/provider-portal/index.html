@@ -333,9 +333,11 @@
   <p class="subtitle" style="margin-bottom:0.8rem">
     The demand side of the same loop: completions against the network's own
     model, priced per million tokens, paid in stablecoins. Every response
-    carries SHA3-256 request/response digests, so your bill is auditable
-    against the post-quantum commitment log — no other inference provider
-    can hand you that.
+    carries SHA3-256 request/response digests committed to a signed,
+    append-only log, so your invoice can be independently audited and
+    neither side can revise it after the fact. That is billing integrity
+    — it proves what you were charged for, not that a particular model
+    ran; those need attestation, and compose with this.
   </p>
   <div class="calc">
     <pre style="margin:0;overflow-x:auto;font-size:0.85rem;line-height:1.5"><code>curl https://gateway.suwappu.bot/inference/v1/chat/completions \

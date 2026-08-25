@@ -40,6 +40,25 @@
 //! and a *failed* settlement (breaker tripped, cap exceeded) leaves the
 //! epoch unsettled and retryable once a fresh reserve attestation
 //! lands.
+//!
+//! That guard is `last_settled_epoch` on [`RewardSettlement`], which is
+//! ordinary struct state: it is only as durable as whatever hosts the
+//! engine. Under the execution layer the value lives in chain state and
+//! the guarantee is real; a host that reconstructs the engine
+//! per-process — a settlement daemon, a test harness — re-opens the
+//! replay window on restart and must persist `last_settled_epoch`
+//! alongside the balances it minted. The same durability discipline
+//! applies to the off-chain side of this loop; see
+//! `suwappu-lattice-protocol/docs/economics/BILLING_LEDGER_GAP_ANALYSIS.md`.
+//!
+//! ## What a receipt proves
+//!
+//! A [`ComputeReceipt`] carries work *observed by the probes*, not work
+//! self-reported by the provider being paid — that distinction is what
+//! makes proof-gating meaningful, and it is load-bearing. Pricing
+//! receipts a provider fills in for itself would make this an honour
+//! system with a mint attached, however carefully the arithmetic is
+//! clamped.
 
 use std::collections::BTreeSet;
 
