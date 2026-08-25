@@ -13,9 +13,15 @@ is live and `VALIDATOR-OPERATORS.md` describes reality.
   releases have been cut (`git tag` is empty).
 - The original lattice-protocol "SUWAPPU testnet" (chain `103115120`,
   the PoA EVM devnet recorded in that repo's `DEPLOYED_CONTRACTS.md`) is
-  **offline** — its RPC hostname no longer resolves. The LTP bridge's
-  Base Sepolia leg is live and verified on-chain (registry v6). This
-  chain is the natural replacement for the dead leg.
+  **offline** — its RPC hostname no longer resolves. The LTP bridge was
+  re-legged onto existing public testnets in 2026-08 rather than waiting
+  for this chain: Base Sepolia (`84532`), Ethereum Sepolia (`11155111`)
+  and Tempo testnet (`42431`) are all live on registry v6, and a full
+  signed end-to-end path has been run across them (see that repo's
+  `DEPLOYED_CONTRACTS.md`). Those legs are interim — testnet,
+  discretionary, unbonded — and do **not** satisfy goal item 3, which
+  requires the bridge re-legged onto *this* chain. This chain remains the
+  intended replacement for the dead leg.
 - `terraform/testnet/` is substantially complete (7-region seeds, ALB,
   ACM, DNS, WAF, faucet, explorer, status, points-program RDS) and is
   more complete than its README previously claimed.

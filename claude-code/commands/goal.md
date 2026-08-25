@@ -30,6 +30,9 @@ Done means all four of these are true at once:
 - Found a new launch blocker? ADD it here.
 - Keep `docs/testnet/LAUNCH-STATUS.md` and this file consistent — that doc
   is the long-form tracker, this is the actionable queue.
+- Boxes: `[x]` done, `[ ]` not started or blocked, `[~]` partly landed —
+  read the note before assuming either that there is nothing to do or that
+  you are starting from scratch.
 
 ## A. Chain: code gaps that block a *credible* testnet
 
@@ -74,11 +77,61 @@ AWS (profile `gsn`) is gone. The free-tier path is written up in
 
 ## E. Bridge re-legging (suwappu-lattice-protocol)
 
-- [ ] E1. **Corridor daemon does not exist.** `src/ltp/corridor/` is a byte-parity library — no membership registry, no PoP exchange, no partial-signature transport for the 7-of-9 super-node quorum. `Relayer.relay()` returns an in-process object; there is no relayer transport. "Joining a corridor" is currently a human arrangement. This is the bridge's A8.
-- [ ] E2. Deploy `LTPAnchorRegistry` (+ bridge pair) on the new chain once D4 passes.
-- [ ] E3. Regenerate + register the gateway keypair (2-of-2 multisig ceremony), fund operators.
+Read the dates before acting on this section. E2–E4 are worded "on the new
+chain", and there is no new chain yet (all of D is open). What actually
+happened in 2026-08 is that the bridge was re-legged onto **existing public
+testnets** — Ethereum Sepolia and Tempo — because the SUWAPPU leg died with
+the AWS teardown. That work is real and is recorded in
+`docs/DEPLOYED_CONTRACTS.md` in the lattice repo. The boxes stay unchecked
+because their stated condition (D4) is still unmet, **not** because the work
+is undone. Do not redeploy what is already deployed — a duplicate registry
+would orphan the addresses in that file, and changing a deployed address there
+requires an upgrade plan under `plans/`.
+
+- [~] E1. **Corridor service layer now exists; the daemon still does not.**
+  Was: "no membership registry, no PoP exchange, no partial-signature
+  transport." All three landed 2026-08-25 in `src/ltp/corridor/`:
+  `membership.py` (`CorridorRegistry` — PoP verified at enrollment, rejects
+  duplicate authority ids *and* duplicate BLS keys, deterministic ordering,
+  comparable `roster_digest()`), `enrollment.py` (`EnrollmentAnnouncement` —
+  the bare PoP signs the public key alone, so an observed PoP could be
+  rebroadcast under any seat/corridor/epoch to squat a seat and lock the real
+  operator out; the binding signature covers all three), and `session.py`
+  (`SigningSession` partial collection to 7-of-9, `CorridorSigner` local
+  double-sign guard, `EquivocationMonitor`/`EquivocationEvidence`).
+  `bridge/wire.py` closes the relayer half: `RelayPacket` had no serialization
+  at all, so `Relayer.relay()` and `L2Materializer.materialize()` could only
+  run in one process.
+  **Still open**, and why this is `[~]` not `[x]`: everything above is
+  transport-agnostic library code — no sockets, no process, no supervision, no
+  peer discovery. And nothing decides *who is entitled* to a seat; an
+  announcement proves intent and key possession, but an allowlist / stake
+  check / governance vote is a policy decision nobody has made yet. Pick that
+  before writing the daemon, because it determines what the daemon enforces.
+- [ ] E2. Deploy `LTPAnchorRegistry` (+ bridge pair) on the new chain once D4
+  passes. **Already done on the interim legs** (2026-08-24): Ethereum Sepolia
+  `11155111` and Tempo testnet `42431`, both registry v6 behind a UUPS proxy
+  with LTPMultiSig (2-of-2) + TimelockController (60s). Base Sepolia `84532`
+  remains live from before. Governance path is multisig submit → confirm →
+  execute (schedules the timelock) → wait → **a second multisig round** to
+  execute, because the multisig is the timelock's only executor — budget for
+  that, it is not a single round.
+- [ ] E3. Regenerate + register the gateway keypair (2-of-2 multisig ceremony),
+  fund operators. **Done for the interim legs**: a signable bridge-operator
+  key was generated 2026-08-24 (vk hash `0x47f8caa7…`, testnet-only) because
+  the original operator key's secret is not in the repo and therefore cannot
+  sign. Deployer and second multisig owner are funded on both legs.
 - [ ] E4. Run `scripts/bridge_live.py` end-to-end and capture the transcript.
-- [ ] E5. Until E2–E4 land, the bridge trust model is 2-of-2 discretionary with ZERO bonds. Fine for a demo, not for value-bearing settlement — `BRIDGE_TRUST_MODEL.md` says the same. Do not let marketing outrun this line.
+  **Done on Ethereum Sepolia + Base Sepolia** (cross-chain anchor pair) and on
+  Tempo (additionally carrying an `entityIdHash` in a transfer memo). Redo on
+  the new chain once D4 passes. Note `BRIDGE_TX_TIMEOUT` (default 600s) — the
+  old hardcoded 180s reported `TimeExhausted` on anchors that had in fact
+  succeeded.
+- [ ] E5. Until E2–E4 land **on the real chain**, the bridge trust model is
+  2-of-2 discretionary with ZERO bonds. Fine for a demo, not for value-bearing
+  settlement — `BRIDGE_TRUST_MODEL.md` says the same. The interim-leg
+  deployments above do not change this: they are testnet, discretionary, and
+  unbonded. Do not let marketing outrun this line.
 
 ## F. SuwappuBot activation (suwappubot)
 
