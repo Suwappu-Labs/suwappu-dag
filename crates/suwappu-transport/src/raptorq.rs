@@ -114,8 +114,14 @@ pub fn reconstruct(
         // shreds and keep going: one malformed packet from one peer must not
         // take down reconstruction of an otherwise recoverable object.
         //
-        // Upstream now has a fallible variant (cberner/raptorq#230); this can
-        // become `try_deserialize` once that is released.
+        // Upstream declined to add a fallible variant (cberner/raptorq#230),
+        // and the reasoning applies here: RaptorQ corrects erasures, not
+        // errors, so it cannot detect a shred whose contents were altered.
+        // A length check is not an integrity check. Corrupt shreds that are
+        // long enough still decode to incorrect data silently, so the real
+        // guarantee has to come from authenticating shreds at the network
+        // boundary before they reach this function. This guard only keeps a
+        // truncated shred from panicking; see cberner/raptorq#231.
         if bytes.len() < FEC_PAYLOAD_ID_BYTES {
             continue;
         }
