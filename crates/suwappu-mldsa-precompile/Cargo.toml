@@ -7,5 +7,12 @@ license = "MIT"
 description = "On-chain ML-DSA-65 (FIPS 204) signature-verification precompile core for the Suwappu bridge. PQ-sound; wraps the NIST PQC reference verifier with EVM-friendly I/O."
 
 [dependencies]
+# Pure-Rust FIPS 204 verifier (RustCrypto). Replaced the pqcrypto-mldsa PQClean
+# bindings, unmaintained since PQClean was archived in 2026 (RUSTSEC-2026-0162).
+# Encodings are unchanged, so previously-issued committee signatures still verify.
+ml-dsa = "0.1"
+
+[dev-dependencies]
+# Retained only to prove byte-compatibility with the verifier this replaced.
 pqcrypto-mldsa = "0.1"
 pqcrypto-traits = "0.3"

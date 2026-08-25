@@ -5,7 +5,7 @@
 //! given `pubkey || signature || message`, it returns a 32-byte EVM word that
 //! is `1` iff the ML-DSA-65 detached signature is valid, else `0`.
 //!
-//! It wraps the same NIST PQC reference verifier (`pqcrypto-mldsa`, ML-DSA-65)
+//! It wraps the same pure-Rust FIPS 204 verifier (`ml-dsa`, ML-DSA-65)
 //! used by `suwappu-crypto` for validator/consensus signatures, so it is genuinely
 //! FIPS-204 post-quantum sound — no SNARK wrapper, no scheme substitution
 //! (contrast the SP1→Groth16/BN254 path, which is Shor-broken; see
@@ -22,14 +22,10 @@
 
 #![forbid(unsafe_code)]
 
-use pqcrypto_mldsa::mldsa65;
-// `from_bytes` is a trait associated function called via path
-// (`mldsa65::PublicKey::from_bytes`); the traits must be in scope for
-// resolution, but rustc's unused-import lint does not count path-form
-// associated-fn calls as usage (known false positive). Removing these
-// breaks compilation, so suppress the spurious warning.
-#[allow(unused_imports)]
-use pqcrypto_traits::sign::{DetachedSignature, PublicKey};
+use ml_dsa::{EncodedSignature, EncodedVerifyingKey, MlDsa65, Signature, VerifyingKey};
+
+/// Empty signing context, matching the verifier this replaced.
+const CTX: &[u8] = b"";
 
 /// ML-DSA-65 (FIPS 204) public-key length in bytes.
 pub const PK_LEN: usize = 1952;
@@ -68,18 +64,26 @@ pub fn verify(input: &[u8]) -> [u8; 32] {
     let sig_bytes = &input[PK_LEN..MIN_INPUT_LEN];
     let message = &input[MIN_INPUT_LEN..];
 
-    let pk = match mldsa65::PublicKey::from_bytes(pk_bytes) {
-        Ok(p) => p,
+    let pk_enc = match EncodedVerifyingKey::<MlDsa65>::try_from(pk_bytes) {
+        Ok(e) => e,
         Err(_) => return WORD_FALSE,
     };
-    let sig = match mldsa65::DetachedSignature::from_bytes(sig_bytes) {
-        Ok(s) => s,
+    let sig_enc = match EncodedSignature::<MlDsa65>::try_from(sig_bytes) {
+        Ok(e) => e,
         Err(_) => return WORD_FALSE,
     };
-    match mldsa65::verify_detached_signature(&sig, message, &pk) {
-        Ok(()) => WORD_TRUE,
-        // VerificationError is #[non_exhaustive]; any error rejects.
-        Err(_) => WORD_FALSE,
+    // `decode` returns None for a signature whose coefficients are out of range,
+    // which is a rejection, not an error condition.
+    let sig = match Signature::<MlDsa65>::decode(&sig_enc) {
+        Some(s) => s,
+        None => return WORD_FALSE,
+    };
+    let pk = VerifyingKey::<MlDsa65>::decode(&pk_enc);
+
+    if pk.verify_with_context(message, CTX, &sig) {
+        WORD_TRUE
+    } else {
+        WORD_FALSE
     }
 }
 
@@ -245,6 +249,10 @@ pub fn verify_mint_quorum(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Test vectors are still produced with the PQClean implementation this
+    // crate migrated away from, so every test below doubles as a check that the
+    // pure-Rust verifier accepts signatures made by the old one.
+    use pqcrypto_mldsa::mldsa65;
     #[allow(unused_imports)]
     use pqcrypto_traits::sign::{DetachedSignature, PublicKey};
 

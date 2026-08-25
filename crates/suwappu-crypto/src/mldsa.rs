@@ -3,15 +3,58 @@
 //! Used in the SUWAPPU DAG L1 on the Authority-Ring signing surface and on the LTP
 //! integrity surface (paper §3.3, §10).
 //!
-//! Wraps the `pqcrypto-mldsa` crate, which is the NIST PQC reference port.
-//! Construction-shape is fixed at parameter set **ML-DSA-65** (NIST claim 3).
+//! Wraps the pure-Rust `ml-dsa` crate (RustCrypto). Construction-shape is fixed
+//! at parameter set **ML-DSA-65** (NIST claim 3).
+//!
+//! Replaced the `pqcrypto-mldsa` PQClean bindings, unmaintained since PQClean was
+//! archived in 2026 (RUSTSEC-2026-0162). The on-the-wire encodings are unchanged:
+//! keys, secret keys and signatures are the FIPS 204 byte strings, and
+//! `tests/pqclean_interop.rs` cross-verifies against the implementation this
+//! replaced.
+//!
+//! Note the secret key handled here is the **expanded** 4032-byte FIPS 204 signing
+//! key, matching what PQClean produced and what existing keystores hold — not the
+//! 32-byte seed that `ml_dsa::SigningKey` defaults to.
 
-use pqcrypto_mldsa::mldsa65;
-use pqcrypto_traits::sign::{
-    DetachedSignature as _, PublicKey as _, SecretKey as _, SignedMessage as _,
+use ml_dsa::{
+    EncodedSignature, EncodedVerifyingKey, ExpandedSigningKey, ExpandedSigningKeyBytes, MlDsa65,
+    Signature as MlDsaSignature, SigningKey, VerifyingKey,
 };
 
 use crate::error::CryptoError;
+
+/// Empty signing context, matching the PQClean bindings this replaced.
+const CTX: &[u8] = b"";
+
+/// Byte length of an ML-DSA-65 detached signature (FIPS 204).
+pub const SIGNATURE_LEN: usize = 3309;
+/// Byte length of an ML-DSA-65 public key (FIPS 204).
+pub const PUBLIC_KEY_LEN: usize = 1952;
+/// Byte length of an expanded ML-DSA-65 secret key (FIPS 204).
+pub const SECRET_KEY_LEN: usize = 4032;
+
+// The expanded (4032-byte) signing-key encoding is deprecated upstream in favour
+// of the 32-byte seed. It is what PQClean emitted and what existing validator
+// keystores hold, so it is retained deliberately: moving to seeds would
+// invalidate every stored secret key.
+#[allow(deprecated)]
+fn expanded_sk(bytes: &[u8]) -> Result<ExpandedSigningKey<MlDsa65>, CryptoError> {
+    let enc = ExpandedSigningKeyBytes::<MlDsa65>::try_from(bytes)
+        .map_err(|_| CryptoError::MalformedKey("ml-dsa-65 secret key"))?;
+    Ok(ExpandedSigningKey::<MlDsa65>::from_expanded(&enc))
+}
+
+fn verifying_key(bytes: &[u8]) -> Result<VerifyingKey<MlDsa65>, CryptoError> {
+    let enc = EncodedVerifyingKey::<MlDsa65>::try_from(bytes)
+        .map_err(|_| CryptoError::MalformedKey("ml-dsa-65 public key"))?;
+    Ok(VerifyingKey::<MlDsa65>::decode(&enc))
+}
+
+fn signature(bytes: &[u8]) -> Result<MlDsaSignature<MlDsa65>, CryptoError> {
+    let enc =
+        EncodedSignature::<MlDsa65>::try_from(bytes).map_err(|_| CryptoError::InvalidSignature)?;
+    MlDsaSignature::<MlDsa65>::decode(&enc).ok_or(CryptoError::InvalidSignature)
+}
 
 /// ML-DSA-65 public key, byte-serialized.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,9 +75,7 @@ impl PublicKey {
     }
     /// Construct from bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
-        mldsa65::PublicKey::from_bytes(bytes)
-            .map(|_| Self(bytes.to_vec()))
-            .map_err(|_| CryptoError::MalformedKey("ml-dsa-65 public key"))
+        verifying_key(bytes).map(|_| Self(bytes.to_vec()))
     }
 }
 
@@ -45,9 +86,7 @@ impl SecretKey {
     }
     /// Construct from bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
-        mldsa65::SecretKey::from_bytes(bytes)
-            .map(|_| Self(bytes.to_vec()))
-            .map_err(|_| CryptoError::MalformedKey("ml-dsa-65 secret key"))
+        expanded_sk(bytes).map(|_| Self(bytes.to_vec()))
     }
 }
 
@@ -58,55 +97,66 @@ impl Signature {
     }
     /// Construct from wire bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
-        mldsa65::DetachedSignature::from_bytes(bytes)
-            .map(|_| Self(bytes.to_vec()))
-            .map_err(|_| CryptoError::InvalidSignature)
+        signature(bytes).map(|_| Self(bytes.to_vec()))
     }
 }
 
 /// Generate a fresh ML-DSA-65 keypair from system randomness.
+#[allow(deprecated)]
 pub fn keypair() -> (PublicKey, SecretKey) {
-    let (pk, sk) = mldsa65::keypair();
+    let mut seed = ml_dsa::Seed::default();
+    crate::random_bytes(&mut seed);
+    let sk = SigningKey::<MlDsa65>::from_seed(&seed);
+    let pk = sk.expanded_key().verifying_key();
     (
-        PublicKey(pk.as_bytes().to_vec()),
-        SecretKey(sk.as_bytes().to_vec()),
+        PublicKey(pk.encode().to_vec()),
+        SecretKey(sk.expanded_key().to_expanded().to_vec()),
     )
 }
 
 /// Produce a detached signature over `message` using `sk`.
 pub fn sign(message: &[u8], sk: &SecretKey) -> Result<Signature, CryptoError> {
-    let sk_typed = mldsa65::SecretKey::from_bytes(&sk.0)
-        .map_err(|_| CryptoError::MalformedKey("ml-dsa-65 secret key"))?;
-    let sig = mldsa65::detached_sign(message, &sk_typed);
-    Ok(Signature(sig.as_bytes().to_vec()))
+    let sk_typed = expanded_sk(&sk.0)?;
+    // Hedged (randomized) signing with an empty context, matching the PQClean
+    // bindings this replaced.
+    let sig = sk_typed
+        .sign_randomized(message, CTX, &mut crate::rng::OsRng)
+        .map_err(|_| CryptoError::InvalidSignature)?;
+    Ok(Signature(sig.encode().to_vec()))
 }
 
 /// Verify a detached signature on `message` against `pk`.
 pub fn verify(message: &[u8], sig: &Signature, pk: &PublicKey) -> Result<(), CryptoError> {
-    let pk_typed = mldsa65::PublicKey::from_bytes(&pk.0)
-        .map_err(|_| CryptoError::MalformedKey("ml-dsa-65 public key"))?;
-    let sig_typed = mldsa65::DetachedSignature::from_bytes(&sig.0)
-        .map_err(|_| CryptoError::InvalidSignature)?;
-    mldsa65::verify_detached_signature(&sig_typed, message, &pk_typed)
-        .map_err(|_| CryptoError::InvalidSignature)
+    let pk_typed = verifying_key(&pk.0)?;
+    let sig_typed = signature(&sig.0)?;
+    if pk_typed.verify_with_context(message, CTX, &sig_typed) {
+        Ok(())
+    } else {
+        Err(CryptoError::InvalidSignature)
+    }
 }
 
 /// Convenience: signed-message form (signature || message) for paper §10.2
 /// constant-size commitment composition.
 pub fn sign_attached(message: &[u8], sk: &SecretKey) -> Result<Vec<u8>, CryptoError> {
-    let sk_typed = mldsa65::SecretKey::from_bytes(&sk.0)
-        .map_err(|_| CryptoError::MalformedKey("ml-dsa-65 secret key"))?;
-    let signed = mldsa65::sign(message, &sk_typed);
-    Ok(signed.as_bytes().to_vec())
+    // PQClean's signed-message form is `signature || message`; preserved exactly
+    // so anything already on-chain keeps parsing. Asserted in tests/pqclean_interop.rs.
+    let sig = sign(message, sk)?;
+    let mut out = sig.0;
+    out.extend_from_slice(message);
+    Ok(out)
 }
 
 /// Convenience: verify a signed-message form, returning the recovered message.
 pub fn open_attached(signed: &[u8], pk: &PublicKey) -> Result<Vec<u8>, CryptoError> {
-    let pk_typed = mldsa65::PublicKey::from_bytes(&pk.0)
-        .map_err(|_| CryptoError::MalformedKey("ml-dsa-65 public key"))?;
-    let signed_typed =
-        mldsa65::SignedMessage::from_bytes(signed).map_err(|_| CryptoError::InvalidSignature)?;
-    mldsa65::open(&signed_typed, &pk_typed).map_err(|_| CryptoError::InvalidSignature)
+    let siglen = SIGNATURE_LEN;
+    if signed.len() < siglen {
+        return Err(CryptoError::InvalidSignature);
+    }
+    let (sig_bytes, message) = signed.split_at(siglen);
+    let sig = Signature(sig_bytes.to_vec());
+    verify(message, &sig, pk)?;
+    Ok(message.to_vec())
 }
 
 #[cfg(test)]

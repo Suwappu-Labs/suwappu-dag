@@ -31,6 +31,9 @@ pub mod error;
 pub mod hash;
 pub mod mldsa;
 pub mod mlkem;
+pub(crate) mod rng;
+
+pub(crate) use rng::random_bytes;
 
 pub use error::CryptoError;
 

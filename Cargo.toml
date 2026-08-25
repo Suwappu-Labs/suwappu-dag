@@ -73,7 +73,16 @@ suwappu-l2-bridge = { path = "crates/suwappu-l2-bridge" }
 suwappu-l2-sequencer = { path = "crates/suwappu-l2-sequencer" }
 suwappu-client = { path = "clients/rust-sdk" }
 
-# Post-quantum primitives (FIPS 203 / 204)
+# Post-quantum primitives (FIPS 203 / 204), pure Rust (RustCrypto).
+# Replaced the pqcrypto-* PQClean bindings, which are unmaintained since
+# PQClean was archived in 2026 (RUSTSEC-2026-0161/0162/0163).
+ml-dsa = { version = "0.1", features = ["rand_core"] }
+ml-kem = { version = "0.3", features = ["getrandom"] }
+signature = "3"
+rand_core_0_10 = { package = "rand_core", version = "0.10" }
+
+# Retained as dev-dependencies only, to cross-check that the pure-Rust
+# implementations produce byte-compatible keys and interoperable signatures.
 pqcrypto-mldsa = "0.1"
 pqcrypto-mlkem = "0.1"
 pqcrypto-traits = "0.3"
