@@ -5510,6 +5510,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "suwappu-clob"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "serde",
+ "suwappu-crypto",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "suwappu-consensus"
 version = "0.1.0"
 dependencies = [

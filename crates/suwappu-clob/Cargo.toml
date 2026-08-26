@@ -1,0 +1,18 @@
+[package]
+name = "suwappu-clob"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+description = "Headless exchange lane: deterministic CLOB matching, netting, and settlement commitments for the SUWAPPU DAG L1."
+
+[dependencies]
+suwappu-crypto.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
