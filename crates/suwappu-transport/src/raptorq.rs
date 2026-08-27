@@ -38,6 +38,10 @@ pub enum TransportError {
     MalformedPacket,
 }
 
+/// Size of the RFC 6330 §4.4.2 FEC Payload ID that prefixes every encoded
+/// packet. Anything shorter than this cannot be a packet.
+const FEC_PAYLOAD_ID_BYTES: usize = 4;
+
 /// A single RaptorQ encoded packet, serialized on the wire.
 ///
 /// Wraps `raptorq::EncodingPacket` and exposes only the byte interface so
@@ -102,7 +106,26 @@ pub fn reconstruct(
 ) -> Result<Vec<u8>, TransportError> {
     let mut decoder = Decoder::new(oti);
     for shred in packets {
-        let pkt = EncodingPacket::deserialize(shred.as_bytes());
+        let bytes = shred.as_bytes();
+        // `EncodingPacket::deserialize` indexes the first four bytes without
+        // checking the length, so a truncated shred would panic here rather
+        // than fail to decode. `Shred::from_bytes` takes whatever arrives on
+        // the wire, so that input is not necessarily well formed. Drop short
+        // shreds and keep going: one malformed packet from one peer must not
+        // take down reconstruction of an otherwise recoverable object.
+        //
+        // Upstream declined to add a fallible variant (cberner/raptorq#230),
+        // and the reasoning applies here: RaptorQ corrects erasures, not
+        // errors, so it cannot detect a shred whose contents were altered.
+        // A length check is not an integrity check. Corrupt shreds that are
+        // long enough still decode to incorrect data silently, so the real
+        // guarantee has to come from authenticating shreds at the network
+        // boundary before they reach this function. This guard only keeps a
+        // truncated shred from panicking; see cberner/raptorq#231.
+        if bytes.len() < FEC_PAYLOAD_ID_BYTES {
+            continue;
+        }
+        let pkt = EncodingPacket::deserialize(bytes);
         if let Some(out) = decoder.decode(pkt) {
             return Ok(out);
         }
@@ -113,6 +136,37 @@ pub fn reconstruct(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncated_shreds_are_skipped_not_fatal() {
+        // A peer sending a short datagram must not be able to panic the
+        // receiver, and must not prevent an otherwise decodable object from
+        // being reconstructed.
+        let payload = b"suwappu-transport truncated shred resilience";
+        let set = shred(payload, 64, 8);
+
+        let mut packets = Vec::new();
+        for len in 0..FEC_PAYLOAD_ID_BYTES {
+            packets.push(Shred::from_bytes(vec![0u8; len]));
+        }
+        packets.extend(set.packets.iter().cloned());
+
+        let out = reconstruct(set.oti, &packets).expect("decode despite truncated shreds");
+        assert_eq!(out.as_slice(), payload.as_slice());
+    }
+
+    #[test]
+    fn only_truncated_shreds_fails_cleanly() {
+        // With nothing decodable at all we want an error, not a panic.
+        let set = shred(b"payload", 64, 2);
+        let packets: Vec<Shred> = (0..FEC_PAYLOAD_ID_BYTES)
+            .map(|len| Shred::from_bytes(vec![0u8; len]))
+            .collect();
+        assert!(matches!(
+            reconstruct(set.oti, &packets),
+            Err(TransportError::DecodeFailed)
+        ));
+    }
 
     #[test]
     fn roundtrip_small_payload() {
