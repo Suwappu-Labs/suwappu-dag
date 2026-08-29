@@ -35,7 +35,7 @@
 # to edition2024, which needs Cargo >= 1.85; pinning 1.78 broke the
 # build with "feature `edition2024` is required". CI builds the workspace
 # on stable, so this matches CI's real toolchain.
-FROM rust:1.97-bookworm AS builder
+FROM rust:1.98-bookworm AS builder
 WORKDIR /work
 # The private suwappu-db git dep is fetched over SSH: rewrite the
 # https URL cargo sees to git@github.com, use the system git client
