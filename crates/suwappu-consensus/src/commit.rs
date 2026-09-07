@@ -307,6 +307,60 @@ pub fn causal_history(dag: &DagStore, start: CertHash) -> Vec<CertHash> {
     out
 }
 
+/// Causal history of `start` cut at a commit floor (IQ-008 D1).
+///
+/// Returns every ancestor of `start` (inclusive) whose round is strictly
+/// greater than `floor`, in the same `(round, author, hash)` order as
+/// [`causal_history`]. `floor = None` is the unbounded walk.
+///
+/// Because a parent's round is strictly smaller than its child's, every
+/// certificate reachable only through a below-floor certificate is
+/// itself below the floor. So "do not expand below the floor" and
+/// "filter the unbounded history by round" yield the same set; this
+/// function does the former for cost, and `proptest_gc.rs` checks the
+/// latter as the reference. The set is a pure function of `start`,
+/// `floor` and the certificates above the floor — pruning anything at or
+/// below the floor cannot change it (I-GC1).
+pub fn causal_history_bounded(
+    dag: &DagStore,
+    start: CertHash,
+    floor: Option<Round>,
+) -> Vec<CertHash> {
+    let above_floor = |round: Round| match floor {
+        Some(f) => round > f,
+        None => true,
+    };
+    let mut seen: HashSet<CertHash> = HashSet::new();
+    let mut queue: VecDeque<CertHash> = VecDeque::new();
+    queue.push_back(start);
+    while let Some(h) = queue.pop_front() {
+        if seen.contains(&h) {
+            continue;
+        }
+        let Some(c) = dag.get(&h) else {
+            // Pruned or never held: not part of the committed set, and
+            // nothing below it can be either.
+            continue;
+        };
+        if !above_floor(c.round) {
+            continue;
+        }
+        seen.insert(h);
+        for p in &c.parents {
+            queue.push_back(*p);
+        }
+    }
+    let mut out: Vec<CertHash> = seen.into_iter().collect();
+    // Same FORK-CRITICAL total order as `causal_history`.
+    out.sort_by_key(|h| {
+        let c = dag
+            .get(h)
+            .expect("only in-dag hashes were inserted into `seen`");
+        (c.round, c.author, *h)
+    });
+    out
+}
+
 /// Run the DagBft-C commit rule (direct + indirect) across every
 /// round of the DAG and return the finalized linear history.
 ///

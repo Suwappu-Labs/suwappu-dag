@@ -37,19 +37,21 @@ pub mod commit;
 pub mod dag;
 pub mod equivocation;
 pub mod error;
+pub mod gc;
 pub mod joint;
 
 pub use cert::{AuthorityId, CertHash, Certificate, Round};
 pub use commit::{
-    causal_history, cert_at, commit_leader, decide_slot, finalize, leader, quorum_threshold,
-    try_direct_decide, try_indirect_decide, CommitteeSize, LeaderStatus,
+    causal_history, causal_history_bounded, cert_at, commit_leader, decide_slot, finalize, leader,
+    quorum_threshold, try_direct_decide, try_indirect_decide, CommitteeSize, LeaderStatus,
 };
-pub use dag::DagStore;
+pub use dag::{DagStore, PruneReport};
 pub use equivocation::{
     detect_authority_equivocation, detect_validator_double_vote, EquivocationProof,
     ValidatorEquivocationProof,
 };
 pub use error::ConsensusError;
+pub use gc::{commit_floor, gc_round, is_obsolete, GC_DEPTH};
 pub use joint::{
     authority_equivocators, joint_commit, validator_double_vote_stake, validator_quorum_met,
     validator_quorum_threshold, voting_stake, Stake, StakeTable, ValidatorId, Vote,

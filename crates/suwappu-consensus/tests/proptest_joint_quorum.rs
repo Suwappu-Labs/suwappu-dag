@@ -144,7 +144,9 @@ fn votes_with_double_voters(
 
 proptest! {
     #![proptest_config(ProptestConfig {
-        cases: 256,
+        // Case count comes from PROPTEST_CASES (default 256); the sprint
+        // exit gate runs 10,000 via scripts/check-10k.sh.
+        cases: std::env::var("PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(256),
         max_shrink_iters: 32,
         .. ProptestConfig::default()
     })]
