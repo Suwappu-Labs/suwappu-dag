@@ -414,7 +414,60 @@ pub struct StateSnapshot {
     pub checkpoint_cursor: (u64, u64, [u8; 32]),
 }
 
+/// The commit-derived body of a snapshot that a checkpoint's
+/// `snapshot_root` commits to (IQ-008 D5). Only fields that are a pure
+/// function of the commit sequence up to `leader_round` belong here:
+/// every node that co-signs the checkpoint must compute the same root.
+/// Certificates, blocks and tombstones are receipt-timing dependent and
+/// are validated structurally on install instead (signatures against the
+/// bound Authority Ring, block digests against the certificates they
+/// back, tombstone rounds against the bound gc round).
+#[derive(Serialize)]
+struct SnapshotBody<'a> {
+    leader_round: u64,
+    has_committed: bool,
+    gc_round: Option<u64>,
+    /// Sorted.
+    committed: Vec<CertHash>,
+    pending_governance: &'a [(Intent, Option<GovAuth>)],
+}
+
 impl StateSnapshot {
+    /// Canonical commitment to the commit-derived body:
+    /// `blake3("SUWAPPU-SNAPSHOT-ROOT-V1" || bincode(body))` with the commit
+    /// marks sorted, so the value is independent of the capturing node's
+    /// hash-set iteration order.
+    pub fn commit_root(&self) -> [u8; 32] {
+        let mut committed = self.committed.clone();
+        committed.sort();
+        committed.dedup();
+        let body = SnapshotBody {
+            leader_round: self.leader_round,
+            has_committed: self.has_committed,
+            gc_round: self.gc_round,
+            committed,
+            pending_governance: &self.pending_governance,
+        };
+        let bytes = crate::codec::encode(&body).expect("snapshot body is serialisable");
+        let mut h = blake3::Hasher::new();
+        h.update(b"SUWAPPU-SNAPSHOT-ROOT-V1");
+        h.update(&bytes);
+        *h.finalize().as_bytes()
+    }
+
+    /// Stake parked for admitted-but-not-yet-active authorities, derived
+    /// from the bound registries rather than taken from the wire: an
+    /// authority in the Validator Ring with no stake-table row is exactly
+    /// one whose first certificate has not been seen yet (DAG-S27.7
+    /// deferred activation).
+    pub fn derived_pending_stake(&self) -> BTreeMap<u32, u128> {
+        self.validator_registry
+            .members()
+            .filter(|m| self.stake_table.weight(m.id) == 0)
+            .map(|m| (m.id, m.stake_suwappu))
+            .collect()
+    }
+
     /// The registry set this snapshot carries, for `RegistrySet::root`.
     pub fn registries(&self) -> RegistrySet {
         RegistrySet {

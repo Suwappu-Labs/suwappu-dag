@@ -297,10 +297,18 @@ Following Mysticeti §VI, no key-value store. A new
      peer (not only configured ones) so a joiner that is nobody's
      configured peer still receives the live stream; dynamic peers remain
      unable to *inject* votes, tips, blocks or checkpoint signatures.
-  4. **Checkpoint identity is anchored on agreed state.** A checkpoint's
-     `round` is the boundary round, and its `height` / `prev_checkpoint`
-     come from the latest co-signed checkpoint, not from the node's own
-     last emission. A node whose view wobbles at one boundary (IQ-004)
+  4. **Checkpoint identity and content are anchored on agreed state.** A
+     checkpoint's `round` is the boundary round, its `height` /
+     `prev_checkpoint` come from the latest co-signed checkpoint, and its
+     `state_root` covers exactly the leaders at or below the boundary: a
+     boundary strictly below the next leader is crossed *before* that
+     leader's sweep, and a leader at the boundary itself crosses it after
+     its own sweep, so nodes that cross at different leaders sign the
+     same value (consensus-review finding on S34.4). The checkpoint also
+     carries `snapshot_root`, a commitment to the commit-derived body of
+     the served snapshot (leader frontier, gc round, sorted commit marks,
+     queued governance), and the node prunes to the frontier before
+     capturing so that body is a function of the leader sequence. A node whose view wobbles at one boundary (IQ-004)
      produces one divergent hash and rejoins at the next boundary rather
      than poisoning every later checkpoint through its own prev-hash
      chain. `checkpoint_cadence_rounds` (genesis manifest, default 32)
@@ -336,8 +344,8 @@ The daemon emits `gc_pruned` (with counts) and `gc_late_flip` events.
   `proptest_persistence.rs::replay_equivalence`.
 - **I-CK1 (checkpoint chain soundness).** `verify_checkpoint_chain`
   accepts iff every checkpoint is co-signed by a quorum of the committee
-  established by its predecessor. Exit gate:
-  `proptest_checkpoint_chain.rs`.
+  established by its predecessor, and consecutive heights chain by
+  `prev_checkpoint`. Exit gate: `proptest_checkpoint_chain.rs`.
 
 These are candidates for CLAUDE.md §Load-bearing invariants pending the
 human sign-off this IQ requires; they are not added there by this
@@ -350,14 +358,21 @@ branch.
    Under GC, a flip for a slot at or below a node's `gc_round` can no
    longer be acted on by that node (its certificate is pruned), while a
    slower node might still commit it. This is a *new* divergence class
-   only if a flip arrives more than `GC_DEPTH` rounds late; the
-   pre-existing class (same certs committed at different sequence
-   positions on different nodes) is unchanged. The clean fix is the
+   whenever a flip lands below the frontier at all: a late leader `L`
+   with `L.round < last_leader` has `commit_floor(L) < gc_round`, so a
+   node that has pruned sweeps `L`'s history cut at its own `gc_round`
+   while a slower peer sweeps it cut at `commit_floor(L)` — a superset.
+   (The consensus review of S34 corrected an earlier version of this
+   paragraph that bounded the window by `GC_DEPTH`; the real condition is
+   one round of lateness, and the difference is confined to certificates
+   at rounds in `(commit_floor(L), gc_round]` that no earlier committed
+   leader already swept.) The daemon makes the clamp explicit
+   (`floor = max(commit_floor(L), gc_round)`), emits `gc_late_flip` each
+   time it applies, and `proptest_gc.rs::bounded_history_below_gc_is_clamped`
+   pins the clamped sweep as a property of the DAG. The clean fix is the
    Mysticeti-style sequential, final decision order that #45 already
-   tracks; until then `GC_DEPTH = 256` is chosen to dwarf the
-   single-round lag IQ-004 documents, and the daemon emits `gc_late_flip`
-   whenever a slot ≤ `gc_round` becomes `Direct`, so the fault-injection
-   run in `/goal` B2 will show whether the class is ever reached.
+   tracks; until then the fault-injection run in `/goal` B2 will show how
+   often the class is reached.
 2. **Intents in certificates that fall below the floor are not
    committed.** Narwhal's stance; re-injection from the mempool is the
    remedy. The mempool is explicitly not persistent ("on restart, peers
@@ -374,7 +389,52 @@ branch.
    the co-signed message sequence.
 4. **Consensus-reviewer + human sign-off.** Required before this branch
    is merged (CLAUDE.md §Specialist subagents; `/goal` Rules). The
-   reviewer's verdict is recorded in the PR body.
+   reviewer's verdict is recorded in the PR body. The first review
+   (S34.5) returned NEEDS-CHANGES; the two HIGH findings (snapshot capture
+   racing the commit claim; snapshot body not bound by the checkpoint) and
+   the I-GC1 gate gap are fixed on this branch (`State::commit_lock`,
+   `Checkpoint.snapshot_root` + `verify_served_snapshot`, the clamp
+   above). The items below are what remains for the human decision.
+5. **Validator-Ring votes are unsigned relay data.** DAG-S5 defined
+   `Vote` without a signature; a live node accepts votes from configured
+   peers only, and S34.4 relays votes to catching-up peers under the same
+   rule. A single Byzantine *configured* peer can therefore vouch for
+   votes it did not originate and satisfy `validator_quorum_met` for one
+   leader on its own — the Validator-Ring half of Theorem 2 is only as
+   strong as the configured peer set until votes are signed (ML-DSA over
+   `network_id || candidate || validator`, verified against the Validator
+   Ring). Votes from ids outside the Validator Ring are dropped and a
+   `Votes` frame is capped, which bounds the map but not the trust.
+   Signed votes are a DAG-S35 candidate; they change the vote wire size
+   from 36 B to ~3.3 KB per vote.
+6. **Bootstrap trusts the Authority Ring alone.** A joiner installs the
+   state a quorum of the Authority Ring co-signed; the Validator Ring
+   provides no independent check over that prefix. Leaders above the
+   checkpoint are still ratified through the live AND-gate (no shortcut
+   around `validator_quorum_met` exists), but the adopted prefix is
+   Authority-only evidence. This is the documented bootstrap exception to
+   Invariant 1 and needs the human sign-off this IQ requires; the
+   alternative is a stake-weighted Validator-Ring co-signature over the
+   checkpoint hash. Related: the served chain is sparse (transitions plus
+   the latest), so `verify_checkpoint_chain` checks `prev_checkpoint`
+   only between consecutive heights; across a gap every link is still
+   signed by a committee that was legitimately in force, and what a gap
+   can hide is only which one — the usual long-range-key exposure of any
+   proof-of-stake bootstrap, mitigated operationally (fresh joiners should
+   take the genesis manifest and a recent checkpoint hash from the
+   published artifacts, not only from the peers they dial).
+7. **Tombstones and certificates in a snapshot are validated
+   structurally, not committed to.** The certificate window is
+   receipt-timing dependent and cannot be part of a consensus-agreed
+   root; a joiner checks every certificate's signature against the bound
+   Authority Ring, its round against the bound gc round, and the
+   tombstone window's rounds and size. A Byzantine authority's certificate
+   referencing a fabricated pruned parent can still enter a joiner's
+   window through a fabricated tombstone — the same exposure a live node
+   has at its own window edge, and one that affects only support counts
+   at rounds the joiner will re-decide from live data. `GetSnapshot` is
+   answered for any peer without a rate limit; the reply is bounded
+   (`SNAPSHOT_CHUNK_BYTES` × chunks) but not free.
 
 ## Implementation sketch (DAG-S34)
 

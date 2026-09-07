@@ -87,6 +87,14 @@ pub(crate) struct State {
     pub(crate) votes: parking_lot::Mutex<HashMap<CertHash, Vec<Vote>>>,
     pub(crate) blocks: parking_lot::Mutex<HashMap<CertHash, BlockPayload>>,
     pub(crate) committed: parking_lot::Mutex<HashSet<CertHash>>,
+    /// Serialises the commit walk (`try_commit`) and every snapshot
+    /// capture. Per-peer inbox tasks each call `try_commit`; without this
+    /// two walks could interleave their `apply_commit` calls (reordering
+    /// substrate application between honest nodes), and a snapshot could
+    /// observe a certificate's commit mark before its block was applied
+    /// (the joiner and the recovery replay would then both skip it
+    /// forever). Lock order: `commit_lock` → `inner` → `dag`.
+    pub(crate) commit_lock: tokio::sync::Mutex<()>,
     pub(crate) stake_table: tokio::sync::RwLock<StakeTable>,
     pub(crate) authority_registry: tokio::sync::RwLock<AuthorityRegistry>,
     pub(crate) validator_registry: tokio::sync::RwLock<ValidatorRegistry>,
@@ -637,6 +645,7 @@ impl State {
             votes: parking_lot::Mutex::new(HashMap::new()),
             blocks: parking_lot::Mutex::new(HashMap::new()),
             committed: parking_lot::Mutex::new(HashSet::new()),
+            commit_lock: tokio::sync::Mutex::new(()),
             stake_table: tokio::sync::RwLock::new(stake_table),
             authority_registry: tokio::sync::RwLock::new(authority_registry),
             validator_registry: tokio::sync::RwLock::new(validator_registry),
@@ -1101,7 +1110,7 @@ async fn run_inbox(
                             validator: self_id,
                             candidate: ic.hash,
                         };
-                        store_vote(&state, vote);
+                        store_vote(&state, vote).await;
                         log.emit(
                             Event::now(&self_label, Lane::Main, "voted")
                                 .with_round(ic.round)
@@ -1167,7 +1176,7 @@ async fn run_inbox(
                 // would forge Validator-Ring stake.
                 if is_dynamic {
                     debug!(peer = %from.0, "inbox: dropping Vote from dynamic peer");
-                } else if store_vote(&state, vote) {
+                } else if store_vote(&state, vote).await {
                     try_commit(&state, &self_label, &log, &outbound).await;
                 }
             }
@@ -1185,8 +1194,10 @@ async fn run_inbox(
                     debug!(peer = %from.0, "inbox: dropping Votes from dynamic peer");
                 } else {
                     let mut any = false;
-                    for vote in votes {
-                        any |= store_vote(&state, vote);
+                    // One frame carries the votes for one certificate; a
+                    // relay cannot exceed the ring size honestly.
+                    for vote in votes.into_iter().take(MAX_VOTES_PER_FRAME) {
+                        any |= store_vote(&state, vote).await;
                     }
                     if any {
                         try_commit(&state, &self_label, &log, &outbound).await;
@@ -1409,7 +1420,19 @@ async fn run_inbox(
 /// Returns `true` iff it was new — the caller only re-runs the commit
 /// walk for new information, and a re-requested backfill round (or a
 /// relay that echoes) cannot grow the slot without bound.
-fn store_vote(state: &State, vote: Vote) -> bool {
+/// Votes from validators outside the Validator Ring are dropped: they
+/// would carry zero stake anyway, and admitting them lets one peer grow
+/// the map with arbitrary ids. (Votes are still unsigned relay data —
+/// IQ-008 Residual 5.)
+async fn store_vote(state: &State, vote: Vote) -> bool {
+    if !state
+        .validator_registry
+        .read()
+        .await
+        .contains(vote.validator)
+    {
+        return false;
+    }
     let mut votes = state.votes.lock();
     let slot = votes.entry(vote.candidate).or_default();
     if slot.iter().any(|v| v.validator == vote.validator) {
@@ -1476,6 +1499,10 @@ async fn run_backfill(
 
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(BACKFILL_TICK_MS));
     let mut ticks: u64 = 0;
+    // Commit-gap requests for an unchanged window are throttled to one
+    // per second: a walk deferred on a block nobody holds any more must
+    // not turn into a request storm against the peers.
+    let mut last_gap_request: Option<(u64, u64)> = None;
     loop {
         tick.tick().await;
         // Refresh peer tips every 4 ticks (2s).
@@ -1487,19 +1514,46 @@ async fn run_backfill(
         ticks = ticks.wrapping_add(1);
 
         let local = state.dag.read().await.max_round().unwrap_or(0);
-        let (target, peer_gc, resume) = {
+        let (target, peer_gc, resume, frontier) = {
             let mut inner = state.inner.lock().await;
             (
                 inner.sync_tip,
                 inner.peer_gc_round,
                 inner.backfill_resume.take(),
+                inner.last_committed_leader_round,
             )
         };
         let resume = resume.filter(|r| *r <= local);
-        if resume.is_none() && target <= local.saturating_add(BACKFILL_LAG_THRESHOLD) {
+        // The DAG tip can be current while the COMMIT frontier is far
+        // behind it (a node that came back from an outage receives the
+        // live stream at once but the rounds in between arrived without
+        // their blocks and votes, or not at all). What the node needs is
+        // everything above its frontier, so a wide commit gap is
+        // backfilled from the frontier, not from the tip — and it is the
+        // frontier, not the tip, that decides whether the peers have
+        // already pruned what we need.
+        let commit_gap_from = frontier
+            .map(|f| f.saturating_add(1))
+            .filter(|f| target > f.saturating_add(BACKFILL_LAG_THRESHOLD) && *f <= local);
+        if resume.is_none()
+            && commit_gap_from.is_none()
+            && target <= local.saturating_add(BACKFILL_LAG_THRESHOLD)
+        {
             continue;
         }
-        let from_round = resume.unwrap_or_else(|| local.saturating_add(1));
+        if resume.is_none() {
+            if let Some(f) = commit_gap_from {
+                if let Some((last_from, at)) = last_gap_request {
+                    if last_from == f && ticks.saturating_sub(at) < 4 {
+                        continue;
+                    }
+                }
+                last_gap_request = Some((f, ticks));
+            }
+        }
+        let from_round = resume
+            .or(commit_gap_from)
+            .unwrap_or_else(|| local.saturating_add(1));
         // IQ-008 D5: if the peers that hold the tip have already pruned
         // every round we would ask for, forward backfill is futile — the
         // certificates no longer exist anywhere. Flag it for the
@@ -1737,6 +1791,12 @@ async fn ingest_cert(
 
 /// Most recent checkpoint hashes for which signatures are buffered.
 const MAX_BUFFERED_CHECKPOINTS: usize = 8;
+/// Upper bound on votes accepted from one `Votes` frame.
+const MAX_VOTES_PER_FRAME: usize = 1024;
+/// A validator whose next authoring round lags the highest observed round
+/// by more than this jumps forward instead of walking one round per tick
+/// (it can never catch a mesh that also advances one round per tick).
+const AUTHOR_LAG_JUMP_ROUNDS: u64 = 8;
 /// Re-ask peers for the checkpoint chain after this long without a
 /// usable answer.
 const SNAPSHOT_SYNC_RETRY_MS: u64 = 5_000;
@@ -1768,13 +1828,36 @@ async fn verification_committee(state: &State) -> AuthorityRegistry {
 /// checkpoint's hash are counted immediately.
 async fn emit_checkpoint(
     state: &State,
-    leader_round: u64,
+    boundary: u64,
     self_label: &str,
     log: &EventLog,
     outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
 ) {
-    // 1. Build the checkpoint and advance the cursor (under `inner`).
-    let registries = current_registry_set(state).await;
+    // Caller holds `commit_lock`: nothing commits between the prune, the
+    // capture and the checkpoint built over it.
+    //
+    // 1. Prune to the frontier first so the captured commit marks are a
+    //    function of the leader sequence (the pass-grouping of leaders
+    //    per `try_commit` call is timing-dependent; the gc round derived
+    //    from the frontier is not), then capture.
+    let (leader_round, gc_depth, local_gc) = {
+        let inner = state.inner.lock().await;
+        (
+            inner.last_committed_leader_round,
+            inner.gc_depth,
+            inner.gc_round,
+        )
+    };
+    if let Some(g) = leader_round.and_then(|l| gc_round_for(l, gc_depth)) {
+        if local_gc.map_or(true, |cur| g > cur) {
+            prune_state(state, g, self_label, log).await;
+        }
+    }
+    let mut snap = capture_snapshot(state).await;
+    let registries = snap.registries();
+    let leader_round = snap.leader_round;
+
+    // 2. Build the checkpoint and advance the cursor (under `inner`).
     let ck = {
         let mut inner = state.inner.lock().await;
         // Identity is anchored on what the mesh has already AGREED on: the
@@ -1785,7 +1868,6 @@ async fn emit_checkpoint(
         // one checkpoint only, and rejoins at the next boundary instead
         // of poisoning every later checkpoint through its own prev-hash
         // chain.
-        let boundary = inner.next_checkpoint_boundary;
         let (height, prev_checkpoint) = match &inner.latest_checkpoint {
             Some(l) => (
                 l.cosigned.checkpoint.height + 1,
@@ -1796,12 +1878,13 @@ async fn emit_checkpoint(
         let ck = Checkpoint {
             height,
             round: boundary,
-            state_root: inner.substrate.state_root(),
+            state_root: snap.state_root,
             prev_checkpoint,
             registry_root: registries.root(),
+            snapshot_root: snap.commit_root(),
         };
         let cadence = inner.checkpoint_cadence;
-        inner.next_checkpoint_boundary = (leader_round / cadence + 1) * cadence;
+        inner.next_checkpoint_boundary = boundary + cadence;
         inner.checkpoint_height = height + 1;
         inner.last_checkpoint_hash = ck.hash();
         inner.pending_checkpoint = Some(ck.clone());
@@ -1809,13 +1892,12 @@ async fn emit_checkpoint(
     };
     log.emit(
         Event::now(self_label, Lane::Main, "checkpoint")
-            .with_round(leader_round)
-            .with_kind(format!("height={}", ck.height)),
+            .with_round(boundary)
+            .with_kind(format!("height={} leader={}", ck.height, leader_round)),
     );
 
-    // 2. Snapshot at exactly this state: served to joiners once co-signed,
-    //    written to disk when persistence is on.
-    let mut snap = capture_snapshot(state).await;
+    // 3. The snapshot at exactly this state: served to joiners once
+    //    co-signed, written to disk when persistence is on.
     snap.checkpoint = Some(ck.clone());
     let snap = Arc::new(snap);
     state.inner.lock().await.checkpoint_snapshot = Some(snap.clone());
@@ -1830,7 +1912,7 @@ async fn emit_checkpoint(
         }
     }
 
-    // 3. Sign if eligible (seated now, or a member of the committee whose
+    // 4. Sign if eligible (seated now, or a member of the committee whose
     //    signatures joiners will verify).
     let committee = verification_committee(state).await;
     let seated_now = state
@@ -1858,7 +1940,7 @@ async fn emit_checkpoint(
         }
     }
 
-    // 4. Count whatever arrived early.
+    // 5. Count whatever arrived early.
     try_aggregate_checkpoint(state, ck.hash(), self_label, log).await;
 }
 
@@ -2134,18 +2216,30 @@ async fn handle_snapshot_chunk(
         return;
     };
     let ck = &trusted.cosigned.checkpoint;
-    let ok = snap.checkpoint.as_ref() == Some(ck)
-        && snap.network_id == state.manifest_network_id
-        && snap.verify().is_ok()
-        && snap.state_root == ck.state_root
-        && snap.registries().root() == ck.registry_root
-        && snap.leader_round >= ck.round;
-    if !ok {
-        tracing::warn!(peer = %from.0, height, "snapshot sync: snapshot does not match the trusted checkpoint; discarded");
+    let gc_depth = state.inner.lock().await.gc_depth;
+    if let Err(why) = verify_served_snapshot(&snap, ck, &state.manifest_network_id, gc_depth) {
+        tracing::warn!(peer = %from.0, height, why, "snapshot sync: snapshot rejected; discarded");
         state.inner.lock().await.snapshot_sync.trusted = None;
         return;
     }
     let mut snap = snap;
+    // Blocks are receipt-timing dependent and not bound by the
+    // checkpoint; keep only those that back a certificate in the
+    // window with the digest that certificate signed.
+    {
+        let digests: HashMap<CertHash, [u8; 32]> = snap
+            .dag_certs
+            .iter()
+            .map(|c| (c.hash(), c.payload_digest))
+            .collect();
+        snap.blocks.retain(|b| {
+            digests.get(&b.cert_hash) == Some(&b.payload_digest) && block_payload_is_consistent(b)
+        });
+    }
+    // Node-local fields the serving peer has no business setting.
+    snap.pending_stake = snap.derived_pending_stake();
+    snap.last_authored_round = None;
+    snap.log_sequence = 0;
     // The served snapshot was captured before its own checkpoint was
     // co-signed; carry the verified chain forward.
     snap.checkpoint_chain = {
@@ -2154,7 +2248,7 @@ async fn handle_snapshot_chunk(
         c.push(trusted.clone());
         c
     };
-    install_snapshot(state, snap.clone()).await;
+    install_snapshot(state, snap.clone(), false).await;
     {
         let mut inner = state.inner.lock().await;
         inner.needs_snapshot = false;
@@ -2196,7 +2290,81 @@ async fn handle_snapshot_chunk(
 
 /// Install a snapshot into a node that has not committed past it: shared
 /// by disk recovery (IQ-008 D4) and joiner bootstrap (D5).
-async fn install_snapshot(state: &State, snap: StateSnapshot) {
+/// Everything a joiner checks before installing a peer-served snapshot
+/// (IQ-008 D5). The checkpoint binds `state_root` (substrate),
+/// `registry_root` (committee + stake + epoch) and `snapshot_root`
+/// (leader frontier, gc round, commit marks, queued governance); the
+/// certificate window is checked structurally: every certificate is
+/// signed by a member of the bound Authority Ring and lies above the
+/// bound gc round, and the tombstone window lies at or below it and is
+/// bounded in size. Returns the reason on failure.
+fn verify_served_snapshot(
+    snap: &StateSnapshot,
+    ck: &Checkpoint,
+    network_id: &str,
+    gc_depth: u64,
+) -> Result<(), &'static str> {
+    if snap.checkpoint.as_ref() != Some(ck) {
+        return Err("checkpoint mismatch");
+    }
+    if snap.network_id != network_id {
+        return Err("network id mismatch");
+    }
+    if snap.verify().is_err() || snap.state_root != ck.state_root {
+        return Err("state root mismatch");
+    }
+    if snap.registries().root() != ck.registry_root {
+        return Err("registry root mismatch");
+    }
+    if snap.commit_root() != ck.snapshot_root {
+        return Err("snapshot root mismatch");
+    }
+    // The checkpoint covers the leaders at or below its boundary round.
+    if snap.leader_round > ck.round {
+        return Err("leader frontier above the checkpoint round");
+    }
+    let expected_gc = if snap.has_committed {
+        gc_round_for(snap.leader_round, gc_depth)
+    } else {
+        None
+    };
+    if snap.gc_round != expected_gc {
+        return Err("gc round is not the frontier minus gc_depth");
+    }
+    let n = snap.n_authorities as u64;
+    if snap.tombstones.len() as u64 > n.saturating_mul(gc_depth).saturating_add(n) {
+        return Err("tombstone window too large");
+    }
+    if let Some(g) = snap.gc_round {
+        if snap.tombstones.iter().any(|(_, r)| *r > g) {
+            return Err("tombstone above gc round");
+        }
+        if snap.dag_certs.iter().any(|c| c.round <= g) {
+            return Err("certificate at or below gc round");
+        }
+    } else if !snap.tombstones.is_empty() {
+        return Err("tombstones without a gc round");
+    }
+    if snap.dag_certs.len() as u64 > n.saturating_mul(gc_depth.saturating_add(2)).max(n) {
+        return Err("certificate window too large");
+    }
+    for c in &snap.dag_certs {
+        let ok = snap
+            .authority_registry
+            .get(c.author)
+            .and_then(|m| suwappu_crypto::mldsa::PublicKey::from_bytes(&m.public_key_bytes).ok())
+            .is_some_and(|pk| c.verify_signature(&pk));
+        if !ok {
+            return Err("certificate not signed by the bound Authority Ring");
+        }
+    }
+    Ok(())
+}
+
+/// `own` is true when the snapshot is this node's own (disk recovery):
+/// the authored-round marker is then restored from it. A peer-served
+/// snapshot never sets node-local markers.
+async fn install_snapshot(state: &State, snap: StateSnapshot, own: bool) {
     {
         let mut dag = state.dag.write().await;
         if let Some(g) = snap.gc_round {
@@ -2241,13 +2409,15 @@ async fn install_snapshot(state: &State, snap: StateSnapshot) {
         None
     };
     inner.last_snapshot_leader_round = Some(snap.leader_round);
-    if let Some(a) = snap.last_authored_round {
-        inner.last_authored_round = Some(inner.last_authored_round.map_or(a, |x| x.max(a)));
+    if own {
+        if let Some(a) = snap.last_authored_round {
+            inner.last_authored_round = Some(inner.last_authored_round.map_or(a, |x| x.max(a)));
+        }
+        inner.max_observed_round = inner
+            .max_observed_round
+            .max(snap.last_authored_round.unwrap_or(0));
     }
-    inner.max_observed_round = inner
-        .max_observed_round
-        .max(snap.last_authored_round.unwrap_or(0))
-        .max(snap.leader_round);
+    inner.max_observed_round = inner.max_observed_round.max(snap.leader_round);
     inner.latest_bridge_header = if snap.has_committed {
         Some((snap.leader_round, snap.state_root))
     } else {
@@ -2296,6 +2466,7 @@ async fn snapshot_now(state: &State, self_label: &str, log: &EventLog) {
     let Some(dir) = state.data_dir.clone() else {
         return;
     };
+    let _commit_guard = state.commit_lock.lock().await;
     let snap = capture_snapshot(state).await;
     let round = snap.leader_round;
     log.emit(Event::now(self_label, Lane::Main, "snapshot").with_round(round));
@@ -2325,20 +2496,24 @@ async fn capture_snapshot(state: &State) -> crate::store::StateSnapshot {
         .filter_map(|h| dag.get(&h).cloned())
         .collect();
     let live: HashSet<CertHash> = dag_certs.iter().map(|c| c.hash()).collect();
-    let committed: Vec<CertHash> = state
+    // Canonical order (the live sets are hash-keyed): two honest nodes
+    // at the same checkpoint produce byte-identical snapshot bodies.
+    let mut committed: Vec<CertHash> = state
         .committed
         .lock()
         .iter()
         .copied()
         .filter(|h| live.contains(h))
         .collect();
-    let blocks: Vec<BlockPayload> = state
+    committed.sort();
+    let mut blocks: Vec<BlockPayload> = state
         .blocks
         .lock()
         .iter()
         .filter(|(h, _)| live.contains(h))
         .map(|(_, b)| b.clone())
         .collect();
+    blocks.sort_by_key(|b| b.cert_hash);
     crate::store::StateSnapshot {
         version: crate::store::STORE_VERSION,
         network_id: state.manifest_network_id.clone(),
@@ -2407,7 +2582,7 @@ async fn recover_from_disk(
         let log_sequence = snap.log_sequence;
         let has_ck = snap.checkpoint.is_some();
         let arc = Arc::new(snap.clone());
-        install_snapshot(state, snap).await;
+        install_snapshot(state, snap, true).await;
         if has_ck {
             state.inner.lock().await.checkpoint_snapshot = Some(arc);
         }
@@ -3172,9 +3347,10 @@ async fn try_commit(
     log: &EventLog,
     outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
 ) {
-    // Snapshot votes + n_authorities + candidate_rounds in brief locks
-    // up-front so the rest of the function operates on owned data.
-    let votes_flat: Vec<Vote> = state.votes.lock().values().flatten().copied().collect();
+    // One commit walk at a time (see `State::commit_lock`).
+    let _commit_guard = state.commit_lock.lock().await;
+    // Snapshot n_authorities + candidate_rounds in brief locks up-front
+    // so the rest of the function operates on owned data.
     let (n, gc_depth, local_gc_round, mut last_leader_round) = {
         let inner = state.inner.lock().await;
         (
@@ -3238,10 +3414,18 @@ async fn try_commit(
             }
         }
 
-        // Joint-quorum AND-gate: validator-ring stake side.
+        // Joint-quorum AND-gate: validator-ring stake side. Only this
+        // candidate's votes are needed; the map holds the whole live
+        // window now that votes are relayed to catching-up peers.
         let stake_ok = {
+            let votes: Vec<Vote> = state
+                .votes
+                .lock()
+                .get(&leader_hash)
+                .cloned()
+                .unwrap_or_default();
             let st = state.stake_table.read().await;
-            validator_quorum_met(&st, leader_hash, &votes_flat)
+            validator_quorum_met(&st, leader_hash, &votes)
         };
         if !stake_ok {
             // DEFER THE WHOLE WALK, don't `continue`. This leader is
@@ -3260,11 +3444,64 @@ async fn try_commit(
             break 'commit;
         }
 
+        // IQ-008 D5: a checkpoint boundary strictly below this leader is
+        // crossed BEFORE its sweep, so the checkpoint's state root covers
+        // exactly the leaders at or below the boundary on every node —
+        // whether the boundary round itself had a leader or was skipped.
+        let advances_frontier = last_leader_round.map_or(true, |prev| round > prev);
+        if advances_frontier {
+            let pending_boundary = {
+                let inner = state.inner.lock().await;
+                let b = inner.next_checkpoint_boundary;
+                if round > b {
+                    let cadence = inner.checkpoint_cadence;
+                    Some(((round - 1) / cadence) * cadence)
+                } else {
+                    None
+                }
+            };
+            if let Some(b) = pending_boundary {
+                emit_checkpoint(state, b, self_label, log, outbound).await;
+            }
+        }
+
         // IQ-008 D1: the committed sub-DAG is the leader's causal history
         // cut at `commit_floor(leader_round, gc_depth)` — a function of
         // the leader alone, so every node sweeps the same set regardless
         // of its own pruning progress (I-GC1, `proptest_gc.rs`).
-        let floor = commit_floor(round, gc_depth);
+        //
+        // A leader below the frontier (IQ-004 late flip) has a floor below
+        // this node's gc round; rounds in between are gone, so the sweep
+        // is clamped to the gc round. This is the pruned-store behaviour
+        // made explicit (`bounded_history_below_gc_is_clamped`), logged as
+        // `gc_late_flip` because a peer that has not pruned as far may
+        // sweep more (IQ-008 Residual 1).
+        let gc_now = state.inner.lock().await.gc_round;
+        let floor = match (commit_floor(round, gc_depth), gc_now) {
+            (Some(f), Some(g)) if f < g => {
+                log.emit(
+                    Event::now(self_label, Lane::Main, "gc_late_flip")
+                        .with_round(round)
+                        .with_cert_hash(&leader_hash.0),
+                );
+                tracing::warn!(
+                    leader_round = round,
+                    floor = f,
+                    gc_round = g,
+                    "commit: late-flip leader's floor is below the gc round; sweep clamped"
+                );
+                Some(g)
+            }
+            (None, Some(g)) => {
+                log.emit(
+                    Event::now(self_label, Lane::Main, "gc_late_flip")
+                        .with_round(round)
+                        .with_cert_hash(&leader_hash.0),
+                );
+                Some(g)
+            }
+            (f, _) => f,
+        };
         let history = {
             let dag = state.dag.read().await;
             causal_history_bounded(&dag, leader_hash, floor)
@@ -3330,12 +3567,12 @@ async fn try_commit(
         }
         // The whole sweep for this leader committed (no defer above):
         // advance the leader frontier that drives the gc round.
-        if last_leader_round.map_or(true, |prev| round > prev) {
+        if advances_frontier {
             last_leader_round = Some(round);
             let at_boundary = {
                 let mut inner = state.inner.lock().await;
                 inner.last_committed_leader_round = Some(round);
-                round >= inner.next_checkpoint_boundary
+                round == inner.next_checkpoint_boundary
             };
             if at_boundary {
                 emit_checkpoint(state, round, self_label, log, outbound).await;
@@ -3347,7 +3584,8 @@ async fn try_commit(
     // prune everything at or below it. Monotone; a no-op until the chain
     // is `gc_depth` rounds deep.
     if let Some(new_gc) = last_leader_round.and_then(|l| gc_round_for(l, gc_depth)) {
-        let advance = match local_gc_round {
+        // Re-read: a checkpoint emitted during the walk prunes first.
+        let advance = match state.inner.lock().await.gc_round {
             Some(cur) => new_gc > cur,
             None => true,
         };
@@ -3794,7 +4032,27 @@ async fn run_round_driver(
             let inner = state.inner.lock().await;
             let n = inner.n_authorities;
             let dag = state.dag.read().await;
-            target_round = inner.last_authored_round.map(|r| r + 1).unwrap_or(0);
+            let mut next = inner.last_authored_round.map(|r| r + 1).unwrap_or(0);
+            // IQ-008: after an outage longer than the retention window the
+            // parents round is pruned everywhere and can never fill; and a
+            // node that fell behind inside the window only advances one
+            // round per tick, exactly like the mesh, so it never catches
+            // up. Jump to the observed tip. The authored marker is
+            // monotone, so a forward jump can never re-sign a round.
+            if inner.last_authored_round.is_some() {
+                let behind_gc = inner.gc_round.is_some_and(|g| next.saturating_sub(1) <= g);
+                let lagging =
+                    next.saturating_add(AUTHOR_LAG_JUMP_ROUNDS) < inner.max_observed_round;
+                if (behind_gc || lagging) && inner.max_observed_round + 1 > next {
+                    tracing::warn!(
+                        from = next,
+                        to = inner.max_observed_round + 1,
+                        "round driver: jumping to the observed tip"
+                    );
+                    next = inner.max_observed_round + 1;
+                }
+            }
+            target_round = next;
             prev_round = target_round.saturating_sub(1);
             if inner.last_authored_round.is_some() {
                 let parents_count = distinct_authors_at(&dag, prev_round, n);
@@ -4800,8 +5058,14 @@ mod tests {
         );
         v3.shutdown().await;
         drop(v3);
-        // Let the peers notice the drop and keep committing without v3.
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        // Let the peers keep committing without v3 for longer than the
+        // retention window (gc_depth = 16 rounds at 100 ms): on restart
+        // v3's own DAG tail is below every peer's gc round, so it must
+        // recover from disk, bootstrap the window from a co-signed
+        // checkpoint snapshot, and jump its authoring round forward
+        // (consensus-review finding: a one-round-per-tick walker never
+        // catches a mesh that also advances one round per tick).
+        tokio::time::sleep(Duration::from_millis(4_000)).await;
 
         // Restart from disk.
         let v3 = Daemon::start(cfg_for(restarted), manifest.clone())
@@ -4831,32 +5095,49 @@ mod tests {
             );
         }
         daemons.push(v3);
-        tokio::time::sleep(Duration::from_secs(4)).await;
 
+        // (2)+(3): within a bounded time v3 authors past its pre-restart
+        // marker and, at an equal leader frontier, matches a peer's
+        // substrate root.
+        let mut caught_up = false;
+        for _ in 0..60 {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            let (v3_authored, v3_frontier, v3_root) = {
+                let inner = daemons.last().unwrap().state.inner.lock().await;
+                (
+                    inner.last_authored_round.unwrap_or(0),
+                    inner.last_committed_leader_round,
+                    inner.substrate.state_root(),
+                )
+            };
+            if v3_authored <= authored_before || v3_frontier.is_none() {
+                continue;
+            }
+            for d in &daemons[..daemons.len() - 1] {
+                let inner = d.state.inner.lock().await;
+                if inner.last_committed_leader_round == v3_frontier {
+                    assert_eq!(
+                        inner.substrate.state_root(),
+                        v3_root,
+                        "state roots disagree at an equal frontier after restart"
+                    );
+                    caught_up = true;
+                }
+            }
+            if caught_up {
+                break;
+            }
+        }
+        assert!(
+            caught_up,
+            "restarted validator did not resume authoring and catch up"
+        );
         // (1) No peer ejected v3 — i.e. v3 never equivocated on restart.
         for d in &daemons {
             assert!(
                 d.state.authority_registry.read().await.contains(restarted),
                 "restarted validator was ejected (equivocation on restart)"
             );
-        }
-        // (2)+(3): v3 authored past its pre-restart marker and matches the
-        // cluster's substrate.
-        let roots: Vec<[u8; 32]> = {
-            let mut v = Vec::new();
-            for d in &daemons {
-                v.push(d.state.inner.lock().await.substrate.state_root());
-            }
-            v
-        };
-        let v3_inner = daemons.last().unwrap().state.inner.lock().await;
-        assert!(
-            v3_inner.last_authored_round.unwrap() > authored_before,
-            "restarted validator did not resume authoring"
-        );
-        drop(v3_inner);
-        for r in &roots[1..] {
-            assert_eq!(*r, roots[0], "state roots disagree after restart");
         }
         let _ = std::fs::remove_dir_all(&data_dir);
     }
@@ -5049,6 +5330,84 @@ mod tests {
         assert!(
             inner.gc_round.is_some(),
             "joiner did not adopt the gc round"
+        );
+        drop(inner);
+
+        // Adversarial snapshots (consensus-review finding on S34.4): a
+        // serving peer that keeps `state_root` / `registry_root` honest
+        // but tampers with anything the checkpoint's `snapshot_root` or
+        // the structural checks cover is rejected.
+        let served = seeds[0]
+            .state
+            .inner
+            .lock()
+            .await
+            .served_snapshot
+            .clone()
+            .expect("seed serves a snapshot");
+        let ck = served.checkpoint.clone().unwrap();
+        let gc_depth = manifest.gc_depth_rounds;
+        let net = manifest.network_id.clone();
+        assert!(
+            verify_served_snapshot(&served, &ck, &net, gc_depth).is_ok(),
+            "honest served snapshot must verify"
+        );
+        let mut bad = (*served).clone();
+        bad.committed.push(CertHash([0xEE; 32]));
+        assert_eq!(
+            verify_served_snapshot(&bad, &ck, &net, gc_depth),
+            Err("snapshot root mismatch"),
+            "forged commit mark"
+        );
+        let mut bad = (*served).clone();
+        bad.gc_round = Some(u64::MAX - 1);
+        assert!(
+            verify_served_snapshot(&bad, &ck, &net, gc_depth).is_err(),
+            "forged gc round"
+        );
+        let mut bad = (*served).clone();
+        bad.leader_round = ck.round + 1;
+        assert!(
+            verify_served_snapshot(&bad, &ck, &net, gc_depth).is_err(),
+            "forged leader frontier"
+        );
+        let mut bad = (*served).clone();
+        if let Some(c) = bad.dag_certs.first_mut() {
+            c.payload_digest[0] ^= 1;
+        }
+        assert_eq!(
+            verify_served_snapshot(&bad, &ck, &net, gc_depth),
+            Err("certificate not signed by the bound Authority Ring"),
+            "tampered certificate"
+        );
+        let mut bad = (*served).clone();
+        bad.tombstones
+            .push((CertHash([0xDD; 32]), bad.gc_round.unwrap() + 1));
+        assert_eq!(
+            verify_served_snapshot(&bad, &ck, &net, gc_depth),
+            Err("tombstone above gc round"),
+            "tombstone above the bound gc round"
+        );
+        let mut bad = (*served).clone();
+        bad.pending_governance.push((
+            Intent::Transfer {
+                from: [0x33; 20],
+                to: [0x55; 20],
+                amount: 1,
+            },
+            None,
+        ));
+        assert_eq!(
+            verify_served_snapshot(&bad, &ck, &net, gc_depth),
+            Err("snapshot root mismatch"),
+            "forged queued governance"
+        );
+        // Node-local fields are not bound but are not installed either:
+        // the joiner derives `pending_stake` from the bound registries.
+        assert_eq!(
+            served.derived_pending_stake(),
+            served.pending_stake,
+            "derived pending stake must match the seed's own"
         );
     }
 

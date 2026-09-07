@@ -219,6 +219,63 @@ proptest! {
         }
     }
 
+    /// EXIT GATE (I-GC1, late-flip input): a leader whose commit floor is
+    /// BELOW the gc round — the IQ-004 late flip the daemon handles under
+    /// `gc_late_flip` — sweeps, on a pruned store, exactly the sub-DAG the
+    /// unpruned store sweeps with the floor clamped to the gc round. The
+    /// daemon makes that clamp explicit; this property is what makes the
+    /// clamp a statement about the DAG rather than about one node's
+    /// pruning progress (consensus-review finding on S34).
+    #[test]
+    fn bounded_history_below_gc_is_clamped(
+        n_authorities in 1u32..=7,
+        n_rounds in 3u64..=12,
+        omit_bits in any::<u64>(),
+        parent_bits in any::<u64>(),
+        g_frac in 1u64..=100,
+        leader_pick in any::<u32>(),
+        floor_below in 0u64..=4,
+        no_floor in any::<bool>(),
+    ) {
+        let certs = random_dag(n_authorities, n_rounds, omit_bits, parent_bits);
+        let orig = store_from(&certs);
+        let max_round = orig.max_round().unwrap();
+        let g = (max_round.saturating_sub(1)) * g_frac / 100;
+        prop_assume!(g > 0);
+        let mut pruned = orig.clone();
+        pruned.prune_below(g);
+
+        let candidates: Vec<CertHash> = orig
+            .linearize()
+            .into_iter()
+            .filter(|h| round_of(&orig, h) > g)
+            .collect();
+        prop_assume!(!candidates.is_empty());
+        let leader = candidates[(leader_pick as usize) % candidates.len()];
+
+        // A floor strictly below g, or none at all.
+        let floor = if no_floor { None } else { Some(g.saturating_sub(1 + floor_below)) };
+        if let Some(f) = floor { prop_assume!(f < g); }
+
+        let on_pruned = causal_history_bounded(&pruned, leader, floor);
+        let clamped = causal_history_bounded(&orig, leader, Some(g));
+        let reference: Vec<CertHash> = causal_history(&orig, leader)
+            .into_iter()
+            .filter(|h| round_of(&orig, h) > g)
+            .collect();
+        prop_assert_eq!(&on_pruned, &clamped, "pruned walk below gc vs clamped unpruned walk differ");
+        prop_assert_eq!(&clamped, &reference, "clamped walk vs filtered reference differ");
+        // And the unclamped walk on the unpruned store is a superset: the
+        // divergence class IQ-008 Residual 1 accepts is exactly
+        // `on_orig \ on_pruned`, all of it at or below g.
+        let on_orig = causal_history_bounded(&orig, leader, floor);
+        for h in &on_orig {
+            if !on_pruned.contains(h) {
+                prop_assert!(round_of(&orig, h) <= g);
+            }
+        }
+    }
+
     /// EXIT GATE (I-GC3): after pruning nothing at or below `g` remains,
     /// no round index is empty, and tombstones are confined to one
     /// `GC_DEPTH` window below `g`.

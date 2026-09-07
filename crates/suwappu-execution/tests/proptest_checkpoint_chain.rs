@@ -8,7 +8,8 @@
 //! changes; any of the following is rejected: a link signed below
 //! quorum, a link signed by a committee other than the one in force, a
 //! forged signature, a `registry_root` that does not bind the supplied
-//! committee, a non-monotone height or round.
+//! committee, a non-monotone height or round, a broken `prev_checkpoint`
+//! link between consecutive heights.
 //!
 //! Run at default 32 cases under CI (ML-DSA-65 keygen dominates); sprint
 //! close runs `PROPTEST_CASES=10000 cargo test -p suwappu-execution --release`.
@@ -67,6 +68,7 @@ fn honest_chain(committees: &[Committee], signers_per_link: &[usize]) -> Vec<Cha
             state_root: [i as u8 + 1; 32],
             prev_checkpoint: prev,
             registry_root: root_of(&next.registry),
+            snapshot_root: [0; 32],
         };
         prev = ck.hash();
         let signatures = committees[i]
@@ -98,7 +100,7 @@ proptest! {
     fn chain_accepts_honest_and_rejects_corruption(
         sizes in prop::collection::vec(1u32..=4, 2..=4),
         seed in any::<u32>(),
-        corrupt in 0u8..=5,
+        corrupt in 0u8..=6,
     ) {
         // Committee i has `sizes[i]` members with ids disjoint per step so
         // that a signature from the wrong committee is never accidentally
@@ -169,6 +171,21 @@ proptest! {
                 bad[target].next_registry_root = bad[target].checkpoint.registry_root;
                 let err = verify_checkpoint_chain(genesis, &bad).unwrap_err();
                 prop_assert!(matches!(err, ChainError::Link { index, source: CheckpointError::InvalidSignature(_) } if index == target), "{err:?}");
+            }
+            5 => {
+                // Broken prev-hash link between consecutive heights: the
+                // honest chain is contiguous, so flipping a link's
+                // `prev_checkpoint` (and re-signing it honestly, so the
+                // signatures are not what fails) must be rejected.
+                bad[target].checkpoint.prev_checkpoint[0] ^= 1;
+                bad[target].signatures = committees[target]
+                    .sks
+                    .iter()
+                    .take(quorums[target])
+                    .map(|(id, sk)| sign_checkpoint(*id, sk, &bad[target].checkpoint).unwrap())
+                    .collect();
+                let err = verify_checkpoint_chain(genesis, &bad).unwrap_err();
+                prop_assert!(matches!(err, ChainError::BrokenLink { index } if index == target), "{err:?}");
             }
             _ => {
                 // Non-monotone: replay an earlier link after a later one.

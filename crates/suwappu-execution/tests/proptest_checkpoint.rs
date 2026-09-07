@@ -75,6 +75,7 @@ proptest! {
             state_root: [state_root_seed; 32],
             prev_checkpoint: [prev_seed; 32],
             registry_root: [0; 32],
+            snapshot_root: [0; 32],
         };
 
         // Sign with exactly the first q authorities.
@@ -152,6 +153,7 @@ proptest! {
             state_root: [0; 32],
             prev_checkpoint: [0; 32],
             registry_root: [0; 32],
+            snapshot_root: [0; 32],
         };
 
         let supplied = q.saturating_sub(1);

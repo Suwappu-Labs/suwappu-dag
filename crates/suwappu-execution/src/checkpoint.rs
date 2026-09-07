@@ -61,13 +61,22 @@ pub struct Checkpoint {
     /// crate treats it as opaque bytes). `[0; 32]` when unused.
     #[serde(default)]
     pub registry_root: [u8; 32],
+    /// Commitment to the commit-derived body of the state snapshot
+    /// served for this checkpoint (leader frontier, gc round, commit
+    /// marks, queued governance) so a joiner cannot be fed a snapshot
+    /// whose `state_root` is honest but whose commit marks or gc round
+    /// are not (IQ-008 D5; consensus-review finding on S34.4). The node
+    /// computes it; this crate treats it as opaque bytes. `[0; 32]` when
+    /// unused.
+    #[serde(default)]
+    pub snapshot_root: [u8; 32],
 }
 
 impl Checkpoint {
     /// Canonical hash of this checkpoint.
     ///
     /// Encoding: `BLAKE3("SUWAPPU-CHECKPOINT-V2" || height (8 BE) || round (8 BE)
-    /// || state_root || prev_checkpoint || registry_root)`.
+    /// || state_root || prev_checkpoint || registry_root || snapshot_root)`.
     pub fn hash(&self) -> [u8; 32] {
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"SUWAPPU-CHECKPOINT-V2");
@@ -76,6 +85,7 @@ impl Checkpoint {
         hasher.update(&self.state_root);
         hasher.update(&self.prev_checkpoint);
         hasher.update(&self.registry_root);
+        hasher.update(&self.snapshot_root);
         let mut out = [0u8; 32];
         out.copy_from_slice(hasher.finalize().as_bytes());
         out
@@ -217,6 +227,14 @@ pub enum ChainError {
         /// Position in the chain.
         index: usize,
     },
+    /// A link at height `h + 1` does not name the verified link at
+    /// height `h` as its predecessor, or the first link (height 0) has a
+    /// non-zero `prev_checkpoint`.
+    #[error("link {index}: prev_checkpoint does not match the preceding link")]
+    BrokenLink {
+        /// Position in the chain.
+        index: usize,
+    },
 }
 
 /// Verify a chain of co-signed checkpoints starting from a trusted
@@ -243,12 +261,29 @@ pub fn verify_checkpoint_chain(
 ) -> Result<Vec<CoSignedCheckpoint>, ChainError> {
     let mut committee = genesis_committee;
     let mut out = Vec::with_capacity(links.len());
-    let mut last: Option<(CheckpointHeight, Round)> = None;
+    let mut last: Option<(CheckpointHeight, Round, [u8; 32])> = None;
     for (index, link) in links.iter().enumerate() {
-        if let Some((h, r)) = last {
-            if link.checkpoint.height <= h || link.checkpoint.round <= r {
+        match last {
+            Some((h, r, _)) if link.checkpoint.height <= h || link.checkpoint.round <= r => {
                 return Err(ChainError::NotMonotone { index });
             }
+            // Consecutive heights must chain by hash. The served chain is
+            // deliberately sparse (committee transitions plus the latest),
+            // so a gap is legal: every link is still signed by a quorum of
+            // a committee that was legitimately in force, and the joiner
+            // ends on the committee the last link binds. What a gap can
+            // hide is only *which* legitimate committee signed; see IQ-008
+            // Residual 6 (long-range keys) for why that is accepted.
+            Some((h, _, prev_hash))
+                if link.checkpoint.height == h + 1
+                    && link.checkpoint.prev_checkpoint != prev_hash =>
+            {
+                return Err(ChainError::BrokenLink { index });
+            }
+            None if link.checkpoint.height == 0 && link.checkpoint.prev_checkpoint != [0u8; 32] => {
+                return Err(ChainError::BrokenLink { index });
+            }
+            _ => {}
         }
         if link.checkpoint.registry_root != link.next_registry_root {
             return Err(ChainError::RegistryRootMismatch { index });
@@ -256,7 +291,11 @@ pub fn verify_checkpoint_chain(
         let cosigned =
             ratify_checkpoint(link.checkpoint.clone(), link.signatures.clone(), committee)
                 .map_err(|source| ChainError::Link { index, source })?;
-        last = Some((link.checkpoint.height, link.checkpoint.round));
+        last = Some((
+            link.checkpoint.height,
+            link.checkpoint.round,
+            link.checkpoint.hash(),
+        ));
         out.push(cosigned);
         committee = &link.next_committee;
     }
@@ -330,6 +369,7 @@ impl Checkpointer {
             state_root,
             prev_checkpoint: self.last_hash,
             registry_root,
+            snapshot_root: [0; 32],
         };
         self.last_hash = ck.hash();
         self.next_height += 1;
@@ -359,6 +399,7 @@ mod tests {
             state_root: [0xAB; 32],
             prev_checkpoint: [0; 32],
             registry_root: [0; 32],
+            snapshot_root: [0; 32],
         };
         assert_eq!(ck.hash(), ck.hash());
     }
@@ -371,10 +412,14 @@ mod tests {
             state_root: [0xAB; 32],
             prev_checkpoint: [0xCD; 32],
             registry_root: [0; 32],
+            snapshot_root: [0; 32],
         };
         let h0 = base.hash();
         let mut variant = base.clone();
         variant.height = 2;
+        assert_ne!(h0, variant.hash());
+        let mut variant = base.clone();
+        variant.snapshot_root = [1; 32];
         assert_ne!(h0, variant.hash());
         let mut variant = base.clone();
         variant.round = 6;
@@ -401,6 +446,7 @@ mod tests {
             state_root: [0xAA; 32],
             prev_checkpoint: [0; 32],
             registry_root: [0; 32],
+            snapshot_root: [0; 32],
         };
         let sig = sign_checkpoint(0, &sk, &ck).unwrap();
         ratify_checkpoint(ck, vec![sig], &registry).unwrap();
@@ -424,6 +470,7 @@ mod tests {
             state_root: [0; 32],
             prev_checkpoint: [0; 32],
             registry_root: [0; 32],
+            snapshot_root: [0; 32],
         };
         // 4-member ring: quorum = 2f+1 = 3 (see IQ-001). One signature is below.
         let sig = sign_checkpoint(0, &sk, &ck).unwrap();

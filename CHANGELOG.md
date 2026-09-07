@@ -83,6 +83,15 @@ will coincide with mainnet genesis.
     halting at the first leader whose votes its peers had already
     dropped. Seeds push certs, blocks, votes and checkpoint signatures to
     dynamic peers; dynamic peers still cannot inject any of them.
+  - Consensus-review fixes (S34.5): one commit walk / snapshot capture
+    at a time (`State::commit_lock`); `Checkpoint.snapshot_root` binds
+    the served snapshot's commit-derived body and joiners verify it plus
+    every certificate's signature; checkpoints are crossed before the
+    first leader above the boundary so every node signs the same root;
+    the late-flip sweep floor is clamped explicitly and gated by
+    `proptest_gc.rs::bounded_history_below_gc_is_clamped`; a validator
+    that falls behind jumps its authoring round to the observed tip and
+    backfills from its commit frontier rather than its DAG tip.
 - `suwappu_getSyncStatus` JSON-RPC method: the one-call answer to "is
   this node caught up?" for operators, the status page (G8) and the
   explorer (G7). Returns `local_dag_round`, `latest_committed_round`,
