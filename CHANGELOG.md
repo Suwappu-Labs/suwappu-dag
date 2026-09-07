@@ -97,7 +97,14 @@ will coincide with mainnet genesis.
     the commit lock; the served certificate window is exact (rounds at or
     below the checkpoint), validated against every committee the verified
     chain binds, and the joiner derives its checkpoint cursor from the
-    trusted checkpoint; the advertised tip is the admissible tip.
+    trusted checkpoint; the advertised tip is the quorum anchor. Window
+    certificates are admitted only against the Authority Ring in force at
+    their round (or the next, as transition grace), at most two per
+    (author, round) — the same cap ingest applies. Checkpoint signatures
+    aggregate against every recently emitted checkpoint, not only the
+    latest, so a signature that arrives after the node crossed the next
+    boundary still counts (previously co-signing could silently stall
+    under load).
   - **Liveness fix found by the widened restart test:** an author never
     voted for its own certificate on the Validator-Ring side, so a
     certificate could gather at most `n − 1` votes and a four-node ring
