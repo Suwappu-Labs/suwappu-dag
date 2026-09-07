@@ -240,8 +240,9 @@ proptest! {
         let certs = random_dag(n_authorities, n_rounds, omit_bits, parent_bits);
         let orig = store_from(&certs);
         let max_round = orig.max_round().unwrap();
-        let g = (max_round.saturating_sub(1)) * g_frac / 100;
-        prop_assume!(g > 0);
+        // g in [1, max_round - 1] (n_rounds >= 3 so max_round >= 2): a
+        // floor strictly below it exists and the top round survives.
+        let g = (1 + max_round.saturating_sub(2) * g_frac / 100).min(max_round - 1);
         let mut pruned = orig.clone();
         pruned.prune_below(g);
 
