@@ -440,9 +440,10 @@ branch.
    window through a fabricated tombstone — the same exposure a live node
    has at its own window edge, and one that affects only support counts
    at rounds the joiner will re-decide from live data. The served window
-   is exact — certificates above the checkpoint round are dropped at
-   capture, so its size is provably at most
-   `n × (gc_depth + cadence + 1)` and the joiner enforces that. Every
+   is exactly `(gc_round, ck.round]` — certificates above the checkpoint
+   round are dropped at capture, and both ends are checkpoint-bound
+   (`ck.round` directly, `gc_round` through `snapshot_root`) — so the
+   joiner enforces the exact bound `n × (ck.round − gc_round)`. Every
    other snapshot field is either bound (`state_root`, `registry_root`,
    `snapshot_root`) or node-local and never installed from a peer
    (`pending_stake` is derived from the bound registries,
@@ -450,6 +451,20 @@ branch.
    cursor is derived from the trusted checkpoint). `GetSnapshot` is
    answered for any peer without a rate limit; the reply is bounded
    (`SNAPSHOT_CHUNK_BYTES` × chunks) but not free.
+8. **The authoring round is anchored on quorum, and the admissible round
+   window is bounded.** A validator that falls behind jumps its next
+   authoring round to one above the highest round holding a quorum of
+   distinct authors — never to the raw DAG tip, which one seated
+   authority can push arbitrarily high with a single valid certificate.
+   Ingest drops any certificate more than `gc_depth` rounds above that
+   same anchor (or the commit frontier, whichever is higher), so a single
+   authority cannot ratchet the window either: the per-node DAG stays
+   within one retention window of honest progress, and a joiner far
+   behind catches up by backfill and snapshot, not by live pushes. Both
+   were consensus-review findings on the S34.5 fix pass. Known gap: the
+   quorum scan iterates authority ids `0..n`, like `parents_for_round`
+   before it; a mid-ring eject that leaves ids non-contiguous is a
+   pre-existing follow-up.
 9. **Authors now vote for their own certificates.** Found while widening
    the restart test to an outage longer than the retention window: the
    Validator-Ring side of the AND-gate only ever collected votes from
@@ -459,15 +474,6 @@ branch.
    The author's own vote is recorded and broadcast at proposal time. This
    is a pre-existing liveness hole, not an IQ-008 change; it is recorded
    here because the S34 tests are what exposed it.
-8. **The authoring round is anchored on quorum, and the admissible round
-   window is bounded.** A validator that falls behind jumps its next
-   authoring round to one above the highest round holding a quorum of
-   distinct authors — never to the raw DAG tip, which one seated
-   authority can push arbitrarily high with a single valid certificate —
-   and ingest drops any certificate more than `gc_depth` rounds above the
-   local tip (a joiner far behind catches up by backfill and snapshot,
-   not by live pushes). Both were consensus-review findings on the S34.5
-   fix pass.
 
 ## Implementation sketch (DAG-S34)
 

@@ -326,6 +326,11 @@ impl DagStore {
         self.by_round.keys().copied()
     }
 
+    /// Live rounds, highest first (no allocation).
+    pub fn rounds_rev(&self) -> impl Iterator<Item = Round> + '_ {
+        self.by_round.keys().rev().copied()
+    }
+
     /// Produce the deterministic linearization of the DAG.
     ///
     /// Order: rounds ascending; within a round, certificates sorted by

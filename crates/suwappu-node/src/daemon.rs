@@ -750,14 +750,12 @@ fn distinct_authors_at(dag: &DagStore, round: u64, n_authorities: u32) -> u32 {
 /// DAG tip itself is not safe to anchor on, because one seated authority
 /// can push a single valid certificate at any round above its parent and
 /// a node that jumped after it would wait for parents that never come
-/// (consensus-review finding on S34.5). The scan is over live rounds
-/// only, so it is O(gc_depth).
+/// (consensus-review finding on S34.5). The scan runs from the top of the
+/// live window and stops at the first quorum round, so it is O(1) for a
+/// node keeping up and O(live rounds) at worst.
 fn highest_quorum_round(dag: &DagStore, n_authorities: u32) -> Option<u64> {
     let need = quorum_threshold(n_authorities);
-    let rounds: Vec<u64> = dag.rounds().collect();
-    rounds
-        .into_iter()
-        .rev()
+    dag.rounds_rev()
         .find(|r| distinct_authors_at(dag, *r, n_authorities) >= need)
 }
 
@@ -1531,13 +1529,14 @@ async fn run_backfill(
         ticks = ticks.wrapping_add(1);
 
         let local = state.dag.read().await.max_round().unwrap_or(0);
-        let (target, peer_gc, resume, frontier) = {
+        let (target, peer_gc, resume, frontier, gc_depth) = {
             let mut inner = state.inner.lock().await;
             (
                 inner.sync_tip,
                 inner.peer_gc_round,
                 inner.backfill_resume.take(),
                 inner.last_committed_leader_round,
+                inner.gc_depth,
             )
         };
         let resume = resume.filter(|r| *r <= local);
@@ -1616,8 +1615,11 @@ async fn run_backfill(
         }
         // A resumed tail is bounded by the local tip even when the peer
         // tip poll has not answered yet.
+        // A batch never reaches past the ingest window of a small manifest
+        // depth (rounds above `anchor + gc_depth` would be dropped and
+        // re-requested).
         let to_round = from_round
-            .saturating_add(BACKFILL_BATCH_ROUNDS - 1)
+            .saturating_add(BACKFILL_BATCH_ROUNDS.min(gc_depth.max(1)) - 1)
             .min(target.max(local));
         // Snapshot senders once; rotate the fan-out start per round so a
         // fixed pair of alive-but-behind peers doesn't absorb every
@@ -1699,15 +1701,28 @@ async fn ingest_cert(
         }
 
         // Round window: a certificate more than one retention window
-        // above the local tip is not something this node can build on or
+        // above what this node can build on is not something it can
         // decide, and admitting it would let one authority inflate every
         // `decide_slot` anchor scan (O(max_round)) and the observed tip
-        // (consensus-review finding on S34.5). A joiner far behind its
-        // peers catches up by backfill and snapshot, not by live pushes.
+        // (consensus-review finding on S34.5). The ceiling is anchored on
+        // the highest quorum round (or the commit frontier), never on the
+        // raw tip, so no single authority can ratchet it. A joiner far
+        // behind its peers catches up by backfill and snapshot, not by
+        // live pushes.
         let cert_payload_digest = c.payload_digest;
+        let (n_now, frontier_now) = {
+            let inner = state.inner.lock().await;
+            (
+                inner.n_authorities,
+                inner.last_committed_leader_round.unwrap_or(0),
+            )
+        };
         let insert_result = {
             let mut dag = state.dag.write().await;
-            let ceiling = dag.max_round().unwrap_or(0).saturating_add(dag.gc_depth());
+            let anchor = highest_quorum_round(&dag, n_now)
+                .unwrap_or(0)
+                .max(frontier_now);
+            let ceiling = anchor.saturating_add(dag.gc_depth());
             if round > ceiling {
                 debug!(peer = %from.0, author = c.author, round, ceiling, "inbox: cert round above the admissible window, dropped");
                 continue;
@@ -2393,19 +2408,22 @@ fn verify_served_snapshot(
     } else if !snap.tombstones.is_empty() {
         return Err("tombstones without a gc round");
     }
-    // The served window is (gc_round, ck.round]; gc_round is the frontier
-    // minus gc_depth and the frontier is at most `cadence` below the
-    // boundary, so an honest window spans at most gc_depth + cadence + 1
-    // rounds of at most n certificates each.
+    // The served window is exactly (gc_round, ck.round]: both ends are
+    // checkpoint-bound (`ck.round` directly; `gc_round` through
+    // `snapshot_root`, checked above), so the bound is exact rather than
+    // a heuristic on how far the frontier may trail the boundary.
     if snap.dag_certs.iter().any(|c| c.round > ck.round) {
         return Err("certificate above the checkpoint round");
     }
-    let max_certs = n
-        .saturating_mul(gc_depth.saturating_add(cadence).saturating_add(1))
-        .max(n);
+    let live_rounds = match snap.gc_round {
+        Some(g) => ck.round.saturating_sub(g),
+        None => ck.round.saturating_add(1),
+    };
+    let max_certs = n.saturating_mul(live_rounds).max(n);
     if snap.dag_certs.len() as u64 > max_certs {
         return Err("certificate window too large");
     }
+    let _ = cadence;
     for c in &snap.dag_certs {
         let ok = snap
             .authority_registry
@@ -3956,14 +3974,12 @@ async fn apply_governance_intent(
                 });
             match admit_result {
                 Ok(()) => {
-                    // DAG-S27.7: park stake; activated on first cert.
-                    state
-                        .inner
-                        .lock()
-                        .await
-                        .pending_stake
-                        .insert(*authority_id, *stake_suwappu as u128);
-                    let _ = state
+                    // The Validator-Ring mirror must succeed for the
+                    // parked stake to be derivable from the registries
+                    // (`StateSnapshot::derived_pending_stake`); on a
+                    // failed mirror nothing is parked, so the invariant
+                    // holds instead of inflating joiners' denominators.
+                    let mirrored = state
                         .validator_registry
                         .write()
                         .await
@@ -3971,6 +3987,20 @@ async fn apply_governance_intent(
                             id: *authority_id,
                             stake_suwappu: *stake_suwappu as u128,
                         });
+                    match mirrored {
+                        Ok(()) => {
+                            // DAG-S27.7: park stake; activated on first cert.
+                            state
+                                .inner
+                                .lock()
+                                .await
+                                .pending_stake
+                                .insert(*authority_id, *stake_suwappu as u128);
+                        }
+                        Err(e) => {
+                            tracing::error!(err = ?e, authority = *authority_id, "validator-ring mirror of admit failed; stake not parked");
+                        }
+                    }
                     // Issue #18 (deferred activation): the registries are
                     // grown to the new size so the new authority's certs
                     // are recognized when they arrive, but
@@ -4298,7 +4328,8 @@ async fn run_round_driver(
             validator: self_id,
             candidate: cert_hash,
         };
-        if store_vote(&state, own_vote).await {
+        let own_vote_stored = store_vote(&state, own_vote).await;
+        if own_vote_stored {
             log.emit(
                 Event::now(&self_label, Lane::Main, "voted")
                     .with_round(target_round)
@@ -4327,13 +4358,15 @@ async fn run_round_driver(
             &self_label,
             &log,
         );
-        broadcast_all(
-            &state,
-            &outbound,
-            WireMessage::Vote(own_vote),
-            &self_label,
-            &log,
-        );
+        if own_vote_stored {
+            broadcast_all(
+                &state,
+                &outbound,
+                WireMessage::Vote(own_vote),
+                &self_label,
+                &log,
+            );
+        }
     }
 }
 
@@ -5257,6 +5290,161 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 
+    /// Consensus-review (S34.5, third pass): the authoring anchor ignores a
+    /// far-future single-author certificate and follows the highest round
+    /// that holds a quorum of distinct authors.
+    #[test]
+    fn highest_quorum_round_follows_quorum_not_tip() {
+        let n = 4u32;
+        let mut dag = DagStore::with_gc_depth(16);
+        let mut prev: Vec<CertHash> = Vec::new();
+        for r in 0..5u64 {
+            let mut this = Vec::new();
+            for a in 0..n {
+                let cert = Certificate {
+                    author: a,
+                    round: r,
+                    parents: prev.clone(),
+                    payload_digest: [a as u8 + 1; 32],
+                    signature: Vec::new(),
+                };
+                this.push(cert.hash());
+                dag.insert(cert).unwrap();
+            }
+            prev = this;
+        }
+        assert_eq!(highest_quorum_round(&dag, n), Some(4));
+        // One authority alone at round 5: below quorum, anchor unchanged.
+        let lone = Certificate {
+            author: 1,
+            round: 5,
+            parents: prev.clone(),
+            payload_digest: [0x55; 32],
+            signature: Vec::new(),
+        };
+        let lone_hash = lone.hash();
+        dag.insert(lone).unwrap();
+        assert_eq!(highest_quorum_round(&dag, n), Some(4));
+        // The same authority pushes a certificate 20 rounds ahead on top
+        // of its own lone certificate: valid to insert, still not an
+        // anchor.
+        let far = Certificate {
+            author: 1,
+            round: 25,
+            parents: vec![lone_hash],
+            payload_digest: [0x66; 32],
+            signature: Vec::new(),
+        };
+        dag.insert(far).unwrap();
+        assert_eq!(dag.max_round(), Some(25));
+        assert_eq!(highest_quorum_round(&dag, n), Some(4));
+        // Exactly quorum_threshold(4) = 3 distinct authors at round 5
+        // makes it the anchor.
+        for a in [0u32, 2] {
+            dag.insert(Certificate {
+                author: a,
+                round: 5,
+                parents: prev.clone(),
+                payload_digest: [a as u8 + 0x10; 32],
+                signature: Vec::new(),
+            })
+            .unwrap();
+        }
+        assert_eq!(highest_quorum_round(&dag, n), Some(5));
+    }
+
+    /// Consensus-review (S34.5, third pass): with n = 4 and one member
+    /// down, the three survivors ratify a leader only if the author's own
+    /// vote counts — the liveness hole the widened restart test exposed.
+    #[tokio::test]
+    async fn author_self_vote_completes_quorum_with_one_member_down() {
+        let n = 4u32;
+        let keypairs: Vec<(
+            suwappu_crypto::mldsa::PublicKey,
+            suwappu_crypto::mldsa::SecretKey,
+        )> = (0..n).map(|_| suwappu_crypto::mldsa::keypair()).collect();
+        let manifest = GenesisManifest {
+            network_id: "self-vote-4n".into(),
+            validators: (0..n)
+                .map(|i| GenesisValidator {
+                    authority_id: i,
+                    label: format!("v{}", i),
+                    mldsa_public_key_hex: hex::encode(keypairs[i as usize].0.as_bytes()),
+                    bls_public_key_hex: "00".into(),
+                    validator_stake_suwappu: 150_000,
+                    authority_stake_suwappu: 150_000,
+                })
+                .collect(),
+            corridors: Vec::new(),
+            prebalances: Vec::new(),
+            rounds_per_epoch: 1024,
+            gc_depth_rounds: 16,
+            checkpoint_cadence_rounds: 4,
+        };
+        let state = State::new(&manifest, keypairs[0].1.clone(), None);
+        let candidate = CertHash([0xAA; 32]);
+        // Author 1's certificate; validator 3 is down. Votes from the two
+        // other survivors alone: 300k of 600k, below the 400,001 threshold.
+        for v in [0u32, 2] {
+            assert!(
+                store_vote(
+                    &state,
+                    Vote {
+                        validator: v,
+                        candidate
+                    }
+                )
+                .await
+            );
+        }
+        let votes: Vec<Vote> = state.votes.lock().get(&candidate).cloned().unwrap();
+        assert!(!validator_quorum_met(
+            &*state.stake_table.read().await,
+            candidate,
+            &votes
+        ));
+        // The author's own vote completes the quorum.
+        assert!(
+            store_vote(
+                &state,
+                Vote {
+                    validator: 1,
+                    candidate
+                }
+            )
+            .await
+        );
+        let votes: Vec<Vote> = state.votes.lock().get(&candidate).cloned().unwrap();
+        assert!(validator_quorum_met(
+            &*state.stake_table.read().await,
+            candidate,
+            &votes
+        ));
+        // A vote from an id outside the Validator Ring is dropped.
+        assert!(
+            !store_vote(
+                &state,
+                Vote {
+                    validator: 9,
+                    candidate
+                }
+            )
+            .await
+        );
+        // Duplicates do not grow the slot.
+        assert!(
+            !store_vote(
+                &state,
+                Vote {
+                    validator: 1,
+                    candidate
+                }
+            )
+            .await
+        );
+        assert_eq!(state.votes.lock().get(&candidate).unwrap().len(), 3);
+    }
+
     /// IQ-008 D5 end to end: seeds co-sign checkpoints, prune past genesis,
     /// and a late joiner that cannot backfill forward (every round it would
     /// ask for is gone) walks the checkpoint chain from the genesis
@@ -5478,6 +5666,24 @@ mod tests {
             verify_served_snapshot(&bad, &ck, &net, gc_depth, cadence),
             Err("snapshot root mismatch"),
             "forged commit mark"
+        );
+        let mut bad = (*served).clone();
+        let live_rounds = ck.round - served.gc_round.unwrap();
+        let max_certs = (served.n_authorities as u64 * live_rounds) as usize;
+        assert!(
+            served.dag_certs.len() <= max_certs,
+            "honest window within the exact bound"
+        );
+        while bad.dag_certs.len() <= max_certs {
+            // Duplicates of an honestly signed certificate: every
+            // structural check but the size passes.
+            let c = bad.dag_certs[0].clone();
+            bad.dag_certs.push(c);
+        }
+        assert_eq!(
+            verify_served_snapshot(&bad, &ck, &net, gc_depth, cadence),
+            Err("certificate window too large"),
+            "padded certificate window"
         );
         let mut bad = (*served).clone();
         bad.gc_round = Some(u64::MAX - 1);
