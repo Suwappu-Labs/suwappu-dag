@@ -90,11 +90,13 @@ Minimum:
 > - As of DAG-S34 (IQ-008) RAM is bounded: the DAG and every side table
 >   are pruned to `gc_depth_rounds` (manifest, default 256) behind the
 >   commit frontier, and with `data_dir` set the node keeps a durable
->   commit log plus periodic snapshots, so a restart resumes from disk
->   instead of genesis. This branch has not yet had the consensus-team
->   sign-off IQ-008 requires, and joiners that fall more than
->   `gc_depth_rounds` behind still need the checkpoint-snapshot bootstrap
->   (S34.4); until both land, expect occasional coordinated regenesis.
+>   commit log plus a snapshot at every checkpoint boundary, so a restart
+>   resumes from disk instead of genesis. A joiner that falls more than
+>   `gc_depth_rounds` behind bootstraps from the latest Authority-Ring
+>   co-signed checkpoint snapshot automatically (S34.4) — nothing to
+>   configure. This branch has not yet had the consensus-team sign-off
+>   IQ-008 requires; until it merges, expect occasional coordinated
+>   regenesis.
 >
 > Disk holds the event log (`event_log_path`) and, with `data_dir` set,
 > the commit log (grows with chain history: roughly the byte size of

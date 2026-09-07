@@ -95,6 +95,7 @@ Between sessions, you resume via:
 | DAG-S18 | `suwappu-transport` — SCION path-authenticated routing       | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_scion.rs`) |
 | DAG-S19 | SCION-IP-Gateway fallback                                | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_gateway.rs`) |
 | DAG-S20 | `suwappu-node` — full validator composition (E2E)            | ✅ Closed    | 3 properties × 10k cases (`tests/proptest_genesis_flow.rs`) |
+| DAG-S34 | IQ-008 — bounded DAG retention, commit log + snapshots, co-signed checkpoint sync | 🔍 Review | `proptest_gc.rs` (5), `proptest_persistence.rs` (2), `proptest_checkpoint_chain.rs` (1) × 10k; consensus-reviewer + human sign-off gate merge |
 
 Update this table when a sprint closes.
 
