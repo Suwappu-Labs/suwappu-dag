@@ -434,8 +434,10 @@ branch.
    structurally, not committed to.** The certificate window is
    receipt-timing dependent and cannot be part of a consensus-agreed
    root; a joiner checks every certificate's signature against the bound
-   Authority Ring, its round against the bound gc round, and the
-   tombstone window's rounds and size. A Byzantine authority's certificate
+   Authority Ring — any committee the verified checkpoint chain binds,
+   since a window of up to `gc_depth` rounds may straddle an eject — its
+   round against the bound gc round, and the tombstone window's rounds
+   and size. A Byzantine authority's certificate
    referencing a fabricated pruned parent can still enter a joiner's
    window through a fabricated tombstone — the same exposure a live node
    has at its own window edge, and one that affects only support counts

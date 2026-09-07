@@ -1241,9 +1241,30 @@ async fn run_inbox(
             }
             WireMessage::Pong(_) => {}
             WireMessage::GetTip => {
+                // Advertise the admissible tip — the highest quorum round
+                // (or frontier) plus one retention window — rather than
+                // the raw `max_round`: a single authority's certificate at
+                // the very edge of our window would otherwise be pinned as
+                // a peer's `sync_tip` that its own, lower, ceiling can
+                // never admit (consensus-review finding, fourth pass).
+                let (n_now, frontier_now) = {
+                    let inner = state.inner.lock().await;
+                    (
+                        inner.n_authorities,
+                        inner.last_committed_leader_round.unwrap_or(0),
+                    )
+                };
                 let (max_round, gc_round) = {
                     let dag = state.dag.read().await;
-                    (dag.max_round().unwrap_or(0), dag.gc_round())
+                    let anchor = highest_quorum_round(&dag, n_now)
+                        .unwrap_or(0)
+                        .max(frontier_now);
+                    (
+                        dag.max_round()
+                            .unwrap_or(0)
+                            .min(anchor.saturating_add(dag.gc_depth())),
+                        dag.gc_round(),
+                    )
                 };
                 reply_to(
                     &outbound,
@@ -1904,8 +1925,9 @@ async fn emit_checkpoint(
     // receipt-timing dependent, are re-pulled by the receiver from its
     // frontier anyway (`backfill_resume`), and would make the window's
     // size unbounded in the tip-minus-frontier gap. Dropping them makes
-    // `n × (gc_depth + cadence + 1)` a provable bound the joiner can
-    // enforce (`verify_served_snapshot`).
+    // the window `(gc_round, ck.round]` with both ends checkpoint-bound,
+    // which is what lets the joiner bound its size
+    // (`verify_served_snapshot`).
     snap.dag_certs.retain(|c| c.round <= boundary);
     let kept: HashSet<CertHash> = snap.dag_certs.iter().map(|c| c.hash()).collect();
     snap.blocks.retain(|b| kept.contains(&b.cert_hash));
@@ -2273,12 +2295,24 @@ async fn handle_snapshot_chunk(
         return;
     };
     let ck = &trusted.cosigned.checkpoint;
-    let (gc_depth, cadence) = {
+    // Every committee the verified chain binds, oldest first: the window
+    // spans up to `gc_depth` rounds of history and may straddle an
+    // Authority-Ring change, so a certificate is admissible if any
+    // committee in force over the chain signed it.
+    let (gc_depth, committees) = {
         let inner = state.inner.lock().await;
-        (inner.gc_depth, inner.checkpoint_cadence)
+        let mut c = vec![state.genesis_authority_registry.clone()];
+        c.extend(
+            inner
+                .checkpoint_transitions
+                .iter()
+                .map(|b| b.registries.authority_registry.clone()),
+        );
+        c.push(trusted.registries.authority_registry.clone());
+        (inner.gc_depth, c)
     };
     if let Err(why) =
-        verify_served_snapshot(&snap, ck, &state.manifest_network_id, gc_depth, cadence)
+        verify_served_snapshot(&snap, ck, &state.manifest_network_id, gc_depth, &committees)
     {
         tracing::warn!(peer = %from.0, height, why, "snapshot sync: snapshot rejected; discarded");
         state.inner.lock().await.snapshot_sync.trusted = None;
@@ -2357,15 +2391,17 @@ async fn handle_snapshot_chunk(
 /// `registry_root` (committee + stake + epoch) and `snapshot_root`
 /// (leader frontier, gc round, commit marks, queued governance); the
 /// certificate window is checked structurally: every certificate is
-/// signed by a member of the bound Authority Ring and lies above the
-/// bound gc round, and the tombstone window lies at or below it and is
-/// bounded in size. Returns the reason on failure.
+/// signed by a member of some Authority Ring the verified checkpoint
+/// chain binds (`committees`, genesis first — the window may straddle a
+/// committee change) and lies above the bound gc round, and the
+/// tombstone window lies at or below it and is bounded in size. Returns
+/// the reason on failure.
 fn verify_served_snapshot(
     snap: &StateSnapshot,
     ck: &Checkpoint,
     network_id: &str,
     gc_depth: u64,
-    cadence: u64,
+    committees: &[AuthorityRegistry],
 ) -> Result<(), &'static str> {
     if snap.checkpoint.as_ref() != Some(ck) {
         return Err("checkpoint mismatch");
@@ -2419,19 +2455,31 @@ fn verify_served_snapshot(
         Some(g) => ck.round.saturating_sub(g),
         None => ck.round.saturating_add(1),
     };
-    let max_certs = n.saturating_mul(live_rounds).max(n);
+    // Per-round factor: the largest committee in force over the chain
+    // (a departed author's certificates stay in the window until GC
+    // passes them), plus one third for equivocating duplicates, which an
+    // honest DAG holds until the equivocator is ejected.
+    let widest = committees
+        .iter()
+        .map(|c| c.len() as u64)
+        .max()
+        .unwrap_or(0)
+        .max(n);
+    let per_round = widest.saturating_add(widest / 3);
+    let max_certs = per_round.saturating_mul(live_rounds).max(per_round);
     if snap.dag_certs.len() as u64 > max_certs {
         return Err("certificate window too large");
     }
-    let _ = cadence;
     for c in &snap.dag_certs {
-        let ok = snap
-            .authority_registry
-            .get(c.author)
-            .and_then(|m| suwappu_crypto::mldsa::PublicKey::from_bytes(&m.public_key_bytes).ok())
-            .is_some_and(|pk| c.verify_signature(&pk));
+        let ok = committees.iter().any(|reg| {
+            reg.get(c.author)
+                .and_then(|m| {
+                    suwappu_crypto::mldsa::PublicKey::from_bytes(&m.public_key_bytes).ok()
+                })
+                .is_some_and(|pk| c.verify_signature(&pk))
+        });
         if !ok {
-            return Err("certificate not signed by the bound Authority Ring");
+            return Err("certificate not signed by any committee the chain binds");
         }
     }
     Ok(())
@@ -4396,6 +4444,7 @@ mod tests {
     //   23_600  four_node_gc_bounds_store (4n)
     //   23_800  restart_resumes_from_disk_without_equivocating (4n)
     //   24_000  joiner_bootstraps_from_cosigned_checkpoint_snapshot (4n + 1)
+    //   24_300  round_driver_records_own_vote
     //
     // Adding a test? Take the next free 200-wide band and list it here.
 
@@ -5353,6 +5402,149 @@ mod tests {
         assert_eq!(highest_quorum_round(&dag, n), Some(5));
     }
 
+    /// Consensus-review (S34.5, fourth pass): `ingest_cert` drops a
+    /// certificate more than one retention window above the quorum anchor
+    /// and admits one at the edge, and the anchor is what the node
+    /// advertises as its tip.
+    #[tokio::test]
+    async fn ingest_drops_certs_above_the_admissible_window() {
+        let n = 4u32;
+        let keypairs: Vec<(
+            suwappu_crypto::mldsa::PublicKey,
+            suwappu_crypto::mldsa::SecretKey,
+        )> = (0..n).map(|_| suwappu_crypto::mldsa::keypair()).collect();
+        let manifest = GenesisManifest {
+            network_id: "ingest-window-4n".into(),
+            validators: (0..n)
+                .map(|i| GenesisValidator {
+                    authority_id: i,
+                    label: format!("v{}", i),
+                    mldsa_public_key_hex: hex::encode(keypairs[i as usize].0.as_bytes()),
+                    bls_public_key_hex: "00".into(),
+                    validator_stake_suwappu: 150_000,
+                    authority_stake_suwappu: 150_000,
+                })
+                .collect(),
+            corridors: Vec::new(),
+            prebalances: Vec::new(),
+            rounds_per_epoch: 1024,
+            gc_depth_rounds: 8,
+            checkpoint_cadence_rounds: 4,
+        };
+        let state = State::new(&manifest, keypairs[0].1.clone(), None);
+        let from = PeerId("test".into());
+        // Genesis round: a quorum of distinct authors.
+        let mut genesis = Vec::new();
+        for a in 0..n {
+            let mut c = Certificate {
+                author: a,
+                round: 0,
+                parents: Vec::new(),
+                payload_digest: [a as u8 + 1; 32],
+                signature: Vec::new(),
+            };
+            c.sign(&keypairs[a as usize].1);
+            genesis.push(c.hash());
+            assert_eq!(ingest_cert(&state, c, &from, None).await.len(), 1);
+        }
+        assert_eq!(highest_quorum_round(&*state.dag.read().await, n), Some(0));
+        // Authority 1 alone at round 8 (= anchor + gc_depth): admissible.
+        let mut edge = Certificate {
+            author: 1,
+            round: 8,
+            parents: genesis.clone(),
+            payload_digest: [0x11; 32],
+            signature: Vec::new(),
+        };
+        edge.sign(&keypairs[1].1);
+        let edge_hash = edge.hash();
+        assert_eq!(ingest_cert(&state, edge, &from, None).await.len(), 1);
+        // Authority 1 at round 9 on top of it: one above the window, and
+        // the lone round-8 certificate did not move the anchor.
+        let mut beyond = Certificate {
+            author: 1,
+            round: 9,
+            parents: vec![edge_hash],
+            payload_digest: [0x22; 32],
+            signature: Vec::new(),
+        };
+        beyond.sign(&keypairs[1].1);
+        assert!(ingest_cert(&state, beyond, &from, None).await.is_empty());
+        let dag = state.dag.read().await;
+        assert_eq!(dag.max_round(), Some(8));
+        assert_eq!(highest_quorum_round(&dag, n), Some(0));
+    }
+
+    /// Consensus-review (S34.5, fourth pass): a running daemon records its
+    /// own Validator-Ring vote for every certificate it authors.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn round_driver_records_own_vote() {
+        let base_port: u16 = 24_300;
+        let (pk, sk) = suwappu_crypto::mldsa::keypair();
+        let manifest = GenesisManifest {
+            network_id: "self-vote-1n".into(),
+            validators: vec![GenesisValidator {
+                authority_id: 0,
+                label: "v0".into(),
+                mldsa_public_key_hex: hex::encode(pk.as_bytes()),
+                bls_public_key_hex: "00".into(),
+                validator_stake_suwappu: 150_000,
+                authority_stake_suwappu: 150_000,
+            }],
+            corridors: Vec::new(),
+            prebalances: Vec::new(),
+            rounds_per_epoch: 1024,
+            gc_depth_rounds: suwappu_consensus::GC_DEPTH,
+            checkpoint_cadence_rounds: 64,
+        };
+        let cfg = NodeConfig {
+            self_id: "v0".into(),
+            authority_id: 0,
+            listen: format!("127.0.0.1:{}", base_port).parse().unwrap(),
+            client_listen: format!("127.0.0.1:{}", base_port + 100).parse().unwrap(),
+            rpc_listen: None,
+            peers: vec![],
+            allow_post_genesis_join: false,
+            round_ms: 100,
+            checkpoint_cadence_rounds: 1,
+            mldsa_secret_key_path: write_mldsa_key_file(&sk),
+            bls_secret_key_path: "/dev/null".into(),
+            genesis_manifest_path: "/dev/null".into(),
+            event_log_path: std::env::temp_dir().join("suwappu-self-vote-1n.ndjson"),
+            max_client_connections: 256,
+            client_idle_timeout_ms: 30_000,
+            client_per_ip_limit: 8,
+            rpc_per_ip_capacity: 60,
+            rpc_per_ip_refill_per_sec: 10,
+            bridge_oracle_address: None,
+            bridge_network_id: None,
+            metrics_listen: None,
+            data_dir: None,
+            store_fsync: false,
+        };
+        let d = Daemon::start(cfg, manifest).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        let authored: Vec<CertHash> = {
+            let inner = d.state.inner.lock().await;
+            inner
+                .seen_at
+                .iter()
+                .filter(|((a, _), _)| *a == 0)
+                .map(|(_, h)| *h)
+                .collect()
+        };
+        assert!(authored.len() >= 2, "daemon did not author");
+        let votes = d.state.votes.lock();
+        for h in &authored {
+            assert!(
+                votes
+                    .get(h)
+                    .is_some_and(|v| v.iter().any(|vote| vote.validator == 0)),
+                "no self-vote recorded for an authored certificate"
+            );
+        }
+    }
+
     /// Consensus-review (S34.5, third pass): with n = 4 and one member
     /// down, the three survivors ratify a leader only if the author's own
     /// vote counts — the liveness hole the widened restart test exposed.
@@ -5652,8 +5844,9 @@ mod tests {
         let gc_depth = manifest.gc_depth_rounds;
         let cadence = manifest.checkpoint_cadence_rounds;
         let net = manifest.network_id.clone();
+        let committees = vec![served.authority_registry.clone()];
         assert!(
-            verify_served_snapshot(&served, &ck, &net, gc_depth, cadence).is_ok(),
+            verify_served_snapshot(&served, &ck, &net, gc_depth, &committees).is_ok(),
             "honest served snapshot must verify"
         );
         assert!(
@@ -5663,13 +5856,14 @@ mod tests {
         let mut bad = (*served).clone();
         bad.committed.push(CertHash([0xEE; 32]));
         assert_eq!(
-            verify_served_snapshot(&bad, &ck, &net, gc_depth, cadence),
+            verify_served_snapshot(&bad, &ck, &net, gc_depth, &committees),
             Err("snapshot root mismatch"),
             "forged commit mark"
         );
         let mut bad = (*served).clone();
         let live_rounds = ck.round - served.gc_round.unwrap();
-        let max_certs = (served.n_authorities as u64 * live_rounds) as usize;
+        let n_ring = served.n_authorities as u64;
+        let max_certs = ((n_ring + n_ring / 3) * live_rounds) as usize;
         assert!(
             served.dag_certs.len() <= max_certs,
             "honest window within the exact bound"
@@ -5681,20 +5875,20 @@ mod tests {
             bad.dag_certs.push(c);
         }
         assert_eq!(
-            verify_served_snapshot(&bad, &ck, &net, gc_depth, cadence),
+            verify_served_snapshot(&bad, &ck, &net, gc_depth, &committees),
             Err("certificate window too large"),
             "padded certificate window"
         );
         let mut bad = (*served).clone();
         bad.gc_round = Some(u64::MAX - 1);
         assert!(
-            verify_served_snapshot(&bad, &ck, &net, gc_depth, cadence).is_err(),
+            verify_served_snapshot(&bad, &ck, &net, gc_depth, &committees).is_err(),
             "forged gc round"
         );
         let mut bad = (*served).clone();
         bad.leader_round = ck.round + 1;
         assert!(
-            verify_served_snapshot(&bad, &ck, &net, gc_depth, cadence).is_err(),
+            verify_served_snapshot(&bad, &ck, &net, gc_depth, &committees).is_err(),
             "forged leader frontier"
         );
         let mut bad = (*served).clone();
@@ -5702,15 +5896,35 @@ mod tests {
             c.payload_digest[0] ^= 1;
         }
         assert_eq!(
-            verify_served_snapshot(&bad, &ck, &net, gc_depth, cadence),
-            Err("certificate not signed by the bound Authority Ring"),
+            verify_served_snapshot(&bad, &ck, &net, gc_depth, &committees),
+            Err("certificate not signed by any committee the chain binds"),
             "tampered certificate"
         );
+        // A certificate by an author the CURRENT committee no longer
+        // holds is still admissible if an earlier committee in the chain
+        // held it: the window may straddle an eject.
+        {
+            let older = served.authority_registry.clone();
+            let departed = older.members().next().map(|m| m.id).unwrap();
+            let mut current = served.authority_registry.clone();
+            current.remove(departed);
+            let with_history = vec![older.clone(), current.clone()];
+            assert!(
+                verify_served_snapshot(&served, &ck, &net, gc_depth, &with_history).is_ok(),
+                "departed author's certificates admissible through the chain"
+            );
+            let only_current = vec![current];
+            assert_eq!(
+                verify_served_snapshot(&served, &ck, &net, gc_depth, &only_current),
+                Err("certificate not signed by any committee the chain binds"),
+                "and inadmissible against the shrunk committee alone"
+            );
+        }
         let mut bad = (*served).clone();
         bad.tombstones
             .push((CertHash([0xDD; 32]), bad.gc_round.unwrap() + 1));
         assert_eq!(
-            verify_served_snapshot(&bad, &ck, &net, gc_depth, cadence),
+            verify_served_snapshot(&bad, &ck, &net, gc_depth, &committees),
             Err("tombstone above gc round"),
             "tombstone above the bound gc round"
         );
@@ -5724,7 +5938,7 @@ mod tests {
             None,
         ));
         assert_eq!(
-            verify_served_snapshot(&bad, &ck, &net, gc_depth, cadence),
+            verify_served_snapshot(&bad, &ck, &net, gc_depth, &committees),
             Err("snapshot root mismatch"),
             "forged queued governance"
         );

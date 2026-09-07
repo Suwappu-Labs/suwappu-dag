@@ -95,8 +95,9 @@ will coincide with mainnet genesis.
     frontier rather than its DAG tip; ingest drops certificates more than
     `gc_depth` rounds above the local tip; snapshot install runs under
     the commit lock; the served certificate window is exact (rounds at or
-    below the checkpoint) and the joiner derives its checkpoint cursor
-    from the trusted checkpoint.
+    below the checkpoint), validated against every committee the verified
+    chain binds, and the joiner derives its checkpoint cursor from the
+    trusted checkpoint; the advertised tip is the admissible tip.
   - **Liveness fix found by the widened restart test:** an author never
     voted for its own certificate on the Validator-Ring side, so a
     certificate could gather at most `n − 1` votes and a four-node ring
