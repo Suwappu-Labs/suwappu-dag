@@ -129,6 +129,25 @@ under-performing validators after 30 days; you can re-apply.
    seed-side config change is needed for you to sync: seeds accept
    late-joiner connections dynamically.
 
+   Watch both transitions from your own node. `synced` flips to `true`
+   once you are within two rounds of the seeds' tip; `seated` flips to
+   `true` at the epoch boundary that applies your admit:
+
+   ```sh
+   curl -s -X POST http://127.0.0.1:9092 -H 'content-type: application/json' \
+     -d '{"jsonrpc":"2.0","id":1,"method":"suwappu_getSyncStatus","params":null}'
+   # {"result":{"local_dag_round":…,"peer_tip_round":…,"rounds_behind":0,
+   #            "synced":true,"seated":false,"orphan_certs":0,…}}
+   ```
+
+   `peer_tip_round` stays `0` until a seed answers your first tip
+   request, so wait for it to be non-zero before trusting `synced`. A
+   `rounds_behind` that keeps growing, or an `orphan_certs` count that
+   never shrinks, means you are not reaching the seeds: check
+   `peers.txt` and your outbound firewall. The same numbers are on
+   `/metrics` as `suwappu_rounds_behind`, `suwappu_synced` and
+   `suwappu_seated`.
+
 ## Local setup
 
 ```sh

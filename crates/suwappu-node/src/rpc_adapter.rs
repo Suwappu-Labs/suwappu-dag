@@ -13,10 +13,11 @@
 
 use std::sync::Arc;
 
+use suwappu_consensus::AuthorityId;
 use suwappu_execution::Intent;
 use suwappu_rpc::context::{
     AuthorityMemberView, BlockView, EpochView, EventView, HeaderAttestationView, IntentView,
-    StateView, SubmitIntentError, TransactionView, ValidatorMemberView,
+    StateView, SubmitIntentError, SyncStatusView, TransactionView, ValidatorMemberView,
 };
 use tokio::sync::broadcast;
 
@@ -115,11 +116,20 @@ fn intent_to_view(intent: &Intent) -> IntentView {
 pub struct NodeStateView {
     state: Arc<State>,
     network_id: String,
+    /// This node's own Authority Ring id (`NodeConfig::authority_id`).
+    /// Only used to answer `SyncStatusView::seated`; the daemon's own
+    /// seated check lives in the inbox handler and is not shared here.
+    self_id: AuthorityId,
     event_view_tx: broadcast::Sender<EventView>,
 }
 
 impl NodeStateView {
-    pub(crate) fn new(state: Arc<State>, network_id: String, log: &EventLog) -> Self {
+    pub(crate) fn new(
+        state: Arc<State>,
+        network_id: String,
+        self_id: AuthorityId,
+        log: &EventLog,
+    ) -> Self {
         // T6: bridge suwappu-node Event → suwappu-rpc EventView once per
         // daemon (not per subscriber). 1024 slot ring buffer matches
         // EventLog's broadcast buffer.
@@ -150,6 +160,7 @@ impl NodeStateView {
         Self {
             state,
             network_id,
+            self_id,
             event_view_tx,
         }
     }
@@ -331,6 +342,49 @@ impl StateView for NodeStateView {
         // `NodeStateView::new` keeps the buffer pumped; dropping
         // this receiver cancels the subscription cleanly.
         self.event_view_tx.subscribe()
+    }
+
+    /// Three short snapshots, each guard dropped before the next lock is
+    /// taken, so the canonical `inner → dag → … → authority_registry`
+    /// order is respected trivially and no guard spans an await. The
+    /// three reads are not atomic with respect to each other; a tip that
+    /// advances between them shifts `rounds_behind` by at most one round,
+    /// which the lag threshold absorbs.
+    async fn sync_status(&self) -> SyncStatusView {
+        let (latest_committed_round, peer_tip_round, orphan_certs, inflight_fetches, needed_blocks) = {
+            let inner = self.state.inner.lock().await;
+            (
+                inner
+                    .blocks_by_round
+                    .keys()
+                    .next_back()
+                    .copied()
+                    .unwrap_or(0),
+                inner.sync_tip,
+                inner.orphans.len() as u64,
+                inner.inflight_fetches.len() as u64,
+                inner.needed_blocks.len() as u64,
+            )
+        };
+        let local_dag_round = self.state.dag.read().await.max_round().unwrap_or(0);
+        let seated = self
+            .state
+            .authority_registry
+            .read()
+            .await
+            .contains(self.self_id);
+        let (rounds_behind, synced) = SyncStatusView::lag(local_dag_round, peer_tip_round);
+        SyncStatusView {
+            local_dag_round,
+            latest_committed_round,
+            peer_tip_round,
+            rounds_behind,
+            synced,
+            seated,
+            orphan_certs,
+            inflight_fetches,
+            needed_blocks,
+        }
     }
 
     /// Sign-and-cache this node's bridge-header side-attestation over the latest

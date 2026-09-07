@@ -10,7 +10,7 @@ use axum::{routing::post, Json, Router};
 use serde_json::{json, Value};
 use suwappu_client::{
     AuthorityMemberView, BalanceView, BlockView, Client, EpochView, Error, StakeEntry,
-    TransactionView, ValidatorMemberView,
+    SyncStatusView, TransactionView, ValidatorMemberView,
 };
 use tokio::net::TcpListener;
 
@@ -27,6 +27,17 @@ async fn spawn_mock_server() -> SocketAddr {
                     "current": 7,
                     "last_boundary_round": 7168,
                     "rounds_per_epoch": 1024,
+                })),
+                "suwappu_getSyncStatus" => Some(json!({
+                    "local_dag_round": 91,
+                    "latest_committed_round": 88,
+                    "peer_tip_round": 100,
+                    "rounds_behind": 9,
+                    "synced": false,
+                    "seated": true,
+                    "orphan_certs": 3,
+                    "inflight_fetches": 2,
+                    "needed_blocks": 1,
                 })),
                 "suwappu_getAuthorityRegistry" => Some(json!([
                     {"id": 0, "stake_suwappu": 150_000u64, "public_key_hex": "deadbeef"},
@@ -169,6 +180,28 @@ async fn get_epoch_round_trip() {
             last_boundary_round: 7168,
             rounds_per_epoch: 1024,
             latest_committed_round: 0,
+        }
+    );
+}
+
+#[tokio::test]
+async fn get_sync_status_round_trip() {
+    let addr = spawn_mock_server().await;
+    let client = client_for(addr);
+
+    let s: SyncStatusView = client.get_sync_status().await.unwrap();
+    assert_eq!(
+        s,
+        SyncStatusView {
+            local_dag_round: 91,
+            latest_committed_round: 88,
+            peer_tip_round: 100,
+            rounds_behind: 9,
+            synced: false,
+            seated: true,
+            orphan_certs: 3,
+            inflight_fetches: 2,
+            needed_blocks: 1,
         }
     );
 }

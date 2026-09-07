@@ -802,6 +802,7 @@ impl Daemon {
             let view = crate::rpc_adapter::NodeStateView::new(
                 state.clone(),
                 manifest.network_id.clone(),
+                self_id,
                 &log,
             );
             let ctx = std::sync::Arc::new(suwappu_rpc::RpcContext::new(std::sync::Arc::new(view)));
@@ -1084,7 +1085,9 @@ async fn run_backfill(
 ) {
     const BACKFILL_TICK_MS: u64 = 500;
     const BACKFILL_BATCH_ROUNDS: u64 = 8;
-    const BACKFILL_LAG_THRESHOLD: u64 = 2;
+    // Shared with `suwappu_getSyncStatus` so "synced" over RPC means
+    // exactly "this loop is idle"; the two cannot drift apart.
+    const BACKFILL_LAG_THRESHOLD: u64 = suwappu_rpc::context::SyncStatusView::SYNCED_LAG_THRESHOLD;
 
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(BACKFILL_TICK_MS));
     let mut ticks: u64 = 0;

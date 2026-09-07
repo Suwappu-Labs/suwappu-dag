@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 use suwappu_rpc::{
     context::{
         AuthorityMemberView, BlockView, EpochView, RpcContext, StateView, SubmitIntentError,
-        TransactionView, ValidatorMemberView,
+        SyncStatusView, TransactionView, ValidatorMemberView,
     },
     router_with_limits, RouterLimits,
 };
@@ -71,6 +71,19 @@ impl StateView for MockState {
         // Keep tx alive so the receiver doesn't immediately error.
         std::mem::forget(tx);
         rx
+    }
+    async fn sync_status(&self) -> SyncStatusView {
+        SyncStatusView {
+            local_dag_round: 0,
+            latest_committed_round: 0,
+            peer_tip_round: 0,
+            rounds_behind: 0,
+            synced: true,
+            seated: true,
+            orphan_certs: 0,
+            inflight_fetches: 0,
+            needed_blocks: 0,
+        }
     }
 }
 

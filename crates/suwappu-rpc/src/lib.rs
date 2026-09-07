@@ -17,6 +17,9 @@
 //! - `suwappu_getBalance { address: hex }`
 //! - `suwappu_getBlock { round }`
 //! - `suwappu_getTransaction { tx_hash: hex }`
+//! - `suwappu_getSyncStatus` — catch-up position vs. peers (`synced`,
+//!   `rounds_behind`, `seated`)
+//! - `suwappu_getHeaderAttestation`
 //!
 //! Write:
 //! - `suwappu_submitIntent { intent: hex, signature: hex, signer_pubkey_hash: hex }`

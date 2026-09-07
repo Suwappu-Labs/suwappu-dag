@@ -26,6 +26,43 @@ export interface EpochView {
 }
 
 /**
+ * This node's catch-up position relative to its configured peers.
+ * Mirrors `SyncStatusView` in `crates/suwappu-rpc/src/context.rs`.
+ *
+ * Every field describes the node that answered. Behind a load balancer
+ * that means "the validator that answered is caught up"; a per-validator
+ * view needs a direct connection.
+ */
+export interface SyncStatusView {
+  /** Highest DAG round held locally, committed or not. */
+  local_dag_round: number;
+  /** Highest round committed locally (same as `EpochView.latest_committed_round`). */
+  latest_committed_round: number;
+  /**
+   * Highest round any configured peer has reported. `0` until the first
+   * tip reply lands, so a just-started node reads `synced: true` for a
+   * couple of seconds; require `peer_tip_round > 0` when you need certainty.
+   */
+  peer_tip_round: number;
+  /** `peer_tip_round - local_dag_round`, never negative. */
+  rounds_behind: number;
+  /** `rounds_behind` is within the daemon's backfill lag threshold (2). */
+  synced: boolean;
+  /**
+   * This node's authority id is seated in the Authority Ring it holds,
+   * so it authors certificates and votes. `false` for a post-genesis
+   * joiner still waiting for its admit intent to land.
+   */
+  seated: boolean;
+  /** Certificates received whose parents are not yet in the local DAG. */
+  orphan_certs: number;
+  /** Certificate fetches issued to peers and not yet answered. */
+  inflight_fetches: number;
+  /** Committed certificates whose block payload has not arrived yet. */
+  needed_blocks: number;
+}
+
+/**
  * JSON-safe projection of an Authority Ring member.
  */
 export interface AuthorityMemberView {

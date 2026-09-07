@@ -31,6 +31,19 @@
 //!   only; identifies this validator.
 //! - `suwappu_process_uptime_seconds` (gauge) — seconds since process
 //!   start. Reset signal for the silent-peer alarm.
+//! - `suwappu_local_dag_round` (gauge) — highest DAG round held locally,
+//!   committed or not (`dag.max_round()`).
+//! - `suwappu_peer_tip_round` (gauge) — highest round any configured
+//!   peer has reported (`inner.sync_tip`).
+//! - `suwappu_rounds_behind` (gauge) — `peer_tip - local_dag_round`,
+//!   saturating. Catch-up alarm signal: sustained > 2 means the backfill
+//!   loop is active and the node is not keeping up.
+//! - `suwappu_synced` (gauge, 0/1) — `rounds_behind` within the backfill
+//!   lag threshold. Same definition as `suwappu_getSyncStatus.synced`.
+//! - `suwappu_seated` (gauge, 0/1) — this node's authority id is in the
+//!   Authority Ring it holds; 0 while a post-genesis joiner waits for
+//!   its admit intent to land.
+//! - `suwappu_orphan_certs` (gauge) — certs waiting on missing parents.
 
 use std::{
     fmt::Write,
@@ -143,15 +156,31 @@ async fn render_metrics(State(state): State<MetricsState>) -> impl IntoResponse 
     // Snapshot every field BEFORE taking the .await on inner so we
     // never hold a lock guard across an await point. `committed` +
     // `blocks` are parking_lot (sync) so they can be queried after.
-    let last_committed_round = {
+    let (last_committed_round, peer_tip_round, orphan_certs) = {
         let inner = state.node.inner.lock().await;
-        inner
-            .blocks_by_round
-            .keys()
-            .next_back()
-            .copied()
-            .unwrap_or(0)
+        (
+            inner
+                .blocks_by_round
+                .keys()
+                .next_back()
+                .copied()
+                .unwrap_or(0),
+            inner.sync_tip,
+            inner.orphans.len() as u64,
+        )
     };
+    // Separate short reads, guards dropped in between: same discipline
+    // as `rpc_adapter::sync_status`, and the same arithmetic, so the
+    // dashboard and the RPC answer agree on "synced".
+    let local_dag_round = state.node.dag.read().await.max_round().unwrap_or(0);
+    let seated = state
+        .node
+        .authority_registry
+        .read()
+        .await
+        .contains(state.identity.authority_id);
+    let (rounds_behind, synced) =
+        suwappu_rpc::context::SyncStatusView::lag(local_dag_round, peer_tip_round);
 
     let (committed_total, mempool_size) = {
         let committed = state.node.committed.lock();
@@ -199,6 +228,30 @@ async fn render_metrics(State(state): State<MetricsState>) -> impl IntoResponse 
     );
     let _ = writeln!(out, "# TYPE suwappu_process_uptime_seconds gauge");
     let _ = writeln!(out, "suwappu_process_uptime_seconds {uptime_secs}");
+
+    let _ = writeln!(out, "# HELP suwappu_local_dag_round Highest DAG round this validator holds a certificate for, committed or not.");
+    let _ = writeln!(out, "# TYPE suwappu_local_dag_round gauge");
+    let _ = writeln!(out, "suwappu_local_dag_round {local_dag_round}");
+
+    let _ = writeln!(out, "# HELP suwappu_peer_tip_round Highest DAG round any configured peer has reported via the wire sync protocol.");
+    let _ = writeln!(out, "# TYPE suwappu_peer_tip_round gauge");
+    let _ = writeln!(out, "suwappu_peer_tip_round {peer_tip_round}");
+
+    let _ = writeln!(out, "# HELP suwappu_rounds_behind Rounds this validator trails its best-known peer tip by (saturating). Catch-up alarm: sustained above the lag threshold means the node is not keeping up.");
+    let _ = writeln!(out, "# TYPE suwappu_rounds_behind gauge");
+    let _ = writeln!(out, "suwappu_rounds_behind {rounds_behind}");
+
+    let _ = writeln!(out, "# HELP suwappu_synced 1 when rounds_behind is within the backfill lag threshold (same definition as suwappu_getSyncStatus.synced), else 0.");
+    let _ = writeln!(out, "# TYPE suwappu_synced gauge");
+    let _ = writeln!(out, "suwappu_synced {}", u8::from(synced));
+
+    let _ = writeln!(out, "# HELP suwappu_seated 1 when this validator's authority id is seated in the Authority Ring it holds (authoring certs + votes), 0 while a post-genesis joiner waits to be admitted.");
+    let _ = writeln!(out, "# TYPE suwappu_seated gauge");
+    let _ = writeln!(out, "suwappu_seated {}", u8::from(seated));
+
+    let _ = writeln!(out, "# HELP suwappu_orphan_certs Certificates received whose parents are not yet in the local DAG.");
+    let _ = writeln!(out, "# TYPE suwappu_orphan_certs gauge");
+    let _ = writeln!(out, "suwappu_orphan_certs {orphan_certs}");
 
     let _ = writeln!(out, "# HELP suwappu_metrics_scrapes_total Cumulative count of /metrics scrapes this process has served.");
     let _ = writeln!(out, "# TYPE suwappu_metrics_scrapes_total counter");

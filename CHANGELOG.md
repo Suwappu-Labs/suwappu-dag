@@ -44,6 +44,27 @@ will coincide with mainnet genesis.
 
 ### Added
 
+- `suwappu_getSyncStatus` JSON-RPC method: the one-call answer to "is
+  this node caught up?" for operators, the status page (G8) and the
+  explorer (G7). Returns `local_dag_round`, `latest_committed_round`,
+  `peer_tip_round` (highest tip reported by a configured peer),
+  `rounds_behind`, `synced` (within the forward-backfill lag threshold,
+  now a shared constant so the RPC answer and the backfill loop cannot
+  drift), `seated` (own authority id present in the held Authority
+  Ring; `false` while a post-genesis joiner waits on its admit intent),
+  and the orphan / inflight-fetch / needed-block counts that explain a
+  stall. Exposed as `Client::get_sync_status` (Rust SDK) and
+  `client.getSyncStatus()` (TS SDK). Previously an external validator
+  admitted per `docs/testnet/VALIDATOR-OPERATORS.md` had no way to
+  observe its own catch-up. Same numbers on `/metrics` as
+  `suwappu_local_dag_round`, `suwappu_peer_tip_round`,
+  `suwappu_rounds_behind`, `suwappu_synced`, `suwappu_seated`,
+  `suwappu_orphan_certs` for the G6 dashboard + catch-up alarm.
+- Research note `docs/research/kasperchain-kasper.md`: evaluated
+  `kasperchain/kasper` for reusable material (verdict: a renamed copy of
+  the deprecated, unlicensed KDX desktop app with no implementation of
+  its README's PoW chain; nothing to adopt as code). The sync-status
+  method above is the one idea from that review worth carrying.
 - Portal live points lookup: the provider portal reads an operator's real
   points + TGE share estimate (2%-of-allocation cap honored) from the
   leaderboard API. Enabled by `Access-Control-Allow-Origin: *` on the

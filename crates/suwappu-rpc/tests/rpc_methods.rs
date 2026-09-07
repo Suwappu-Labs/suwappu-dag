@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 use suwappu_rpc::{
     context::{
         AuthorityMemberView, BlockView, EpochView, IntentView, RpcContext, StateView,
-        SubmitIntentError, TransactionView, ValidatorMemberView,
+        SubmitIntentError, SyncStatusView, TransactionView, ValidatorMemberView,
     },
     router,
 };
@@ -87,6 +87,25 @@ impl StateView for MockState {
         &self,
     ) -> tokio::sync::broadcast::Receiver<suwappu_rpc::context::EventView> {
         self.event_tx.subscribe()
+    }
+    async fn sync_status(&self) -> SyncStatusView {
+        // A node 9 rounds behind its peers: derive `rounds_behind` and
+        // `synced` through the same helper the daemon adapter uses, so
+        // this test also pins the helper's arithmetic.
+        let local_dag_round = 91;
+        let peer_tip_round = 100;
+        let (rounds_behind, synced) = SyncStatusView::lag(local_dag_round, peer_tip_round);
+        SyncStatusView {
+            local_dag_round,
+            latest_committed_round: self.epoch.latest_committed_round,
+            peer_tip_round,
+            rounds_behind,
+            synced,
+            seated: true,
+            orphan_certs: 3,
+            inflight_fetches: 2,
+            needed_blocks: 1,
+        }
     }
 }
 
@@ -200,6 +219,69 @@ async fn get_epoch_returns_snapshot() {
     assert_eq!(resp["result"]["last_boundary_round"], 7168);
     assert_eq!(resp["result"]["rounds_per_epoch"], 1024);
     assert!(resp["error"].is_null());
+}
+
+#[tokio::test]
+async fn get_sync_status_reports_lag_and_flags() {
+    let ctx = fixture();
+    let resp = post_rpc(
+        ctx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 30,
+            "method": "suwappu_getSyncStatus",
+        }),
+    )
+    .await;
+
+    assert!(resp["error"].is_null());
+    let r = &resp["result"];
+    assert_eq!(r["local_dag_round"], 91);
+    assert_eq!(r["peer_tip_round"], 100);
+    assert_eq!(r["rounds_behind"], 9);
+    assert_eq!(r["synced"], false);
+    assert_eq!(r["seated"], true);
+    assert_eq!(r["orphan_certs"], 3);
+    assert_eq!(r["inflight_fetches"], 2);
+    assert_eq!(r["needed_blocks"], 1);
+    assert_eq!(r["latest_committed_round"], 0);
+}
+
+#[tokio::test]
+async fn get_sync_status_rejects_params() {
+    let ctx = fixture();
+    let resp = post_rpc(
+        ctx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 31,
+            "method": "suwappu_getSyncStatus",
+            "params": { "round": 1 },
+        }),
+    )
+    .await;
+
+    // No-param method: any params object is -32602 InvalidParams,
+    // consistent with suwappu_getEpoch.
+    assert_eq!(resp["error"]["code"], -32602);
+}
+
+#[test]
+fn sync_status_lag_threshold_boundaries() {
+    // Ahead of or level with the peers: synced, zero behind (never
+    // negative, never wraps).
+    assert_eq!(SyncStatusView::lag(10, 10), (0, true));
+    assert_eq!(SyncStatusView::lag(12, 10), (0, true));
+    // Within the threshold: normal steady-state lag behind advancing peers.
+    let t = SyncStatusView::SYNCED_LAG_THRESHOLD;
+    assert_eq!(SyncStatusView::lag(100 - t, 100), (t, true));
+    // One past the threshold: the backfill loop is active, so not synced.
+    assert_eq!(SyncStatusView::lag(100 - t - 1, 100), (t + 1, false));
+    // Fresh node, no tip reply yet: reads as synced by construction,
+    // which the view's docs call out for clients to guard on.
+    assert_eq!(SyncStatusView::lag(0, 0), (0, true));
+    // Saturating, not panicking, at the extremes.
+    assert_eq!(SyncStatusView::lag(0, u64::MAX), (u64::MAX, false));
 }
 
 #[tokio::test]
