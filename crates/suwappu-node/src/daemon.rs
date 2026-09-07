@@ -2033,6 +2033,9 @@ async fn emit_checkpoint(
             match oldest {
                 Some(k) => {
                     inner.emitted_checkpoints.remove(&k);
+                    // Its signatures would otherwise linger as a foreign
+                    // entry and charge every honest signer's quota.
+                    inner.checkpoint_sigs.remove(&k);
                 }
                 None => break,
             }
@@ -2121,7 +2124,15 @@ async fn buffer_checkpoint_sig(state: &State, ck: &Checkpoint, sig: CheckpointSi
     // signature to an existing entry is never quota-limited.
     if !inner.emitted_checkpoints.contains_key(&hash) && !inner.checkpoint_sigs.contains_key(&hash)
     {
-        let quota = (MAX_BUFFERED_CHECKPOINTS / (inner.n_authorities as usize).max(1)).max(2);
+        // `MAX / n` (at least two) capped by `MAX / (f + 1)`: a Byzantine
+        // minority of f signers can then never hold more than
+        // f × MAX / (f + 1) < MAX entries between them.
+        let n = (inner.n_authorities as usize).max(1);
+        let f = (n - 1) / 3;
+        let quota = (MAX_BUFFERED_CHECKPOINTS / n)
+            .max(2)
+            .min(MAX_BUFFERED_CHECKPOINTS / (f + 1))
+            .max(1);
         let held = inner
             .checkpoint_sigs
             .iter()
@@ -2141,27 +2152,71 @@ async fn buffer_checkpoint_sig(state: &State, ck: &Checkpoint, sig: CheckpointSi
     if !entry.1.iter().any(|s| s.authority == sig.authority) {
         entry.1.push(sig);
     }
+    // Own emissions never take every slot: two are always left for
+    // foreign entries (the next checkpoint's early signatures), evicting
+    // the lowest (height, round) own entry — a stalled emission that is
+    // the least likely to ratify.
+    loop {
+        let own: Vec<([u8; 32], (u64, u64))> = inner
+            .checkpoint_sigs
+            .keys()
+            .filter_map(|k| {
+                inner
+                    .emitted_checkpoints
+                    .get(k)
+                    .map(|(c, _)| (*k, (c.height, c.round)))
+            })
+            .collect();
+        if own.len() + 2 <= MAX_BUFFERED_CHECKPOINTS {
+            break;
+        }
+        match own.iter().min_by_key(|(_, hr)| *hr).map(|(k, _)| *k) {
+            Some(k) => {
+                inner.checkpoint_sigs.remove(&k);
+            }
+            None => break,
+        }
+    }
     while inner.checkpoint_sigs.len() > MAX_BUFFERED_CHECKPOINTS {
-        // Evict foreign entries before anything this node emitted, the
-        // least-signed first, then the oldest. Our own current checkpoint
-        // is always at the lowest admissible height, so a height-ordered
-        // eviction would let one seated authority evict it with a handful
-        // of fabricated higher entries (consensus-review finding, eighth
-        // pass); a fabrication carries one signature and goes first.
+        // Evict foreign entries before anything this node emitted;
+        // among foreign entries, the one whose signers hold the most
+        // foreign entries first (a flooder's fabrications, never a
+        // singleton honest entry while any signer holds two), then the
+        // least-signed, then the HIGHEST height — the honest
+        // pre-emission entry is always at the lowest admissible height
+        // (consensus-review findings, eighth to tenth passes).
+        let load = |sigs: &[CheckpointSignature]| -> usize {
+            sigs.iter()
+                .map(|s| {
+                    inner
+                        .checkpoint_sigs
+                        .iter()
+                        .filter(|(k, (_, v))| {
+                            !inner.emitted_checkpoints.contains_key(*k)
+                                && v.iter().any(|x| x.authority == s.authority)
+                        })
+                        .count()
+                })
+                .max()
+                .unwrap_or(0)
+        };
         let round_of = |k: &[u8; 32]| inner.emitted_checkpoints.get(k).map_or(0, |(c, _)| c.round);
-        let oldest = inner
+        let victim = inner
             .checkpoint_sigs
             .iter()
             .min_by_key(|(k, (h, sigs))| {
+                let own = inner.emitted_checkpoints.contains_key(*k);
                 (
-                    inner.emitted_checkpoints.contains_key(*k),
+                    own,
+                    std::cmp::Reverse(if own { 0 } else { load(sigs) }),
                     sigs.len(),
+                    std::cmp::Reverse(if own { 0 } else { *h }),
                     *h,
                     round_of(k),
                 )
             })
             .map(|(k, _)| *k);
-        match oldest {
+        match victim {
             Some(k) => {
                 inner.checkpoint_sigs.remove(&k);
             }
@@ -5755,27 +5810,37 @@ mod tests {
             snapshot_root: snap.commit_root(),
         };
         let own_hash = own.hash();
-        state
-            .inner
-            .lock()
-            .await
-            .emitted_checkpoints
-            .insert(own_hash, (own.clone(), snap.clone()));
         let sig_for =
             |ck: &Checkpoint, i: usize| sign_checkpoint(i as u32, &keypairs[i].1, ck).unwrap();
+        // Four stalled own emissions at height 0 (rounds 4, 12, 16, 20 —
+        // `own` itself at round 4), each with this node's signature.
+        for r in [4u64, 12, 16, 20] {
+            let mut c = own.clone();
+            c.round = r;
+            let h = c.hash();
+            state
+                .inner
+                .lock()
+                .await
+                .emitted_checkpoints
+                .insert(h, (c.clone(), snap.clone()));
+            buffer_checkpoint_sig(&state, &c, sig_for(&c, 0)).await;
+        }
         buffer_checkpoint_sig(&state, &own, sig_for(&own, 1)).await;
-        // Authority 3 floods: 2 x MAX fabricated checkpoints at heights
-        // 1..=2*MAX with valid signatures.
-        for h in 1..=(2 * MAX_BUFFERED_CHECKPOINTS as u64) {
-            let fake = Checkpoint {
-                height: h,
-                round: 1_000 + h,
-                state_root: [h as u8; 32],
-                prev_checkpoint: [0xAB; 32],
-                registry_root: [0; 32],
-                snapshot_root: [0; 32],
-            };
-            buffer_checkpoint_sig(&state, &fake, sig_for(&fake, 3)).await;
+        // Authorities 2 and 3 flood: 2 x MAX fabricated checkpoints each at
+        // heights 1..=2*MAX with valid signatures.
+        for signer in [2usize, 3] {
+            for h in 1..=(2 * MAX_BUFFERED_CHECKPOINTS as u64) {
+                let fake = Checkpoint {
+                    height: h,
+                    round: 1_000 * signer as u64 + h,
+                    state_root: [h as u8; 32],
+                    prev_checkpoint: [signer as u8; 32],
+                    registry_root: [0; 32],
+                    snapshot_root: [0; 32],
+                };
+                buffer_checkpoint_sig(&state, &fake, sig_for(&fake, signer)).await;
+            }
         }
         {
             let inner = state.inner.lock().await;
@@ -5785,17 +5850,25 @@ mod tests {
                 "own current checkpoint evicted by fabricated entries"
             );
             // Heights beyond the admissible window were never buffered,
-            // and one signer opened at most its quota of foreign entries.
+            // and each signer opened at most its quota of foreign entries
+            // (n = 4: quota 2).
             assert!(inner
                 .checkpoint_sigs
                 .values()
                 .all(|(h, _)| *h <= MAX_BUFFERED_CHECKPOINTS as u64));
-            let by_three = inner
-                .checkpoint_sigs
-                .values()
-                .filter(|(_, sigs)| sigs.iter().any(|s| s.authority == 3))
-                .count();
-            assert!(by_three <= 2, "signer quota exceeded: {by_three}");
+            for signer in [2u32, 3] {
+                let held = inner
+                    .checkpoint_sigs
+                    .iter()
+                    .filter(|(k, (_, sigs))| {
+                        !inner.emitted_checkpoints.contains_key(*k)
+                            && sigs.iter().any(|s| s.authority == signer)
+                    })
+                    .count();
+                assert!(held <= 2, "signer {signer} quota exceeded: {held}");
+            }
+            // 4 own + 4 fabrications = MAX: the buffer is full.
+            assert_eq!(inner.checkpoint_sigs.len(), MAX_BUFFERED_CHECKPOINTS);
         }
         // An honest peer's early signature for the checkpoint this node
         // will emit next (height 1, the lowest admissible) still finds a
@@ -5808,18 +5881,28 @@ mod tests {
             registry_root: registries.root(),
             snapshot_root: snap.commit_root(),
         };
+        // Inserting it overflows the full buffer: the eviction must take a
+        // fabrication (its signer holds two foreign entries), not the
+        // honest singleton, and never an own emission.
         buffer_checkpoint_sig(&state, &next, sig_for(&next, 1)).await;
         buffer_checkpoint_sig(&state, &next, sig_for(&next, 2)).await;
-        assert!(
-            state
-                .inner
-                .lock()
-                .await
+        {
+            let inner = state.inner.lock().await;
+            assert!(
+                inner
+                    .checkpoint_sigs
+                    .get(&next.hash())
+                    .is_some_and(|(_, sigs)| sigs.len() == 2),
+                "honest pre-emission entry starved by fabrications"
+            );
+            assert!(inner.checkpoint_sigs.len() <= MAX_BUFFERED_CHECKPOINTS);
+            let own_kept = inner
                 .checkpoint_sigs
-                .get(&next.hash())
-                .is_some_and(|(_, sigs)| sigs.len() == 2),
-            "honest pre-emission entry starved by fabrications"
-        );
+                .keys()
+                .filter(|k| inner.emitted_checkpoints.contains_key(*k))
+                .count();
+            assert_eq!(own_kept, 4, "an own emission was evicted for a fabrication");
+        }
         // The mesh co-signs `own` (3 of 4) and serves it as its chain; this
         // node never saw the quorum. Adoption re-anchors and promotes the
         // snapshot it captured for it.
@@ -5891,6 +5974,13 @@ mod tests {
                 8
             );
             assert_eq!(inner.next_checkpoint_boundary, 12);
+            assert!(
+                inner
+                    .served_snapshot
+                    .as_ref()
+                    .is_some_and(|s| Arc::ptr_eq(s, &snap)),
+                "served snapshot must be left as it was for a checkpoint this node did not emit"
+            );
         }
         // A chain that is not strictly ahead is ignored.
         let stale = Checkpoint {

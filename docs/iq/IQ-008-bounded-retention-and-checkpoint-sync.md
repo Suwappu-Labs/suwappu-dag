@@ -472,8 +472,13 @@ branch.
    (`SNAPSHOT_CHUNK_BYTES` × chunks) but not free. Checkpoint
    signatures aggregate against every recently emitted checkpoint
    (bounded to eight, each holding its snapshot in memory until
-   settled), buffered only for heights this node could ratify next and
-   at most `MAX / n` foreign entries per signer; a
+   settled), buffered only for heights this node could ratify next, at
+   most `min(max(MAX / n, 2), MAX / (f + 1))` foreign entries per signer
+   (so f Byzantine signers hold fewer than `MAX` between them), evicted
+   flooder-first (the entry whose signers hold the most foreign entries,
+   then the least-signed, then the highest height — the honest
+   pre-emission entry is always at the lowest), and with two slots always
+   kept free of this node's own emissions; a
    node whose own checkpointing stalls for two boundaries asks peers for
    their chain and adopts a strictly newer verified one, re-anchoring its
    cursor without touching consensus state. Two Authority-Ring changes
