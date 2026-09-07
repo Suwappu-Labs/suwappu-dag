@@ -472,7 +472,8 @@ branch.
    (`SNAPSHOT_CHUNK_BYTES` × chunks) but not free. Checkpoint
    signatures aggregate against every recently emitted checkpoint
    (bounded to eight, each holding its snapshot in memory until
-   settled), buffered only for heights this node could ratify next; a
+   settled), buffered only for heights this node could ratify next and
+   at most `MAX / n` foreign entries per signer; a
    node whose own checkpointing stalls for two boundaries asks peers for
    their chain and adopts a strictly newer verified one, re-anchoring its
    cursor without touching consensus state. Two Authority-Ring changes

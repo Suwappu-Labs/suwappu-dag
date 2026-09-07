@@ -2111,9 +2111,32 @@ async fn buffer_checkpoint_sig(state: &State, ck: &Checkpoint, sig: CheckpointSi
     if ck.height < floor || ck.height > floor + MAX_BUFFERED_CHECKPOINTS as u64 {
         return;
     }
+    let hash = ck.hash();
+    // Per-signer quota on FOREIGN entries (checkpoints this node has not
+    // emitted): one authority may open at most `MAX / n` (at least two)
+    // of them. Without it a seated authority's one-signature fabrications
+    // tie the honest pre-emission entry for the next checkpoint on every
+    // eviction key but height — and that entry is always at the lowest
+    // admissible height (consensus-review finding, ninth pass). Adding a
+    // signature to an existing entry is never quota-limited.
+    if !inner.emitted_checkpoints.contains_key(&hash) && !inner.checkpoint_sigs.contains_key(&hash)
+    {
+        let quota = (MAX_BUFFERED_CHECKPOINTS / (inner.n_authorities as usize).max(1)).max(2);
+        let held = inner
+            .checkpoint_sigs
+            .iter()
+            .filter(|(k, (_, sigs))| {
+                !inner.emitted_checkpoints.contains_key(*k)
+                    && sigs.iter().any(|s| s.authority == sig.authority)
+            })
+            .count();
+        if held >= quota {
+            return;
+        }
+    }
     let entry = inner
         .checkpoint_sigs
-        .entry(ck.hash())
+        .entry(hash)
         .or_insert_with(|| (ck.height, Vec::new()));
     if !entry.1.iter().any(|s| s.authority == sig.authority) {
         entry.1.push(sig);
@@ -5761,12 +5784,42 @@ mod tests {
                 inner.checkpoint_sigs.contains_key(&own_hash),
                 "own current checkpoint evicted by fabricated entries"
             );
-            // Heights beyond the admissible window were never buffered.
+            // Heights beyond the admissible window were never buffered,
+            // and one signer opened at most its quota of foreign entries.
             assert!(inner
                 .checkpoint_sigs
                 .values()
-                .all(|(h, _)| *h <= 1 + MAX_BUFFERED_CHECKPOINTS as u64));
+                .all(|(h, _)| *h <= MAX_BUFFERED_CHECKPOINTS as u64));
+            let by_three = inner
+                .checkpoint_sigs
+                .values()
+                .filter(|(_, sigs)| sigs.iter().any(|s| s.authority == 3))
+                .count();
+            assert!(by_three <= 2, "signer quota exceeded: {by_three}");
         }
+        // An honest peer's early signature for the checkpoint this node
+        // will emit next (height 1, the lowest admissible) still finds a
+        // slot after the flood.
+        let next = Checkpoint {
+            height: 1,
+            round: 8,
+            state_root: snap.state_root,
+            prev_checkpoint: own_hash,
+            registry_root: registries.root(),
+            snapshot_root: snap.commit_root(),
+        };
+        buffer_checkpoint_sig(&state, &next, sig_for(&next, 1)).await;
+        buffer_checkpoint_sig(&state, &next, sig_for(&next, 2)).await;
+        assert!(
+            state
+                .inner
+                .lock()
+                .await
+                .checkpoint_sigs
+                .get(&next.hash())
+                .is_some_and(|(_, sigs)| sigs.len() == 2),
+            "honest pre-emission entry starved by fabrications"
+        );
         // The mesh co-signs `own` (3 of 4) and serves it as its chain; this
         // node never saw the quorum. Adoption re-anchors and promotes the
         // snapshot it captured for it.
@@ -5799,6 +5852,45 @@ mod tests {
                 "adopted checkpoint's snapshot must be served"
             );
             assert_eq!(inner.checkpoint_transitions.len(), 1);
+        }
+        // Same height, higher round: adopted (deterministic tie-break for
+        // a same-height fork), and the served snapshot for a checkpoint
+        // this node did not emit is left as it was.
+        let sibling = Checkpoint {
+            height: 0,
+            round: 8,
+            ..own.clone()
+        };
+        let sibling_cosigned = ratify_checkpoint(
+            sibling.clone(),
+            (0..3).map(|i| sig_for(&sibling, i)).collect(),
+            &registries.authority_registry,
+        )
+        .unwrap();
+        handle_checkpoint_chain(
+            &state,
+            vec![CheckpointBundle {
+                cosigned: sibling_cosigned,
+                registries: registries.clone(),
+            }],
+            &PeerId("v1".into()),
+            &None,
+            &outbound,
+        )
+        .await;
+        {
+            let inner = state.inner.lock().await;
+            assert_eq!(
+                inner
+                    .latest_checkpoint
+                    .as_ref()
+                    .unwrap()
+                    .cosigned
+                    .checkpoint
+                    .round,
+                8
+            );
+            assert_eq!(inner.next_checkpoint_boundary, 12);
         }
         // A chain that is not strictly ahead is ignored.
         let stale = Checkpoint {
@@ -5833,8 +5925,8 @@ mod tests {
                 .unwrap()
                 .cosigned
                 .checkpoint
-                .hash(),
-            own_hash
+                .round,
+            8
         );
     }
 
