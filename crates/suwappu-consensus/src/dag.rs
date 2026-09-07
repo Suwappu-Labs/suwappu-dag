@@ -76,12 +76,36 @@ pub struct DagStore {
     tombstones: HashMap<CertHash, Round>,
     /// Inverted tombstone index so expiry is O(rounds expired).
     tombstones_by_round: BTreeMap<Round, Vec<CertHash>>,
+    /// Rounds of tombstones retained below the gc round. `0` means the
+    /// default, [`GC_DEPTH`]; the daemon sets it to the manifest's
+    /// `gc_depth_rounds` so the window tracks the mesh-wide depth.
+    tombstone_window: Round,
 }
 
 impl DagStore {
-    /// Construct an empty store.
+    /// Construct an empty store with the default tombstone window
+    /// ([`GC_DEPTH`] rounds).
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Construct an empty store whose tombstone window is `depth` rounds
+    /// — the same depth the caller derives its gc round from, so a
+    /// certificate at `gc_round + 1` can always validate against parents
+    /// pruned in the most recent window. `0` falls back to [`GC_DEPTH`].
+    pub fn with_gc_depth(depth: Round) -> Self {
+        Self {
+            tombstone_window: depth,
+            ..Self::default()
+        }
+    }
+
+    fn tombstone_window(&self) -> Round {
+        if self.tombstone_window == 0 {
+            GC_DEPTH
+        } else {
+            self.tombstone_window
+        }
     }
 
     /// Number of certificates in the store.
@@ -204,8 +228,8 @@ impl DagStore {
         self.gc_round = Some(gc_round);
 
         // Expire tombstones below the window: keep rounds in
-        // (gc_round - GC_DEPTH, gc_round].
-        if let Some(window_floor) = gc_round.checked_sub(GC_DEPTH) {
+        // (gc_round - window, gc_round].
+        if let Some(window_floor) = gc_round.checked_sub(self.tombstone_window()) {
             let keep = self
                 .tombstones_by_round
                 .split_off(&window_floor.saturating_add(1));

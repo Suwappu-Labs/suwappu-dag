@@ -156,7 +156,7 @@ async fn render_metrics(State(state): State<MetricsState>) -> impl IntoResponse 
     // Snapshot every field BEFORE taking the .await on inner so we
     // never hold a lock guard across an await point. `committed` +
     // `blocks` are parking_lot (sync) so they can be queried after.
-    let (last_committed_round, peer_tip_round, orphan_certs) = {
+    let (last_committed_round, peer_tip_round, orphan_certs, gc_round, needs_snapshot) = {
         let inner = state.node.inner.lock().await;
         (
             inner
@@ -167,12 +167,17 @@ async fn render_metrics(State(state): State<MetricsState>) -> impl IntoResponse 
                 .unwrap_or(0),
             inner.sync_tip,
             inner.orphans.len() as u64,
+            inner.gc_round,
+            inner.needs_snapshot,
         )
     };
     // Separate short reads, guards dropped in between: same discipline
     // as `rpc_adapter::sync_status`, and the same arithmetic, so the
     // dashboard and the RPC answer agree on "synced".
-    let local_dag_round = state.node.dag.read().await.max_round().unwrap_or(0);
+    let (local_dag_round, dag_certs) = {
+        let dag = state.node.dag.read().await;
+        (dag.max_round().unwrap_or(0), dag.len() as u64)
+    };
     let seated = state
         .node
         .authority_registry
@@ -252,6 +257,20 @@ async fn render_metrics(State(state): State<MetricsState>) -> impl IntoResponse 
     let _ = writeln!(out, "# HELP suwappu_orphan_certs Certificates received whose parents are not yet in the local DAG.");
     let _ = writeln!(out, "# TYPE suwappu_orphan_certs gauge");
     let _ = writeln!(out, "suwappu_orphan_certs {orphan_certs}");
+
+    let _ = writeln!(out, "# HELP suwappu_gc_round Garbage-collection round (IQ-008): every round at or below it is pruned. Absent until the chain is gc_depth rounds deep.");
+    let _ = writeln!(out, "# TYPE suwappu_gc_round gauge");
+    if let Some(g) = gc_round {
+        let _ = writeln!(out, "suwappu_gc_round {g}");
+    }
+
+    let _ = writeln!(out, "# HELP suwappu_dag_certs Certificates held in the DAG store. Bounded-memory alarm: sustained growth past authorities x gc_depth means pruning is not running.");
+    let _ = writeln!(out, "# TYPE suwappu_dag_certs gauge");
+    let _ = writeln!(out, "suwappu_dag_certs {dag_certs}");
+
+    let _ = writeln!(out, "# HELP suwappu_needs_snapshot 1 when peers have pruned past this node's DAG round, so forward backfill cannot catch up and a checkpoint snapshot bootstrap is required.");
+    let _ = writeln!(out, "# TYPE suwappu_needs_snapshot gauge");
+    let _ = writeln!(out, "suwappu_needs_snapshot {}", u8::from(needs_snapshot));
 
     let _ = writeln!(out, "# HELP suwappu_metrics_scrapes_total Cumulative count of /metrics scrapes this process has served.");
     let _ = writeln!(out, "# TYPE suwappu_metrics_scrapes_total counter");

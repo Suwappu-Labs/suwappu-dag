@@ -265,6 +265,23 @@ pub struct SyncStatusView {
     /// Committed certificates whose block payload has not arrived yet,
     /// so execution is deferred.
     pub needed_blocks: u64,
+    /// This node's garbage-collection round (IQ-008): every round at or
+    /// below it has been pruned. `null` until the chain is `gc_depth`
+    /// rounds deep.
+    #[serde(default)]
+    pub gc_round: Option<u64>,
+    /// Highest gc round reported by a configured peer.
+    #[serde(default)]
+    pub peer_gc_round: Option<u64>,
+    /// Forward backfill cannot reach the peers' tip because they have
+    /// pruned every round this node would request; a checkpoint
+    /// snapshot bootstrap is required (IQ-008 D5).
+    #[serde(default)]
+    pub needs_snapshot: bool,
+    /// Certificates currently held in the DAG store. Bounded by
+    /// `authorities × gc_depth` once pruning is active.
+    #[serde(default)]
+    pub dag_certs: u64,
 }
 
 impl SyncStatusView {

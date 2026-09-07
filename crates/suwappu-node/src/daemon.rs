@@ -24,11 +24,15 @@ use std::{
 
 use suwappu_authority::{AuthorityMember, AuthorityRegistry};
 use suwappu_consensus::{
+    causal_history_bounded,
     cert::{CertHash, Certificate, Round},
     commit::{cert_at, quorum_threshold},
+    commit_floor,
     dag::DagStore,
     decide_slot,
     equivocation::EquivocationProof,
+    gc::gc_round as gc_round_for,
+    is_obsolete,
     joint::{StakeTable, Vote},
     validator_quorum_met, AuthorityId, ConsensusError, LeaderStatus,
 };
@@ -265,6 +269,26 @@ pub(crate) struct StateInner {
     /// Drives the forward backfill loop (`run_backfill`) for late-join
     /// and restart catch-up.
     pub(crate) sync_tip: u64,
+    /// Highest gc round any *configured* peer has reported via
+    /// `TipInfo`. When it is at or above our own DAG round, forward
+    /// backfill cannot succeed (IQ-008 D5) and `needs_snapshot` is set.
+    pub(crate) peer_gc_round: Option<u64>,
+    /// Set by the backfill loop once it observes that every round it
+    /// would request has been pruned by the peers holding the tip. Read
+    /// by the sync-status RPC; consumed by the checkpoint-snapshot
+    /// bootstrap (S34.4).
+    pub(crate) needs_snapshot: bool,
+    /// Manifest `gc_depth_rounds` (IQ-008 D1). Identical mesh-wide by
+    /// construction (same genesis.toml), which is what makes
+    /// `commit_floor` deterministic across nodes.
+    pub(crate) gc_depth: u64,
+    /// Our own gc round: `gc_round(last_committed_leader_round, gc_depth)`.
+    /// Mirrors `DagStore::gc_round()` so readers under `inner` need not
+    /// take the DAG lock. `None` until the chain is `gc_depth` deep.
+    pub(crate) gc_round: Option<u64>,
+    /// Round of the highest leader whose causal history this node has
+    /// committed. Sole input to `gc_round`; only leader commits move it.
+    pub(crate) last_committed_leader_round: Option<u64>,
     pub(crate) n_authorities: u32,
     /// Certs received whose parents aren't yet in the local DAG.
     pub(crate) orphans: HashMap<CertHash, Vec<Certificate>>,
@@ -529,7 +553,10 @@ impl State {
         }
         let n = manifest.validators.len() as u32;
         Self {
-            dag: tokio::sync::RwLock::new(DagStore::new()),
+            // Tombstone window = manifest gc depth (IQ-008 D2), so a cert
+            // just above the gc round validates against its pruned
+            // parents for exactly one retention window.
+            dag: tokio::sync::RwLock::new(DagStore::with_gc_depth(manifest.gc_depth_rounds)),
             votes: parking_lot::Mutex::new(HashMap::new()),
             blocks: parking_lot::Mutex::new(HashMap::new()),
             committed: parking_lot::Mutex::new(HashSet::new()),
@@ -541,6 +568,11 @@ impl State {
                 last_authored_round: None,
                 max_observed_round: 0,
                 sync_tip: 0,
+                peer_gc_round: None,
+                needs_snapshot: false,
+                gc_depth: manifest.gc_depth_rounds.max(1),
+                gc_round: None,
+                last_committed_leader_round: None,
                 n_authorities: n,
                 orphans: HashMap::new(),
                 inflight_fetches: HashSet::new(),
@@ -899,7 +931,7 @@ async fn run_inbox(
                         .with_cert_hash(&h.0)
                         .with_peer(from.0.clone()),
                 );
-                let inserted = ingest_cert(&state, cert, &from, &outbound).await;
+                let inserted = ingest_cert(&state, cert, &from, Some(&outbound)).await;
                 // Post-genesis joiners ingest and commit but do not vote
                 // until seated in the Authority Ring: an unseated vote
                 // carries zero stake in `validator_quorum_met` anyway,
@@ -1009,8 +1041,19 @@ async fn run_inbox(
             }
             WireMessage::Pong(_) => {}
             WireMessage::GetTip => {
-                let tip = state.dag.read().await.max_round().unwrap_or(0);
-                reply_to(&outbound, &from, &reply, WireMessage::Tip(tip));
+                let (max_round, gc_round) = {
+                    let dag = state.dag.read().await;
+                    (dag.max_round().unwrap_or(0), dag.gc_round())
+                };
+                reply_to(
+                    &outbound,
+                    &from,
+                    &reply,
+                    WireMessage::TipInfo {
+                        max_round,
+                        gc_round,
+                    },
+                );
             }
             WireMessage::Tip(r) => {
                 // Only configured peers set the backfill target: a
@@ -1022,6 +1065,27 @@ async fn run_inbox(
                     let mut inner = state.inner.lock().await;
                     if r > inner.sync_tip {
                         inner.sync_tip = r;
+                    }
+                }
+            }
+            WireMessage::TipInfo {
+                max_round,
+                gc_round,
+            } => {
+                // Same trust posture as `Tip`: a dynamic peer could claim
+                // an enormous gc round and trick us into abandoning
+                // forward backfill for a snapshot bootstrap.
+                if is_dynamic {
+                    debug!(peer = %from.0, "inbox: ignoring TipInfo from dynamic peer");
+                } else {
+                    let mut inner = state.inner.lock().await;
+                    if max_round > inner.sync_tip {
+                        inner.sync_tip = max_round;
+                    }
+                    if let Some(g) = gc_round {
+                        if inner.peer_gc_round.map_or(true, |cur| g > cur) {
+                            inner.peer_gc_round = Some(g);
+                        }
                     }
                 }
             }
@@ -1102,11 +1166,33 @@ async fn run_backfill(
         ticks = ticks.wrapping_add(1);
 
         let local = state.dag.read().await.max_round().unwrap_or(0);
-        let target = state.inner.lock().await.sync_tip;
+        let (target, peer_gc) = {
+            let inner = state.inner.lock().await;
+            (inner.sync_tip, inner.peer_gc_round)
+        };
         if target <= local.saturating_add(BACKFILL_LAG_THRESHOLD) {
             continue;
         }
         let from_round = local.saturating_add(1);
+        // IQ-008 D5: if the peers that hold the tip have already pruned
+        // every round we would ask for, forward backfill is futile — the
+        // certificates no longer exist anywhere. Flag it for the
+        // checkpoint-snapshot bootstrap and stop hammering the peers.
+        if let Some(g) = peer_gc {
+            if from_round <= g {
+                let mut inner = state.inner.lock().await;
+                if !inner.needs_snapshot {
+                    inner.needs_snapshot = true;
+                    tracing::warn!(
+                        local_round = local,
+                        peer_gc_round = g,
+                        peer_tip = target,
+                        "backfill: peers have pruned past our DAG round; snapshot bootstrap required"
+                    );
+                }
+                continue;
+            }
+        }
         let to_round = from_round
             .saturating_add(BACKFILL_BATCH_ROUNDS - 1)
             .min(target);
@@ -1152,7 +1238,11 @@ async fn ingest_cert(
     state: &State,
     cert: Certificate,
     from: &PeerId,
-    outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
+    // `None` on the post-prune re-ingest path (IQ-008 D3), which runs
+    // inside `try_commit` without outbound handles: a still-unknown
+    // parent is buffered but not fetched — the sync sweeper picks it up
+    // on its next tick exactly as it would a fetch that was dropped.
+    outbound: Option<&HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>>,
 ) -> Vec<IngestedCert> {
     let mut inserted = Vec::new();
     let mut work: Vec<Certificate> = vec![cert];
@@ -1275,8 +1365,15 @@ async fn ingest_cert(
                     }
                 }
                 if send_fetch {
-                    fetch_cert_from_peers(missing, Some(from), outbound);
+                    if let Some(outbound) = outbound {
+                        fetch_cert_from_peers(missing, Some(from), outbound);
+                    }
                 }
+            }
+            Err(ConsensusError::BelowGcRound { round, gc_round }) => {
+                // Obsolete by IQ-008 D1: nothing to buffer, nothing to
+                // fetch. Expected from slow relays right after a prune.
+                debug!(peer = %from.0, round, gc_round, "inbox: cert below gc round, dropped");
             }
             Err(e) => {
                 debug!(peer = %from.0, err = ?e, "inbox: dag rejected cert");
@@ -1285,6 +1382,151 @@ async fn ingest_cert(
     }
     inserted
 }
+
+/// Result of one [`prune_state`] pass, for the event log and metrics.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct PruneOutcome {
+    certs: usize,
+    blocks: usize,
+    votes: usize,
+    orphans_dropped: usize,
+    orphans_reinserted: usize,
+}
+
+/// Apply IQ-008 D3: evict every structure below `gc_round`.
+///
+/// Called from `try_commit` once the gc round advances. Takes each lock
+/// briefly in the canonical order (`inner → dag → … → votes → blocks →
+/// committed`) with no guard held across an await, except that the DAG
+/// write and the `inner` read of the orphan buffer are sequential, not
+/// nested. Orphans whose missing parent is now a tombstone are re-run
+/// through `ingest_cert` (they were signature-verified when buffered;
+/// re-verification is the price of reusing the one admission path).
+async fn prune_state(
+    state: &State,
+    gc_round: u64,
+    self_label: &str,
+    log: &EventLog,
+) -> PruneOutcome {
+    let mut out = PruneOutcome::default();
+
+    // 1. DAG: evict rounds <= gc_round, collect evicted hashes.
+    let report = state.dag.write().await.prune_below(gc_round);
+    out.certs = report.certs_pruned;
+    if report.certs_pruned == 0 && report.rounds_pruned == 0 {
+        // Nothing lived at or below gc_round (e.g. a fresh node whose
+        // peers are far ahead). Still record the round so ingest rejects
+        // obsolete certs and side tables stay consistent.
+    }
+
+    // 2. Hash-keyed side tables: drop entries for evicted certs.
+    {
+        let mut blocks = state.blocks.lock();
+        for h in &report.evicted {
+            if blocks.remove(h).is_some() {
+                out.blocks += 1;
+            }
+        }
+    }
+    {
+        let mut votes = state.votes.lock();
+        for h in &report.evicted {
+            if votes.remove(h).is_some() {
+                out.votes += 1;
+            }
+        }
+    }
+    {
+        let mut committed = state.committed.lock();
+        for h in &report.evicted {
+            committed.remove(h);
+        }
+    }
+
+    // 3. Round-keyed cold state + orphan triage.
+    let reinsert: Vec<Certificate> = {
+        let tombstoned: HashSet<CertHash> = {
+            let dag = state.dag.read().await;
+            let mut inner = state.inner.lock().await;
+            inner.gc_round = Some(gc_round);
+            inner.seen_at.retain(|(_, r), _| *r > gc_round);
+            inner.main_lane_index.retain(|tx| tx.round > gc_round);
+            for h in &report.evicted {
+                inner.needed_blocks.remove(h);
+                inner.inflight_fetches.remove(h);
+                inner.inflight_fetch_history.remove(h);
+            }
+            // RPC indices keep a longer tail until the durable commit log
+            // (S34.3) answers historical lookups; they are still bounded.
+            let rpc_floor =
+                gc_round.saturating_sub(RPC_INDEX_EXTRA_DEPTH_MULTIPLIER * inner.gc_depth);
+            inner.blocks_by_round.retain(|r, _| *r > rpc_floor);
+            inner.tx_to_block.retain(|_, (r, _, _)| *r > rpc_floor);
+            inner
+                .orphans
+                .keys()
+                .filter(|missing| dag.is_tombstoned(missing))
+                .copied()
+                .collect()
+        };
+        let mut inner = state.inner.lock().await;
+        let mut reinsert = Vec::new();
+        let keys: Vec<CertHash> = inner.orphans.keys().copied().collect();
+        for missing in keys {
+            let Some(certs) = inner.orphans.remove(&missing) else {
+                continue;
+            };
+            let (live, stale): (Vec<Certificate>, Vec<Certificate>) =
+                certs.into_iter().partition(|c| c.round > gc_round);
+            out.orphans_dropped += stale.len();
+            if tombstoned.contains(&missing) {
+                // Parent is pruned but known: these certs now validate.
+                inner.inflight_fetches.remove(&missing);
+                inner.inflight_fetch_history.remove(&missing);
+                out.orphans_reinserted += live.len();
+                reinsert.extend(live);
+            } else if live.is_empty() {
+                // Every waiter was obsolete; stop fetching the parent.
+                inner.inflight_fetches.remove(&missing);
+                inner.inflight_fetch_history.remove(&missing);
+            } else {
+                inner.orphans.insert(missing, live);
+            }
+        }
+        reinsert
+    };
+
+    // 4. Re-admit orphans unblocked by tombstones. No votes are cast for
+    //    them: they sit `gc_depth` rounds behind the commit frontier, and
+    //    the joint-quorum gate is evaluated on leader certs, not on every
+    //    swept certificate.
+    let from = PeerId::new("gc-reinsert".to_string());
+    for cert in reinsert {
+        let _ = ingest_cert(state, cert, &from, None).await;
+    }
+
+    log.emit(
+        Event::now(self_label, Lane::Main, "gc_pruned")
+            .with_round(gc_round)
+            .with_kind("gc"),
+    );
+    tracing::info!(
+        gc_round,
+        certs = out.certs,
+        blocks = out.blocks,
+        votes = out.votes,
+        orphans_dropped = out.orphans_dropped,
+        orphans_reinserted = out.orphans_reinserted,
+        "gc: pruned state below gc round"
+    );
+    out
+}
+
+/// How far below the gc round the explorer-facing indices
+/// (`blocks_by_round`, `tx_to_block`) are retained, as a multiple of
+/// `gc_depth`. Bounded like everything else; superseded by the durable
+/// commit log in S34.3.
+const RPC_INDEX_EXTRA_DEPTH_MULTIPLIER: u64 = 4;
 
 /// Unicast `GetCert(hash)` to up to two peers — `prefer` (if any,
 /// usually the cert sender) and one other. Two-peer fan-out matches
@@ -1761,6 +2003,7 @@ fn wire_msg_kind(msg: &WireMessage) -> &'static str {
         WireMessage::Tip(_) => "tip",
         WireMessage::GetCertsByRound(_) => "get_certs_by_round",
         WireMessage::GetBlock(_) => "get_block",
+        WireMessage::TipInfo { .. } => "tip_info",
     }
 }
 
@@ -1768,7 +2011,17 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
     // Snapshot votes + n_authorities + candidate_rounds in brief locks
     // up-front so the rest of the function operates on owned data.
     let votes_flat: Vec<Vote> = state.votes.lock().values().flatten().copied().collect();
-    let n = state.inner.lock().await.n_authorities;
+    let (n, gc_depth, local_gc_round, mut last_leader_round) = {
+        let inner = state.inner.lock().await;
+        (
+            inner.n_authorities,
+            inner.gc_depth,
+            inner.gc_round,
+            inner.last_committed_leader_round,
+        )
+    };
+    // IQ-008 D3: the DAG holds only rounds above the gc round, so this
+    // walk is O(gc_depth) per pass instead of O(chain age).
     let candidate_rounds: BTreeSet<u64> = {
         let dag = state.dag.read().await;
         dag.rounds().collect()
@@ -1782,6 +2035,12 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
     // Every node therefore commits a strictly-growing prefix of the
     // canonical finalize order.
     'commit: for round in candidate_rounds {
+        // Obsolete slots are never committed (IQ-008 D1). The DAG has
+        // already dropped them; this guard covers the window between a
+        // gc-round advance and the prune that follows it.
+        if is_obsolete(round, local_gc_round) {
+            continue;
+        }
         let status = {
             let dag = state.dag.read().await;
             decide_slot(&dag, round, n)
@@ -1793,6 +2052,26 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
 
         if state.committed.lock().contains(&leader_hash) {
             continue;
+        }
+
+        // IQ-008 Residual 1 evidence: a leader committing below the
+        // highest leader already committed is an IQ-004 late flip. Logged
+        // (not blocked) so the fault-injection run in /goal B2 can
+        // measure how often the class is reached and by how many rounds.
+        if let Some(prev) = last_leader_round {
+            if round < prev {
+                log.emit(
+                    Event::now(self_label, Lane::Main, "commit_out_of_order")
+                        .with_round(round)
+                        .with_cert_hash(&leader_hash.0),
+                );
+                tracing::warn!(
+                    leader_round = round,
+                    highest_committed_leader = prev,
+                    lag = prev - round,
+                    "commit: leader committed below the highest committed leader (IQ-004 late flip)"
+                );
+            }
         }
 
         // Joint-quorum AND-gate: validator-ring stake side.
@@ -1817,24 +2096,29 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
             break 'commit;
         }
 
+        // IQ-008 D1: the committed sub-DAG is the leader's causal history
+        // cut at `commit_floor(leader_round, gc_depth)` — a function of
+        // the leader alone, so every node sweeps the same set regardless
+        // of its own pruning progress (I-GC1, `proptest_gc.rs`).
+        let floor = commit_floor(round, gc_depth);
         let history = {
             let dag = state.dag.read().await;
-            suwappu_consensus::causal_history(&dag, leader_hash)
+            causal_history_bounded(&dag, leader_hash, floor)
         };
         for h in history {
             if state.committed.lock().contains(&h) {
                 continue;
             }
-            // `None` is unreachable today: `h` came from
-            // `causal_history`, which only yields certs already in the
-            // DAG, and the DAG is append-only (no eviction/pruning). If
-            // pruning is ever added, this `continue` would skip a cert
-            // while committing finalize-later ones — reopening the
-            // ordering-divergence class fixed above; it must become a
-            // walk-wide defer (`break 'commit`) at that point.
+            // `h` came from `causal_history_bounded` against the live DAG
+            // a moment ago. The only way it is gone now is a concurrent
+            // prune from another inbox task's `try_commit`; in that case
+            // committing finalize-later certs while skipping this one
+            // would reopen the ordering-divergence class fixed above, so
+            // defer the whole walk and let the next pass re-derive the
+            // sweep from the pruned DAG.
             let (cert_round, cert_payload_digest) = match state.dag.read().await.get(&h) {
                 Some(c) => (c.round, c.payload_digest),
-                None => continue,
+                None => break 'commit,
             };
             // Bind the block to the SIGNED cert: only consume a block whose
             // payload digest equals the committed cert's payload_digest
@@ -2002,6 +2286,25 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
                     "epoch boundary crossed; governance applied"
                 );
             }
+        }
+        // The whole sweep for this leader committed (no defer above):
+        // advance the leader frontier that drives the gc round.
+        if last_leader_round.map_or(true, |prev| round > prev) {
+            last_leader_round = Some(round);
+            state.inner.lock().await.last_committed_leader_round = Some(round);
+        }
+    }
+
+    // IQ-008 D1/D3: advance the gc round from the leader frontier and
+    // prune everything at or below it. Monotone; a no-op until the chain
+    // is `gc_depth` rounds deep.
+    if let Some(new_gc) = last_leader_round.and_then(|l| gc_round_for(l, gc_depth)) {
+        let advance = match local_gc_round {
+            Some(cur) => new_gc > cur,
+            None => true,
+        };
+        if advance {
+            prune_state(state, new_gc, self_label, log).await;
         }
     }
 
@@ -2457,6 +2760,7 @@ mod tests {
     //   23_000  phase_g_admit (4n)
     //   23_200  phase_g_eject (4n)
     //   23_400  phase_g_growing_prefix_under_transient_unavailability (4n)
+    //   23_600  four_node_gc_bounds_store (4n)
     //
     // Adding a test? Take the next free 200-wide band and list it here.
 
@@ -2691,6 +2995,7 @@ mod tests {
             corridors: Vec::new(),
             prebalances: Vec::new(),
             rounds_per_epoch: 1024,
+            gc_depth_rounds: suwappu_consensus::GC_DEPTH,
         };
         let cfg = NodeConfig {
             self_id: "v0".into(),
@@ -2778,6 +3083,7 @@ mod tests {
             corridors: Vec::new(),
             prebalances: Vec::new(),
             rounds_per_epoch: 1024,
+            gc_depth_rounds: suwappu_consensus::GC_DEPTH,
         };
         let cfg = NodeConfig {
             self_id: "v0".into(),
@@ -2880,6 +3186,7 @@ mod tests {
             corridors: Vec::new(),
             prebalances: Vec::new(),
             rounds_per_epoch: 1024,
+            gc_depth_rounds: suwappu_consensus::GC_DEPTH,
         };
 
         let mut daemons = Vec::new();
@@ -2946,6 +3253,173 @@ mod tests {
         let first = state_roots[0];
         for r in &state_roots[1..] {
             assert_eq!(*r, first, "state roots disagree across daemons");
+        }
+    }
+
+    /// IQ-008 D1/D3 at the daemon layer: a 4-node cluster run for many
+    /// multiples of a small `gc_depth_rounds` keeps every growth surface
+    /// bounded and still agrees on the substrate state root.
+    ///
+    /// The pure-consensus invariants (I-GC1..3) are the 10k-case
+    /// `proptest_gc.rs`; this test is the deterministic scenario for the
+    /// piece those cannot see — that the daemon actually advances the gc
+    /// round from the leader frontier, prunes every side table, keeps
+    /// serving and committing across prunes, and that pruning at
+    /// different moments on different nodes changes no post-root.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn four_node_gc_bounds_store() {
+        let n = 4u32;
+        let base_port: u16 = 23_600;
+        let gc_depth: u64 = 8;
+
+        let keypairs: Vec<(
+            suwappu_crypto::mldsa::PublicKey,
+            suwappu_crypto::mldsa::SecretKey,
+        )> = (0..n).map(|_| suwappu_crypto::mldsa::keypair()).collect();
+
+        let manifest = GenesisManifest {
+            network_id: "test-gc-4n".into(),
+            validators: (0..n)
+                .map(|i| GenesisValidator {
+                    authority_id: i,
+                    label: format!("v{}", i),
+                    mldsa_public_key_hex: hex::encode(keypairs[i as usize].0.as_bytes()),
+                    bls_public_key_hex: "00".into(),
+                    validator_stake_suwappu: 150_000,
+                    authority_stake_suwappu: 150_000,
+                })
+                .collect(),
+            corridors: Vec::new(),
+            prebalances: Vec::new(),
+            rounds_per_epoch: 1024,
+            gc_depth_rounds: gc_depth,
+        };
+
+        let mut daemons = Vec::new();
+        for i in 0..n {
+            let peers: Vec<Peer> = (0..n)
+                .filter(|j| *j != i)
+                .map(|j| Peer {
+                    id: format!("v{}", j),
+                    addr: format!("127.0.0.1:{}", base_port + j as u16)
+                        .parse::<SocketAddr>()
+                        .unwrap(),
+                })
+                .collect();
+            let cfg = NodeConfig {
+                self_id: format!("v{}", i),
+                authority_id: i,
+                listen: format!("127.0.0.1:{}", base_port + i as u16)
+                    .parse::<SocketAddr>()
+                    .unwrap(),
+                client_listen: format!("127.0.0.1:{}", base_port + 100 + i as u16)
+                    .parse::<SocketAddr>()
+                    .unwrap(),
+                rpc_listen: None,
+                peers,
+                allow_post_genesis_join: false,
+                round_ms: 100,
+                checkpoint_cadence_rounds: 1,
+                mldsa_secret_key_path: write_mldsa_key_file(&keypairs[i as usize].1),
+                bls_secret_key_path: "/dev/null".into(),
+                genesis_manifest_path: "/dev/null".into(),
+                event_log_path: std::env::temp_dir()
+                    .join(format!("suwappu-daemon-gc-test-v{}.ndjson", i)),
+                max_client_connections: 256,
+                client_idle_timeout_ms: 30_000,
+                client_per_ip_limit: 8,
+                rpc_per_ip_capacity: 60,
+                rpc_per_ip_refill_per_sec: 10,
+                bridge_oracle_address: None,
+                bridge_network_id: None,
+                metrics_listen: None,
+            };
+            let d = Daemon::start(cfg, manifest.clone()).await.unwrap();
+            daemons.push(d);
+        }
+
+        // ~60 rounds at 100 ms: several full gc windows past the first
+        // prune, which needs the leader frontier to reach `gc_depth`.
+        tokio::time::sleep(Duration::from_secs(6)).await;
+
+        // Generous bound: the live window is (gc_round, max_round], i.e.
+        // gc_depth rounds plus the few rounds between the last committed
+        // leader and the tip. Anything past 3x the depth means pruning
+        // is not keeping up.
+        let live_bound = (n as u64) * (3 * gc_depth);
+        let mut state_roots = Vec::new();
+        for d in &daemons {
+            let (dag_len, dag_gc, tombstones, max_round) = {
+                let dag = d.state.dag.read().await;
+                (
+                    dag.len() as u64,
+                    dag.gc_round(),
+                    dag.tombstone_count() as u64,
+                    dag.max_round().unwrap_or(0),
+                )
+            };
+            let blocks_len = d.state.blocks.lock().len() as u64;
+            let votes_len = d.state.votes.lock().len() as u64;
+            let committed_len = d.state.committed.lock().len() as u64;
+            let inner = d.state.inner.lock().await;
+            let label = inner.last_authored_round;
+            assert!(
+                max_round >= 3 * gc_depth,
+                "{label:?}: cluster did not progress far enough (max_round {max_round})"
+            );
+            assert!(
+                dag_gc.is_some() && inner.gc_round == dag_gc,
+                "{label:?}: gc round never advanced (dag {dag_gc:?}, inner {:?})",
+                inner.gc_round
+            );
+            let gc = dag_gc.unwrap();
+            assert_eq!(
+                Some(gc),
+                inner
+                    .last_committed_leader_round
+                    .and_then(|l| l.checked_sub(gc_depth)),
+                "{label:?}: gc round is not leader frontier minus depth"
+            );
+            assert!(
+                dag_len <= live_bound,
+                "{label:?}: dag has {dag_len} certs (> {live_bound})"
+            );
+            assert!(
+                tombstones <= (n as u64) * gc_depth + n as u64,
+                "{label:?}: {tombstones} tombstones"
+            );
+            assert!(
+                blocks_len <= live_bound,
+                "{label:?}: {blocks_len} blocks retained"
+            );
+            assert!(
+                votes_len <= live_bound,
+                "{label:?}: {votes_len} vote slots retained"
+            );
+            assert!(
+                committed_len <= live_bound,
+                "{label:?}: {committed_len} commit marks retained"
+            );
+            assert!(
+                inner.seen_at.keys().all(|(_, r)| *r > gc),
+                "{label:?}: seen_at retains rounds at or below gc"
+            );
+            assert!(
+                inner.main_lane_index.iter().all(|tx| tx.round > gc),
+                "{label:?}: main_lane_index retains rounds at or below gc"
+            );
+            assert!(
+                !inner.needs_snapshot,
+                "{label:?}: a genesis validator must never need a snapshot"
+            );
+            state_roots.push(inner.substrate.state_root());
+        }
+        let first = state_roots[0];
+        for r in &state_roots[1..] {
+            assert_eq!(
+                *r, first,
+                "state roots disagree across daemons after pruning"
+            );
         }
     }
 
@@ -3021,6 +3495,7 @@ mod tests {
             // (which now lands at the next boundary) is exercised on
             // CI-sane timescales. 16 rounds * 100ms = 1.6s/boundary.
             rounds_per_epoch: 16,
+            gc_depth_rounds: suwappu_consensus::GC_DEPTH,
         };
 
         let mut daemons = Vec::new();
@@ -3713,6 +4188,7 @@ mod tests {
             corridors: Vec::new(),
             prebalances: Vec::new(),
             rounds_per_epoch: 1024,
+            gc_depth_rounds: suwappu_consensus::GC_DEPTH,
         };
         let cfg = NodeConfig {
             self_id: "v0".into(),
@@ -3883,6 +4359,7 @@ mod tests {
             }],
             corridors: Vec::new(),
             rounds_per_epoch: 1024,
+            gc_depth_rounds: suwappu_consensus::GC_DEPTH,
             prebalances: vec![
                 crate::config::GenesisPrebalance {
                     address: format!("0x{}", hex::encode(faucet_addr)),
@@ -3949,6 +4426,7 @@ mod tests {
             corridors: Vec::new(),
             prebalances: Vec::new(),
             rounds_per_epoch: 1024,
+            gc_depth_rounds: suwappu_consensus::GC_DEPTH,
         };
         let (log, _log_task) =
             EventLog::start(&std::env::temp_dir().join("suwappu-fastpath-test.ndjson"))
@@ -4050,6 +4528,7 @@ mod tests {
             corridors: Vec::new(),
             prebalances: Vec::new(),
             rounds_per_epoch: 1024,
+            gc_depth_rounds: suwappu_consensus::GC_DEPTH,
         };
         let (log, _log_task) =
             EventLog::start(&std::env::temp_dir().join("suwappu-fp-k-binding-test.ndjson"))
@@ -4158,6 +4637,7 @@ mod tests {
             corridors: Vec::new(),
             prebalances: Vec::new(),
             rounds_per_epoch: 1024,
+            gc_depth_rounds: suwappu_consensus::GC_DEPTH,
         };
         let (log, _log_task) =
             EventLog::start(&std::env::temp_dir().join("suwappu-ltp-test.ndjson"))
@@ -4261,6 +4741,7 @@ mod tests {
             corridors: Vec::new(),
             prebalances: Vec::new(),
             rounds_per_epoch: 1024,
+            gc_depth_rounds: suwappu_consensus::GC_DEPTH,
         };
         let (log, _log_task) =
             EventLog::start(&std::env::temp_dir().join("suwappu-ltp-unreg.ndjson"))
@@ -4317,6 +4798,7 @@ mod tests {
             corridors: Vec::new(),
             prebalances: Vec::new(),
             rounds_per_epoch: 1024,
+            gc_depth_rounds: suwappu_consensus::GC_DEPTH,
         };
         let cfg = NodeConfig {
             self_id: "v0".into(),
@@ -4411,6 +4893,7 @@ mod tests {
             corridors: Vec::new(),
             prebalances: Vec::new(),
             rounds_per_epoch: 1024,
+            gc_depth_rounds: suwappu_consensus::GC_DEPTH,
         };
         let cfg = NodeConfig {
             self_id: "v0".into(),
@@ -4529,6 +5012,7 @@ mod tests {
             corridors: Vec::new(),
             prebalances: Vec::new(),
             rounds_per_epoch: 1024,
+            gc_depth_rounds: suwappu_consensus::GC_DEPTH,
         };
         let cfg = NodeConfig {
             self_id: "v0".into(),
@@ -4649,6 +5133,7 @@ mod tests {
             corridors: Vec::new(),
             prebalances: Vec::new(),
             rounds_per_epoch: 1024,
+            gc_depth_rounds: suwappu_consensus::GC_DEPTH,
         };
         let cfg = NodeConfig {
             self_id: "v0".into(),

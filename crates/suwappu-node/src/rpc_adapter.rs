@@ -351,7 +351,16 @@ impl StateView for NodeStateView {
     /// advances between them shifts `rounds_behind` by at most one round,
     /// which the lag threshold absorbs.
     async fn sync_status(&self) -> SyncStatusView {
-        let (latest_committed_round, peer_tip_round, orphan_certs, inflight_fetches, needed_blocks) = {
+        let (
+            latest_committed_round,
+            peer_tip_round,
+            orphan_certs,
+            inflight_fetches,
+            needed_blocks,
+            gc_round,
+            peer_gc_round,
+            needs_snapshot,
+        ) = {
             let inner = self.state.inner.lock().await;
             (
                 inner
@@ -364,9 +373,15 @@ impl StateView for NodeStateView {
                 inner.orphans.len() as u64,
                 inner.inflight_fetches.len() as u64,
                 inner.needed_blocks.len() as u64,
+                inner.gc_round,
+                inner.peer_gc_round,
+                inner.needs_snapshot,
             )
         };
-        let local_dag_round = self.state.dag.read().await.max_round().unwrap_or(0);
+        let (local_dag_round, dag_certs) = {
+            let dag = self.state.dag.read().await;
+            (dag.max_round().unwrap_or(0), dag.len() as u64)
+        };
         let seated = self
             .state
             .authority_registry
@@ -384,6 +399,10 @@ impl StateView for NodeStateView {
             orphan_certs,
             inflight_fetches,
             needed_blocks,
+            gc_round,
+            peer_gc_round,
+            needs_snapshot,
+            dag_certs,
         }
     }
 

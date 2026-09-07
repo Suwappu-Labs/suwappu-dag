@@ -38,6 +38,10 @@ async fn spawn_mock_server() -> SocketAddr {
                     "orphan_certs": 3,
                     "inflight_fetches": 2,
                     "needed_blocks": 1,
+                    "gc_round": null,
+                    "peer_gc_round": 12,
+                    "needs_snapshot": false,
+                    "dag_certs": 364,
                 })),
                 "suwappu_getAuthorityRegistry" => Some(json!([
                     {"id": 0, "stake_suwappu": 150_000u64, "public_key_hex": "deadbeef"},
@@ -202,6 +206,10 @@ async fn get_sync_status_round_trip() {
             orphan_certs: 3,
             inflight_fetches: 2,
             needed_blocks: 1,
+            gc_round: None,
+            peer_gc_round: Some(12),
+            needs_snapshot: false,
+            dag_certs: 364,
         }
     );
 }

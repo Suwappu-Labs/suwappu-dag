@@ -122,6 +122,19 @@ pub enum WireMessage {
     /// Sync: request the block payload backing a cert hash. Receivers
     /// respond with `Block(...)` if held; otherwise silently drop.
     GetBlock(CertHash),
+    /// Sync (IQ-008 D5): richer `GetTip` reply. `max_round` is what
+    /// `Tip` carried; `gc_round` is the sender's garbage-collection round
+    /// (`None` = nothing pruned yet). A requester whose local DAG round
+    /// is at or below every configured peer's `gc_round` cannot catch up
+    /// by forward backfill — those rounds no longer exist anywhere — and
+    /// must bootstrap from a checkpoint snapshot instead. Appended after
+    /// `GetBlock` so earlier variant indexes stay stable.
+    TipInfo {
+        /// Sender's highest DAG round.
+        max_round: u64,
+        /// Sender's gc round, if it has pruned.
+        gc_round: Option<u64>,
+    },
 }
 
 /// Maximum allowed framed payload size. Drops the connection on overrun.
@@ -546,6 +559,7 @@ fn wire_variant_name(msg: &WireMessage) -> &'static str {
         WireMessage::Tip(_) => "Tip",
         WireMessage::GetCertsByRound(_) => "GetCertsByRound",
         WireMessage::GetBlock(_) => "GetBlock",
+        WireMessage::TipInfo { .. } => "TipInfo",
     }
 }
 

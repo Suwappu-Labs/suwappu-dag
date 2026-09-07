@@ -105,6 +105,10 @@ impl StateView for MockState {
             orphan_certs: 3,
             inflight_fetches: 2,
             needed_blocks: 1,
+            gc_round: Some(40),
+            peer_gc_round: Some(50),
+            needs_snapshot: false,
+            dag_certs: 7 * 256,
         }
     }
 }
@@ -245,6 +249,26 @@ async fn get_sync_status_reports_lag_and_flags() {
     assert_eq!(r["inflight_fetches"], 2);
     assert_eq!(r["needed_blocks"], 1);
     assert_eq!(r["latest_committed_round"], 0);
+    assert_eq!(r["gc_round"], 40);
+    assert_eq!(r["peer_gc_round"], 50);
+    assert_eq!(r["needs_snapshot"], false);
+    assert_eq!(r["dag_certs"], 7 * 256);
+}
+
+#[test]
+fn sync_status_gc_fields_default_when_absent() {
+    // A pre-IQ-008 daemon omits the gc fields; SDKs built against this
+    // crate must still decode its answer.
+    let legacy = serde_json::json!({
+        "local_dag_round": 1, "latest_committed_round": 1, "peer_tip_round": 1,
+        "rounds_behind": 0, "synced": true, "seated": true,
+        "orphan_certs": 0, "inflight_fetches": 0, "needed_blocks": 0
+    });
+    let v: SyncStatusView = serde_json::from_value(legacy).unwrap();
+    assert_eq!(v.gc_round, None);
+    assert_eq!(v.peer_gc_round, None);
+    assert!(!v.needs_snapshot);
+    assert_eq!(v.dag_certs, 0);
 }
 
 #[tokio::test]

@@ -60,6 +60,21 @@ export interface SyncStatusView {
   inflight_fetches: number;
   /** Committed certificates whose block payload has not arrived yet. */
   needed_blocks: number;
+  /**
+   * This node's garbage-collection round (IQ-008): every round at or
+   * below it has been pruned. `null` until the chain is `gc_depth`
+   * rounds deep. Absent from pre-IQ-008 daemons.
+   */
+  gc_round?: number | null;
+  /** Highest gc round reported by a configured peer. */
+  peer_gc_round?: number | null;
+  /**
+   * The peers holding the tip have pruned every round this node would
+   * backfill; it must bootstrap from a checkpoint snapshot instead.
+   */
+  needs_snapshot?: boolean;
+  /** Certificates currently held in the DAG store (bounded once pruning is active). */
+  dag_certs?: number;
 }
 
 /**

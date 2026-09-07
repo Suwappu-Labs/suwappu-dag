@@ -188,6 +188,17 @@ pub struct GenesisManifest {
     #[serde(default = "default_rounds_per_epoch")]
     pub rounds_per_epoch: u64,
 
+    /// Garbage-collection depth in rounds (IQ-008 D1). A certificate is
+    /// obsolete once a leader this many rounds past it has committed,
+    /// and every committed leader's causal history is cut this many
+    /// rounds below the leader. Lives in the manifest, not `NodeConfig`,
+    /// because the commit floor is derived from it: two validators with
+    /// different depths would commit different sub-DAGs for the same
+    /// leader. Default `suwappu_consensus::GC_DEPTH` (256). Tests use
+    /// small values to exercise pruning quickly.
+    #[serde(default = "default_gc_depth_rounds")]
+    pub gc_depth_rounds: u64,
+
     /// Genesis pre-balances. Each entry is credited to the substrate
     /// exactly once when a fresh node constructs its state (block
     /// height 0), via `Intent::GenesisAllocation` — see
@@ -293,6 +304,10 @@ fn default_checkpoint_cadence() -> u32 {
 
 fn default_rounds_per_epoch() -> u64 {
     1024
+}
+
+fn default_gc_depth_rounds() -> u64 {
+    suwappu_consensus::GC_DEPTH
 }
 
 fn default_max_client_connections() -> u32 {
@@ -430,6 +445,7 @@ mod tests {
             }],
             corridors: Vec::new(),
             rounds_per_epoch: 1024,
+            gc_depth_rounds: suwappu_consensus::GC_DEPTH,
             prebalances: Vec::new(),
         };
         let cfg = NodeConfig {
