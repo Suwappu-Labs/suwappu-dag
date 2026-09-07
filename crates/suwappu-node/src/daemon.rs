@@ -1551,6 +1551,26 @@ async fn run_backfill(
                 let _ = tx.try_send(WireMessage::GetTip);
             }
         }
+        // Every 8 ticks: if a checkpoint we emitted two or more boundaries
+        // ago never co-signed, ask peers for their chain — we may have
+        // ratified a checkpoint the mesh did not (`handle_checkpoint_chain`
+        // adopts a strictly newer verified chain in steady state).
+        if ticks % 8 == 0 {
+            let stalled = {
+                let inner = state.inner.lock().await;
+                let cadence = inner.checkpoint_cadence;
+                let boundary = inner.next_checkpoint_boundary;
+                inner
+                    .emitted_checkpoints
+                    .values()
+                    .any(|(c, _)| c.round.saturating_add(2 * cadence) <= boundary)
+            };
+            if stalled {
+                for tx in outbound.values().take(2) {
+                    let _ = tx.try_send(WireMessage::GetCheckpoints);
+                }
+            }
+        }
         ticks = ticks.wrapping_add(1);
 
         let local = state.dag.read().await.max_round().unwrap_or(0);
@@ -2008,7 +2028,7 @@ async fn emit_checkpoint(
             let oldest = inner
                 .emitted_checkpoints
                 .iter()
-                .min_by_key(|(_, (c, _))| c.height)
+                .min_by_key(|(_, (c, _))| (c.height, c.round))
                 .map(|(k, _)| *k);
             match oldest {
                 Some(k) => {
@@ -2080,6 +2100,17 @@ async fn current_registry_set(state: &State) -> RegistrySet {
 /// signer, keeping only the most recent `MAX_BUFFERED_CHECKPOINTS` hashes.
 async fn buffer_checkpoint_sig(state: &State, ck: &Checkpoint, sig: CheckpointSignature) {
     let mut inner = state.inner.lock().await;
+    // Only heights this node could plausibly ratify next are buffered:
+    // a seated authority signing fabricated far-future checkpoints could
+    // otherwise evict every honest entry (consensus-review finding,
+    // seventh pass).
+    let floor = inner
+        .latest_checkpoint
+        .as_ref()
+        .map_or(0, |l| l.cosigned.checkpoint.height + 1);
+    if ck.height < floor || ck.height > floor + MAX_BUFFERED_CHECKPOINTS as u64 {
+        return;
+    }
     let entry = inner
         .checkpoint_sigs
         .entry(ck.hash())
@@ -2088,10 +2119,13 @@ async fn buffer_checkpoint_sig(state: &State, ck: &Checkpoint, sig: CheckpointSi
         entry.1.push(sig);
     }
     while inner.checkpoint_sigs.len() > MAX_BUFFERED_CHECKPOINTS {
+        // Oldest by height, then by the hash's round when known (all
+        // stalled emissions share a height).
+        let round_of = |k: &[u8; 32]| inner.emitted_checkpoints.get(k).map_or(0, |(c, _)| c.round);
         let oldest = inner
             .checkpoint_sigs
             .iter()
-            .min_by_key(|(_, (h, _))| *h)
+            .min_by_key(|(k, (h, _))| (*h, round_of(k)))
             .map(|(k, _)| *k);
         match oldest {
             Some(k) => {
@@ -2254,12 +2288,13 @@ async fn handle_checkpoint_chain(
     reply: &Option<tokio::sync::mpsc::Sender<WireMessage>>,
     outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
 ) {
-    {
+    let syncing = {
         let inner = state.inner.lock().await;
-        if !inner.needs_snapshot || inner.snapshot_sync.trusted.is_some() {
+        if inner.needs_snapshot && inner.snapshot_sync.trusted.is_some() {
             return;
         }
-    }
+        inner.needs_snapshot
+    };
     let links: Vec<ChainLink> = chain
         .iter()
         .map(|b| ChainLink {
@@ -2280,6 +2315,52 @@ async fn handle_checkpoint_chain(
         return;
     };
     let height = latest.cosigned.checkpoint.height;
+    if !syncing {
+        // Steady state: adopt a verified chain that is strictly ahead of
+        // ours. A node that ratified a same-height checkpoint the
+        // majority did not (asymmetric signature delivery under load)
+        // would otherwise chain its next emission to a hash nobody else
+        // has and never co-sign again (consensus-review finding, seventh
+        // pass). Nothing is installed: consensus state is untouched, only
+        // the checkpoint cursor re-anchors on the mesh's chain.
+        let mut inner = state.inner.lock().await;
+        let ahead = inner.latest_checkpoint.as_ref().map_or(true, |l| {
+            latest.cosigned.checkpoint.height > l.cosigned.checkpoint.height
+                && latest.cosigned.checkpoint.round > l.cosigned.checkpoint.round
+        });
+        if !ahead {
+            return;
+        }
+        let ck = latest.cosigned.checkpoint.clone();
+        let mut trans: Vec<CheckpointBundle> = Vec::new();
+        for b in chain.iter().cloned() {
+            let changed = trans.last().map_or(true, |t| {
+                t.registries.authority_registry != b.registries.authority_registry
+            });
+            if changed {
+                trans.push(b);
+            }
+        }
+        inner.checkpoint_transitions = trans;
+        inner.latest_checkpoint = Some(latest.clone());
+        inner.checkpoint_height = ck.height + 1;
+        inner.last_checkpoint_hash = ck.hash();
+        let cadence = inner.checkpoint_cadence;
+        inner.next_checkpoint_boundary = inner
+            .next_checkpoint_boundary
+            .max((ck.round / cadence + 1) * cadence);
+        inner
+            .emitted_checkpoints
+            .retain(|_, (c, _)| c.height > ck.height);
+        inner.checkpoint_sigs.retain(|_, (h, _)| *h > ck.height);
+        if let Some(store) = inner.store.as_mut() {
+            if let Err(e) = store.append_checkpointed(latest.clone()) {
+                tracing::error!(err = %e, height, "commit log: adopted checkpoint append failed");
+            }
+        }
+        tracing::info!(peer = %from.0, height, round = ck.round, "checkpoint: adopted the mesh's co-signed chain");
+        return;
+    }
     {
         let mut inner = state.inner.lock().await;
         if inner
@@ -2450,8 +2531,9 @@ async fn handle_snapshot_chunk(
 /// certificate window is checked structurally: every certificate is
 /// signed by a member of the Authority Ring in force at its round
 /// (`committees`: `(round, ring)` pairs oldest first, genesis at round 0;
-/// the ring established by the last checkpoint below the certificate's
-/// round, or the next one as transition grace), lies above the bound
+/// the rings established by checkpoints within `gc_depth` rounds below
+/// the certificate's round, the last one below it, and the next one as
+/// transition grace), lies above the bound
 /// gc round, and at most two certificates share an (author, round); the
 /// tombstone window lies at or below the gc round and is bounded in
 /// size. Returns the reason on failure.
@@ -2537,15 +2619,23 @@ fn verify_served_snapshot(
         // Committee in force at this round: a checkpoint at round R
         // reports the ring after the leaders at or below R committed, so
         // for a certificate at round r in (R_k, R_(k+1)] the ring in force
-        // is bounded by C_k and C_(k+1) — the one established strictly
-        // below r (genesis if none) and the next one (transition grace
-        // for an admit or eject inside the era).
+        // is C_k or C_(k+1) (an admit inside the era). An honest node
+        // ingests against its LIVE registry, which trails its commit
+        // frontier by up to gc_depth rounds, so an ejected author's
+        // certificates legitimately sit up to gc_depth rounds above the
+        // eject: every ring seated within that lag is admissible too. A
+        // key seated only before r - gc_depth admits nothing at r.
         let i = committees
             .iter()
             .rposition(|(rd, _)| *rd < c.round)
             .unwrap_or(0);
+        let lo = committees
+            .iter()
+            .rposition(|(rd, _)| *rd < c.round.saturating_sub(gc_depth))
+            .unwrap_or(0)
+            .min(i);
         let hi = (i + 1).min(committees.len() - 1);
-        let ok = committees[i..=hi].iter().any(|(_, reg)| {
+        let ok = committees[lo..=hi].iter().any(|(_, reg)| {
             reg.get(c.author)
                 .and_then(|m| {
                     suwappu_crypto::mldsa::PublicKey::from_bytes(&m.public_key_bytes).ok()
@@ -2659,6 +2749,9 @@ async fn install_snapshot(state: &State, snap: StateSnapshot, own: bool) {
             let cadence = inner.checkpoint_cadence;
             inner.next_checkpoint_boundary = (ck.round / cadence + 1) * cadence;
         }
+        inner
+            .emitted_checkpoints
+            .retain(|_, (c, _)| c.height > ck.height);
         inner.latest_checkpoint = Some(latest);
     }
 }
@@ -5972,7 +6065,11 @@ mod tests {
         }
         bad.dag_certs.push(originals[0].clone());
         assert!(
-            verify_served_snapshot(&bad, &ck, &net, gc_depth, &committees).is_err(),
+            matches!(
+                verify_served_snapshot(&bad, &ck, &net, gc_depth, &committees),
+                Err("certificate window too large")
+                    | Err("more than two certificates for one author and round")
+            ),
             "padded certificate window"
         );
         let mut bad = (*served).clone();
@@ -6019,24 +6116,36 @@ mod tests {
             "forged queued governance"
         );
         // Committees are scoped to the rounds they governed: a certificate
-        // at round r verifies against the ring established by the last
-        // checkpoint below r and the next one (transition grace).
-        //  - eject at the checkpoint itself: the full ring governs every
-        //    window round, the shrunk ring is the successor → ok;
+        // at round r verifies against the rings established within
+        // gc_depth rounds below r (the honest ingest lag), the last one
+        // below r, and the next one (transition grace).
+        //  - eject at or below the window top: the full ring is within
+        //    the lag of every window round → ok;
         //  - admit inside the window: rounds up to the admit checkpoint
         //    see the full ring as successor, rounds above it directly → ok;
-        //  - a key seated only before an era boundary two checkpoints
-        //    back admits nothing at rounds past it → rejected.
+        //  - a ring seated only more than gc_depth rounds below a window
+        //    round admits nothing there → rejected (when the window
+        //    reaches far enough above genesis for that to be testable);
+        //  - the shrunk ring alone never admits the departed author.
         {
             let full = served.authority_registry.clone();
             let departed = full.members().next().map(|m| m.id).unwrap();
             let mut shrunk = served.authority_registry.clone();
             shrunk.remove(departed);
             let gc = served.gc_round.unwrap();
-            let eject_at_checkpoint = vec![(0u64, full.clone()), (ck.round, shrunk.clone())];
+            let eject_at_top = vec![(0u64, full.clone()), (ck.round, shrunk.clone())];
             assert!(
-                verify_served_snapshot(&served, &ck, &net, gc_depth, &eject_at_checkpoint).is_ok(),
-                "eject at the checkpoint: departed author's window certificates admissible"
+                verify_served_snapshot(&served, &ck, &net, gc_depth, &eject_at_top).is_ok(),
+                "eject at the window top"
+            );
+            let eject_inside = vec![
+                (0u64, full.clone()),
+                (gc + 1, shrunk.clone()),
+                (ck.round, shrunk.clone()),
+            ];
+            assert!(
+                verify_served_snapshot(&served, &ck, &net, gc_depth, &eject_inside).is_ok(),
+                "eject inside the window: departed author's certificates within the ingest lag"
             );
             let admit_inside = vec![(0u64, shrunk.clone()), (gc + 2, full.clone())];
             assert!(
@@ -6045,14 +6154,20 @@ mod tests {
             );
             let long_range = vec![
                 (0u64, full.clone()),
-                (gc + 1, shrunk.clone()),
-                (gc + 2, shrunk.clone()),
+                (1, shrunk.clone()),
+                (2, shrunk.clone()),
             ];
-            assert_eq!(
-                verify_served_snapshot(&served, &ck, &net, gc_depth, &long_range),
-                Err("certificate not signed by the committee in force at its round"),
-                "a key from an earlier era does not admit certificates past it"
-            );
+            let departed_far_above = served
+                .dag_certs
+                .iter()
+                .any(|c| c.author == departed && c.round.saturating_sub(gc_depth) > 2);
+            if departed_far_above {
+                assert_eq!(
+                    verify_served_snapshot(&served, &ck, &net, gc_depth, &long_range),
+                    Err("certificate not signed by the committee in force at its round"),
+                    "a ring seated only far below the window admits nothing there"
+                );
+            }
             let only_shrunk = vec![(0u64, shrunk)];
             assert_eq!(
                 verify_served_snapshot(&served, &ck, &net, gc_depth, &only_shrunk),

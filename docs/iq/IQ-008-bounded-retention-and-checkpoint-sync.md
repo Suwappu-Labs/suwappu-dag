@@ -438,10 +438,13 @@ branch.
    structurally, not committed to.** The certificate window is
    receipt-timing dependent and cannot be part of a consensus-agreed
    root; a joiner checks every certificate's signature against the bound
-   Authority Ring in force at the certificate's round (the ring
-   established by the last verified checkpoint below that round, or its
-   predecessor as transition grace — a window of up to `gc_depth` rounds
-   may straddle an eject, but a key from any other era admits nothing),
+   Authority Ring in force at the certificate's round — the rings
+   established by verified checkpoints within `gc_depth` rounds below
+   it (an honest node ingests against its live registry, which trails
+   its commit frontier by up to that much, so an ejected author's
+   certificates legitimately sit up to `gc_depth` above the eject), the
+   last ring below it, and the next one as admit grace; a key seated
+   only before that lag admits nothing —
    its round against the bound gc round, at most two certificates per
    (author, round) — the same cap ingest applies, two being all an
    equivocation proof needs — and the tombstone window's rounds and
@@ -461,7 +464,16 @@ branch.
    `last_authored_round` and `log_sequence` are cleared, the checkpoint
    cursor is derived from the trusted checkpoint). `GetSnapshot` is
    answered for any peer without a rate limit; the reply is bounded
-   (`SNAPSHOT_CHUNK_BYTES` × chunks) but not free.
+   (`SNAPSHOT_CHUNK_BYTES` × chunks) but not free. Checkpoint
+   signatures aggregate against every recently emitted checkpoint
+   (bounded to eight, each holding its snapshot in memory until
+   settled), buffered only for heights this node could ratify next; a
+   node whose own checkpointing stalls for two boundaries asks peers for
+   their chain and adopts a strictly newer verified one, re-anchoring its
+   cursor without touching consensus state. Two Authority-Ring changes
+   inside one cadence window leave an intermediate ring no checkpoint
+   records; that member's certificates in the window are unverifiable
+   by joiners until GC passes them.
 8. **The authoring round is anchored on quorum, and the admissible round
    window is bounded.** A validator that falls behind jumps its next
    authoring round to one above the highest round holding a quorum of
