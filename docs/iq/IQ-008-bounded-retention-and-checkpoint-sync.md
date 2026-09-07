@@ -472,9 +472,12 @@ branch.
    (`SNAPSHOT_CHUNK_BYTES` × chunks) but not free. Checkpoint
    signatures aggregate against every recently emitted checkpoint
    (bounded to eight, each holding its snapshot in memory until
-   settled), buffered only for heights this node could ratify next, at
-   most `min(max(MAX / n, 2), MAX / (f + 1))` foreign entries per signer
-   (so f Byzantine signers hold fewer than `MAX` between them), evicted
+   settled), buffered only for heights this node could ratify next, in a
+   buffer whose capacity scales as `max(8, 2f + 2)` with at most
+   `min(max(cap / n, 2), cap / (f + 1))` foreign entries per signer (so f
+   Byzantine signers hold fewer than the capacity between them at every
+   ring size up to `AUTHORITY_RING_MAX`, checked by
+   `sig_buffer_bound_holds_at_every_ring_size`), evicted
    flooder-first (the entry whose signers hold the most foreign entries,
    then the least-signed, then the highest height — the honest
    pre-emission entry is always at the lowest), and with two slots always

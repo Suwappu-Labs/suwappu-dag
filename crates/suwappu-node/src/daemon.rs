@@ -1893,6 +1893,22 @@ async fn ingest_cert(
 
 /// Most recent checkpoint hashes for which signatures are buffered.
 const MAX_BUFFERED_CHECKPOINTS: usize = 8;
+
+/// Capacity and per-signer foreign-entry quota of the checkpoint
+/// signature buffer for a ring of `n` authorities (`f = (n - 1) / 3`).
+/// The capacity scales as `2f + 2` past `MAX_BUFFERED_CHECKPOINTS`, so
+/// `f × quota < capacity` holds at every ring size: a Byzantine minority
+/// can never fill the buffer, and at least two slots stay free for the
+/// honest pre-emission entry (consensus-review finding, eleventh pass —
+/// with a fixed capacity the bound broke at n ≥ 25).
+fn sig_buffer_params(n_authorities: u32) -> (usize, usize) {
+    let n = (n_authorities as usize).max(1);
+    let f = (n - 1) / 3;
+    let cap = MAX_BUFFERED_CHECKPOINTS.max(2 * f + 2);
+    let quota = (cap / n).max(2).min(cap / (f + 1)).max(1);
+    debug_assert!(f * quota < cap);
+    (cap, quota)
+}
 /// Certificates admitted per (author, round): two suffice for an
 /// equivocation proof, and the cap is what makes the DAG — and the served
 /// snapshot window — bounded per round.
@@ -2111,7 +2127,8 @@ async fn buffer_checkpoint_sig(state: &State, ck: &Checkpoint, sig: CheckpointSi
         .latest_checkpoint
         .as_ref()
         .map_or(0, |l| l.cosigned.checkpoint.height + 1);
-    if ck.height < floor || ck.height > floor + MAX_BUFFERED_CHECKPOINTS as u64 {
+    let (cap, quota) = sig_buffer_params(inner.n_authorities);
+    if ck.height < floor || ck.height > floor + cap as u64 {
         return;
     }
     let hash = ck.hash();
@@ -2124,15 +2141,8 @@ async fn buffer_checkpoint_sig(state: &State, ck: &Checkpoint, sig: CheckpointSi
     // signature to an existing entry is never quota-limited.
     if !inner.emitted_checkpoints.contains_key(&hash) && !inner.checkpoint_sigs.contains_key(&hash)
     {
-        // `MAX / n` (at least two) capped by `MAX / (f + 1)`: a Byzantine
-        // minority of f signers can then never hold more than
-        // f × MAX / (f + 1) < MAX entries between them.
-        let n = (inner.n_authorities as usize).max(1);
-        let f = (n - 1) / 3;
-        let quota = (MAX_BUFFERED_CHECKPOINTS / n)
-            .max(2)
-            .min(MAX_BUFFERED_CHECKPOINTS / (f + 1))
-            .max(1);
+        // See `sig_buffer_params`: f Byzantine signers hold fewer than
+        // `cap` entries between them at every ring size.
         let held = inner
             .checkpoint_sigs
             .iter()
@@ -2167,7 +2177,7 @@ async fn buffer_checkpoint_sig(state: &State, ck: &Checkpoint, sig: CheckpointSi
                     .map(|(c, _)| (*k, (c.height, c.round)))
             })
             .collect();
-        if own.len() + 2 <= MAX_BUFFERED_CHECKPOINTS {
+        if own.len() + 2 <= cap {
             break;
         }
         match own.iter().min_by_key(|(_, hr)| *hr).map(|(k, _)| *k) {
@@ -2177,7 +2187,7 @@ async fn buffer_checkpoint_sig(state: &State, ck: &Checkpoint, sig: CheckpointSi
             None => break,
         }
     }
-    while inner.checkpoint_sigs.len() > MAX_BUFFERED_CHECKPOINTS {
+    while inner.checkpoint_sigs.len() > cap {
         // Evict foreign entries before anything this node emitted;
         // among foreign entries, the one whose signers hold the most
         // foreign entries first (a flooder's fabrications, never a
@@ -5764,6 +5774,23 @@ mod tests {
         let dag = state.dag.read().await;
         assert_eq!(dag.max_round(), Some(8));
         assert_eq!(highest_quorum_round(&dag, n), Some(0));
+    }
+
+    /// Consensus-review (S34.5, eleventh pass): at every supported ring
+    /// size a Byzantine minority cannot fill the signature buffer.
+    #[test]
+    fn sig_buffer_bound_holds_at_every_ring_size() {
+        for n in 1..=(suwappu_authority::AUTHORITY_RING_MAX as u32) {
+            let f = ((n as usize).max(1) - 1) / 3;
+            let (cap, quota) = sig_buffer_params(n);
+            assert!(quota >= 1);
+            assert!(f * quota < cap, "n={n}: f={f} quota={quota} cap={cap}");
+            assert!(cap - f * quota >= 2, "n={n}: fewer than two free slots");
+        }
+        assert_eq!(sig_buffer_params(4), (8, 2));
+        assert_eq!(sig_buffer_params(13), (10, 2));
+        assert_eq!(sig_buffer_params(25), (18, 2));
+        assert_eq!(sig_buffer_params(50), (34, 2));
     }
 
     /// Consensus-review (S34.5, eighth pass): a seated authority flooding
