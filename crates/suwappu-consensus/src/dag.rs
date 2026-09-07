@@ -100,6 +100,13 @@ impl DagStore {
         }
     }
 
+    /// The retention depth this store was built with (`GC_DEPTH` by
+    /// default) — the width of the live window above the gc round and of
+    /// the tombstone window below it.
+    pub fn gc_depth(&self) -> Round {
+        self.tombstone_window()
+    }
+
     fn tombstone_window(&self) -> Round {
         if self.tombstone_window == 0 {
             GC_DEPTH

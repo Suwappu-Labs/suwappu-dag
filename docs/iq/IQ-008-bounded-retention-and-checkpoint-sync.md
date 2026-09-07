@@ -369,7 +369,14 @@ branch.
    leader already swept.) The daemon makes the clamp explicit
    (`floor = max(commit_floor(L), gc_round)`), emits `gc_late_flip` each
    time it applies, and `proptest_gc.rs::bounded_history_below_gc_is_clamped`
-   pins the clamped sweep as a property of the DAG. The clean fix is the
+   pins the clamped sweep as a property of the DAG (the clamp also
+   applies when the leader has no floor at all, i.e. `commit_floor` is
+   `None` while the node has pruned). The consequence is not transient:
+   the certificates only the slower peer sweeps have their intents
+   applied there and never on the pruned node, so the two post-roots stay
+   apart until the pruned node re-bootstraps from a co-signed snapshot,
+   and if at least `f + 1` nodes split the mesh can no longer co-sign a
+   checkpoint at that or any later boundary. The clean fix is the
    Mysticeti-style sequential, final decision order that #45 already
    tracks; until then the fault-injection run in `/goal` B2 will show how
    often the class is reached.
@@ -432,9 +439,35 @@ branch.
    referencing a fabricated pruned parent can still enter a joiner's
    window through a fabricated tombstone — the same exposure a live node
    has at its own window edge, and one that affects only support counts
-   at rounds the joiner will re-decide from live data. `GetSnapshot` is
+   at rounds the joiner will re-decide from live data. The served window
+   is exact — certificates above the checkpoint round are dropped at
+   capture, so its size is provably at most
+   `n × (gc_depth + cadence + 1)` and the joiner enforces that. Every
+   other snapshot field is either bound (`state_root`, `registry_root`,
+   `snapshot_root`) or node-local and never installed from a peer
+   (`pending_stake` is derived from the bound registries,
+   `last_authored_round` and `log_sequence` are cleared, the checkpoint
+   cursor is derived from the trusted checkpoint). `GetSnapshot` is
    answered for any peer without a rate limit; the reply is bounded
    (`SNAPSHOT_CHUNK_BYTES` × chunks) but not free.
+9. **Authors now vote for their own certificates.** Found while widening
+   the restart test to an outage longer than the retention window: the
+   Validator-Ring side of the AND-gate only ever collected votes from
+   *other* seated validators, so a certificate had at most `n − 1` votes
+   and a four-node ring with one member down could not ratify any leader
+   (three survivors: 300k of a 600k table against a 400,001 threshold).
+   The author's own vote is recorded and broadcast at proposal time. This
+   is a pre-existing liveness hole, not an IQ-008 change; it is recorded
+   here because the S34 tests are what exposed it.
+8. **The authoring round is anchored on quorum, and the admissible round
+   window is bounded.** A validator that falls behind jumps its next
+   authoring round to one above the highest round holding a quorum of
+   distinct authors — never to the raw DAG tip, which one seated
+   authority can push arbitrarily high with a single valid certificate —
+   and ingest drops any certificate more than `gc_depth` rounds above the
+   local tip (a joiner far behind catches up by backfill and snapshot,
+   not by live pushes). Both were consensus-review findings on the S34.5
+   fix pass.
 
 ## Implementation sketch (DAG-S34)
 

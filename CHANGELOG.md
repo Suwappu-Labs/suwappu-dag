@@ -90,8 +90,20 @@ will coincide with mainnet genesis.
     first leader above the boundary so every node signs the same root;
     the late-flip sweep floor is clamped explicitly and gated by
     `proptest_gc.rs::bounded_history_below_gc_is_clamped`; a validator
-    that falls behind jumps its authoring round to the observed tip and
-    backfills from its commit frontier rather than its DAG tip.
+    that falls behind jumps its authoring round to one above the highest
+    round holding a quorum of authors and backfills from its commit
+    frontier rather than its DAG tip; ingest drops certificates more than
+    `gc_depth` rounds above the local tip; snapshot install runs under
+    the commit lock; the served certificate window is exact (rounds at or
+    below the checkpoint) and the joiner derives its checkpoint cursor
+    from the trusted checkpoint.
+  - **Liveness fix found by the widened restart test:** an author never
+    voted for its own certificate on the Validator-Ring side, so a
+    certificate could gather at most `n − 1` votes and a four-node ring
+    with one member down held its commit frontier until that member
+    returned (three survivors held 300k of stake against a 400,001
+    threshold on every leader). The round driver now records and
+    broadcasts the author's own vote.
 - `suwappu_getSyncStatus` JSON-RPC method: the one-call answer to "is
   this node caught up?" for operators, the status page (G8) and the
   explorer (G7). Returns `local_dag_round`, `latest_committed_round`,
