@@ -29,7 +29,7 @@ regenesis.
 |---|---|---|---|
 | Certificate DAG | `crates/suwappu-consensus/src/dag.rs:33-40` | every cert ever ingested | Module doc: "append-only; certificates cannot be modified or removed". `max_round` carries an explicit warning (`dag.rs:115-121`) that pruning would break the commit-path substitution proven in `commit.rs::mod equivalence`. |
 | Block payloads | `State::blocks` (`daemon.rs`) | every block ever received | Served back to peers by `GetBlock` / `GetCertsByRound`. |
-| Votes | `State::votes` | removed only on commit (`daemon.rs:1962`) | Votes for never-committed certs stay forever. |
+| Votes | `State::votes` | removed only on commit (`daemon.rs:1962`) | Votes for never-committed certs stay forever. (S34.4: retained until the certificate is pruned at the gc round, so they can be relayed to catching-up peers; still bounded by the live window.) |
 | Committed set | `State::committed` | every committed cert hash | Consulted on every sweep. |
 | Equivocation index | `StateInner::seen_at` | one entry per (author, round) | Grows with rounds. |
 | Fast-path binding index | `StateInner::main_lane_index` | one entry per committed transfer | IQ-003 only needs the K=4 window. |
@@ -272,6 +272,41 @@ Following Mysticeti §VI, no key-value store. A new
      verifies `state_root` and `registry_root` against the verified
      checkpoint, installs it, and resumes ordinary backfill from
      `checkpoint.round + 1`.
+- As implemented (S34.4), three details the sketch above glossed over:
+  1. **Votes are relayed with certificates.** Validator-Ring votes are
+     unsigned gossip that seeds used to drop at commit. A joiner (or a
+     restarted seed) catching up over rounds its peers already committed
+     therefore held every certificate but no vote, and the AND-gate
+     correctly halted it at the first un-ratified leader forever. Votes
+     now live until their certificate is pruned at the gc round (still
+     bounded by the live window), and every `GetCert` /
+     `GetCertsByRound` reply is followed by a `Votes` frame for that
+     certificate. The receiver applies the live-`Vote` rule (configured
+     peers only), so this adds no trust the joiner did not already
+     place in the peers it dials. No checkpoint-based shortcut around the
+     Validator Ring was added: a co-signed checkpoint is Authority-Ring
+     evidence only and using it to ratify leaders would collapse one ring
+     into the other for the catch-up window (Invariant 1).
+  2. **Backfill resumes below the DAG tip after an install or recovery.**
+     Certificates above the restored leader frontier travel inside the
+     snapshot / commit log without their votes or blocks; forward backfill
+     keys on the DAG tip and would never re-ask for them. A one-shot
+     `backfill_resume` re-pulls the tail from `leader_round + 1`.
+  3. **Seeds push to dynamic peers.** Certificates, blocks, votes and
+     checkpoint signatures are fanned out to every connected dynamic
+     peer (not only configured ones) so a joiner that is nobody's
+     configured peer still receives the live stream; dynamic peers remain
+     unable to *inject* votes, tips, blocks or checkpoint signatures.
+  4. **Checkpoint identity is anchored on agreed state.** A checkpoint's
+     `round` is the boundary round, and its `height` / `prev_checkpoint`
+     come from the latest co-signed checkpoint, not from the node's own
+     last emission. A node whose view wobbles at one boundary (IQ-004)
+     produces one divergent hash and rejoins at the next boundary rather
+     than poisoning every later checkpoint through its own prev-hash
+     chain. `checkpoint_cadence_rounds` (genesis manifest, default 32)
+     must satisfy `2 × cadence ≤ gc_depth_rounds` so the served snapshot
+     window edge outlives the joiner's catch-up; `Daemon::start` rejects
+     manifests that violate it.
 - The trust obtained is the same as for any committed block: an honest
   ≥ quorum of the Authority Ring at that checkpoint. This preserves
   Invariant 1's framing — a joiner can be fed a false state only by a
@@ -332,10 +367,11 @@ branch.
    resubmitted) rather than adding re-injection.
 3. **Checkpoint cadence trade-off.** Snapshots are written at checkpoint
    boundaries; a low cadence means large replay on restart, a high
-   cadence means many co-signature rounds. The default stays at the
-   epoch length (1024 rounds) for the testnet; `checkpoint_cadence_rounds`
-   remains operator-tunable but must be identical across the mesh
-   because it changes the co-signed message sequence.
+   cadence means many co-signature rounds. The manifest default is 32
+   rounds (one eighth of `GC_DEPTH`, well inside the `2 × cadence ≤
+   gc_depth` bound); `checkpoint_cadence_rounds` is a genesis-manifest
+   field, identical across the mesh by construction, because it changes
+   the co-signed message sequence.
 4. **Consensus-reviewer + human sign-off.** Required before this branch
    is merged (CLAUDE.md §Specialist subagents; `/goal` Rules). The
    reviewer's verdict is recorded in the PR body.

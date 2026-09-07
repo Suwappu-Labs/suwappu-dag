@@ -24,8 +24,9 @@
 //!   (a torn tail from a crash mid-write) is discarded by truncation.
 //!
 //! - **`snapshot-<round>.bin`** — a full [`StateSnapshot`] written
-//!   atomically (temp file + rename) every `snapshot_interval_rounds`
-//!   committed leader rounds and on clean shutdown. Verified on load by
+//!   atomically (temp file + rename) at every checkpoint boundary
+//!   (`checkpoint_cadence_rounds` in the genesis manifest) and on clean
+//!   shutdown. Verified on load by
 //!   recomputing the substrate root against the stored `state_root`; on
 //!   mismatch the loader falls back to the previous snapshot, then to
 //!   genesis, mirroring Sui's formal-snapshot "revert on failed
@@ -50,7 +51,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use suwappu_authority::AuthorityRegistry;
 use suwappu_consensus::{CertHash, Certificate, StakeTable};
-use suwappu_execution::{InMemorySubstrate, Intent, Substrate};
+use suwappu_execution::{Checkpoint, CoSignedCheckpoint, InMemorySubstrate, Intent, Substrate};
 use suwappu_validator::ValidatorRegistry;
 
 use crate::{client::GovAuth, wire::BlockPayload};
@@ -91,6 +92,49 @@ pub enum LogEvent {
         /// Its authentic block (digest-matched to the cert at commit).
         block: BlockPayload,
     },
+    /// A checkpoint reached an Authority Ring quorum of signatures
+    /// (IQ-008 D5). Replayed to restore the served chain.
+    Checkpointed(Box<CheckpointBundle>),
+}
+
+/// The committee state a checkpoint commits to via `registry_root`
+/// (IQ-008 D5). Everything a joiner needs to verify the *next*
+/// checkpoint's signatures and to seat itself in the right epoch.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RegistrySet {
+    /// Authority Ring.
+    pub authority_registry: AuthorityRegistry,
+    /// Validator Ring.
+    pub validator_registry: ValidatorRegistry,
+    /// Validator stake table.
+    pub stake_table: StakeTable,
+    /// `(current, rounds_per_epoch, last_boundary_round)`.
+    pub epoch: (u64, u64, u64),
+    /// Committee size used by the commit rule.
+    pub n_authorities: u32,
+}
+
+impl RegistrySet {
+    /// Canonical commitment: `blake3("SUWAPPU-REGISTRY-ROOT-V1" ||
+    /// bincode(self))`. The registries are `BTreeMap`-backed, so the
+    /// encoding is deterministic.
+    pub fn root(&self) -> [u8; 32] {
+        let bytes = crate::codec::encode(self).expect("RegistrySet is serialisable");
+        let mut h = blake3::Hasher::new();
+        h.update(b"SUWAPPU-REGISTRY-ROOT-V1");
+        h.update(&bytes);
+        *h.finalize().as_bytes()
+    }
+}
+
+/// A co-signed checkpoint together with the committee it establishes —
+/// one link of the chain served to joiners (IQ-008 D5).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CheckpointBundle {
+    /// Quorum-signed checkpoint.
+    pub cosigned: CoSignedCheckpoint,
+    /// Registry set whose `root()` equals `cosigned.checkpoint.registry_root`.
+    pub registries: RegistrySet,
 }
 
 /// A log record: an event plus the hash chain link.
@@ -192,6 +236,7 @@ impl CommitLog {
                     last_authored_round =
                         Some(last_authored_round.map_or(*round, |r: u64| r.max(*round)));
                 }
+                LogEvent::Checkpointed(_) => {}
             }
             last_hash = record.hash();
             records.push(record);
@@ -283,6 +328,12 @@ impl CommitLog {
         Ok(())
     }
 
+    /// Record a quorum-co-signed checkpoint (IQ-008 D5).
+    pub fn append_checkpointed(&mut self, bundle: CheckpointBundle) -> io::Result<()> {
+        self.append(LogEvent::Checkpointed(Box::new(bundle)))?;
+        Ok(())
+    }
+
     /// Record a committed certificate. Returns its sequence number.
     pub fn append_committed(
         &mut self,
@@ -347,9 +398,34 @@ pub struct StateSnapshot {
     pub committed: Vec<CertHash>,
     /// Block payloads for the live window.
     pub blocks: Vec<BlockPayload>,
+    /// The checkpoint this snapshot was captured at (IQ-008 D5): its
+    /// `state_root` equals `state_root` here and its `registry_root`
+    /// equals the root of the registries above. `None` for a shutdown
+    /// snapshot taken between checkpoint rounds.
+    #[serde(default)]
+    pub checkpoint: Option<Checkpoint>,
+    /// Committee-transition checkpoints plus the latest co-signed one,
+    /// oldest first — the chain served to joiners.
+    #[serde(default)]
+    pub checkpoint_chain: Vec<CheckpointBundle>,
+    /// Checkpoint sequencing state: next boundary round, next height,
+    /// hash of the last emitted checkpoint.
+    #[serde(default)]
+    pub checkpoint_cursor: (u64, u64, [u8; 32]),
 }
 
 impl StateSnapshot {
+    /// The registry set this snapshot carries, for `RegistrySet::root`.
+    pub fn registries(&self) -> RegistrySet {
+        RegistrySet {
+            authority_registry: self.authority_registry.clone(),
+            validator_registry: self.validator_registry.clone(),
+            stake_table: self.stake_table.clone(),
+            epoch: self.epoch,
+            n_authorities: self.n_authorities,
+        }
+    }
+
     /// Recompute the substrate root and compare with the recorded one.
     pub fn verify(&self) -> Result<(), SnapshotError> {
         if self.version != STORE_VERSION {
@@ -639,6 +715,9 @@ mod tests {
             tombstones: vec![(cert(1, 1).hash(), 1)],
             committed: vec![cert(leader_round, 9).hash()],
             blocks: Vec::new(),
+            checkpoint: None,
+            checkpoint_chain: Vec::new(),
+            checkpoint_cursor: (0, 0, [0u8; 32]),
         }
     }
 

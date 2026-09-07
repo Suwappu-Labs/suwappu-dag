@@ -110,6 +110,9 @@ fn snapshot_of(sub: &InMemorySubstrate, leader_round: u64, log_sequence: u64) ->
         tombstones: Vec::new(),
         committed: Vec::new(),
         blocks: Vec::new(),
+        checkpoint: None,
+        checkpoint_chain: Vec::new(),
+        checkpoint_cursor: (0, 0, [0u8; 32]),
     }
 }
 

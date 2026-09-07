@@ -51,7 +51,6 @@ for region in $regions; do
     echo "# IQ-008 D4: durable commit log + snapshots; a seed must never"
     echo "# re-sign a round after a restart."
     echo "data_dir = \"/var/lib/suwappu/state\""
-    echo "snapshot_interval_rounds = 1024"
     echo "store_fsync = true"
     echo ""
     echo "# Testnet runs heavier than devnet — the rate-limit knobs"

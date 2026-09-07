@@ -52,7 +52,7 @@ proptest! {
         // low at default and let the 10k release run produce the
         // load-bearing evidence. The sprint exit gate budget is the
         // release-mode time, not the dev-mode time.
-        cases: 64,
+        cases: std::env::var("PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(64),
         max_shrink_iters: 16,
         .. ProptestConfig::default()
     })]
@@ -74,6 +74,7 @@ proptest! {
             round,
             state_root: [state_root_seed; 32],
             prev_checkpoint: [prev_seed; 32],
+            registry_root: [0; 32],
         };
 
         // Sign with exactly the first q authorities.
@@ -150,6 +151,7 @@ proptest! {
             round,
             state_root: [0; 32],
             prev_checkpoint: [0; 32],
+            registry_root: [0; 32],
         };
 
         let supplied = q.saturating_sub(1);

@@ -37,7 +37,10 @@ use suwappu_consensus::{
     validator_quorum_met, AuthorityId, ConsensusError, LeaderStatus,
 };
 use suwappu_execution::Substrate;
-use suwappu_execution::{execute_block, Block, InMemorySubstrate, Intent};
+use suwappu_execution::{
+    execute_block, ratify_checkpoint, sign_checkpoint, verify_checkpoint_chain, Block, ChainLink,
+    Checkpoint, CheckpointSignature, InMemorySubstrate, Intent,
+};
 use suwappu_fastpath::{
     binding::{is_main_lane_consistent, MainLaneTx, FAST_PATH_CONFIRMATION_K},
     cert::{FastPathCert, FastPathTx, OwnedObjectId},
@@ -52,7 +55,11 @@ use tracing::debug;
 use crate::{
     config::{ConfigError, GenesisManifest, NodeConfig},
     events::{Event, EventLog, Lane},
-    wire::{BlockPayload, PeerId, Wire, WireConfig, WireEvent, WireMessage, WireSplit},
+    store::{CheckpointBundle, RegistrySet, StateSnapshot},
+    wire::{
+        BlockPayload, CheckpointSigMsg, DynPeers, PeerId, Wire, WireConfig, WireEvent, WireMessage,
+        WireSplit, SNAPSHOT_CHUNK_BYTES,
+    },
 };
 
 /// DAG-S31.2 shared validator state with per-field locking.
@@ -125,8 +132,28 @@ pub(crate) struct State {
     /// IQ-008 D4: snapshot directory (`NodeConfig::data_dir`), `None` for
     /// an ephemeral node.
     pub(crate) data_dir: Option<std::path::PathBuf>,
-    /// Committed leader rounds between snapshots.
-    pub(crate) snapshot_interval: u64,
+    /// This node's authority id (`NodeConfig::authority_id`); the id it
+    /// signs checkpoints under.
+    pub(crate) self_id: AuthorityId,
+    /// The Authority Ring as published in the genesis manifest — the
+    /// trust root of the checkpoint-chain walk (IQ-008 D5).
+    pub(crate) genesis_authority_registry: AuthorityRegistry,
+    /// Connected dynamic peers, for push gossip (IQ-008 D5). Empty on a
+    /// node whose wire has not been attached (unit tests).
+    pub(crate) dyn_peers: DynPeers,
+}
+
+/// Joiner-side checkpoint-snapshot bootstrap state (IQ-008 D5).
+#[derive(Debug, Default)]
+pub(crate) struct SnapshotSync {
+    /// Unix ms of the last `GetCheckpoints` request (0 = never).
+    pub(crate) requested_at_ms: u64,
+    /// Chain-verified bundle whose snapshot we are fetching.
+    pub(crate) trusted: Option<CheckpointBundle>,
+    /// Reassembly buffer keyed by chunk index.
+    pub(crate) chunks: BTreeMap<u32, Vec<u8>>,
+    /// Expected chunk count once the first chunk arrives.
+    pub(crate) total: u32,
 }
 
 /// Material needed to produce this validator's bridge-header side-attestations.
@@ -274,6 +301,15 @@ pub(crate) struct StateInner {
     /// Drives the forward backfill loop (`run_backfill`) for late-join
     /// and restart catch-up.
     pub(crate) sync_tip: u64,
+    /// IQ-008 D5: one-shot request for the backfill loop to re-pull rounds
+    /// from here instead of from the local DAG tip. Set after a snapshot
+    /// install or a disk recovery: the certificates above the restored
+    /// leader frontier are already in the DAG (they travelled in the
+    /// snapshot / the log), but their Validator-Ring votes and possibly
+    /// their blocks did not, and forward backfill keys on the DAG tip so it
+    /// would never ask for them. Re-requesting the tail delivers the votes
+    /// (`Votes` frames) the joint quorum needs to commit past the frontier.
+    pub(crate) backfill_resume: Option<u64>,
     /// Highest gc round any *configured* peer has reported via
     /// `TipInfo`. When it is at or above our own DAG round, forward
     /// backfill cannot succeed (IQ-008 D5) and `needs_snapshot` is set.
@@ -301,6 +337,34 @@ pub(crate) struct StateInner {
     pub(crate) store: Option<crate::store::CommitLog>,
     /// Leader round at which the last snapshot was captured.
     pub(crate) last_snapshot_leader_round: Option<u64>,
+    /// IQ-008 D5: manifest checkpoint cadence in committed leader rounds.
+    pub(crate) checkpoint_cadence: u64,
+    /// Next committed leader round at or past which a checkpoint is
+    /// emitted.
+    pub(crate) next_checkpoint_boundary: u64,
+    /// Height the next checkpoint will carry.
+    pub(crate) checkpoint_height: u64,
+    /// Hash of the last emitted checkpoint (`[0; 32]` before the first).
+    pub(crate) last_checkpoint_hash: [u8; 32],
+    /// Checkpoint this node computed and is collecting signatures for.
+    pub(crate) pending_checkpoint: Option<Checkpoint>,
+    /// Verified signatures buffered per checkpoint hash. Bounded to the
+    /// most recent `MAX_BUFFERED_CHECKPOINTS` hashes.
+    pub(crate) checkpoint_sigs: BTreeMap<[u8; 32], (u64, Vec<CheckpointSignature>)>,
+    /// Committee-transition checkpoints (oldest first), each signed by
+    /// the committee the previous one established.
+    pub(crate) checkpoint_transitions: Vec<CheckpointBundle>,
+    /// Latest co-signed checkpoint, if any.
+    pub(crate) latest_checkpoint: Option<CheckpointBundle>,
+    /// Snapshot captured at the latest *emitted* checkpoint (awaiting
+    /// co-signature).
+    pub(crate) checkpoint_snapshot: Option<Arc<StateSnapshot>>,
+    /// Snapshot bound to the latest *co-signed* checkpoint — the one
+    /// served to joiners. Kept separately so emitting the next
+    /// checkpoint never un-serves the one joiners can verify.
+    pub(crate) served_snapshot: Option<Arc<StateSnapshot>>,
+    /// Joiner bootstrap state.
+    pub(crate) snapshot_sync: SnapshotSync,
     pub(crate) n_authorities: u32,
     /// Certs received whose parents aren't yet in the local DAG.
     pub(crate) orphans: HashMap<CertHash, Vec<Certificate>>,
@@ -564,6 +628,7 @@ impl State {
             }
         }
         let n = manifest.validators.len() as u32;
+        let genesis_authority_registry = authority_registry.clone();
         Self {
             // Tombstone window = manifest gc depth (IQ-008 D2), so a cert
             // just above the gc round validates against its pruned
@@ -580,6 +645,7 @@ impl State {
                 last_authored_round: None,
                 max_observed_round: 0,
                 sync_tip: 0,
+                backfill_resume: None,
                 peer_gc_round: None,
                 needs_snapshot: false,
                 gc_depth: manifest.gc_depth_rounds.max(1),
@@ -587,6 +653,17 @@ impl State {
                 last_committed_leader_round: None,
                 store: None,
                 last_snapshot_leader_round: None,
+                checkpoint_cadence: manifest.checkpoint_cadence_rounds.max(1),
+                next_checkpoint_boundary: manifest.checkpoint_cadence_rounds.max(1),
+                checkpoint_height: 0,
+                last_checkpoint_hash: [0u8; 32],
+                pending_checkpoint: None,
+                checkpoint_sigs: BTreeMap::new(),
+                checkpoint_transitions: Vec::new(),
+                latest_checkpoint: None,
+                checkpoint_snapshot: None,
+                served_snapshot: None,
+                snapshot_sync: SnapshotSync::default(),
                 n_authorities: n,
                 orphans: HashMap::new(),
                 inflight_fetches: HashSet::new(),
@@ -621,15 +698,24 @@ impl State {
             bridge_signer,
             bridge_attestation_cache: parking_lot::Mutex::new(None),
             data_dir: None,
-            snapshot_interval: 1024,
+            self_id: 0,
+            genesis_authority_registry,
+            dyn_peers: Arc::new(parking_lot::RwLock::new(HashMap::new())),
         }
     }
 
-    /// Builder: enable persistence under `data_dir` (IQ-008 D4). Called by
+    /// Builder: attach the wire's dynamic-peer registry so broadcasts
+    /// reach late joiners (IQ-008 D5).
+    fn with_dyn_peers(mut self, dyn_peers: DynPeers) -> Self {
+        self.dyn_peers = dyn_peers;
+        self
+    }
+
+    /// Builder: runtime identity + persistence (IQ-008 D4/D5). Called by
     /// `Daemon::start` before the state is shared.
-    fn with_persistence(mut self, data_dir: Option<std::path::PathBuf>, interval: u64) -> Self {
+    fn with_runtime(mut self, data_dir: Option<std::path::PathBuf>, self_id: AuthorityId) -> Self {
         self.data_dir = data_dir;
-        self.snapshot_interval = interval.max(1);
+        self.self_id = self_id;
         self
     }
 
@@ -720,6 +806,17 @@ impl Daemon {
         let self_id: AuthorityId = cfg.authority_id;
         let self_label = cfg.self_id.clone();
         let round_ms = cfg.round_ms;
+        // IQ-008 D5: a joiner catches up from the served checkpoint
+        // snapshot by forward backfill, which only works while the
+        // checkpoint round is still inside every peer's live window.
+        if manifest.checkpoint_cadence_rounds.saturating_mul(2) > manifest.gc_depth_rounds {
+            return Err(anyhow::anyhow!(
+                "genesis manifest: checkpoint_cadence_rounds ({}) must be at most half of \
+                 gc_depth_rounds ({}), or joiners could never catch up after a snapshot",
+                manifest.checkpoint_cadence_rounds,
+                manifest.gc_depth_rounds
+            ));
+        }
 
         let (log, log_task) = EventLog::start(&cfg.event_log_path).await?;
         let wire = Wire::start(WireConfig {
@@ -736,6 +833,7 @@ impl Daemon {
             inboxes,
             outbound,
             dyn_inbox,
+            dyn_peers,
             tasks: mut wire_tasks,
         } = wire.split();
         let outbound = Arc::new(outbound);
@@ -760,7 +858,8 @@ impl Daemon {
         let bridge_signer = BridgeHeaderSigner::from_config(&cfg, &manifest);
         let state = Arc::new(
             State::new(&manifest, self_secret_key, bridge_signer)
-                .with_persistence(cfg.data_dir.clone(), cfg.snapshot_interval_rounds),
+                .with_runtime(cfg.data_dir.clone(), self_id)
+                .with_dyn_peers(dyn_peers),
         );
 
         // IQ-008 D4: recover from disk BEFORE any task can author, vote or
@@ -1002,16 +1101,22 @@ async fn run_inbox(
                             validator: self_id,
                             candidate: ic.hash,
                         };
-                        state.votes.lock().entry(ic.hash).or_default().push(vote);
+                        store_vote(&state, vote);
                         log.emit(
                             Event::now(&self_label, Lane::Main, "voted")
                                 .with_round(ic.round)
                                 .with_cert_hash(&ic.hash.0),
                         );
-                        broadcast_traced(&outbound, WireMessage::Vote(vote), &self_label, &log);
+                        broadcast_all(
+                            &state,
+                            &outbound,
+                            WireMessage::Vote(vote),
+                            &self_label,
+                            &log,
+                        );
                     }
                 }
-                try_commit(&state, &self_label, &log).await;
+                try_commit(&state, &self_label, &log, &outbound).await;
             }
             WireMessage::Block(block) => {
                 // Dynamic (unauthenticated) peers only ever REQUEST blocks
@@ -1062,20 +1167,30 @@ async fn run_inbox(
                 // would forge Validator-Ring stake.
                 if is_dynamic {
                     debug!(peer = %from.0, "inbox: dropping Vote from dynamic peer");
-                } else {
-                    state
-                        .votes
-                        .lock()
-                        .entry(vote.candidate)
-                        .or_default()
-                        .push(vote);
-                    try_commit(&state, &self_label, &log).await;
+                } else if store_vote(&state, vote) {
+                    try_commit(&state, &self_label, &log, &outbound).await;
                 }
             }
             WireMessage::GetCert(hash) => {
                 let cert_opt = state.dag.read().await.get(&hash).cloned();
                 if let Some(cert) = cert_opt {
                     reply_to(&outbound, &from, &reply, WireMessage::Cert(cert));
+                    reply_votes(&state, hash, &outbound, &from, &reply);
+                }
+            }
+            WireMessage::Votes(votes) => {
+                // Same trust rule as a live `Vote`: unsigned, so only a
+                // configured peer may deliver them.
+                if is_dynamic {
+                    debug!(peer = %from.0, "inbox: dropping Votes from dynamic peer");
+                } else {
+                    let mut any = false;
+                    for vote in votes {
+                        any |= store_vote(&state, vote);
+                    }
+                    if any {
+                        try_commit(&state, &self_label, &log, &outbound).await;
+                    }
                 }
             }
             WireMessage::FastPath(cert) => {
@@ -1148,6 +1263,116 @@ async fn run_inbox(
                     }
                 }
             }
+            WireMessage::CheckpointSig(msg) => {
+                // Configured peers only: the signature is verified against
+                // the verification committee's registered key, but the
+                // buffer is bounded per hash by signer count, so an
+                // unauthenticated flood could still churn it.
+                if is_dynamic {
+                    debug!(peer = %from.0, "inbox: dropping CheckpointSig from dynamic peer");
+                } else {
+                    let committee = verification_committee(&state).await;
+                    let current = state.authority_registry.read().await.clone();
+                    let pk = committee
+                        .get(msg.authority)
+                        .or_else(|| current.get(msg.authority))
+                        .and_then(|m| {
+                            suwappu_crypto::mldsa::PublicKey::from_bytes(&m.public_key_bytes).ok()
+                        });
+                    let valid = pk.is_some_and(|pk| {
+                        suwappu_crypto::mldsa::Signature::from_bytes(&msg.signature)
+                            .map(|sig| {
+                                suwappu_crypto::mldsa::verify(&msg.checkpoint.hash(), &sig, &pk)
+                                    .is_ok()
+                            })
+                            .unwrap_or(false)
+                    });
+                    if valid {
+                        let hash = msg.checkpoint.hash();
+                        buffer_checkpoint_sig(
+                            &state,
+                            &msg.checkpoint,
+                            CheckpointSignature {
+                                authority: msg.authority,
+                                signature: msg.signature,
+                            },
+                        )
+                        .await;
+                        try_aggregate_checkpoint(&state, hash, &self_label, &log).await;
+                    } else {
+                        debug!(peer = %from.0, authority = msg.authority, "inbox: checkpoint signature rejected");
+                    }
+                }
+            }
+            WireMessage::GetCheckpoints => {
+                let chain = served_checkpoint_chain(&state).await;
+                if !chain.is_empty() {
+                    reply_to(&outbound, &from, &reply, WireMessage::Checkpoints(chain));
+                }
+            }
+            WireMessage::Checkpoints(chain) => {
+                if is_dynamic {
+                    debug!(peer = %from.0, "inbox: dropping Checkpoints from dynamic peer");
+                } else {
+                    handle_checkpoint_chain(&state, chain, &from, &reply, &outbound).await;
+                }
+            }
+            WireMessage::GetSnapshot(height) => {
+                let snap = {
+                    let inner = state.inner.lock().await;
+                    let served = inner
+                        .latest_checkpoint
+                        .as_ref()
+                        .is_some_and(|l| l.cosigned.checkpoint.height == height);
+                    inner.served_snapshot.clone().filter(|s| {
+                        served && s.checkpoint.as_ref().is_some_and(|c| c.height == height)
+                    })
+                };
+                if let Some(snap) = snap {
+                    match crate::codec::encode(&*snap) {
+                        Ok(bytes) => {
+                            let total = bytes.len().div_ceil(SNAPSHOT_CHUNK_BYTES).max(1) as u32;
+                            for (index, chunk) in bytes.chunks(SNAPSHOT_CHUNK_BYTES).enumerate() {
+                                reply_to(
+                                    &outbound,
+                                    &from,
+                                    &reply,
+                                    WireMessage::SnapshotChunk {
+                                        height,
+                                        index: index as u32,
+                                        total,
+                                        bytes: chunk.to_vec(),
+                                    },
+                                );
+                            }
+                        }
+                        Err(e) => tracing::error!(err = %e, "snapshot: encode failed"),
+                    }
+                }
+            }
+            WireMessage::SnapshotChunk {
+                height,
+                index,
+                total,
+                bytes,
+            } => {
+                if is_dynamic {
+                    debug!(peer = %from.0, "inbox: dropping SnapshotChunk from dynamic peer");
+                } else {
+                    handle_snapshot_chunk(
+                        &state,
+                        height,
+                        index,
+                        total,
+                        bytes,
+                        &from,
+                        &self_label,
+                        &log,
+                        &outbound,
+                    )
+                    .await;
+                }
+            }
             WireMessage::GetCertsByRound(round) => {
                 // Serve every cert at `round` as ordinary Cert frames (the
                 // requester's normal ingest verifies + dedups), each with
@@ -1167,6 +1392,7 @@ async fn run_inbox(
                     if let Some(block) = block_opt {
                         reply_to(&outbound, &from, &reply, WireMessage::Block(block));
                     }
+                    reply_votes(&state, h, &outbound, &from, &reply);
                 }
             }
             WireMessage::GetBlock(hash) => {
@@ -1176,6 +1402,39 @@ async fn run_inbox(
                 }
             }
         }
+    }
+}
+
+/// Record a Validator-Ring vote, deduplicated per (candidate, validator).
+/// Returns `true` iff it was new — the caller only re-runs the commit
+/// walk for new information, and a re-requested backfill round (or a
+/// relay that echoes) cannot grow the slot without bound.
+fn store_vote(state: &State, vote: Vote) -> bool {
+    let mut votes = state.votes.lock();
+    let slot = votes.entry(vote.candidate).or_default();
+    if slot.iter().any(|v| v.validator == vote.validator) {
+        return false;
+    }
+    slot.push(vote);
+    true
+}
+
+/// Relay the votes held for `hash` after serving the certificate itself
+/// (IQ-008 D5). Votes live until the certificate is pruned, so a peer
+/// catching up over rounds this node already committed receives the
+/// Validator-Ring side of the joint quorum together with the
+/// Authority-Ring side, and ratifies those leaders through the same
+/// AND-gate a live node does.
+fn reply_votes(
+    state: &State,
+    hash: CertHash,
+    outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
+    from: &PeerId,
+    reply: &Option<tokio::sync::mpsc::Sender<WireMessage>>,
+) {
+    let votes: Vec<Vote> = state.votes.lock().get(&hash).cloned().unwrap_or_default();
+    if !votes.is_empty() {
+        reply_to(outbound, from, reply, WireMessage::Votes(votes));
     }
 }
 
@@ -1206,8 +1465,11 @@ async fn run_backfill(
     state: Arc<State>,
     outbound: Arc<HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>>,
 ) {
-    const BACKFILL_TICK_MS: u64 = 500;
-    const BACKFILL_BATCH_ROUNDS: u64 = 8;
+    // IQ-008 D5: a joiner that just installed a snapshot must out-run the
+    // seeds' pruning (budget = gc_depth - checkpoint_cadence rounds), so
+    // the loop polls tips every second and pulls 32 rounds per tick.
+    const BACKFILL_TICK_MS: u64 = 250;
+    const BACKFILL_BATCH_ROUNDS: u64 = 32;
     // Shared with `suwappu_getSyncStatus` so "synced" over RPC means
     // exactly "this loop is idle"; the two cannot drift apart.
     const BACKFILL_LAG_THRESHOLD: u64 = suwappu_rpc::context::SyncStatusView::SYNCED_LAG_THRESHOLD;
@@ -1225,36 +1487,67 @@ async fn run_backfill(
         ticks = ticks.wrapping_add(1);
 
         let local = state.dag.read().await.max_round().unwrap_or(0);
-        let (target, peer_gc) = {
-            let inner = state.inner.lock().await;
-            (inner.sync_tip, inner.peer_gc_round)
+        let (target, peer_gc, resume) = {
+            let mut inner = state.inner.lock().await;
+            (
+                inner.sync_tip,
+                inner.peer_gc_round,
+                inner.backfill_resume.take(),
+            )
         };
-        if target <= local.saturating_add(BACKFILL_LAG_THRESHOLD) {
+        let resume = resume.filter(|r| *r <= local);
+        if resume.is_none() && target <= local.saturating_add(BACKFILL_LAG_THRESHOLD) {
             continue;
         }
-        let from_round = local.saturating_add(1);
+        let from_round = resume.unwrap_or_else(|| local.saturating_add(1));
         // IQ-008 D5: if the peers that hold the tip have already pruned
         // every round we would ask for, forward backfill is futile — the
         // certificates no longer exist anywhere. Flag it for the
         // checkpoint-snapshot bootstrap and stop hammering the peers.
         if let Some(g) = peer_gc {
             if from_round <= g {
-                let mut inner = state.inner.lock().await;
-                if !inner.needs_snapshot {
-                    inner.needs_snapshot = true;
-                    tracing::warn!(
-                        local_round = local,
-                        peer_gc_round = g,
-                        peer_tip = target,
-                        "backfill: peers have pruned past our DAG round; snapshot bootstrap required"
-                    );
+                let ask = {
+                    let mut inner = state.inner.lock().await;
+                    if !inner.needs_snapshot {
+                        inner.needs_snapshot = true;
+                        tracing::warn!(
+                            local_round = local,
+                            peer_gc_round = g,
+                            peer_tip = target,
+                            "backfill: peers have pruned past our DAG round; snapshot bootstrap required"
+                        );
+                    }
+                    let now = now_unix_ms();
+                    let elapsed = now.saturating_sub(inner.snapshot_sync.requested_at_ms);
+                    if elapsed >= SNAPSHOT_SYNC_RETRY_MS {
+                        // A trusted chain whose snapshot never arrived (the
+                        // peer moved on to a newer checkpoint, or dropped
+                        // the chunks) is abandoned and the walk restarts.
+                        if inner.snapshot_sync.trusted.is_some()
+                            && inner.snapshot_sync.chunks.is_empty()
+                        {
+                            inner.snapshot_sync.trusted = None;
+                        }
+                        inner.snapshot_sync.requested_at_ms = now;
+                        inner.snapshot_sync.trusted.is_none()
+                    } else {
+                        false
+                    }
+                };
+                if ask {
+                    // Two-peer fan-out, like every other sync request.
+                    for tx in outbound.values().take(2) {
+                        let _ = tx.try_send(WireMessage::GetCheckpoints);
+                    }
                 }
                 continue;
             }
         }
+        // A resumed tail is bounded by the local tip even when the peer
+        // tip poll has not answered yet.
         let to_round = from_round
             .saturating_add(BACKFILL_BATCH_ROUNDS - 1)
-            .min(target);
+            .min(target.max(local));
         // Snapshot senders once; rotate the fan-out start per round so a
         // fixed pair of alive-but-behind peers doesn't absorb every
         // request (consensus-reviewer fairness finding).
@@ -1442,6 +1735,558 @@ async fn ingest_cert(
     inserted
 }
 
+/// Most recent checkpoint hashes for which signatures are buffered.
+const MAX_BUFFERED_CHECKPOINTS: usize = 8;
+/// Re-ask peers for the checkpoint chain after this long without a
+/// usable answer.
+const SNAPSHOT_SYNC_RETRY_MS: u64 = 5_000;
+
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// The committee a checkpoint's signatures are verified against: the one
+/// established by the latest co-signed checkpoint, or the genesis
+/// Authority Ring before any (IQ-008 D5). Identical to the joiner's walk
+/// in `verify_checkpoint_chain`, so a node never accepts a co-signature
+/// a joiner could not verify.
+async fn verification_committee(state: &State) -> AuthorityRegistry {
+    let inner = state.inner.lock().await;
+    match &inner.latest_checkpoint {
+        Some(b) => b.registries.authority_registry.clone(),
+        None => state.genesis_authority_registry.clone(),
+    }
+}
+
+/// IQ-008 D5: a committed leader crossed a checkpoint boundary. Build the
+/// checkpoint over the current substrate root and committee, capture the
+/// snapshot that will be served for it, sign it if we are eligible, and
+/// broadcast the signature. Signatures already buffered for this
+/// checkpoint's hash are counted immediately.
+async fn emit_checkpoint(
+    state: &State,
+    leader_round: u64,
+    self_label: &str,
+    log: &EventLog,
+    outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
+) {
+    // 1. Build the checkpoint and advance the cursor (under `inner`).
+    let registries = current_registry_set(state).await;
+    let ck = {
+        let mut inner = state.inner.lock().await;
+        // Identity is anchored on what the mesh has already AGREED on: the
+        // boundary round (not the leader that happened to cross it first
+        // on this node) and the latest co-signed checkpoint's height and
+        // hash. A node whose view diverges at one boundary (an IQ-004
+        // ordering wobble) therefore produces a different hash for that
+        // one checkpoint only, and rejoins at the next boundary instead
+        // of poisoning every later checkpoint through its own prev-hash
+        // chain.
+        let boundary = inner.next_checkpoint_boundary;
+        let (height, prev_checkpoint) = match &inner.latest_checkpoint {
+            Some(l) => (
+                l.cosigned.checkpoint.height + 1,
+                l.cosigned.checkpoint.hash(),
+            ),
+            None => (0, [0u8; 32]),
+        };
+        let ck = Checkpoint {
+            height,
+            round: boundary,
+            state_root: inner.substrate.state_root(),
+            prev_checkpoint,
+            registry_root: registries.root(),
+        };
+        let cadence = inner.checkpoint_cadence;
+        inner.next_checkpoint_boundary = (leader_round / cadence + 1) * cadence;
+        inner.checkpoint_height = height + 1;
+        inner.last_checkpoint_hash = ck.hash();
+        inner.pending_checkpoint = Some(ck.clone());
+        ck
+    };
+    log.emit(
+        Event::now(self_label, Lane::Main, "checkpoint")
+            .with_round(leader_round)
+            .with_kind(format!("height={}", ck.height)),
+    );
+
+    // 2. Snapshot at exactly this state: served to joiners once co-signed,
+    //    written to disk when persistence is on.
+    let mut snap = capture_snapshot(state).await;
+    snap.checkpoint = Some(ck.clone());
+    let snap = Arc::new(snap);
+    state.inner.lock().await.checkpoint_snapshot = Some(snap.clone());
+    if let Some(dir) = state.data_dir.clone() {
+        let snap = snap.clone();
+        match tokio::task::spawn_blocking(move || crate::store::write_snapshot(&dir, &snap)).await {
+            Ok(Ok(path)) => {
+                tracing::info!(round = leader_round, path = %path.display(), "snapshot written")
+            }
+            Ok(Err(e)) => tracing::error!(err = %e, round = leader_round, "snapshot write failed"),
+            Err(e) => tracing::error!(err = %e, round = leader_round, "snapshot task panicked"),
+        }
+    }
+
+    // 3. Sign if eligible (seated now, or a member of the committee whose
+    //    signatures joiners will verify).
+    let committee = verification_committee(state).await;
+    let seated_now = state
+        .authority_registry
+        .read()
+        .await
+        .contains(state.self_id);
+    if seated_now || committee.contains(state.self_id) {
+        match sign_checkpoint(state.self_id, &state.self_secret_key, &ck) {
+            Ok(sig) => {
+                buffer_checkpoint_sig(state, &ck, sig.clone()).await;
+                broadcast_all(
+                    state,
+                    outbound,
+                    WireMessage::CheckpointSig(CheckpointSigMsg {
+                        checkpoint: ck.clone(),
+                        authority: sig.authority,
+                        signature: sig.signature,
+                    }),
+                    self_label,
+                    log,
+                );
+            }
+            Err(e) => tracing::error!(err = %e, "checkpoint: signing failed"),
+        }
+    }
+
+    // 4. Count whatever arrived early.
+    try_aggregate_checkpoint(state, ck.hash(), self_label, log).await;
+}
+
+async fn current_registry_set(state: &State) -> RegistrySet {
+    let inner = state.inner.lock().await;
+    RegistrySet {
+        authority_registry: state.authority_registry.read().await.clone(),
+        validator_registry: state.validator_registry.read().await.clone(),
+        stake_table: state.stake_table.read().await.clone(),
+        epoch: (
+            inner.epoch.current,
+            inner.epoch.rounds_per_epoch,
+            inner.epoch.last_boundary_round,
+        ),
+        n_authorities: inner.n_authorities,
+    }
+}
+
+/// Buffer a verified signature under its checkpoint hash, deduplicated by
+/// signer, keeping only the most recent `MAX_BUFFERED_CHECKPOINTS` hashes.
+async fn buffer_checkpoint_sig(state: &State, ck: &Checkpoint, sig: CheckpointSignature) {
+    let mut inner = state.inner.lock().await;
+    let entry = inner
+        .checkpoint_sigs
+        .entry(ck.hash())
+        .or_insert_with(|| (ck.height, Vec::new()));
+    if !entry.1.iter().any(|s| s.authority == sig.authority) {
+        entry.1.push(sig);
+    }
+    while inner.checkpoint_sigs.len() > MAX_BUFFERED_CHECKPOINTS {
+        let oldest = inner
+            .checkpoint_sigs
+            .iter()
+            .min_by_key(|(_, (h, _))| *h)
+            .map(|(k, _)| *k);
+        match oldest {
+            Some(k) => {
+                inner.checkpoint_sigs.remove(&k);
+            }
+            None => break,
+        }
+    }
+}
+
+/// If the pending checkpoint has a quorum of verified signatures under
+/// the verification committee, ratify it, record the bundle, and persist.
+async fn try_aggregate_checkpoint(state: &State, hash: [u8; 32], self_label: &str, log: &EventLog) {
+    let committee = verification_committee(state).await;
+    let (ck, sigs, snapshot) = {
+        let inner = state.inner.lock().await;
+        let Some(ck) = inner.pending_checkpoint.clone() else {
+            return;
+        };
+        if ck.hash() != hash {
+            return;
+        }
+        let sigs = inner
+            .checkpoint_sigs
+            .get(&hash)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default();
+        (ck, sigs, inner.checkpoint_snapshot.clone())
+    };
+    if (sigs.len() as u32) < committee.quorum_threshold() {
+        return;
+    }
+    let cosigned = match ratify_checkpoint(ck.clone(), sigs, &committee) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::debug!(err = %e, height = ck.height, "checkpoint: quorum not yet ratifiable");
+            return;
+        }
+    };
+    let registries = match snapshot
+        .as_ref()
+        .filter(|s| s.checkpoint.as_ref() == Some(&ck))
+    {
+        Some(s) => s.registries(),
+        None => current_registry_set(state).await,
+    };
+    if registries.root() != ck.registry_root {
+        tracing::error!(
+            height = ck.height,
+            "checkpoint: local registry set does not match the signed registry root"
+        );
+        return;
+    }
+    let bundle = CheckpointBundle {
+        cosigned,
+        registries,
+    };
+    record_cosigned_checkpoint(state, bundle, self_label, log).await;
+}
+
+/// Install a co-signed checkpoint into the served chain (transition rule:
+/// a checkpoint whose `registry_root` differs from the previous one's is
+/// a committee transition and is retained forever; otherwise only the
+/// latest is kept) and persist it.
+async fn record_cosigned_checkpoint(
+    state: &State,
+    bundle: CheckpointBundle,
+    self_label: &str,
+    log: &EventLog,
+) {
+    let height = bundle.cosigned.checkpoint.height;
+    let round = bundle.cosigned.checkpoint.round;
+    let mut inner = state.inner.lock().await;
+    if inner
+        .latest_checkpoint
+        .as_ref()
+        .is_some_and(|l| l.cosigned.checkpoint.height >= height)
+    {
+        return;
+    }
+    let prev_root = inner
+        .latest_checkpoint
+        .as_ref()
+        .map(|l| l.cosigned.checkpoint.registry_root);
+    let is_transition = prev_root != Some(bundle.cosigned.checkpoint.registry_root);
+    if is_transition {
+        inner.checkpoint_transitions.push(bundle.clone());
+    }
+    inner.latest_checkpoint = Some(bundle.clone());
+    inner.pending_checkpoint = None;
+    if let Some(snap) = inner.checkpoint_snapshot.clone() {
+        if snap.checkpoint.as_ref() == Some(&bundle.cosigned.checkpoint) {
+            inner.served_snapshot = Some(snap);
+        }
+    }
+    inner
+        .checkpoint_sigs
+        .remove(&bundle.cosigned.checkpoint.hash());
+    if let Some(store) = inner.store.as_mut() {
+        if let Err(e) = store.append_checkpointed(bundle) {
+            tracing::error!(err = %e, height, "commit log: checkpointed append failed");
+        }
+    }
+    drop(inner);
+    log.emit(
+        Event::now(self_label, Lane::Main, "checkpoint_cosigned")
+            .with_round(round)
+            .with_kind(if is_transition {
+                "transition"
+            } else {
+                "latest"
+            }),
+    );
+    tracing::info!(
+        height,
+        round,
+        transition = is_transition,
+        "checkpoint co-signed"
+    );
+}
+
+/// The chain served to joiners: transitions plus the latest (if distinct).
+async fn served_checkpoint_chain(state: &State) -> Vec<CheckpointBundle> {
+    let inner = state.inner.lock().await;
+    let mut chain = inner.checkpoint_transitions.clone();
+    if let Some(latest) = &inner.latest_checkpoint {
+        if chain.last().map_or(true, |t| {
+            t.cosigned.checkpoint.height != latest.cosigned.checkpoint.height
+        }) {
+            chain.push(latest.clone());
+        }
+    }
+    chain
+}
+
+/// Joiner side: a peer answered `GetCheckpoints`. Verify the chain from
+/// the genesis committee; on success request the latest checkpoint's
+/// snapshot from that peer.
+async fn handle_checkpoint_chain(
+    state: &State,
+    chain: Vec<CheckpointBundle>,
+    from: &PeerId,
+    reply: &Option<tokio::sync::mpsc::Sender<WireMessage>>,
+    outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
+) {
+    {
+        let inner = state.inner.lock().await;
+        if !inner.needs_snapshot || inner.snapshot_sync.trusted.is_some() {
+            return;
+        }
+    }
+    let links: Vec<ChainLink> = chain
+        .iter()
+        .map(|b| ChainLink {
+            checkpoint: b.cosigned.checkpoint.clone(),
+            signatures: b.cosigned.signatures.clone(),
+            next_committee: b.registries.authority_registry.clone(),
+            next_registry_root: b.registries.root(),
+        })
+        .collect();
+    match verify_checkpoint_chain(&state.genesis_authority_registry, &links) {
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(peer = %from.0, err = %e, "snapshot sync: checkpoint chain rejected");
+            return;
+        }
+    }
+    let Some(latest) = chain.last().cloned() else {
+        return;
+    };
+    let height = latest.cosigned.checkpoint.height;
+    {
+        let mut inner = state.inner.lock().await;
+        if inner
+            .last_committed_leader_round
+            .is_some_and(|l| l >= latest.cosigned.checkpoint.round)
+        {
+            // We are already past this checkpoint; nothing to install.
+            return;
+        }
+        inner.snapshot_sync.trusted = Some(latest);
+        inner.snapshot_sync.chunks.clear();
+        inner.snapshot_sync.total = 0;
+        inner.checkpoint_transitions = chain[..chain.len() - 1].to_vec();
+    }
+    tracing::info!(peer = %from.0, height, "snapshot sync: chain verified; requesting snapshot");
+    reply_to(outbound, from, reply, WireMessage::GetSnapshot(height));
+}
+
+/// Joiner side: one snapshot chunk arrived. On completion decode, verify
+/// against the trusted checkpoint, and install.
+#[allow(clippy::too_many_arguments)]
+async fn handle_snapshot_chunk(
+    state: &State,
+    height: u64,
+    index: u32,
+    total: u32,
+    bytes: Vec<u8>,
+    from: &PeerId,
+    self_label: &str,
+    log: &EventLog,
+    outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
+) {
+    let assembled: Option<Vec<u8>> = {
+        let mut inner = state.inner.lock().await;
+        let Some(trusted) = inner.snapshot_sync.trusted.clone() else {
+            return;
+        };
+        if trusted.cosigned.checkpoint.height != height || total == 0 || index >= total {
+            return;
+        }
+        if inner.snapshot_sync.total != total {
+            inner.snapshot_sync.total = total;
+            inner.snapshot_sync.chunks.clear();
+        }
+        inner.snapshot_sync.chunks.insert(index, bytes);
+        if inner.snapshot_sync.chunks.len() as u32 == total {
+            let mut all = Vec::new();
+            for (_, c) in std::mem::take(&mut inner.snapshot_sync.chunks) {
+                all.extend_from_slice(&c);
+            }
+            Some(all)
+        } else {
+            None
+        }
+    };
+    let Some(all) = assembled else {
+        return;
+    };
+    let snap: StateSnapshot = match crate::codec::decode(&all) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(peer = %from.0, err = %e, "snapshot sync: undecodable snapshot");
+            return;
+        }
+    };
+    let trusted = state.inner.lock().await.snapshot_sync.trusted.clone();
+    let Some(trusted) = trusted else {
+        return;
+    };
+    let ck = &trusted.cosigned.checkpoint;
+    let ok = snap.checkpoint.as_ref() == Some(ck)
+        && snap.network_id == state.manifest_network_id
+        && snap.verify().is_ok()
+        && snap.state_root == ck.state_root
+        && snap.registries().root() == ck.registry_root
+        && snap.leader_round >= ck.round;
+    if !ok {
+        tracing::warn!(peer = %from.0, height, "snapshot sync: snapshot does not match the trusted checkpoint; discarded");
+        state.inner.lock().await.snapshot_sync.trusted = None;
+        return;
+    }
+    let mut snap = snap;
+    // The served snapshot was captured before its own checkpoint was
+    // co-signed; carry the verified chain forward.
+    snap.checkpoint_chain = {
+        let inner = state.inner.lock().await;
+        let mut c = inner.checkpoint_transitions.clone();
+        c.push(trusted.clone());
+        c
+    };
+    install_snapshot(state, snap.clone()).await;
+    {
+        let mut inner = state.inner.lock().await;
+        inner.needs_snapshot = false;
+        inner.snapshot_sync = SnapshotSync::default();
+        // Everything buffered before the install refers to a world the
+        // snapshot superseded; a stale orphan waiting on a pruned parent
+        // would otherwise sit in the buffer forever.
+        inner.orphans.clear();
+        inner.inflight_fetches.clear();
+        inner.inflight_fetch_history.clear();
+        inner.needed_blocks.clear();
+        // Backfill gates on the peer tip; make sure it is fresh now rather
+        // than at the next periodic poll — the seeds are pruning while we
+        // wait.
+        inner.sync_tip = inner.sync_tip.max(ck.round);
+        inner.backfill_resume = Some(snap.leader_round.saturating_add(1));
+        let arc = Arc::new(snap.clone());
+        inner.checkpoint_snapshot = Some(arc.clone());
+        inner.served_snapshot = Some(arc);
+    }
+    if let Some(dir) = state.data_dir.clone() {
+        let s2 = snap.clone();
+        let _ = tokio::task::spawn_blocking(move || crate::store::write_snapshot(&dir, &s2)).await;
+        let mut inner = state.inner.lock().await;
+        if let Some(store) = inner.store.as_mut() {
+            let _ = store.append_checkpointed(trusted.clone());
+        }
+    }
+    for tx in outbound.values() {
+        let _ = tx.try_send(WireMessage::GetTip);
+    }
+    log.emit(
+        Event::now(self_label, Lane::Main, "snapshot_installed")
+            .with_round(ck.round)
+            .with_peer(from.0.clone()),
+    );
+    tracing::info!(peer = %from.0, height, round = ck.round, "snapshot sync: installed verified snapshot");
+}
+
+/// Install a snapshot into a node that has not committed past it: shared
+/// by disk recovery (IQ-008 D4) and joiner bootstrap (D5).
+async fn install_snapshot(state: &State, snap: StateSnapshot) {
+    {
+        let mut dag = state.dag.write().await;
+        if let Some(g) = snap.gc_round {
+            dag.restore_gc_round(g);
+        }
+        for (h, r) in &snap.tombstones {
+            dag.insert_tombstone(*h, *r);
+        }
+        for c in &snap.dag_certs {
+            if let Err(e) = dag.insert(c.clone()) {
+                tracing::debug!(err = ?e, round = c.round, "snapshot install: cert not re-inserted");
+            }
+        }
+    }
+    *state.authority_registry.write().await = snap.authority_registry;
+    *state.validator_registry.write().await = snap.validator_registry;
+    *state.stake_table.write().await = snap.stake_table;
+    {
+        let mut committed = state.committed.lock();
+        committed.extend(snap.committed.iter().copied());
+    }
+    {
+        let mut blocks = state.blocks.lock();
+        for b in snap.blocks {
+            blocks.insert(b.cert_hash, b);
+        }
+    }
+    let mut inner = state.inner.lock().await;
+    inner.substrate = snap.substrate;
+    inner.epoch = EpochState {
+        current: snap.epoch.0,
+        rounds_per_epoch: snap.epoch.1,
+        last_boundary_round: snap.epoch.2,
+    };
+    inner.pending_governance = snap.pending_governance;
+    inner.pending_stake = snap.pending_stake;
+    inner.n_authorities = snap.n_authorities;
+    inner.gc_round = snap.gc_round;
+    inner.last_committed_leader_round = if snap.has_committed {
+        Some(snap.leader_round)
+    } else {
+        None
+    };
+    inner.last_snapshot_leader_round = Some(snap.leader_round);
+    if let Some(a) = snap.last_authored_round {
+        inner.last_authored_round = Some(inner.last_authored_round.map_or(a, |x| x.max(a)));
+    }
+    inner.max_observed_round = inner
+        .max_observed_round
+        .max(snap.last_authored_round.unwrap_or(0))
+        .max(snap.leader_round);
+    inner.latest_bridge_header = if snap.has_committed {
+        Some((snap.leader_round, snap.state_root))
+    } else {
+        None
+    };
+    // Checkpoint chain + cursor.
+    let (next_boundary, height, last_hash) = snap.checkpoint_cursor;
+    if next_boundary > 0 {
+        inner.next_checkpoint_boundary = next_boundary;
+        inner.checkpoint_height = height;
+        inner.last_checkpoint_hash = last_hash;
+    }
+    let mut transitions = snap.checkpoint_chain.clone();
+    if let Some(latest) = transitions.pop() {
+        // Re-derive transitions vs. latest from registry roots.
+        let mut trans: Vec<CheckpointBundle> = Vec::new();
+        for b in transitions
+            .into_iter()
+            .chain(std::iter::once(latest.clone()))
+        {
+            let prev = trans.last().map(|t| t.cosigned.checkpoint.registry_root);
+            if prev != Some(b.cosigned.checkpoint.registry_root) {
+                trans.push(b);
+            }
+        }
+        inner.checkpoint_transitions = trans;
+        // After installing a co-signed checkpoint, the next checkpoint is
+        // the one after it.
+        let ck = &latest.cosigned.checkpoint;
+        if inner.checkpoint_height <= ck.height {
+            inner.checkpoint_height = ck.height + 1;
+            inner.last_checkpoint_hash = ck.hash();
+            let cadence = inner.checkpoint_cadence;
+            inner.next_checkpoint_boundary = (ck.round / cadence + 1) * cadence;
+        }
+        inner.latest_checkpoint = Some(latest);
+    }
+}
+
 /// Capture a consistent [`crate::store::StateSnapshot`] and write it under
 /// `state.data_dir` (IQ-008 D4). The capture takes every lock briefly in
 /// the canonical order and clones; the encode + write runs on the
@@ -1519,6 +2364,23 @@ async fn capture_snapshot(state: &State) -> crate::store::StateSnapshot {
         tombstones: dag.tombstones().collect(),
         committed,
         blocks,
+        checkpoint: None,
+        checkpoint_chain: {
+            let mut c = inner.checkpoint_transitions.clone();
+            if let Some(l) = &inner.latest_checkpoint {
+                if c.last().map_or(true, |t| {
+                    t.cosigned.checkpoint.height != l.cosigned.checkpoint.height
+                }) {
+                    c.push(l.clone());
+                }
+            }
+            c
+        },
+        checkpoint_cursor: (
+            inner.next_checkpoint_boundary,
+            inner.checkpoint_height,
+            inner.last_checkpoint_hash,
+        ),
     }
 }
 
@@ -1537,63 +2399,19 @@ async fn recover_from_disk(
     let snapshot = crate::store::load_latest_snapshot(dir, &state.manifest_network_id)?;
     let (store, records) = crate::store::CommitLog::open(dir, fsync)?;
 
-    // 1. Snapshot install.
+    // 1. Snapshot install (shared with the joiner path).
     let mut replay_from = 0u64;
     if let Some(snap) = snapshot {
         replay_from = snap.log_sequence;
-        {
-            let mut dag = state.dag.write().await;
-            if let Some(g) = snap.gc_round {
-                dag.restore_gc_round(g);
-            }
-            for (h, r) in &snap.tombstones {
-                dag.insert_tombstone(*h, *r);
-            }
-            for c in &snap.dag_certs {
-                if let Err(e) = dag.insert(c.clone()) {
-                    tracing::warn!(err = ?e, round = c.round, "recovery: snapshot cert not re-inserted");
-                }
-            }
+        let leader_round = snap.leader_round;
+        let log_sequence = snap.log_sequence;
+        let has_ck = snap.checkpoint.is_some();
+        let arc = Arc::new(snap.clone());
+        install_snapshot(state, snap).await;
+        if has_ck {
+            state.inner.lock().await.checkpoint_snapshot = Some(arc);
         }
-        *state.authority_registry.write().await = snap.authority_registry;
-        *state.validator_registry.write().await = snap.validator_registry;
-        *state.stake_table.write().await = snap.stake_table;
-        {
-            let mut committed = state.committed.lock();
-            committed.extend(snap.committed.iter().copied());
-        }
-        {
-            let mut blocks = state.blocks.lock();
-            for b in snap.blocks {
-                blocks.insert(b.cert_hash, b);
-            }
-        }
-        {
-            let mut inner = state.inner.lock().await;
-            inner.substrate = snap.substrate;
-            inner.epoch = EpochState {
-                current: snap.epoch.0,
-                rounds_per_epoch: snap.epoch.1,
-                last_boundary_round: snap.epoch.2,
-            };
-            inner.pending_governance = snap.pending_governance;
-            inner.pending_stake = snap.pending_stake;
-            inner.n_authorities = snap.n_authorities;
-            inner.gc_round = snap.gc_round;
-            inner.last_committed_leader_round = if snap.has_committed {
-                Some(snap.leader_round)
-            } else {
-                None
-            };
-            inner.last_snapshot_leader_round = Some(snap.leader_round);
-            inner.last_authored_round = snap.last_authored_round;
-            inner.max_observed_round = snap.last_authored_round.unwrap_or(0).max(snap.leader_round);
-        }
-        tracing::info!(
-            leader_round = snap.leader_round,
-            log_sequence = snap.log_sequence,
-            "recovery: snapshot installed"
-        );
+        tracing::info!(leader_round, log_sequence, "recovery: snapshot installed");
     }
 
     // 2. Log replay. Committed records re-run the exact commit body;
@@ -1604,6 +2422,26 @@ async fn recover_from_disk(
         match rec.event {
             crate::store::LogEvent::Authored { round, .. } => {
                 authored_max = Some(authored_max.map_or(round, |m: u64| m.max(round)));
+            }
+            crate::store::LogEvent::Checkpointed(bundle) => {
+                let mut inner = state.inner.lock().await;
+                let b = *bundle;
+                let h = b.cosigned.checkpoint.height;
+                if inner
+                    .latest_checkpoint
+                    .as_ref()
+                    .is_some_and(|l| l.cosigned.checkpoint.height >= h)
+                {
+                    continue;
+                }
+                let prev = inner
+                    .latest_checkpoint
+                    .as_ref()
+                    .map(|l| l.cosigned.checkpoint.registry_root);
+                if prev != Some(b.cosigned.checkpoint.registry_root) {
+                    inner.checkpoint_transitions.push(b.clone());
+                }
+                inner.latest_checkpoint = Some(b);
             }
             crate::store::LogEvent::Committed {
                 sequence,
@@ -1645,14 +2483,27 @@ async fn recover_from_disk(
         }
     }
 
-    // 3. Restore the authored marker (max of snapshot + log) and prune.
+    // 3. Restore the authored marker (max of snapshot + log), promote the
+    //    loaded snapshot to "served" if its checkpoint is the latest
+    //    co-signed one, and prune.
     let (leader_round, gc_depth) = {
         let mut inner = state.inner.lock().await;
+        if let (Some(snap), Some(latest)) = (
+            inner.checkpoint_snapshot.clone(),
+            inner.latest_checkpoint.clone(),
+        ) {
+            if snap.checkpoint.as_ref() == Some(&latest.cosigned.checkpoint) {
+                inner.served_snapshot = Some(snap);
+            }
+        }
         if let Some(a) = authored_max {
             inner.last_authored_round = Some(inner.last_authored_round.map_or(a, |x| x.max(a)));
             inner.max_observed_round = inner.max_observed_round.max(a);
         }
         inner.store = Some(store);
+        inner.backfill_resume = inner
+            .last_committed_leader_round
+            .map(|l| l.saturating_add(1));
         (inner.last_committed_leader_round, inner.gc_depth)
     };
     if let Some(g) = leader_round.and_then(|l| gc_round_for(l, gc_depth)) {
@@ -1725,8 +2576,11 @@ async fn prune_state(
     // 3. Round-keyed cold state + orphan triage.
     let reinsert: Vec<Certificate> = {
         let tombstoned: HashSet<CertHash> = {
-            let dag = state.dag.read().await;
+            // Canonical order: `inner` before `dag`. Taking the DAG read
+            // guard first deadlocks against `capture_snapshot` (inner →
+            // dag) once a writer is queued on the writer-preferring RwLock.
             let mut inner = state.inner.lock().await;
+            let dag = state.dag.read().await;
             inner.gc_round = Some(gc_round);
             inner.seen_at.retain(|(_, r), _| *r > gc_round);
             inner.main_lane_index.retain(|tx| tx.round > gc_round);
@@ -2268,6 +3122,26 @@ fn broadcast_traced(
     }
 }
 
+/// `broadcast_traced` to configured peers plus best-effort push to every
+/// connected dynamic peer (IQ-008 D5). Dynamic peers get no `wire_drop`
+/// events: they are unauthenticated late joiners whose loss is their own
+/// catch-up problem, and pull-based sync still covers them.
+fn broadcast_all(
+    state: &State,
+    outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
+    msg: WireMessage,
+    self_label: &str,
+    log: &EventLog,
+) {
+    {
+        let dyn_peers = state.dyn_peers.read();
+        for tx in dyn_peers.values() {
+            let _ = tx.try_send(msg.clone());
+        }
+    }
+    broadcast_traced(outbound, msg, self_label, log);
+}
+
 fn wire_msg_kind(msg: &WireMessage) -> &'static str {
     match msg {
         WireMessage::Cert(_) => "cert",
@@ -2283,10 +3157,21 @@ fn wire_msg_kind(msg: &WireMessage) -> &'static str {
         WireMessage::GetCertsByRound(_) => "get_certs_by_round",
         WireMessage::GetBlock(_) => "get_block",
         WireMessage::TipInfo { .. } => "tip_info",
+        WireMessage::CheckpointSig(_) => "checkpoint_sig",
+        WireMessage::GetCheckpoints => "get_checkpoints",
+        WireMessage::Checkpoints(_) => "checkpoints",
+        WireMessage::GetSnapshot(_) => "get_snapshot",
+        WireMessage::SnapshotChunk { .. } => "snapshot_chunk",
+        WireMessage::Votes(_) => "votes",
     }
 }
 
-async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
+async fn try_commit(
+    state: &State,
+    self_label: &str,
+    log: &EventLog,
+    outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
+) {
     // Snapshot votes + n_authorities + candidate_rounds in brief locks
     // up-front so the rest of the function operates on owned data.
     let votes_flat: Vec<Vote> = state.votes.lock().values().flatten().copied().collect();
@@ -2447,16 +3332,13 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
         // advance the leader frontier that drives the gc round.
         if last_leader_round.map_or(true, |prev| round > prev) {
             last_leader_round = Some(round);
-            let due = {
+            let at_boundary = {
                 let mut inner = state.inner.lock().await;
                 inner.last_committed_leader_round = Some(round);
-                state.data_dir.is_some()
-                    && inner
-                        .last_snapshot_leader_round
-                        .map_or(true, |s| round.saturating_sub(s) >= state.snapshot_interval)
+                round >= inner.next_checkpoint_boundary
             };
-            if due {
-                snapshot_now(state, self_label, log).await;
+            if at_boundary {
+                emit_checkpoint(state, round, self_label, log, outbound).await;
             }
         }
     }
@@ -2617,7 +3499,10 @@ async fn apply_commit(
             .with_cert_hash(&h.0)
             .with_intent_hashes(intent_hashes),
     );
-    state.votes.lock().remove(&h);
+    // Votes are NOT dropped at commit (they were before S34.4): they are
+    // relayed to peers backfilling this round (`reply_votes`) and evicted
+    // with the certificate when it falls below the gc round
+    // (`prune_state`), so the slot count stays bounded by the live window.
 
     // Epoch boundary detection (DAG-S25 Phase G).
     // Issue #18: drains queued governance intents here so that
@@ -3063,8 +3948,20 @@ async fn run_round_driver(
                 .with_round(target_round)
                 .with_cert_hash(&cert_hash.0),
         );
-        broadcast_traced(&outbound, WireMessage::Block(block), &self_label, &log);
-        broadcast_traced(&outbound, WireMessage::Cert(cert), &self_label, &log);
+        broadcast_all(
+            &state,
+            &outbound,
+            WireMessage::Block(block),
+            &self_label,
+            &log,
+        );
+        broadcast_all(
+            &state,
+            &outbound,
+            WireMessage::Cert(cert),
+            &self_label,
+            &log,
+        );
     }
 }
 
@@ -3093,6 +3990,7 @@ mod tests {
     //   23_400  phase_g_growing_prefix_under_transient_unavailability (4n)
     //   23_600  four_node_gc_bounds_store (4n)
     //   23_800  restart_resumes_from_disk_without_equivocating (4n)
+    //   24_000  joiner_bootstraps_from_cosigned_checkpoint_snapshot (4n + 1)
     //
     // Adding a test? Take the next free 200-wide band and list it here.
 
@@ -3328,6 +4226,7 @@ mod tests {
             prebalances: Vec::new(),
             rounds_per_epoch: 1024,
             gc_depth_rounds: suwappu_consensus::GC_DEPTH,
+            checkpoint_cadence_rounds: 64,
         };
         let cfg = NodeConfig {
             self_id: "v0".into(),
@@ -3353,7 +4252,6 @@ mod tests {
             bridge_network_id: None,
             metrics_listen: None,
             data_dir: None,
-            snapshot_interval_rounds: 1024,
             store_fsync: false,
         };
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
@@ -3419,6 +4317,7 @@ mod tests {
             prebalances: Vec::new(),
             rounds_per_epoch: 1024,
             gc_depth_rounds: suwappu_consensus::GC_DEPTH,
+            checkpoint_cadence_rounds: 64,
         };
         let cfg = NodeConfig {
             self_id: "v0".into(),
@@ -3444,7 +4343,6 @@ mod tests {
             bridge_network_id: None,
             metrics_listen: None,
             data_dir: None,
-            snapshot_interval_rounds: 1024,
             store_fsync: false,
         };
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
@@ -3525,6 +4423,7 @@ mod tests {
             prebalances: Vec::new(),
             rounds_per_epoch: 1024,
             gc_depth_rounds: suwappu_consensus::GC_DEPTH,
+            checkpoint_cadence_rounds: 64,
         };
 
         let mut daemons = Vec::new();
@@ -3567,7 +4466,6 @@ mod tests {
                 bridge_network_id: None,
                 metrics_listen: None,
                 data_dir: None,
-                snapshot_interval_rounds: 1024,
                 store_fsync: false,
             };
             let d = Daemon::start(cfg, manifest.clone()).await.unwrap();
@@ -3634,6 +4532,7 @@ mod tests {
             prebalances: Vec::new(),
             rounds_per_epoch: 1024,
             gc_depth_rounds: gc_depth,
+            checkpoint_cadence_rounds: 4,
         };
 
         let mut daemons = Vec::new();
@@ -3675,7 +4574,6 @@ mod tests {
                 bridge_network_id: None,
                 metrics_listen: None,
                 data_dir: None,
-                snapshot_interval_rounds: 1024,
                 store_fsync: false,
             };
             let d = Daemon::start(cfg, manifest.clone()).await.unwrap();
@@ -3810,7 +4708,10 @@ mod tests {
                 role: None,
             }],
             rounds_per_epoch: 1024,
-            gc_depth_rounds: 8,
+            gc_depth_rounds: 16,
+            // Checkpoint (and therefore snapshot) often so the restart
+            // exercises snapshot + tail replay.
+            checkpoint_cadence_rounds: 6,
         };
         let cfg_for = |i: u32| -> NodeConfig {
             let peers: Vec<Peer> = (0..n)
@@ -3854,8 +4755,6 @@ mod tests {
                 } else {
                     None
                 },
-                // Snapshot often so the restart exercises snapshot + tail.
-                snapshot_interval_rounds: 6,
                 store_fsync: false,
             }
         };
@@ -3962,6 +4861,197 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 
+    /// IQ-008 D5 end to end: seeds co-sign checkpoints, prune past genesis,
+    /// and a late joiner that cannot backfill forward (every round it would
+    /// ask for is gone) walks the checkpoint chain from the genesis
+    /// committee, installs the verified snapshot, and catches up to the
+    /// cluster's state root. This is /goal A7.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn joiner_bootstraps_from_cosigned_checkpoint_snapshot() {
+        let n = 4u32;
+        let base_port: u16 = 24_000;
+        let keypairs: Vec<(
+            suwappu_crypto::mldsa::PublicKey,
+            suwappu_crypto::mldsa::SecretKey,
+        )> = (0..=n).map(|_| suwappu_crypto::mldsa::keypair()).collect();
+        let manifest = GenesisManifest {
+            network_id: "test-joiner-4n".into(),
+            validators: (0..n)
+                .map(|i| GenesisValidator {
+                    authority_id: i,
+                    label: format!("v{}", i),
+                    mldsa_public_key_hex: hex::encode(keypairs[i as usize].0.as_bytes()),
+                    bls_public_key_hex: "00".into(),
+                    validator_stake_suwappu: 150_000,
+                    authority_stake_suwappu: 150_000,
+                })
+                .collect(),
+            corridors: Vec::new(),
+            prebalances: vec![GenesisPrebalance {
+                address: format!("0x{}", "33".repeat(20)),
+                balance_suwappu: 5_000_000,
+                role: None,
+            }],
+            rounds_per_epoch: 1024,
+            // Budget for a joiner to fetch the window edge before the
+            // seeds prune it is (depth - cadence) rounds = 6 s at 100 ms.
+            gc_depth_rounds: 64,
+            checkpoint_cadence_rounds: 4,
+        };
+        let cfg_for = |i: u32| -> NodeConfig {
+            // Seeds peer with each other; the joiner (id 4) dials the seeds
+            // but is not in any seed's config — a dynamic peer there.
+            let peers: Vec<Peer> = (0..n)
+                .filter(|j| *j != i)
+                .map(|j| Peer {
+                    id: format!("v{}", j),
+                    addr: format!("127.0.0.1:{}", base_port + j as u16)
+                        .parse::<SocketAddr>()
+                        .unwrap(),
+                })
+                .collect();
+            NodeConfig {
+                self_id: format!("v{}", i),
+                authority_id: i,
+                listen: format!("127.0.0.1:{}", base_port + i as u16)
+                    .parse::<SocketAddr>()
+                    .unwrap(),
+                client_listen: format!("127.0.0.1:{}", base_port + 100 + i as u16)
+                    .parse::<SocketAddr>()
+                    .unwrap(),
+                rpc_listen: None,
+                peers,
+                allow_post_genesis_join: i == n,
+                round_ms: 100,
+                checkpoint_cadence_rounds: 1,
+                mldsa_secret_key_path: write_mldsa_key_file(&keypairs[i as usize].1),
+                bls_secret_key_path: "/dev/null".into(),
+                genesis_manifest_path: "/dev/null".into(),
+                event_log_path: std::env::temp_dir()
+                    .join(format!("suwappu-daemon-joiner-test-v{}.ndjson", i)),
+                max_client_connections: 256,
+                client_idle_timeout_ms: 30_000,
+                client_per_ip_limit: 8,
+                rpc_per_ip_capacity: 60,
+                rpc_per_ip_refill_per_sec: 10,
+                bridge_oracle_address: None,
+                bridge_network_id: None,
+                metrics_listen: None,
+                data_dir: None,
+                store_fsync: false,
+            }
+        };
+
+        let mut seeds: Vec<Daemon> = Vec::new();
+        for i in 0..n {
+            seeds.push(Daemon::start(cfg_for(i), manifest.clone()).await.unwrap());
+        }
+        {
+            let mut client = crate::client::LoadGenClient::connect(
+                cfg_for(0).client_listen,
+                keypairs[0].1.clone(),
+                keypairs[0].0.clone(),
+                manifest.network_id.clone(),
+            )
+            .await
+            .unwrap();
+            client
+                .submit(Intent::Transfer {
+                    from: [0x33; 20],
+                    to: [0x44; 20],
+                    amount: 1234,
+                })
+                .await
+                .unwrap();
+        }
+        // Several checkpoint cadences and past the first prune (the seeds
+        // need a leader frontier of gc_depth before pruning anything).
+        tokio::time::sleep(Duration::from_secs(9)).await;
+
+        for d in &seeds {
+            let inner = d.state.inner.lock().await;
+            assert!(
+                inner.latest_checkpoint.is_some(),
+                "seed {:?} never co-signed a checkpoint",
+                inner.last_authored_round
+            );
+            assert_eq!(
+                inner.checkpoint_transitions.len(),
+                1,
+                "with a fixed committee only the first checkpoint is a transition"
+            );
+            assert!(
+                inner.served_snapshot.is_some(),
+                "seed holds no served snapshot for its co-signed checkpoint"
+            );
+            assert!(inner.gc_round.is_some(), "seeds did not prune");
+        }
+
+        let joiner = Daemon::start(cfg_for(n), manifest.clone()).await.unwrap();
+
+        // Wait for the bootstrap: needs_snapshot must be raised and then
+        // cleared by a verified install.
+        let mut saw_needs_snapshot = false;
+        let mut installed = false;
+        for _ in 0..120 {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            let inner = joiner.state.inner.lock().await;
+            if inner.needs_snapshot {
+                saw_needs_snapshot = true;
+            }
+            if saw_needs_snapshot && !inner.needs_snapshot && inner.latest_checkpoint.is_some() {
+                installed = true;
+                break;
+            }
+        }
+        assert!(
+            saw_needs_snapshot,
+            "joiner never detected that forward backfill was futile"
+        );
+        assert!(installed, "joiner never installed a verified snapshot");
+
+        // Catch-up: within a few seconds the joiner's leader frontier
+        // reaches a seed's, and at equal frontiers the roots must agree.
+        let mut agreed = false;
+        for _ in 0..80 {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            let (jf, jr) = {
+                let inner = joiner.state.inner.lock().await;
+                (
+                    inner.last_committed_leader_round,
+                    inner.substrate.state_root(),
+                )
+            };
+            for d in &seeds {
+                let inner = d.state.inner.lock().await;
+                if jf.is_some() && jf == inner.last_committed_leader_round {
+                    assert_eq!(
+                        jr,
+                        inner.substrate.state_root(),
+                        "joiner root differs at equal frontier"
+                    );
+                    agreed = true;
+                }
+            }
+            if agreed {
+                break;
+            }
+        }
+        assert!(
+            agreed,
+            "joiner never reached a seed's leader frontier after bootstrap"
+        );
+        // The joiner's substrate carries the funded transfer, i.e. it did
+        // not merely restart from genesis.
+        let inner = joiner.state.inner.lock().await;
+        assert_eq!(inner.substrate.balance(&[0x44u8; 20]), 1234);
+        assert!(!inner.needs_snapshot);
+        assert!(
+            inner.gc_round.is_some(),
+            "joiner did not adopt the gc round"
+        );
+    }
+
     /// Shared cluster setup for the Phase G admit/eject tests below.
     ///
     /// Spins up a 4-node loopback cluster with above-threshold stakes so
@@ -4035,6 +5125,7 @@ mod tests {
             // CI-sane timescales. 16 rounds * 100ms = 1.6s/boundary.
             rounds_per_epoch: 16,
             gc_depth_rounds: suwappu_consensus::GC_DEPTH,
+            checkpoint_cadence_rounds: 64,
         };
 
         let mut daemons = Vec::new();
@@ -4081,7 +5172,6 @@ mod tests {
                 bridge_network_id: None,
                 metrics_listen: None,
                 data_dir: None,
-                snapshot_interval_rounds: 1024,
                 store_fsync: false,
             };
             let d = Daemon::start(cfg, manifest.clone()).await.unwrap();
@@ -4731,6 +5821,7 @@ mod tests {
             prebalances: Vec::new(),
             rounds_per_epoch: 1024,
             gc_depth_rounds: suwappu_consensus::GC_DEPTH,
+            checkpoint_cadence_rounds: 64,
         };
         let cfg = NodeConfig {
             self_id: "v0".into(),
@@ -4756,7 +5847,6 @@ mod tests {
             bridge_network_id: None,
             metrics_listen: None,
             data_dir: None,
-            snapshot_interval_rounds: 1024,
             store_fsync: false,
         };
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
@@ -4905,6 +5995,7 @@ mod tests {
             corridors: Vec::new(),
             rounds_per_epoch: 1024,
             gc_depth_rounds: suwappu_consensus::GC_DEPTH,
+            checkpoint_cadence_rounds: 64,
             prebalances: vec![
                 crate::config::GenesisPrebalance {
                     address: format!("0x{}", hex::encode(faucet_addr)),
@@ -4972,6 +6063,7 @@ mod tests {
             prebalances: Vec::new(),
             rounds_per_epoch: 1024,
             gc_depth_rounds: suwappu_consensus::GC_DEPTH,
+            checkpoint_cadence_rounds: 64,
         };
         let (log, _log_task) =
             EventLog::start(&std::env::temp_dir().join("suwappu-fastpath-test.ndjson"))
@@ -5074,6 +6166,7 @@ mod tests {
             prebalances: Vec::new(),
             rounds_per_epoch: 1024,
             gc_depth_rounds: suwappu_consensus::GC_DEPTH,
+            checkpoint_cadence_rounds: 64,
         };
         let (log, _log_task) =
             EventLog::start(&std::env::temp_dir().join("suwappu-fp-k-binding-test.ndjson"))
@@ -5183,6 +6276,7 @@ mod tests {
             prebalances: Vec::new(),
             rounds_per_epoch: 1024,
             gc_depth_rounds: suwappu_consensus::GC_DEPTH,
+            checkpoint_cadence_rounds: 64,
         };
         let (log, _log_task) =
             EventLog::start(&std::env::temp_dir().join("suwappu-ltp-test.ndjson"))
@@ -5287,6 +6381,7 @@ mod tests {
             prebalances: Vec::new(),
             rounds_per_epoch: 1024,
             gc_depth_rounds: suwappu_consensus::GC_DEPTH,
+            checkpoint_cadence_rounds: 64,
         };
         let (log, _log_task) =
             EventLog::start(&std::env::temp_dir().join("suwappu-ltp-unreg.ndjson"))
@@ -5344,6 +6439,7 @@ mod tests {
             prebalances: Vec::new(),
             rounds_per_epoch: 1024,
             gc_depth_rounds: suwappu_consensus::GC_DEPTH,
+            checkpoint_cadence_rounds: 64,
         };
         let cfg = NodeConfig {
             self_id: "v0".into(),
@@ -5369,7 +6465,6 @@ mod tests {
             bridge_network_id: None,
             metrics_listen: None,
             data_dir: None,
-            snapshot_interval_rounds: 1024,
             store_fsync: false,
         };
         let _d = Daemon::start(cfg.clone(), manifest).await.unwrap();
@@ -5442,6 +6537,7 @@ mod tests {
             prebalances: Vec::new(),
             rounds_per_epoch: 1024,
             gc_depth_rounds: suwappu_consensus::GC_DEPTH,
+            checkpoint_cadence_rounds: 64,
         };
         let cfg = NodeConfig {
             self_id: "v0".into(),
@@ -5467,7 +6563,6 @@ mod tests {
             bridge_network_id: None,
             metrics_listen: None,
             data_dir: None,
-            snapshot_interval_rounds: 1024,
             store_fsync: false,
         };
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
@@ -5564,6 +6659,7 @@ mod tests {
             prebalances: Vec::new(),
             rounds_per_epoch: 1024,
             gc_depth_rounds: suwappu_consensus::GC_DEPTH,
+            checkpoint_cadence_rounds: 64,
         };
         let cfg = NodeConfig {
             self_id: "v0".into(),
@@ -5589,7 +6685,6 @@ mod tests {
             bridge_network_id: None,
             metrics_listen: None,
             data_dir: None,
-            snapshot_interval_rounds: 1024,
             store_fsync: false,
         };
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
@@ -5688,6 +6783,7 @@ mod tests {
             prebalances: Vec::new(),
             rounds_per_epoch: 1024,
             gc_depth_rounds: suwappu_consensus::GC_DEPTH,
+            checkpoint_cadence_rounds: 64,
         };
         let cfg = NodeConfig {
             self_id: "v0".into(),
@@ -5713,7 +6809,6 @@ mod tests {
             bridge_network_id: None,
             metrics_listen: None,
             data_dir: None,
-            snapshot_interval_rounds: 1024,
             store_fsync: false,
         };
         let _d = Daemon::start(cfg.clone(), manifest).await.unwrap();

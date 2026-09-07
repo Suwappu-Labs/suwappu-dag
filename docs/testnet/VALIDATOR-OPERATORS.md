@@ -211,7 +211,6 @@ event_log_path = "/var/log/suwappu/events.ndjson"
 # without it a restart rebuilds from genesis and, worse, may re-sign a
 # round it already signed — which peers slash as equivocation.
 data_dir = "/var/lib/suwappu/state"
-snapshot_interval_rounds = 1024
 store_fsync = true
 
 # Pull the current peer list as a starting point. You can prune

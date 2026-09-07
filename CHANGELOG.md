@@ -44,6 +44,45 @@ will coincide with mainnet genesis.
 
 ### Added
 
+- **DAG-S34 (IQ-008): bounded DAG retention, durable commit log,
+  checkpoint-anchored snapshot sync.** Closes `/goal` A6 and A7 at the
+  code level; consensus-reviewer verdict + human sign-off gate the merge.
+  Decision record: `docs/iq/IQ-008-bounded-retention-and-checkpoint-sync.md`.
+  - `suwappu-consensus`: `gc.rs` (`GC_DEPTH = 256`, `gc_round`,
+    `commit_floor`), a GC-aware `DagStore` (`prune_below`, tombstone
+    window so a cert whose parent was pruned still inserts,
+    `BelowGcRound` rejection) and `causal_history_bounded`. The committed
+    sub-DAG of a leader is a function of the leader alone, so nodes with
+    different pruning progress commit the same set (I-GC1; `proptest_gc.rs`).
+  - `suwappu-node`: the gc round is `last_committed_leader − gc_depth`
+    (Narwhal / Sui consensus-core rule); every hash- and round-keyed map
+    is pruned at the same floor, ingest drops obsolete certs, `TipInfo`
+    carries the peer's gc round, and `suwappu_getSyncStatus` / `/metrics`
+    expose `gc_round`, `dag_certs`, `needs_snapshot`.
+  - `suwappu-node::store`: blake3-chained append-only commit log with
+    torn-tail truncation, atomic `StateSnapshot` files verified by
+    `state_root` on load, and startup replay that re-uses the live
+    `apply_commit` path (I-P1; `proptest_persistence.rs`). A restarted
+    validator resumes its authored-round marker from disk and never
+    re-signs a round (`restart_resumes_from_disk_without_equivocating`).
+    New `NodeConfig` fields `data_dir`, `store_fsync`.
+  - Checkpoint v2: `Checkpoint.registry_root` binds the committee, hash
+    domain `SUWAPPU-CHECKPOINT-V2`; seated authorities co-sign every
+    `checkpoint_cadence_rounds` (genesis manifest, default 32, must be ≤
+    half `gc_depth_rounds`) via `CheckpointSig` frames;
+    `verify_checkpoint_chain` walks a chain from the genesis committee
+    (I-CK1; `proptest_checkpoint_chain.rs`). A joiner whose peers have
+    pruned past its DAG requests `GetCheckpoints`, verifies the chain,
+    pulls the snapshot in `SnapshotChunk`s, checks it against the
+    co-signed root, installs it and resumes forward backfill
+    (`joiner_bootstraps_from_cosigned_checkpoint_snapshot`).
+  - Validator-Ring votes are retained until their certificate is pruned
+    and relayed in `Votes` frames after every `GetCert` /
+    `GetCertsByRound` reply, so a catching-up node ratifies leaders
+    through the same joint-quorum AND-gate as a live node instead of
+    halting at the first leader whose votes its peers had already
+    dropped. Seeds push certs, blocks, votes and checkpoint signatures to
+    dynamic peers; dynamic peers still cannot inject any of them.
 - `suwappu_getSyncStatus` JSON-RPC method: the one-call answer to "is
   this node caught up?" for operators, the status page (G8) and the
   explorer (G7). Returns `local_dag_round`, `latest_committed_round`,

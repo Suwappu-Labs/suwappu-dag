@@ -135,7 +135,60 @@ pub enum WireMessage {
         /// Sender's gc round, if it has pruned.
         gc_round: Option<u64>,
     },
+    /// Checkpoint co-signing (IQ-008 D5): a seated authority's ML-DSA-65
+    /// signature over the checkpoint it computed at a checkpoint round.
+    /// Carries the full checkpoint so a receiver that has not reached
+    /// that round yet can buffer it, and one that has can compare it to
+    /// its own before counting the signature. Configured peers only.
+    CheckpointSig(CheckpointSigMsg),
+    /// Sync: ask for the checkpoint chain a joiner needs to bootstrap —
+    /// every committee-transition checkpoint plus the latest co-signed
+    /// one. Public data; dynamic peers may ask.
+    GetCheckpoints,
+    /// Reply to `GetCheckpoints`.
+    Checkpoints(Vec<crate::store::CheckpointBundle>),
+    /// Sync: ask for the state snapshot captured at the co-signed
+    /// checkpoint of the given height. Public data.
+    GetSnapshot(u64),
+    /// One chunk of a bincode-encoded `StateSnapshot`. Snapshots exceed
+    /// the 1 MiB frame cap, so they travel as `total` chunks of at most
+    /// `SNAPSHOT_CHUNK_BYTES`; the receiver reassembles by `index`.
+    SnapshotChunk {
+        /// Checkpoint height the snapshot was captured at.
+        height: u64,
+        /// Chunk position, `0..total`.
+        index: u32,
+        /// Number of chunks.
+        total: u32,
+        /// Chunk bytes.
+        bytes: Vec<u8>,
+    },
+    /// Sync (IQ-008 D5): the Validator-Ring votes the sender holds for
+    /// one certificate, sent right after that certificate in a `GetCert`
+    /// / `GetCertsByRound` reply. Votes are unsigned relay data exactly
+    /// like a live `Vote` frame, so the receiver applies the same rule:
+    /// accepted from configured peers only. Without this a node that
+    /// catches up over rounds its peers already committed would hold the
+    /// certificates but never the votes, and the joint-quorum AND-gate
+    /// would (correctly) halt it forever at the first un-ratified leader.
+    Votes(Vec<Vote>),
 }
+
+/// A seated authority's signature over a checkpoint, with the checkpoint
+/// it signed (IQ-008 D5).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CheckpointSigMsg {
+    /// The checkpoint as computed by the signer.
+    pub checkpoint: suwappu_execution::Checkpoint,
+    /// Signing authority id.
+    pub authority: u32,
+    /// ML-DSA-65 detached signature over `checkpoint.hash()`.
+    pub signature: Vec<u8>,
+}
+
+/// Snapshot chunk payload size. 768 KiB keeps the framed message under
+/// `MAX_FRAME_BYTES` with room for the envelope.
+pub const SNAPSHOT_CHUNK_BYTES: usize = 768 * 1024;
 
 /// Maximum allowed framed payload size. Drops the connection on overrun.
 /// This is the *outer* envelope cap — applied at the length-prefix
@@ -228,6 +281,15 @@ pub struct WireEvent {
     pub reply: Option<mpsc::Sender<WireMessage>>,
 }
 
+/// Live send handles for every connected DYNAMIC peer (IQ-008 D5). A
+/// late joiner is a dynamic peer at every seed, and a node that only
+/// pulls certificates can never *commit* — the Validator Ring votes it
+/// needs are pushed, not served. Broadcasts therefore also fan out to
+/// this registry. Entries are registered when a dynamic connection
+/// completes its hello and removed when it closes; the value is the same
+/// per-connection sender that `WireEvent::reply` carries.
+pub type DynPeers = Arc<parking_lot::RwLock<HashMap<u64, mpsc::Sender<WireMessage>>>>;
+
 /// Running wire-transport handle. Drop to stop all background tasks.
 pub struct Wire {
     /// DAG-S31.1: per-peer inbound channels. Pre-S31 every inbound peer
@@ -247,6 +309,8 @@ pub struct Wire {
     /// label is not in the configured peer set (late-joiners). Their
     /// events carry a per-connection `reply` sender; see [`WireEvent`].
     pub dyn_inbox: mpsc::Receiver<WireEvent>,
+    /// Send handles of connected dynamic peers. See [`DynPeers`].
+    pub dyn_peers: DynPeers,
     /// Background task handles. Aborted on drop.
     tasks: Vec<JoinHandle<()>>,
 }
@@ -261,6 +325,8 @@ pub struct WireSplit {
     pub outbound: HashMap<PeerId, mpsc::Sender<WireMessage>>,
     /// Shared dynamic-peer inbox. See [`Wire::dyn_inbox`].
     pub dyn_inbox: mpsc::Receiver<WireEvent>,
+    /// Send handles of connected dynamic peers. See [`DynPeers`].
+    pub dyn_peers: DynPeers,
     /// Background accept/dialer tasks. Abort them to stop the wire.
     pub tasks: Vec<JoinHandle<()>>,
 }
@@ -283,10 +349,12 @@ impl Wire {
         let (_closed_tx, closed_rx) = mpsc::channel(1);
         let dyn_inbox = std::mem::replace(&mut self.dyn_inbox, closed_rx);
         let tasks = std::mem::take(&mut self.tasks);
+        let dyn_peers = self.dyn_peers.clone();
         WireSplit {
             inboxes,
             outbound,
             dyn_inbox,
+            dyn_peers,
             tasks,
         }
     }
@@ -311,6 +379,7 @@ impl Wire {
         // rate compared to the per-peer static inboxes.
         let (dyn_tx, dyn_inbox) = mpsc::channel::<WireEvent>(4096);
         let dyn_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let dyn_peers: DynPeers = Arc::new(parking_lot::RwLock::new(HashMap::new()));
 
         // Bind first so the caller knows the port is up before we return.
         let listener = TcpListener::bind(cfg.listen).await?;
@@ -324,8 +393,9 @@ impl Wire {
             let self_id = cfg.self_id.clone();
             let dyn_tx = dyn_tx.clone();
             let dyn_count = dyn_count.clone();
+            let dyn_peers = dyn_peers.clone();
             tasks.push(tokio::spawn(async move {
-                accept_loop(listener, inbound_txs, dyn_tx, dyn_count, self_id).await;
+                accept_loop(listener, inbound_txs, dyn_tx, dyn_count, dyn_peers, self_id).await;
             }));
         }
 
@@ -350,6 +420,7 @@ impl Wire {
             inboxes,
             outbound,
             dyn_inbox,
+            dyn_peers,
             tasks,
         })
     }
@@ -383,6 +454,7 @@ async fn accept_loop(
     inbound_txs: Arc<HashMap<PeerId, mpsc::Sender<WireEvent>>>,
     dyn_tx: mpsc::Sender<WireEvent>,
     dyn_count: Arc<std::sync::atomic::AtomicUsize>,
+    dyn_peers: DynPeers,
     self_id: PeerId,
 ) {
     loop {
@@ -393,10 +465,19 @@ async fn accept_loop(
                 let inbound_txs = inbound_txs.clone();
                 let dyn_tx = dyn_tx.clone();
                 let dyn_count = dyn_count.clone();
+                let dyn_peers = dyn_peers.clone();
                 let self_id = self_id.clone();
                 tokio::spawn(async move {
-                    if let Err(e) =
-                        read_loop(stream, inbound_txs, dyn_tx, dyn_count, self_id, addr).await
+                    if let Err(e) = read_loop(
+                        stream,
+                        inbound_txs,
+                        dyn_tx,
+                        dyn_count,
+                        dyn_peers,
+                        self_id,
+                        addr,
+                    )
+                    .await
                     {
                         debug!(remote = %addr, err = %e, "wire: inbound closed");
                     }
@@ -428,6 +509,7 @@ async fn read_loop(
     inbound_txs: Arc<HashMap<PeerId, mpsc::Sender<WireEvent>>>,
     dyn_tx: mpsc::Sender<WireEvent>,
     dyn_count: Arc<std::sync::atomic::AtomicUsize>,
+    dyn_peers: DynPeers,
     _self_id: PeerId,
     remote_addr: SocketAddr,
 ) -> Result<(), WireError> {
@@ -482,6 +564,10 @@ async fn read_loop(
 
     let (mut read_half, mut write_half) = stream.into_split();
     let (conn_tx, mut conn_rx) = mpsc::channel::<WireMessage>(1024);
+    // Register for push gossip (votes, certs, blocks, checkpoint sigs).
+    static NEXT_DYN_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let dyn_id = NEXT_DYN_ID.fetch_add(1, Ordering::Relaxed);
+    dyn_peers.write().insert(dyn_id, conn_tx.clone());
     let writer = tokio::spawn(async move {
         while let Some(msg) = conn_rx.recv().await {
             match crate::codec::encode_frame(&msg) {
@@ -526,6 +612,7 @@ async fn read_loop(
             break Ok(());
         }
     };
+    dyn_peers.write().remove(&dyn_id);
     dyn_count.fetch_sub(1, Ordering::Relaxed);
     writer.abort();
     info!(peer = %from.0, addr = %remote_addr, "wire: dynamic peer disconnected");
@@ -540,6 +627,10 @@ fn enforce_compact_variant_cap(msg: &WireMessage, frame_bytes: usize) -> bool {
     match msg {
         // `Block` payload can be large; rely on the outer frame cap.
         WireMessage::Block(_) => true,
+        // IQ-008 D5 sync payloads: a checkpoint chain carries a quorum of
+        // ML-DSA signatures per link, and snapshot chunks are sized to the
+        // outer cap by construction.
+        WireMessage::Checkpoints(_) | WireMessage::SnapshotChunk { .. } => true,
         // Everything else should fit in the compact cap.
         _ => frame_bytes <= MAX_COMPACT_MESSAGE_BYTES,
     }
@@ -560,6 +651,12 @@ fn wire_variant_name(msg: &WireMessage) -> &'static str {
         WireMessage::GetCertsByRound(_) => "GetCertsByRound",
         WireMessage::GetBlock(_) => "GetBlock",
         WireMessage::TipInfo { .. } => "TipInfo",
+        WireMessage::CheckpointSig(_) => "CheckpointSig",
+        WireMessage::GetCheckpoints => "GetCheckpoints",
+        WireMessage::Checkpoints(_) => "Checkpoints",
+        WireMessage::GetSnapshot(_) => "GetSnapshot",
+        WireMessage::SnapshotChunk { .. } => "SnapshotChunk",
+        WireMessage::Votes(_) => "Votes",
     }
 }
 
