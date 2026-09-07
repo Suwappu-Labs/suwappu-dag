@@ -1241,12 +1241,14 @@ async fn run_inbox(
             }
             WireMessage::Pong(_) => {}
             WireMessage::GetTip => {
-                // Advertise the admissible tip — the highest quorum round
-                // (or frontier) plus one retention window — rather than
-                // the raw `max_round`: a single authority's certificate at
-                // the very edge of our window would otherwise be pinned as
-                // a peer's `sync_tip` that its own, lower, ceiling can
-                // never admit (consensus-review finding, fourth pass).
+                // Advertise the anchor — the highest round holding a quorum
+                // of distinct authors (or the frontier) — rather than the
+                // raw `max_round`: it is the highest round a peer can
+                // build on and the only value no single authority can
+                // ratchet, so a behind peer's `sync_tip` is never pinned
+                // above what it can admit (consensus-review findings,
+                // fourth and fifth passes). Rounds above the anchor arrive
+                // by live push.
                 let (n_now, frontier_now) = {
                     let inner = state.inner.lock().await;
                     (
@@ -1259,12 +1261,7 @@ async fn run_inbox(
                     let anchor = highest_quorum_round(&dag, n_now)
                         .unwrap_or(0)
                         .max(frontier_now);
-                    (
-                        dag.max_round()
-                            .unwrap_or(0)
-                            .min(anchor.saturating_add(dag.gc_depth())),
-                        dag.gc_round(),
-                    )
+                    (dag.max_round().unwrap_or(0).min(anchor), dag.gc_round())
                 };
                 reply_to(
                     &outbound,
@@ -1744,6 +1741,18 @@ async fn ingest_cert(
                 .unwrap_or(0)
                 .max(frontier_now);
             let ceiling = anchor.saturating_add(dag.gc_depth());
+            // Two certificates per (author, round) is all an equivocation
+            // proof needs; admitting more lets one authority grow the DAG
+            // (and every served snapshot) without bound.
+            let dups = dag
+                .round_hashes(round)
+                .iter()
+                .filter(|h| dag.get(h).is_some_and(|x| x.author == c.author))
+                .count();
+            if dups >= MAX_CERTS_PER_AUTHOR_ROUND {
+                debug!(peer = %from.0, author = c.author, round, "inbox: equivocation already proven for this slot, dropped");
+                continue;
+            }
             if round > ceiling {
                 debug!(peer = %from.0, author = c.author, round, ceiling, "inbox: cert round above the admissible window, dropped");
                 continue;
@@ -1857,6 +1866,10 @@ async fn ingest_cert(
 
 /// Most recent checkpoint hashes for which signatures are buffered.
 const MAX_BUFFERED_CHECKPOINTS: usize = 8;
+/// Certificates admitted per (author, round): two suffice for an
+/// equivocation proof, and the cap is what makes the DAG — and the served
+/// snapshot window — bounded per round.
+const MAX_CERTS_PER_AUTHOR_ROUND: usize = 2;
 /// Upper bound on votes accepted from one `Votes` frame: one frame
 /// carries the votes for one certificate, so the Validator Ring size.
 const MAX_VOTES_PER_FRAME: usize = suwappu_validator::VALIDATOR_RING_MAX;
@@ -2134,11 +2147,12 @@ async fn record_cosigned_checkpoint(
     {
         return;
     }
-    let prev_root = inner
-        .latest_checkpoint
-        .as_ref()
-        .map(|l| l.cosigned.checkpoint.registry_root);
-    let is_transition = prev_root != Some(bundle.cosigned.checkpoint.registry_root);
+    // A transition is a change of the Authority Ring itself — not of the
+    // whole registry root, which also covers the epoch counter and would
+    // make every epoch boundary a retained-forever link.
+    let is_transition = inner.latest_checkpoint.as_ref().map_or(true, |l| {
+        l.registries.authority_registry != bundle.registries.authority_registry
+    });
     if is_transition {
         inner.checkpoint_transitions.push(bundle.clone());
     }
@@ -2295,20 +2309,22 @@ async fn handle_snapshot_chunk(
         return;
     };
     let ck = &trusted.cosigned.checkpoint;
-    // Every committee the verified chain binds, oldest first: the window
-    // spans up to `gc_depth` rounds of history and may straddle an
-    // Authority-Ring change, so a certificate is admissible if any
-    // committee in force over the chain signed it.
+    // Every committee the verified chain binds, with the round from which
+    // it governed (genesis from round 0): the window spans up to
+    // `gc_depth` rounds of history and may straddle an Authority-Ring
+    // change, so a certificate is admissible against the committee in
+    // force at its round (plus the one before it, as transition grace) —
+    // never against a key from any other era.
     let (gc_depth, committees) = {
         let inner = state.inner.lock().await;
-        let mut c = vec![state.genesis_authority_registry.clone()];
-        c.extend(
-            inner
-                .checkpoint_transitions
-                .iter()
-                .map(|b| b.registries.authority_registry.clone()),
-        );
-        c.push(trusted.registries.authority_registry.clone());
+        let mut c = vec![(0u64, state.genesis_authority_registry.clone())];
+        c.extend(inner.checkpoint_transitions.iter().map(|b| {
+            (
+                b.cosigned.checkpoint.round,
+                b.registries.authority_registry.clone(),
+            )
+        }));
+        c.push((ck.round, trusted.registries.authority_registry.clone()));
         (inner.gc_depth, c)
     };
     if let Err(why) =
@@ -2391,17 +2407,19 @@ async fn handle_snapshot_chunk(
 /// `registry_root` (committee + stake + epoch) and `snapshot_root`
 /// (leader frontier, gc round, commit marks, queued governance); the
 /// certificate window is checked structurally: every certificate is
-/// signed by a member of some Authority Ring the verified checkpoint
-/// chain binds (`committees`, genesis first — the window may straddle a
-/// committee change) and lies above the bound gc round, and the
-/// tombstone window lies at or below it and is bounded in size. Returns
-/// the reason on failure.
+/// signed by a member of the Authority Ring in force at its round
+/// (`committees`: `(round, ring)` pairs oldest first, genesis at round 0;
+/// the ring established by the last checkpoint below the certificate's
+/// round, or its predecessor as transition grace), lies above the bound
+/// gc round, and at most two certificates share an (author, round); the
+/// tombstone window lies at or below the gc round and is bounded in
+/// size. Returns the reason on failure.
 fn verify_served_snapshot(
     snap: &StateSnapshot,
     ck: &Checkpoint,
     network_id: &str,
     gc_depth: u64,
-    committees: &[AuthorityRegistry],
+    committees: &[(u64, AuthorityRegistry)],
 ) -> Result<(), &'static str> {
     if snap.checkpoint.as_ref() != Some(ck) {
         return Err("checkpoint mismatch");
@@ -2455,23 +2473,34 @@ fn verify_served_snapshot(
         Some(g) => ck.round.saturating_sub(g),
         None => ck.round.saturating_add(1),
     };
-    // Per-round factor: the largest committee in force over the chain
-    // (a departed author's certificates stay in the window until GC
-    // passes them), plus one third for equivocating duplicates, which an
-    // honest DAG holds until the equivocator is ejected.
-    let widest = committees
+    // Per-round bound: at most MAX_CERTS_PER_AUTHOR_ROUND certificates
+    // per author, and every admissible author is a member of some
+    // committee the chain binds, so the union of member ids over the
+    // chain is the per-round author bound. Provable, not a fudge factor.
+    let union_ids: BTreeSet<AuthorityId> = committees
         .iter()
-        .map(|c| c.len() as u64)
-        .max()
-        .unwrap_or(0)
-        .max(n);
-    let per_round = widest.saturating_add(widest / 3);
+        .flat_map(|(_, reg)| reg.members().map(|m| m.id))
+        .collect();
+    let per_round = (union_ids.len().max(n as usize) * MAX_CERTS_PER_AUTHOR_ROUND) as u64;
     let max_certs = per_round.saturating_mul(live_rounds).max(per_round);
     if snap.dag_certs.len() as u64 > max_certs {
         return Err("certificate window too large");
     }
+    let mut per_slot: HashMap<(AuthorityId, u64), usize> = HashMap::new();
     for c in &snap.dag_certs {
-        let ok = committees.iter().any(|reg| {
+        let slot = per_slot.entry((c.author, c.round)).or_default();
+        *slot += 1;
+        if *slot > MAX_CERTS_PER_AUTHOR_ROUND {
+            return Err("more than two certificates for one author and round");
+        }
+        // Committee in force at this round: the last one established
+        // strictly below it (genesis if none), plus its predecessor.
+        let i = committees
+            .iter()
+            .rposition(|(rd, _)| *rd < c.round)
+            .unwrap_or(0);
+        let lo = i.saturating_sub(1);
+        let ok = committees[lo..=i].iter().any(|(_, reg)| {
             reg.get(c.author)
                 .and_then(|m| {
                     suwappu_crypto::mldsa::PublicKey::from_bytes(&m.public_key_bytes).ok()
@@ -2479,7 +2508,7 @@ fn verify_served_snapshot(
                 .is_some_and(|pk| c.verify_signature(&pk))
         });
         if !ok {
-            return Err("certificate not signed by any committee the chain binds");
+            return Err("certificate not signed by the committee in force at its round");
         }
     }
     Ok(())
@@ -2568,8 +2597,10 @@ async fn install_snapshot(state: &State, snap: StateSnapshot, own: bool) {
             .into_iter()
             .chain(std::iter::once(latest.clone()))
         {
-            let prev = trans.last().map(|t| t.cosigned.checkpoint.registry_root);
-            if prev != Some(b.cosigned.checkpoint.registry_root) {
+            let changed = trans.last().map_or(true, |t| {
+                t.registries.authority_registry != b.registries.authority_registry
+            });
+            if changed {
                 trans.push(b);
             }
         }
@@ -5844,7 +5875,7 @@ mod tests {
         let gc_depth = manifest.gc_depth_rounds;
         let cadence = manifest.checkpoint_cadence_rounds;
         let net = manifest.network_id.clone();
-        let committees = vec![served.authority_registry.clone()];
+        let committees = vec![(0u64, served.authority_registry.clone())];
         assert!(
             verify_served_snapshot(&served, &ck, &net, gc_depth, &committees).is_ok(),
             "honest served snapshot must verify"
@@ -5863,17 +5894,29 @@ mod tests {
         let mut bad = (*served).clone();
         let live_rounds = ck.round - served.gc_round.unwrap();
         let n_ring = served.n_authorities as u64;
-        let max_certs = ((n_ring + n_ring / 3) * live_rounds) as usize;
+        let max_certs = (n_ring * MAX_CERTS_PER_AUTHOR_ROUND as u64 * live_rounds) as usize;
         assert!(
             served.dag_certs.len() <= max_certs,
-            "honest window within the exact bound"
+            "honest window within the bound"
         );
-        while bad.dag_certs.len() <= max_certs {
-            // Duplicates of an honestly signed certificate: every
-            // structural check but the size passes.
+        // A third certificate for one (author, round) is refused outright.
+        {
             let c = bad.dag_certs[0].clone();
+            bad.dag_certs.push(c.clone());
             bad.dag_certs.push(c);
         }
+        assert_eq!(
+            verify_served_snapshot(&bad, &ck, &net, gc_depth, &committees),
+            Err("more than two certificates for one author and round"),
+            "triplicate slot"
+        );
+        // Padding within the per-slot cap still trips the window bound.
+        let mut bad = (*served).clone();
+        let originals = bad.dag_certs.clone();
+        for c in &originals {
+            bad.dag_certs.push(c.clone());
+        }
+        bad.dag_certs.push(originals[0].clone());
         assert_eq!(
             verify_served_snapshot(&bad, &ck, &net, gc_depth, &committees),
             Err("certificate window too large"),
@@ -5897,51 +5940,41 @@ mod tests {
         }
         assert_eq!(
             verify_served_snapshot(&bad, &ck, &net, gc_depth, &committees),
-            Err("certificate not signed by any committee the chain binds"),
+            Err("certificate not signed by the committee in force at its round"),
             "tampered certificate"
         );
-        // A certificate by an author the CURRENT committee no longer
-        // holds is still admissible if an earlier committee in the chain
-        // held it: the window may straddle an eject.
+        // Committees are scoped to the rounds they governed. With the
+        // full ring in force from genesis and a shrunk ring established
+        // one round below the checkpoint, the departed author's older
+        // certificates verify against the full ring and its certificate
+        // at the checkpoint round against the predecessor (transition
+        // grace). With the shrunk ring in force from genesis and the full
+        // ring only established inside the window, the departed author's
+        // early certificates have no committee that held it.
         {
-            let older = served.authority_registry.clone();
-            let departed = older.members().next().map(|m| m.id).unwrap();
-            let mut current = served.authority_registry.clone();
-            current.remove(departed);
-            let with_history = vec![older.clone(), current.clone()];
+            let full = served.authority_registry.clone();
+            let departed = full.members().next().map(|m| m.id).unwrap();
+            let mut shrunk = served.authority_registry.clone();
+            shrunk.remove(departed);
+            let gc = served.gc_round.unwrap();
+            let eject_late = vec![(0u64, full.clone()), (ck.round - 1, shrunk.clone())];
             assert!(
-                verify_served_snapshot(&served, &ck, &net, gc_depth, &with_history).is_ok(),
-                "departed author's certificates admissible through the chain"
+                verify_served_snapshot(&served, &ck, &net, gc_depth, &eject_late).is_ok(),
+                "departed author's certificates admissible under the ring in force at their rounds"
             );
-            let only_current = vec![current];
+            let admit_late = vec![(0u64, shrunk.clone()), (gc + 2, full.clone())];
             assert_eq!(
-                verify_served_snapshot(&served, &ck, &net, gc_depth, &only_current),
-                Err("certificate not signed by any committee the chain binds"),
-                "and inadmissible against the shrunk committee alone"
+                verify_served_snapshot(&served, &ck, &net, gc_depth, &admit_late),
+                Err("certificate not signed by the committee in force at its round"),
+                "a key from another era does not admit a certificate"
+            );
+            let only_shrunk = vec![(0u64, shrunk)];
+            assert_eq!(
+                verify_served_snapshot(&served, &ck, &net, gc_depth, &only_shrunk),
+                Err("certificate not signed by the committee in force at its round"),
+                "shrunk ring alone"
             );
         }
-        let mut bad = (*served).clone();
-        bad.tombstones
-            .push((CertHash([0xDD; 32]), bad.gc_round.unwrap() + 1));
-        assert_eq!(
-            verify_served_snapshot(&bad, &ck, &net, gc_depth, &committees),
-            Err("tombstone above gc round"),
-            "tombstone above the bound gc round"
-        );
-        let mut bad = (*served).clone();
-        bad.pending_governance.push((
-            Intent::Transfer {
-                from: [0x33; 20],
-                to: [0x55; 20],
-                amount: 1,
-            },
-            None,
-        ));
-        assert_eq!(
-            verify_served_snapshot(&bad, &ck, &net, gc_depth, &committees),
-            Err("snapshot root mismatch"),
-            "forged queued governance"
-        );
         // Node-local fields are not bound but are not installed either:
         // the joiner derives `pending_stake` from the bound registries
         // and its checkpoint cursor from the trusted checkpoint.

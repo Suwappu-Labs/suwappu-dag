@@ -419,8 +419,12 @@ branch.
    provides no independent check over that prefix. Leaders above the
    checkpoint are still ratified through the live AND-gate (no shortcut
    around `validator_quorum_met` exists), but the adopted prefix is
-   Authority-only evidence. This is the documented bootstrap exception to
-   Invariant 1 and needs the human sign-off this IQ requires; the
+   Authority-only evidence — specifically the Authority Ring in force at
+   each checkpoint of the verified chain; certificates in the served
+   window are admitted only against the ring in force at their round, so
+   a key seated in an earlier era cannot mint window certificates at
+   live rounds. This is the documented bootstrap exception to Invariant 1
+   and needs the human sign-off this IQ requires; the
    alternative is a stake-weighted Validator-Ring co-signature over the
    checkpoint hash. Related: the served chain is sparse (transitions plus
    the latest), so `verify_checkpoint_chain` checks `prev_checkpoint`
@@ -434,10 +438,14 @@ branch.
    structurally, not committed to.** The certificate window is
    receipt-timing dependent and cannot be part of a consensus-agreed
    root; a joiner checks every certificate's signature against the bound
-   Authority Ring — any committee the verified checkpoint chain binds,
-   since a window of up to `gc_depth` rounds may straddle an eject — its
-   round against the bound gc round, and the tombstone window's rounds
-   and size. A Byzantine authority's certificate
+   Authority Ring in force at the certificate's round (the ring
+   established by the last verified checkpoint below that round, or its
+   predecessor as transition grace — a window of up to `gc_depth` rounds
+   may straddle an eject, but a key from any other era admits nothing),
+   its round against the bound gc round, at most two certificates per
+   (author, round) — the same cap ingest applies, two being all an
+   equivocation proof needs — and the tombstone window's rounds and
+   size. A Byzantine authority's certificate
    referencing a fabricated pruned parent can still enter a joiner's
    window through a fabricated tombstone — the same exposure a live node
    has at its own window edge, and one that affects only support counts
@@ -445,7 +453,8 @@ branch.
    is exactly `(gc_round, ck.round]` — certificates above the checkpoint
    round are dropped at capture, and both ends are checkpoint-bound
    (`ck.round` directly, `gc_round` through `snapshot_root`) — so the
-   joiner enforces the exact bound `n × (ck.round − gc_round)`. Every
+   joiner enforces the bound `2 × |authors bound by the chain| ×
+   (ck.round − gc_round)`, provable from the per-slot cap. Every
    other snapshot field is either bound (`state_root`, `registry_root`,
    `snapshot_root`) or node-local and never installed from a peer
    (`pending_stake` is derived from the bound registries,
