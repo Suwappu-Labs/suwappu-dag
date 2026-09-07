@@ -2119,13 +2119,24 @@ async fn buffer_checkpoint_sig(state: &State, ck: &Checkpoint, sig: CheckpointSi
         entry.1.push(sig);
     }
     while inner.checkpoint_sigs.len() > MAX_BUFFERED_CHECKPOINTS {
-        // Oldest by height, then by the hash's round when known (all
-        // stalled emissions share a height).
+        // Evict foreign entries before anything this node emitted, the
+        // least-signed first, then the oldest. Our own current checkpoint
+        // is always at the lowest admissible height, so a height-ordered
+        // eviction would let one seated authority evict it with a handful
+        // of fabricated higher entries (consensus-review finding, eighth
+        // pass); a fabrication carries one signature and goes first.
         let round_of = |k: &[u8; 32]| inner.emitted_checkpoints.get(k).map_or(0, |(c, _)| c.round);
         let oldest = inner
             .checkpoint_sigs
             .iter()
-            .min_by_key(|(k, (h, _))| (*h, round_of(k)))
+            .min_by_key(|(k, (h, sigs))| {
+                (
+                    inner.emitted_checkpoints.contains_key(*k),
+                    sigs.len(),
+                    *h,
+                    round_of(k),
+                )
+            })
             .map(|(k, _)| *k);
         match oldest {
             Some(k) => {
@@ -2293,6 +2304,20 @@ async fn handle_checkpoint_chain(
         if inner.needs_snapshot && inner.snapshot_sync.trusted.is_some() {
             return;
         }
+        if !inner.needs_snapshot {
+            // Steady state: only a chain strictly ahead of ours is worth
+            // the verification cost (any configured peer can send one).
+            let ahead = chain.last().is_some_and(|b| {
+                let c = &b.cosigned.checkpoint;
+                inner.latest_checkpoint.as_ref().map_or(true, |l| {
+                    (c.height, c.round)
+                        > (l.cosigned.checkpoint.height, l.cosigned.checkpoint.round)
+                })
+            });
+            if !ahead {
+                return;
+            }
+        }
         inner.needs_snapshot
     };
     let links: Vec<ChainLink> = chain
@@ -2324,14 +2349,25 @@ async fn handle_checkpoint_chain(
         // pass). Nothing is installed: consensus state is untouched, only
         // the checkpoint cursor re-anchors on the mesh's chain.
         let mut inner = state.inner.lock().await;
+        // Re-checked under the lock; lexicographic so two co-signed
+        // checkpoints at one height (possible with n >= 5 when honest
+        // nodes re-emit after a failed ratification) converge on the
+        // higher round instead of splitting the mesh's chain forever.
         let ahead = inner.latest_checkpoint.as_ref().map_or(true, |l| {
-            latest.cosigned.checkpoint.height > l.cosigned.checkpoint.height
-                && latest.cosigned.checkpoint.round > l.cosigned.checkpoint.round
+            (
+                latest.cosigned.checkpoint.height,
+                latest.cosigned.checkpoint.round,
+            ) > (l.cosigned.checkpoint.height, l.cosigned.checkpoint.round)
         });
         if !ahead {
             return;
         }
         let ck = latest.cosigned.checkpoint.clone();
+        // The mesh may have co-signed a checkpoint this node emitted but
+        // never saw the quorum for: its snapshot is the one to serve.
+        if let Some((_, snap)) = inner.emitted_checkpoints.get(&ck.hash()) {
+            inner.served_snapshot = Some(snap.clone());
+        }
         let mut trans: Vec<CheckpointBundle> = Vec::new();
         for b in chain.iter().cloned() {
             let changed = trans.last().map_or(true, |t| {
@@ -2752,6 +2788,7 @@ async fn install_snapshot(state: &State, snap: StateSnapshot, own: bool) {
         inner
             .emitted_checkpoints
             .retain(|_, (c, _)| c.height > ck.height);
+        inner.checkpoint_sigs.retain(|_, (h, _)| *h > ck.height);
         inner.latest_checkpoint = Some(latest);
     }
 }
@@ -5649,6 +5686,156 @@ mod tests {
         let dag = state.dag.read().await;
         assert_eq!(dag.max_round(), Some(8));
         assert_eq!(highest_quorum_round(&dag, n), Some(0));
+    }
+
+    /// Consensus-review (S34.5, eighth pass): a seated authority flooding
+    /// the signature buffer with fabricated higher checkpoints cannot
+    /// evict this node's own current checkpoint, and adoption of a
+    /// verified chain the mesh co-signed (for a checkpoint this node
+    /// emitted but never saw the quorum for) re-anchors the cursor and
+    /// promotes that checkpoint's snapshot to the served one.
+    #[tokio::test]
+    async fn checkpoint_sig_buffer_and_chain_adoption() {
+        let n = 4u32;
+        let keypairs: Vec<(
+            suwappu_crypto::mldsa::PublicKey,
+            suwappu_crypto::mldsa::SecretKey,
+        )> = (0..n).map(|_| suwappu_crypto::mldsa::keypair()).collect();
+        let manifest = GenesisManifest {
+            network_id: "ck-adopt-4n".into(),
+            validators: (0..n)
+                .map(|i| GenesisValidator {
+                    authority_id: i,
+                    label: format!("v{}", i),
+                    mldsa_public_key_hex: hex::encode(keypairs[i as usize].0.as_bytes()),
+                    bls_public_key_hex: "00".into(),
+                    validator_stake_suwappu: 150_000,
+                    authority_stake_suwappu: 150_000,
+                })
+                .collect(),
+            corridors: Vec::new(),
+            prebalances: Vec::new(),
+            rounds_per_epoch: 1024,
+            gc_depth_rounds: 16,
+            checkpoint_cadence_rounds: 4,
+        };
+        let state = State::new(&manifest, keypairs[0].1.clone(), None);
+        let registries = current_registry_set(&state).await;
+        let snap = Arc::new(capture_snapshot(&state).await);
+        // This node's own checkpoint at height 0 (nothing co-signed yet).
+        let own = Checkpoint {
+            height: 0,
+            round: 4,
+            state_root: snap.state_root,
+            prev_checkpoint: [0; 32],
+            registry_root: registries.root(),
+            snapshot_root: snap.commit_root(),
+        };
+        let own_hash = own.hash();
+        state
+            .inner
+            .lock()
+            .await
+            .emitted_checkpoints
+            .insert(own_hash, (own.clone(), snap.clone()));
+        let sig_for =
+            |ck: &Checkpoint, i: usize| sign_checkpoint(i as u32, &keypairs[i].1, ck).unwrap();
+        buffer_checkpoint_sig(&state, &own, sig_for(&own, 1)).await;
+        // Authority 3 floods: 2 x MAX fabricated checkpoints at heights
+        // 1..=2*MAX with valid signatures.
+        for h in 1..=(2 * MAX_BUFFERED_CHECKPOINTS as u64) {
+            let fake = Checkpoint {
+                height: h,
+                round: 1_000 + h,
+                state_root: [h as u8; 32],
+                prev_checkpoint: [0xAB; 32],
+                registry_root: [0; 32],
+                snapshot_root: [0; 32],
+            };
+            buffer_checkpoint_sig(&state, &fake, sig_for(&fake, 3)).await;
+        }
+        {
+            let inner = state.inner.lock().await;
+            assert!(inner.checkpoint_sigs.len() <= MAX_BUFFERED_CHECKPOINTS);
+            assert!(
+                inner.checkpoint_sigs.contains_key(&own_hash),
+                "own current checkpoint evicted by fabricated entries"
+            );
+            // Heights beyond the admissible window were never buffered.
+            assert!(inner
+                .checkpoint_sigs
+                .values()
+                .all(|(h, _)| *h <= 1 + MAX_BUFFERED_CHECKPOINTS as u64));
+        }
+        // The mesh co-signs `own` (3 of 4) and serves it as its chain; this
+        // node never saw the quorum. Adoption re-anchors and promotes the
+        // snapshot it captured for it.
+        let cosigned = ratify_checkpoint(
+            own.clone(),
+            (0..3).map(|i| sig_for(&own, i)).collect(),
+            &registries.authority_registry,
+        )
+        .unwrap();
+        let chain = vec![CheckpointBundle {
+            cosigned,
+            registries: registries.clone(),
+        }];
+        let outbound: HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>> = HashMap::new();
+        handle_checkpoint_chain(&state, chain, &PeerId("v1".into()), &None, &outbound).await;
+        {
+            let inner = state.inner.lock().await;
+            let latest = inner.latest_checkpoint.as_ref().expect("chain adopted");
+            assert_eq!(latest.cosigned.checkpoint.hash(), own_hash);
+            assert_eq!(inner.checkpoint_height, 1);
+            assert_eq!(inner.last_checkpoint_hash, own_hash);
+            assert_eq!(inner.next_checkpoint_boundary, 8);
+            assert!(inner.emitted_checkpoints.is_empty());
+            assert!(inner.checkpoint_sigs.values().all(|(h, _)| *h > 0));
+            assert!(
+                inner
+                    .served_snapshot
+                    .as_ref()
+                    .is_some_and(|s| Arc::ptr_eq(s, &snap)),
+                "adopted checkpoint's snapshot must be served"
+            );
+            assert_eq!(inner.checkpoint_transitions.len(), 1);
+        }
+        // A chain that is not strictly ahead is ignored.
+        let stale = Checkpoint {
+            height: 0,
+            round: 3,
+            ..own.clone()
+        };
+        let stale_cosigned = ratify_checkpoint(
+            stale.clone(),
+            (0..3).map(|i| sig_for(&stale, i)).collect(),
+            &registries.authority_registry,
+        )
+        .unwrap();
+        handle_checkpoint_chain(
+            &state,
+            vec![CheckpointBundle {
+                cosigned: stale_cosigned,
+                registries,
+            }],
+            &PeerId("v1".into()),
+            &None,
+            &outbound,
+        )
+        .await;
+        assert_eq!(
+            state
+                .inner
+                .lock()
+                .await
+                .latest_checkpoint
+                .as_ref()
+                .unwrap()
+                .cosigned
+                .checkpoint
+                .hash(),
+            own_hash
+        );
     }
 
     /// Consensus-review (S34.5, fourth pass): a running daemon records its

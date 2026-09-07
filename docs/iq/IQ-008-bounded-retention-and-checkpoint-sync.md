@@ -423,8 +423,13 @@ branch.
    each checkpoint of the verified chain; certificates in the served
    window are admitted only against the ring in force at their round, so
    a key seated in an earlier era cannot mint window certificates at
-   live rounds. This is the documented bootstrap exception to Invariant 1
-   and needs the human sign-off this IQ requires; the
+   live rounds. The same trust applies in steady state: a node whose
+   own checkpointing has stalled adopts a strictly newer chain a
+   configured peer serves (verified from the genesis committee, cursor
+   only — no state is installed), which replaces the committee it
+   verifies future co-signatures against. This is the documented
+   bootstrap exception to Invariant 1 and needs the human sign-off this
+   IQ requires; the
    alternative is a stake-weighted Validator-Ring co-signature over the
    checkpoint hash. Related: the served chain is sparse (transitions plus
    the latest), so `verify_checkpoint_chain` checks `prev_checkpoint`
