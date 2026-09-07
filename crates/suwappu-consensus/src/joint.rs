@@ -48,7 +48,7 @@ pub type Stake = u128;
 ///
 /// Phase-1 keeps this as an in-memory map; the on-chain registry lands
 /// in DAG-S6 alongside cert-signature verification.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StakeTable {
     weights: BTreeMap<ValidatorId, Stake>,
 }

@@ -44,7 +44,7 @@ use tracing::{debug, info, warn};
 /// DagBft-C separates cert proposal from block dissemination — the cert
 /// commits to a 32-byte digest, the block (which carries the actual intents)
 /// flows on a parallel `WireMessage::Block` frame.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BlockPayload {
     /// 32-byte content hash of `intents` (blake3). Must equal the
     /// `payload_digest` of the associated cert.

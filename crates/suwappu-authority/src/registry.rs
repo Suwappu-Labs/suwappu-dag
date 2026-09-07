@@ -50,7 +50,7 @@ pub enum AdmissionError {
 }
 
 /// A seated Authority Ring member.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AuthorityMember {
     /// Authority identifier (index into the published set).
     pub id: AuthorityId,
@@ -64,7 +64,7 @@ pub struct AuthorityMember {
 }
 
 /// Authority Ring registry.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AuthorityRegistry {
     members: BTreeMap<AuthorityId, AuthorityMember>,
 }

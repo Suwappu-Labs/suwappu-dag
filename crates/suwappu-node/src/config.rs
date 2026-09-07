@@ -147,6 +147,32 @@ pub struct NodeConfig {
     /// `networkId` immutable or the on-chain quorum check fails silently.
     #[serde(default)]
     pub bridge_network_id: Option<String>,
+
+    /// IQ-008 D4: directory for the durable commit log and state
+    /// snapshots. UNSET (the default) keeps the pre-S34 behaviour — all
+    /// state in memory, rebuilt from genesis on every start — which is
+    /// what tests and the perf cluster want. Operators set it (the
+    /// template uses `/var/lib/suwappu`) so a restart resumes from the
+    /// last snapshot plus log replay instead of from genesis, and so the
+    /// node never re-authors a round it already signed.
+    #[serde(default)]
+    pub data_dir: Option<PathBuf>,
+
+    /// IQ-008 D4: write a full state snapshot every this many committed
+    /// leader rounds (and on clean shutdown). Lower means less log to
+    /// replay after a crash; higher means fewer multi-megabyte writes.
+    /// Default 1024 = one epoch at the default `rounds_per_epoch`.
+    /// Ignored when `data_dir` is unset.
+    #[serde(default = "default_snapshot_interval_rounds")]
+    pub snapshot_interval_rounds: u64,
+
+    /// IQ-008 D4: `fdatasync` the commit log after every appended record.
+    /// Default `true` — a validator's own authored-round marker MUST be
+    /// durable before its certificate is broadcast, or a crash-restart
+    /// can re-sign the same round and be slashed for equivocation.
+    /// Disable only on test rigs.
+    #[serde(default = "default_store_fsync")]
+    pub store_fsync: bool,
 }
 
 /// One peer entry inside [`NodeConfig::peers`].
@@ -310,6 +336,14 @@ fn default_gc_depth_rounds() -> u64 {
     suwappu_consensus::GC_DEPTH
 }
 
+fn default_snapshot_interval_rounds() -> u64 {
+    1024
+}
+
+fn default_store_fsync() -> bool {
+    true
+}
+
 fn default_max_client_connections() -> u32 {
     256
 }
@@ -471,6 +505,9 @@ mod tests {
             bridge_oracle_address: None,
             bridge_network_id: None,
             metrics_listen: None,
+            data_dir: None,
+            snapshot_interval_rounds: 1024,
+            store_fsync: false,
         };
         let err = manifest.validate_against(&cfg).unwrap_err();
         assert!(matches!(err, ConfigError::LabelMismatch { id: 0, .. }));

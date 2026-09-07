@@ -87,13 +87,19 @@ Minimum:
 > - **A restart loses all history.** There is no on-disk state to reload;
 >   a restarted node re-syncs from peers, and can only go back as far as
 >   its peers have held *in their own memory* since *their* last restart.
-> - Operations therefore depend on **periodic regenesis** until snapshot
->   persistence lands (`/goal` A6/A7). Expect scheduled restarts of the
->   whole network, not just your node.
+> - As of DAG-S34 (IQ-008) RAM is bounded: the DAG and every side table
+>   are pruned to `gc_depth_rounds` (manifest, default 256) behind the
+>   commit frontier, and with `data_dir` set the node keeps a durable
+>   commit log plus periodic snapshots, so a restart resumes from disk
+>   instead of genesis. This branch has not yet had the consensus-team
+>   sign-off IQ-008 requires, and joiners that fall more than
+>   `gc_depth_rounds` behind still need the checkpoint-snapshot bootstrap
+>   (S34.4); until both land, expect occasional coordinated regenesis.
 >
-> Disk is used for the event log (`event_log_path`) and little else, so
-> the 2 TB figure is generous — but do not size RAM as if the 2 TB were
-> absorbing chain growth.
+> Disk holds the event log (`event_log_path`) and, with `data_dir` set,
+> the commit log (grows with chain history: roughly the byte size of
+> every committed block) plus two snapshots. Size disk for history, RAM
+> for `authorities × gc_depth_rounds` certificates.
 
 If you can't hit the network RTT requirement (e.g. you're on
 mobile-tier home internet), you'll see more dropped certs and
@@ -201,6 +207,12 @@ mldsa_secret_key_path = "/var/lib/suwappu/mldsa.sk"
 bls_secret_key_path = "/var/lib/suwappu/bls.sk"
 genesis_manifest_path = "/etc/suwappu/genesis.toml"
 event_log_path = "/var/log/suwappu/events.ndjson"
+# IQ-008 D4: durable commit log + snapshots. REQUIRED for a validator:
+# without it a restart rebuilds from genesis and, worse, may re-sign a
+# round it already signed — which peers slash as equivocation.
+data_dir = "/var/lib/suwappu/state"
+snapshot_interval_rounds = 1024
+store_fsync = true
 
 # Pull the current peer list as a starting point. You can prune
 # to your 3 closest geographically once latency telemetry lands.

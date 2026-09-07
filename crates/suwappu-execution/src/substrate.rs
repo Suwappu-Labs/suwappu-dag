@@ -952,7 +952,7 @@ pub(crate) fn compute_state_root_v2<'a>(
 /// balances and empty bytes-records are represented by absent
 /// keys (the map and the explicit-empty/zero record produce
 /// identical roots).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InMemorySubstrate {
     balances: BTreeMap<Address, Balance>,
     bytes_state: BTreeMap<Address, Vec<u8>>,

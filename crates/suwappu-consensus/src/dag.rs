@@ -145,6 +145,46 @@ impl DagStore {
         self.tombstones.contains_key(hash)
     }
 
+    /// Iterate the retained tombstones as `(hash, round)`, rounds
+    /// ascending. Used by the persistence layer (IQ-008 D4) to carry the
+    /// window across a restart.
+    pub fn tombstones(&self) -> impl Iterator<Item = (CertHash, Round)> + '_ {
+        self.tombstones_by_round
+            .iter()
+            .flat_map(|(r, hs)| hs.iter().map(move |h| (*h, *r)))
+    }
+
+    /// Record a tombstone without ever having held the certificate:
+    /// recovery replays committed certificates from the durable log, and
+    /// a committed certificate whose parents fell below the floor before
+    /// the snapshot cannot be `insert`ed, yet later certificates still
+    /// name it as a parent. No-op for a hash that is live or already
+    /// tombstoned, and for rounds above the gc round (those must be
+    /// inserted properly). Returns whether a tombstone was added.
+    pub fn insert_tombstone(&mut self, hash: CertHash, round: Round) -> bool {
+        if self.certs.contains_key(&hash) || self.tombstones.contains_key(&hash) {
+            return false;
+        }
+        if !is_obsolete(round, self.gc_round) {
+            return false;
+        }
+        self.tombstones.insert(hash, round);
+        self.tombstones_by_round
+            .entry(round)
+            .or_default()
+            .push(hash);
+        true
+    }
+
+    /// Set the gc round directly without evicting anything — for a
+    /// store rebuilt from a snapshot, whose contents are already above
+    /// the recorded gc round. Monotone like `prune_below`.
+    pub fn restore_gc_round(&mut self, gc_round: Round) {
+        if self.gc_round.map_or(true, |g| gc_round > g) {
+            self.gc_round = Some(gc_round);
+        }
+    }
+
     /// Insert a certificate after validation. Returns the newly-inserted
     /// certificate's hash on success.
     pub fn insert(&mut self, cert: Certificate) -> Result<CertHash, ConsensusError> {

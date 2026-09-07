@@ -122,6 +122,11 @@ pub(crate) struct State {
     /// only when `StateInner::latest_bridge_header` advances to a new round.
     pub(crate) bridge_attestation_cache:
         parking_lot::Mutex<Option<suwappu_consensus::bridge_header::HeaderAttestation>>,
+    /// IQ-008 D4: snapshot directory (`NodeConfig::data_dir`), `None` for
+    /// an ephemeral node.
+    pub(crate) data_dir: Option<std::path::PathBuf>,
+    /// Committed leader rounds between snapshots.
+    pub(crate) snapshot_interval: u64,
 }
 
 /// Material needed to produce this validator's bridge-header side-attestations.
@@ -289,6 +294,13 @@ pub(crate) struct StateInner {
     /// Round of the highest leader whose causal history this node has
     /// committed. Sole input to `gc_round`; only leader commits move it.
     pub(crate) last_committed_leader_round: Option<u64>,
+    /// IQ-008 D4: the durable commit log, `None` when `data_dir` is
+    /// unset. Lives under `inner` so a log append and the substrate
+    /// mutation it precedes happen under one guard, and so a snapshot's
+    /// `log_sequence` is read at the same instant as the state it covers.
+    pub(crate) store: Option<crate::store::CommitLog>,
+    /// Leader round at which the last snapshot was captured.
+    pub(crate) last_snapshot_leader_round: Option<u64>,
     pub(crate) n_authorities: u32,
     /// Certs received whose parents aren't yet in the local DAG.
     pub(crate) orphans: HashMap<CertHash, Vec<Certificate>>,
@@ -573,6 +585,8 @@ impl State {
                 gc_depth: manifest.gc_depth_rounds.max(1),
                 gc_round: None,
                 last_committed_leader_round: None,
+                store: None,
+                last_snapshot_leader_round: None,
                 n_authorities: n,
                 orphans: HashMap::new(),
                 inflight_fetches: HashSet::new(),
@@ -606,7 +620,17 @@ impl State {
             governance_envelopes: parking_lot::Mutex::new(HashMap::new()),
             bridge_signer,
             bridge_attestation_cache: parking_lot::Mutex::new(None),
+            data_dir: None,
+            snapshot_interval: 1024,
         }
+    }
+
+    /// Builder: enable persistence under `data_dir` (IQ-008 D4). Called by
+    /// `Daemon::start` before the state is shared.
+    fn with_persistence(mut self, data_dir: Option<std::path::PathBuf>, interval: u64) -> Self {
+        self.data_dir = data_dir;
+        self.snapshot_interval = interval.max(1);
+        self
     }
 
     /// Compute the `(object, nonce)` key for a fast-path tx.
@@ -645,12 +669,29 @@ pub struct Daemon {
     /// progress and inject intents).
     #[allow(dead_code)]
     pub(crate) state: Arc<State>,
+    /// Event log handle, kept so `shutdown` can record the final snapshot.
+    log: EventLog,
 }
 
 impl Drop for Daemon {
     fn drop(&mut self) {
         for t in self.tasks.drain(..) {
             t.abort();
+        }
+    }
+}
+
+impl Daemon {
+    /// Clean shutdown (IQ-008 D4): stop every task so no further commit
+    /// can land, then write a final snapshot so the next start replays
+    /// nothing. Safe to call on an ephemeral node (no-op). Dropping the
+    /// handle afterwards is still required.
+    pub async fn shutdown(&mut self) {
+        for t in self.tasks.drain(..) {
+            t.abort();
+        }
+        if self.state.data_dir.is_some() {
+            snapshot_now(&self.state, "shutdown", &self.log).await;
         }
     }
 }
@@ -717,7 +758,24 @@ impl Daemon {
         // attestation is configured) so the RPC adapter can sign bridge
         // headers. `None` => attestation disabled; the daemon still runs.
         let bridge_signer = BridgeHeaderSigner::from_config(&cfg, &manifest);
-        let state = Arc::new(State::new(&manifest, self_secret_key, bridge_signer));
+        let state = Arc::new(
+            State::new(&manifest, self_secret_key, bridge_signer)
+                .with_persistence(cfg.data_dir.clone(), cfg.snapshot_interval_rounds),
+        );
+
+        // IQ-008 D4: recover from disk BEFORE any task can author, vote or
+        // serve — the authored-round marker in particular must be restored
+        // before the round driver's first tick.
+        if let Some(dir) = cfg.data_dir.as_deref() {
+            let recovered = recover_from_disk(&state, dir, cfg.store_fsync, &self_label, &log)
+                .await
+                .map_err(|e| anyhow::anyhow!("recovery from {}: {e}", dir.display()))?;
+            tracing::info!(
+                data_dir = %dir.display(),
+                recovered_leader_round = ?recovered,
+                "persistence enabled"
+            );
+        }
 
         // DAG-S31.4 / A3: client + JSON-RPC intent submissions flow
         // through `state.mempool` directly. The pre-A3 `intent_tx` /
@@ -875,6 +933,7 @@ impl Daemon {
             _log_task: log_task,
             tasks,
             state,
+            log,
         })
     }
 }
@@ -1381,6 +1440,226 @@ async fn ingest_cert(
         }
     }
     inserted
+}
+
+/// Capture a consistent [`crate::store::StateSnapshot`] and write it under
+/// `state.data_dir` (IQ-008 D4). The capture takes every lock briefly in
+/// the canonical order and clones; the encode + write runs on the
+/// blocking pool so the commit path is not stalled by disk. No-op for an
+/// ephemeral node.
+async fn snapshot_now(state: &State, self_label: &str, log: &EventLog) {
+    let Some(dir) = state.data_dir.clone() else {
+        return;
+    };
+    let snap = capture_snapshot(state).await;
+    let round = snap.leader_round;
+    log.emit(Event::now(self_label, Lane::Main, "snapshot").with_round(round));
+    match tokio::task::spawn_blocking(move || crate::store::write_snapshot(&dir, &snap)).await {
+        Ok(Ok(path)) => tracing::info!(round, path = %path.display(), "snapshot written"),
+        Ok(Err(e)) => tracing::error!(err = %e, round, "snapshot write failed"),
+        Err(e) => tracing::error!(err = %e, round, "snapshot task panicked"),
+    }
+}
+
+/// Clone the recoverable state at one point of the commit sequence.
+async fn capture_snapshot(state: &State) -> crate::store::StateSnapshot {
+    let mut inner = state.inner.lock().await;
+    let dag = state.dag.read().await;
+    let authority_registry = state.authority_registry.read().await.clone();
+    let validator_registry = state.validator_registry.read().await.clone();
+    let stake_table = state.stake_table.read().await.clone();
+    let leader_round = inner.last_committed_leader_round.unwrap_or(0);
+    inner.last_snapshot_leader_round = Some(leader_round);
+    let log_sequence = inner.store.as_ref().map_or(0, |s| s.next_sequence());
+    let last_authored_round = inner
+        .last_authored_round
+        .max(inner.store.as_ref().and_then(|s| s.last_authored_round()));
+    let dag_certs: Vec<Certificate> = dag
+        .linearize()
+        .into_iter()
+        .filter_map(|h| dag.get(&h).cloned())
+        .collect();
+    let live: HashSet<CertHash> = dag_certs.iter().map(|c| c.hash()).collect();
+    let committed: Vec<CertHash> = state
+        .committed
+        .lock()
+        .iter()
+        .copied()
+        .filter(|h| live.contains(h))
+        .collect();
+    let blocks: Vec<BlockPayload> = state
+        .blocks
+        .lock()
+        .iter()
+        .filter(|(h, _)| live.contains(h))
+        .map(|(_, b)| b.clone())
+        .collect();
+    crate::store::StateSnapshot {
+        version: crate::store::STORE_VERSION,
+        network_id: state.manifest_network_id.clone(),
+        leader_round,
+        has_committed: inner.last_committed_leader_round.is_some(),
+        gc_round: inner.gc_round,
+        log_sequence,
+        last_authored_round,
+        state_root: inner.substrate.state_root(),
+        substrate: inner.substrate.clone(),
+        authority_registry,
+        validator_registry,
+        stake_table,
+        epoch: (
+            inner.epoch.current,
+            inner.epoch.rounds_per_epoch,
+            inner.epoch.last_boundary_round,
+        ),
+        pending_governance: inner.pending_governance.clone(),
+        pending_stake: inner.pending_stake.clone(),
+        n_authorities: inner.n_authorities,
+        dag_certs,
+        tombstones: dag.tombstones().collect(),
+        committed,
+        blocks,
+    }
+}
+
+/// IQ-008 D4 recovery: install the newest valid snapshot (if any), replay
+/// every later `Committed` record through [`apply_commit`], restore the
+/// authored-round marker, prune to the recovered gc round, and hand the
+/// open log to the state. Returns the recovered leader round for the
+/// startup log line.
+async fn recover_from_disk(
+    state: &State,
+    dir: &std::path::Path,
+    fsync: bool,
+    self_label: &str,
+    log: &EventLog,
+) -> anyhow::Result<Option<u64>> {
+    let snapshot = crate::store::load_latest_snapshot(dir, &state.manifest_network_id)?;
+    let (store, records) = crate::store::CommitLog::open(dir, fsync)?;
+
+    // 1. Snapshot install.
+    let mut replay_from = 0u64;
+    if let Some(snap) = snapshot {
+        replay_from = snap.log_sequence;
+        {
+            let mut dag = state.dag.write().await;
+            if let Some(g) = snap.gc_round {
+                dag.restore_gc_round(g);
+            }
+            for (h, r) in &snap.tombstones {
+                dag.insert_tombstone(*h, *r);
+            }
+            for c in &snap.dag_certs {
+                if let Err(e) = dag.insert(c.clone()) {
+                    tracing::warn!(err = ?e, round = c.round, "recovery: snapshot cert not re-inserted");
+                }
+            }
+        }
+        *state.authority_registry.write().await = snap.authority_registry;
+        *state.validator_registry.write().await = snap.validator_registry;
+        *state.stake_table.write().await = snap.stake_table;
+        {
+            let mut committed = state.committed.lock();
+            committed.extend(snap.committed.iter().copied());
+        }
+        {
+            let mut blocks = state.blocks.lock();
+            for b in snap.blocks {
+                blocks.insert(b.cert_hash, b);
+            }
+        }
+        {
+            let mut inner = state.inner.lock().await;
+            inner.substrate = snap.substrate;
+            inner.epoch = EpochState {
+                current: snap.epoch.0,
+                rounds_per_epoch: snap.epoch.1,
+                last_boundary_round: snap.epoch.2,
+            };
+            inner.pending_governance = snap.pending_governance;
+            inner.pending_stake = snap.pending_stake;
+            inner.n_authorities = snap.n_authorities;
+            inner.gc_round = snap.gc_round;
+            inner.last_committed_leader_round = if snap.has_committed {
+                Some(snap.leader_round)
+            } else {
+                None
+            };
+            inner.last_snapshot_leader_round = Some(snap.leader_round);
+            inner.last_authored_round = snap.last_authored_round;
+            inner.max_observed_round = snap.last_authored_round.unwrap_or(0).max(snap.leader_round);
+        }
+        tracing::info!(
+            leader_round = snap.leader_round,
+            log_sequence = snap.log_sequence,
+            "recovery: snapshot installed"
+        );
+    }
+
+    // 2. Log replay. Committed records re-run the exact commit body;
+    //    authored markers advance the equivocation guard.
+    let mut replayed = 0u64;
+    let mut authored_max: Option<u64> = None;
+    for rec in records {
+        match rec.event {
+            crate::store::LogEvent::Authored { round, .. } => {
+                authored_max = Some(authored_max.map_or(round, |m: u64| m.max(round)));
+            }
+            crate::store::LogEvent::Committed {
+                sequence,
+                leader_round,
+                cert,
+                block,
+            } => {
+                if sequence < replay_from {
+                    continue;
+                }
+                let h = cert.hash();
+                {
+                    let mut dag = state.dag.write().await;
+                    if let Err(e) = dag.insert(cert.clone()) {
+                        // Parents below the floor or already pruned: keep
+                        // the hash resolvable for later children.
+                        if !dag.is_tombstoned(&h) && !dag.contains(&h) {
+                            dag.insert_tombstone(h, cert.round);
+                        }
+                        tracing::debug!(err = ?e, round = cert.round, "recovery: replayed cert tombstoned");
+                    }
+                }
+                state.blocks.lock().insert(h, block.clone());
+                if !state.committed.lock().insert(h) {
+                    continue;
+                }
+                apply_commit(state, h, cert, block, leader_round, self_label, log, false).await;
+                {
+                    let mut inner = state.inner.lock().await;
+                    if inner
+                        .last_committed_leader_round
+                        .map_or(true, |l| leader_round > l)
+                    {
+                        inner.last_committed_leader_round = Some(leader_round);
+                    }
+                }
+                replayed += 1;
+            }
+        }
+    }
+
+    // 3. Restore the authored marker (max of snapshot + log) and prune.
+    let (leader_round, gc_depth) = {
+        let mut inner = state.inner.lock().await;
+        if let Some(a) = authored_max {
+            inner.last_authored_round = Some(inner.last_authored_round.map_or(a, |x| x.max(a)));
+            inner.max_observed_round = inner.max_observed_round.max(a);
+        }
+        inner.store = Some(store);
+        (inner.last_committed_leader_round, inner.gc_depth)
+    };
+    if let Some(g) = leader_round.and_then(|l| gc_round_for(l, gc_depth)) {
+        prune_state(state, g, self_label, log).await;
+    }
+    tracing::info!(replayed, leader_round = ?leader_round, "recovery: commit log replayed");
+    Ok(leader_round)
 }
 
 /// Result of one [`prune_state`] pass, for the event log and metrics.
@@ -2116,10 +2395,11 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
             // would reopen the ordering-divergence class fixed above, so
             // defer the whole walk and let the next pass re-derive the
             // sweep from the pruned DAG.
-            let (cert_round, cert_payload_digest) = match state.dag.read().await.get(&h) {
-                Some(c) => (c.round, c.payload_digest),
+            let cert = match state.dag.read().await.get(&h).cloned() {
+                Some(c) => c,
                 None => break 'commit,
             };
+            let cert_payload_digest = cert.payload_digest;
             // Bind the block to the SIGNED cert: only consume a block whose
             // payload digest equals the committed cert's payload_digest
             // (which the author signed). This means the intents AND the
@@ -2139,9 +2419,9 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
                 .lock()
                 .get(&h)
                 .filter(|b| b.payload_digest == cert_payload_digest)
-                .map(|b| (b.intents.clone(), b.governance_auth.clone()));
-            let (intents, block_gov_auth) = match block_payload {
-                Some(p) => p,
+                .cloned();
+            let block = match block_payload {
+                Some(b) => b,
                 None => {
                     // Record the missing block for the sync sweeper to
                     // fetch (try_commit has no outbound handle), and defer
@@ -2161,137 +2441,23 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
             }
             // No longer waiting on this block.
             state.inner.lock().await.needed_blocks.remove(&h);
-            // DAG-S26.1: capture intent hashes for compliance trace.
-            // Computed once and reused for the `tx_to_block` index below
-            // so we don't pay blake3 twice per intent.
-            let intent_hash_bytes: Vec<[u8; 32]> = intents
-                .iter()
-                .map(|i| {
-                    let bytes = crate::codec::encode(i).expect("intent serialize");
-                    *blake3::hash(&bytes).as_bytes()
-                })
-                .collect();
-            let intent_hashes: Vec<String> = intent_hash_bytes.iter().map(hex::encode).collect();
-            let block = Block {
-                round: cert_round,
-                intents: intents.clone(),
-            };
-            // Substrate execution under inner lock.
-            {
-                let mut inner = state.inner.lock().await;
-                let report = execute_block(&mut inner.substrate, &block);
-                // Bridge header attestation: capture (round, post_root) at the
-                // single canonical commit point — the only place the pair is
-                // co-available (the substrate exposes only the latest root, with
-                // no round→root history). Lossy-latest; read out-of-band and
-                // signed lazily by the RPC adapter, never under this lock.
-                inner.latest_bridge_header = Some((report.round, report.post_root));
-                // IQ-003: index single-owner-equivalent main-lane txs so
-                // the fast-path receiver can K-binding cross-check.
-                // Skip governance/admin intents — only state-touching
-                // transfers can conflict with a fast-path cert.
-                for intent in &intents {
-                    if let Some(ml_tx) = intent_to_main_lane_tx(intent, cert_round, h) {
-                        inner.main_lane_index.push(ml_tx);
-                    }
-                }
-                // Secondary indices for `suwappu_getBlock(round)` and
-                // `suwappu_getTransaction(hash)`. Populated here (and only
-                // here) so the indices are tight-coupled to the canonical
-                // commit path — no second `try_commit` writer.
-                inner.blocks_by_round.insert(cert_round, h);
-                for (idx, tx_hash) in intent_hash_bytes.iter().enumerate() {
-                    inner.tx_to_block.insert(*tx_hash, (cert_round, h, idx));
-                }
-            }
-
-            // Issue #18: queue Phase G governance intents for
-            // epoch-boundary application. Applying at commit time made
-            // n_authorities update at different rounds across daemons
-            // (jitter), causing transitional quorum-threshold asymmetry
-            // that stalled the eject path (n=5→n=4: threshold changes
-            // from 4 to 3 mid-flight). Draining at the epoch boundary
-            // (below) makes governance transitions atomic across the
-            // mesh. Non-governance intents (Transfer) already executed
-            // via execute_block above — they are unchanged.
-            {
-                let mut inner = state.inner.lock().await;
-                for (idx, intent) in intents.iter().enumerate() {
-                    if matches!(
-                        intent,
-                        Intent::AdmitAuthority { .. }
-                            | Intent::ExitAuthority { .. }
-                            | Intent::EjectAuthority { .. }
-                    ) {
-                        // Carry the block's authorization envelope for this
-                        // intent (by index) into the pending queue so it is
-                        // re-verified at the epoch boundary. A Byzantine
-                        // author that omits it leaves `None`, and the apply
-                        // path then drops the intent.
-                        let env = block_gov_auth
-                            .iter()
-                            .find(|(i, _)| *i as usize == idx)
-                            .map(|(_, a)| a.clone());
-                        inner.pending_governance.push((intent.clone(), env));
-                    }
-                }
-            }
-
-            log.emit(
-                Event::now(self_label, Lane::Main, "committed")
-                    .with_round(cert_round)
-                    .with_cert_hash(&h.0)
-                    .with_intent_hashes(intent_hashes),
-            );
-            state.votes.lock().remove(&h);
-
-            // Epoch boundary detection (DAG-S25 Phase G).
-            // Issue #18: drains queued governance intents here so that
-            // registry mutations land atomically at the boundary round.
-            let boundary_crossed = {
-                let mut inner = state.inner.lock().await;
-                if inner.epoch.boundary_crossed_by(cert_round) {
-                    let new_epoch = inner.epoch.epoch_for(cert_round);
-                    inner.epoch.current = new_epoch;
-                    inner.epoch.last_boundary_round = cert_round;
-                    true
-                } else {
-                    false
-                }
-            };
-            if boundary_crossed {
-                let queued: Vec<(Intent, Option<crate::client::GovAuth>)> = {
-                    let mut inner = state.inner.lock().await;
-                    std::mem::take(&mut inner.pending_governance)
-                };
-                for (intent, env) in &queued {
-                    apply_governance_intent(
-                        state,
-                        intent,
-                        env.as_ref(),
-                        cert_round,
-                        self_label,
-                        log,
-                    )
-                    .await;
-                }
-                log.emit(
-                    Event::now(self_label, Lane::Main, "epoch_boundary").with_round(cert_round),
-                );
-                let new_epoch = state.inner.lock().await.epoch.current;
-                tracing::info!(
-                    epoch = new_epoch,
-                    round = cert_round,
-                    drained = queued.len(),
-                    "epoch boundary crossed; governance applied"
-                );
-            }
+            apply_commit(state, h, cert, block, round, self_label, log, true).await;
         }
         // The whole sweep for this leader committed (no defer above):
         // advance the leader frontier that drives the gc round.
         if last_leader_round.map_or(true, |prev| round > prev) {
             last_leader_round = Some(round);
-            state.inner.lock().await.last_committed_leader_round = Some(round);
+            let due = {
+                let mut inner = state.inner.lock().await;
+                inner.last_committed_leader_round = Some(round);
+                state.data_dir.is_some()
+                    && inner
+                        .last_snapshot_leader_round
+                        .map_or(true, |s| round.saturating_sub(s) >= state.snapshot_interval)
+            };
+            if due {
+                snapshot_now(state, self_label, log).await;
+            }
         }
     }
 
@@ -2330,6 +2496,159 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
                 "auto-ejected on detected authority equivocation"
             );
         }
+    }
+}
+
+/// Apply one committed certificate — the tail of the commit path shared
+/// by the live sweep in `try_commit` and by log replay at startup
+/// (IQ-008 D4). `record = true` appends the cert + block to the durable
+/// commit log *before* the block is applied (write-ahead); replay passes
+/// `false` because the record being replayed is the source.
+///
+/// Everything below the log append is byte-for-byte the pre-S34 commit
+/// body: substrate execution, bridge-header capture, IQ-003 index, RPC
+/// indices, governance queueing, the `committed` event, vote cleanup and
+/// the epoch-boundary governance apply. Keeping it in one function is
+/// what makes recovery replay equivalent to live execution (I-P1).
+#[allow(clippy::too_many_arguments)]
+async fn apply_commit(
+    state: &State,
+    h: CertHash,
+    cert: Certificate,
+    block: BlockPayload,
+    leader_round: u64,
+    self_label: &str,
+    log: &EventLog,
+    record: bool,
+) {
+    let cert_round = cert.round;
+    let intents = block.intents.clone();
+    let block_gov_auth = block.governance_auth.clone();
+    if record {
+        let mut inner = state.inner.lock().await;
+        if let Some(store) = inner.store.as_mut() {
+            if let Err(e) = store.append_committed(leader_round, cert, block) {
+                // A validator that cannot persist keeps running (liveness)
+                // but is no longer crash-recoverable; the operator alarm is
+                // the log line. Never silently drop the commit itself.
+                tracing::error!(err = %e, round = cert_round, "commit log append failed");
+            }
+        }
+    }
+    // DAG-S26.1: capture intent hashes for compliance trace.
+    // Computed once and reused for the `tx_to_block` index below
+    // so we don't pay blake3 twice per intent.
+    let intent_hash_bytes: Vec<[u8; 32]> = intents
+        .iter()
+        .map(|i| {
+            let bytes = crate::codec::encode(i).expect("intent serialize");
+            *blake3::hash(&bytes).as_bytes()
+        })
+        .collect();
+    let intent_hashes: Vec<String> = intent_hash_bytes.iter().map(hex::encode).collect();
+    let block = Block {
+        round: cert_round,
+        intents: intents.clone(),
+    };
+    // Substrate execution under inner lock.
+    {
+        let mut inner = state.inner.lock().await;
+        let report = execute_block(&mut inner.substrate, &block);
+        // Bridge header attestation: capture (round, post_root) at the
+        // single canonical commit point — the only place the pair is
+        // co-available (the substrate exposes only the latest root, with
+        // no round→root history). Lossy-latest; read out-of-band and
+        // signed lazily by the RPC adapter, never under this lock.
+        inner.latest_bridge_header = Some((report.round, report.post_root));
+        // IQ-003: index single-owner-equivalent main-lane txs so
+        // the fast-path receiver can K-binding cross-check.
+        // Skip governance/admin intents — only state-touching
+        // transfers can conflict with a fast-path cert.
+        for intent in &intents {
+            if let Some(ml_tx) = intent_to_main_lane_tx(intent, cert_round, h) {
+                inner.main_lane_index.push(ml_tx);
+            }
+        }
+        // Secondary indices for `suwappu_getBlock(round)` and
+        // `suwappu_getTransaction(hash)`. Populated here (and only
+        // here) so the indices are tight-coupled to the canonical
+        // commit path — no second `try_commit` writer.
+        inner.blocks_by_round.insert(cert_round, h);
+        for (idx, tx_hash) in intent_hash_bytes.iter().enumerate() {
+            inner.tx_to_block.insert(*tx_hash, (cert_round, h, idx));
+        }
+    }
+
+    // Issue #18: queue Phase G governance intents for
+    // epoch-boundary application. Applying at commit time made
+    // n_authorities update at different rounds across daemons
+    // (jitter), causing transitional quorum-threshold asymmetry
+    // that stalled the eject path (n=5→n=4: threshold changes
+    // from 4 to 3 mid-flight). Draining at the epoch boundary
+    // (below) makes governance transitions atomic across the
+    // mesh. Non-governance intents (Transfer) already executed
+    // via execute_block above — they are unchanged.
+    {
+        let mut inner = state.inner.lock().await;
+        for (idx, intent) in intents.iter().enumerate() {
+            if matches!(
+                intent,
+                Intent::AdmitAuthority { .. }
+                    | Intent::ExitAuthority { .. }
+                    | Intent::EjectAuthority { .. }
+            ) {
+                // Carry the block's authorization envelope for this
+                // intent (by index) into the pending queue so it is
+                // re-verified at the epoch boundary. A Byzantine
+                // author that omits it leaves `None`, and the apply
+                // path then drops the intent.
+                let env = block_gov_auth
+                    .iter()
+                    .find(|(i, _)| *i as usize == idx)
+                    .map(|(_, a)| a.clone());
+                inner.pending_governance.push((intent.clone(), env));
+            }
+        }
+    }
+
+    log.emit(
+        Event::now(self_label, Lane::Main, "committed")
+            .with_round(cert_round)
+            .with_cert_hash(&h.0)
+            .with_intent_hashes(intent_hashes),
+    );
+    state.votes.lock().remove(&h);
+
+    // Epoch boundary detection (DAG-S25 Phase G).
+    // Issue #18: drains queued governance intents here so that
+    // registry mutations land atomically at the boundary round.
+    let boundary_crossed = {
+        let mut inner = state.inner.lock().await;
+        if inner.epoch.boundary_crossed_by(cert_round) {
+            let new_epoch = inner.epoch.epoch_for(cert_round);
+            inner.epoch.current = new_epoch;
+            inner.epoch.last_boundary_round = cert_round;
+            true
+        } else {
+            false
+        }
+    };
+    if boundary_crossed {
+        let queued: Vec<(Intent, Option<crate::client::GovAuth>)> = {
+            let mut inner = state.inner.lock().await;
+            std::mem::take(&mut inner.pending_governance)
+        };
+        for (intent, env) in &queued {
+            apply_governance_intent(state, intent, env.as_ref(), cert_round, self_label, log).await;
+        }
+        log.emit(Event::now(self_label, Lane::Main, "epoch_boundary").with_round(cert_round));
+        let new_epoch = state.inner.lock().await.epoch.current;
+        tracing::info!(
+            epoch = new_epoch,
+            round = cert_round,
+            drained = queued.len(),
+            "epoch boundary crossed; governance applied"
+        );
     }
 }
 
@@ -2696,6 +3015,18 @@ async fn run_round_driver(
         // equivocation detection.
         {
             let mut inner = state.inner.lock().await;
+            // IQ-008 D4: the authored-round marker is written and synced
+            // BEFORE this cert can leave the process (broadcast is Phase
+            // 4). A crash between here and the broadcast costs one unsent
+            // cert; a crash-restart that re-signed this round would cost
+            // the whole bond (Invariant 5). Persistence failure here is
+            // fatal to authoring for this tick, not to the process.
+            if let Some(store) = inner.store.as_mut() {
+                if let Err(e) = store.append_authored(target_round, cert_hash) {
+                    tracing::error!(err = %e, round = target_round, "authored marker append failed; skipping propose");
+                    continue;
+                }
+            }
             inner.last_authored_round = Some(target_round);
             if target_round > inner.max_observed_round {
                 inner.max_observed_round = target_round;
@@ -2761,6 +3092,7 @@ mod tests {
     //   23_200  phase_g_eject (4n)
     //   23_400  phase_g_growing_prefix_under_transient_unavailability (4n)
     //   23_600  four_node_gc_bounds_store (4n)
+    //   23_800  restart_resumes_from_disk_without_equivocating (4n)
     //
     // Adding a test? Take the next free 200-wide band and list it here.
 
@@ -2835,7 +3167,7 @@ mod tests {
     use std::net::SocketAddr;
 
     use super::*;
-    use crate::config::{GenesisValidator, Peer};
+    use crate::config::{GenesisPrebalance, GenesisValidator, Peer};
 
     /// Write an ML-DSA-65 secret key's raw bytes to a fresh temp file and
     /// return its path, for use as `NodeConfig::mldsa_secret_key_path` — the
@@ -3020,6 +3352,9 @@ mod tests {
             bridge_oracle_address: None,
             bridge_network_id: None,
             metrics_listen: None,
+            data_dir: None,
+            snapshot_interval_rounds: 1024,
+            store_fsync: false,
         };
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -3108,6 +3443,9 @@ mod tests {
             bridge_oracle_address: None,
             bridge_network_id: None,
             metrics_listen: None,
+            data_dir: None,
+            snapshot_interval_rounds: 1024,
+            store_fsync: false,
         };
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -3228,6 +3566,9 @@ mod tests {
                 bridge_oracle_address: None,
                 bridge_network_id: None,
                 metrics_listen: None,
+                data_dir: None,
+                snapshot_interval_rounds: 1024,
+                store_fsync: false,
             };
             let d = Daemon::start(cfg, manifest.clone()).await.unwrap();
             daemons.push(d);
@@ -3333,6 +3674,9 @@ mod tests {
                 bridge_oracle_address: None,
                 bridge_network_id: None,
                 metrics_listen: None,
+                data_dir: None,
+                snapshot_interval_rounds: 1024,
+                store_fsync: false,
             };
             let d = Daemon::start(cfg, manifest.clone()).await.unwrap();
             daemons.push(d);
@@ -3421,6 +3765,201 @@ mod tests {
                 "state roots disagree across daemons after pruning"
             );
         }
+    }
+
+    /// IQ-008 D4 at the daemon layer: a validator with `data_dir` set is
+    /// stopped mid-run and restarted from disk. It must (1) never re-sign a
+    /// round it already authored — its peers would eject it for
+    /// equivocation — (2) resume with the substrate it had, and (3) catch
+    /// up to the cluster's state root.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn restart_resumes_from_disk_without_equivocating() {
+        let n = 4u32;
+        let base_port: u16 = 23_800;
+        let restarted: u32 = 3;
+        let data_dir = std::env::temp_dir().join(format!(
+            "suwappu-restart-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&data_dir);
+
+        let keypairs: Vec<(
+            suwappu_crypto::mldsa::PublicKey,
+            suwappu_crypto::mldsa::SecretKey,
+        )> = (0..n).map(|_| suwappu_crypto::mldsa::keypair()).collect();
+        let manifest = GenesisManifest {
+            network_id: "test-restart-4n".into(),
+            validators: (0..n)
+                .map(|i| GenesisValidator {
+                    authority_id: i,
+                    label: format!("v{}", i),
+                    mldsa_public_key_hex: hex::encode(keypairs[i as usize].0.as_bytes()),
+                    bls_public_key_hex: "00".into(),
+                    validator_stake_suwappu: 150_000,
+                    authority_stake_suwappu: 150_000,
+                })
+                .collect(),
+            corridors: Vec::new(),
+            prebalances: vec![GenesisPrebalance {
+                address: format!("0x{}", "11".repeat(20)),
+                balance_suwappu: 1_000_000,
+                role: None,
+            }],
+            rounds_per_epoch: 1024,
+            gc_depth_rounds: 8,
+        };
+        let cfg_for = |i: u32| -> NodeConfig {
+            let peers: Vec<Peer> = (0..n)
+                .filter(|j| *j != i)
+                .map(|j| Peer {
+                    id: format!("v{}", j),
+                    addr: format!("127.0.0.1:{}", base_port + j as u16)
+                        .parse::<SocketAddr>()
+                        .unwrap(),
+                })
+                .collect();
+            NodeConfig {
+                self_id: format!("v{}", i),
+                authority_id: i,
+                listen: format!("127.0.0.1:{}", base_port + i as u16)
+                    .parse::<SocketAddr>()
+                    .unwrap(),
+                client_listen: format!("127.0.0.1:{}", base_port + 100 + i as u16)
+                    .parse::<SocketAddr>()
+                    .unwrap(),
+                rpc_listen: None,
+                peers,
+                allow_post_genesis_join: false,
+                round_ms: 100,
+                checkpoint_cadence_rounds: 1,
+                mldsa_secret_key_path: write_mldsa_key_file(&keypairs[i as usize].1),
+                bls_secret_key_path: "/dev/null".into(),
+                genesis_manifest_path: "/dev/null".into(),
+                event_log_path: std::env::temp_dir()
+                    .join(format!("suwappu-daemon-restart-test-v{}.ndjson", i)),
+                max_client_connections: 256,
+                client_idle_timeout_ms: 30_000,
+                client_per_ip_limit: 8,
+                rpc_per_ip_capacity: 60,
+                rpc_per_ip_refill_per_sec: 10,
+                bridge_oracle_address: None,
+                bridge_network_id: None,
+                metrics_listen: None,
+                data_dir: if i == restarted {
+                    Some(data_dir.clone())
+                } else {
+                    None
+                },
+                // Snapshot often so the restart exercises snapshot + tail.
+                snapshot_interval_rounds: 6,
+                store_fsync: false,
+            }
+        };
+
+        let mut daemons: Vec<Daemon> = Vec::new();
+        for i in 0..n {
+            daemons.push(Daemon::start(cfg_for(i), manifest.clone()).await.unwrap());
+        }
+        // Submit a transfer so the substrate is not trivially genesis.
+        {
+            let mut client = crate::client::LoadGenClient::connect(
+                cfg_for(0).client_listen,
+                keypairs[0].1.clone(),
+                keypairs[0].0.clone(),
+                manifest.network_id.clone(),
+            )
+            .await
+            .unwrap();
+            client
+                .submit(Intent::Transfer {
+                    from: [0x11; 20],
+                    to: [0x22; 20],
+                    amount: 777,
+                })
+                .await
+                .unwrap();
+        }
+        tokio::time::sleep(Duration::from_secs(4)).await;
+
+        // Stop v3 cleanly (final snapshot) and record where it was.
+        let mut v3 = daemons.remove(restarted as usize);
+        let (authored_before, leader_before, root_before) = {
+            let inner = v3.state.inner.lock().await;
+            (
+                inner.last_authored_round.unwrap(),
+                inner.last_committed_leader_round.unwrap(),
+                inner.substrate.state_root(),
+            )
+        };
+        assert!(
+            leader_before >= 8,
+            "cluster did not progress before restart"
+        );
+        v3.shutdown().await;
+        drop(v3);
+        // Let the peers notice the drop and keep committing without v3.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+
+        // Restart from disk.
+        let v3 = Daemon::start(cfg_for(restarted), manifest.clone())
+            .await
+            .unwrap();
+        {
+            let inner = v3.state.inner.lock().await;
+            assert!(
+                inner.last_authored_round.unwrap_or(0) >= authored_before,
+                "authored marker regressed across restart: {:?} < {}",
+                inner.last_authored_round,
+                authored_before
+            );
+            assert_eq!(
+                inner.last_committed_leader_round,
+                Some(leader_before),
+                "recovered leader frontier differs from the one snapshotted at shutdown"
+            );
+            assert_eq!(
+                inner.substrate.state_root(),
+                root_before,
+                "recovered substrate differs"
+            );
+            assert!(
+                inner.store.is_some(),
+                "commit log not attached after recovery"
+            );
+        }
+        daemons.push(v3);
+        tokio::time::sleep(Duration::from_secs(4)).await;
+
+        // (1) No peer ejected v3 — i.e. v3 never equivocated on restart.
+        for d in &daemons {
+            assert!(
+                d.state.authority_registry.read().await.contains(restarted),
+                "restarted validator was ejected (equivocation on restart)"
+            );
+        }
+        // (2)+(3): v3 authored past its pre-restart marker and matches the
+        // cluster's substrate.
+        let roots: Vec<[u8; 32]> = {
+            let mut v = Vec::new();
+            for d in &daemons {
+                v.push(d.state.inner.lock().await.substrate.state_root());
+            }
+            v
+        };
+        let v3_inner = daemons.last().unwrap().state.inner.lock().await;
+        assert!(
+            v3_inner.last_authored_round.unwrap() > authored_before,
+            "restarted validator did not resume authoring"
+        );
+        drop(v3_inner);
+        for r in &roots[1..] {
+            assert_eq!(*r, roots[0], "state roots disagree after restart");
+        }
+        let _ = std::fs::remove_dir_all(&data_dir);
     }
 
     /// Shared cluster setup for the Phase G admit/eject tests below.
@@ -3541,6 +4080,9 @@ mod tests {
                 bridge_oracle_address: None,
                 bridge_network_id: None,
                 metrics_listen: None,
+                data_dir: None,
+                snapshot_interval_rounds: 1024,
+                store_fsync: false,
             };
             let d = Daemon::start(cfg, manifest.clone()).await.unwrap();
             daemons.push(d);
@@ -4213,6 +4755,9 @@ mod tests {
             bridge_oracle_address: None,
             bridge_network_id: None,
             metrics_listen: None,
+            data_dir: None,
+            snapshot_interval_rounds: 1024,
+            store_fsync: false,
         };
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -4823,6 +5368,9 @@ mod tests {
             bridge_oracle_address: None,
             bridge_network_id: None,
             metrics_listen: None,
+            data_dir: None,
+            snapshot_interval_rounds: 1024,
+            store_fsync: false,
         };
         let _d = Daemon::start(cfg.clone(), manifest).await.unwrap();
         // Give the bound listener a tick to accept connections.
@@ -4918,6 +5466,9 @@ mod tests {
             bridge_oracle_address: None,
             bridge_network_id: None,
             metrics_listen: None,
+            data_dir: None,
+            snapshot_interval_rounds: 1024,
+            store_fsync: false,
         };
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -5037,6 +5588,9 @@ mod tests {
             bridge_oracle_address: None,
             bridge_network_id: None,
             metrics_listen: None,
+            data_dir: None,
+            snapshot_interval_rounds: 1024,
+            store_fsync: false,
         };
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -5158,6 +5712,9 @@ mod tests {
             bridge_oracle_address: None,
             bridge_network_id: None,
             metrics_listen: None,
+            data_dir: None,
+            snapshot_interval_rounds: 1024,
+            store_fsync: false,
         };
         let _d = Daemon::start(cfg.clone(), manifest).await.unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;
