@@ -112,6 +112,23 @@ will coincide with mainnet genesis.
     returned (three survivors held 300k of stake against a 400,001
     threshold on every leader). The round driver now records and
     broadcasts the author's own vote.
+- **DAG-S35 (IQ-009): certificate availability.** A certificate enters
+  the DAG only together with its block (Narwhal §4.2 / Mysticeti §III
+  admission rule): a signature-verified certificate whose block is not
+  held is parked, the block is fetched from the sender and one other
+  peer, and the certificate is admitted — and voted for — when it
+  arrives. Parents are chosen only from held certificates and the
+  Validator-Ring vote is cast at admission, so a reference implies the
+  referrer holds the payload and a leader's vote quorum doubles as an
+  availability attestation. Closes the class the DAG-S34 restart test
+  exposed: an author that crashed between broadcasting its certificate
+  and its block froze every node's commit frontier until it returned.
+  `GetCert` / `GetCertsByRound` replies send the block before the
+  certificate; a served snapshot must carry a block for every
+  certificate. `State::withhold_blocks` is the first `/goal` B2
+  fault-injection knob; `withholding_author_does_not_stall_the_mesh`
+  exercises it. Decision record:
+  `docs/iq/IQ-009-certificate-availability.md`.
 - `suwappu_getSyncStatus` JSON-RPC method: the one-call answer to "is
   this node caught up?" for operators, the status page (G8) and the
   explorer (G7). Returns `local_dag_round`, `latest_committed_round`,
