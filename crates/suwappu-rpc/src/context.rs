@@ -262,9 +262,15 @@ pub struct SyncStatusView {
     pub orphan_certs: u64,
     /// Certificate fetches issued to peers and not yet answered.
     pub inflight_fetches: u64,
-    /// Committed certificates whose block payload has not arrived yet,
-    /// so execution is deferred.
+    /// Certificates whose block payload has not arrived yet: parked
+    /// before admission (IQ-009) or, rarely, committed-in-order and
+    /// deferred. A large, non-shrinking count means block propagation
+    /// is failing.
     pub needed_blocks: u64,
+    /// Certificates parked before admission because their block has not
+    /// arrived (IQ-009 D1). Transient in a healthy mesh.
+    #[serde(default)]
+    pub awaiting_block: u64,
     /// This node's garbage-collection round (IQ-008): every round at or
     /// below it has been pruned. `null` until the chain is `gc_depth`
     /// rounds deep.

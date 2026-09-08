@@ -96,7 +96,7 @@ Between sessions, you resume via:
 | DAG-S19 | SCION-IP-Gateway fallback                                | ✅ Closed    | 4 properties × 10k cases (`tests/proptest_gateway.rs`) |
 | DAG-S20 | `suwappu-node` — full validator composition (E2E)            | ✅ Closed    | 3 properties × 10k cases (`tests/proptest_genesis_flow.rs`) |
 | DAG-S34 | IQ-008 — bounded DAG retention, commit log + snapshots, co-signed checkpoint sync | 🔍 Review | `proptest_gc.rs` (6), `proptest_persistence.rs` (2), `proptest_checkpoint_chain.rs` (1) × 10k; eleven consensus-reviewer passes, no HIGH/MED remaining; human sign-off gates merge |
-| DAG-S35 | IQ-009 — certificate availability: a certificate enters the DAG only with its block | 🔍 Review | `cert_is_admitted_only_with_its_block`, `withholding_author_does_not_stall_the_mesh` (4-node fault injection); consensus-reviewer + human sign-off gate merge |
+| DAG-S35 | IQ-009 — certificate availability: a certificate enters the DAG only with its block | 🔍 Review | `availability_is_an_admission_invariant` × 10k (I-AV1 over arbitrary certificate/block/wrong-block interleavings), `cert_is_admitted_only_with_its_block`, `withholding_author_does_not_stall_the_mesh` (4-node fault injection); consensus-reviewer + human sign-off gate merge |
 
 Update this table when a sprint closes.
 

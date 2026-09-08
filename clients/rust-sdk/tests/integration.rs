@@ -206,6 +206,7 @@ async fn get_sync_status_round_trip() {
             orphan_certs: 3,
             inflight_fetches: 2,
             needed_blocks: 1,
+            awaiting_block: 0,
             gc_round: None,
             peer_gc_round: Some(12),
             needs_snapshot: false,

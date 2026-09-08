@@ -60,6 +60,8 @@ export interface SyncStatusView {
   inflight_fetches: number;
   /** Committed certificates whose block payload has not arrived yet. */
   needed_blocks: number;
+  /** Certificates parked before admission because their block has not arrived (IQ-009). */
+  awaiting_block?: number;
   /**
    * This node's garbage-collection round (IQ-008): every round at or
    * below it has been pruned. `null` until the chain is `gc_depth`

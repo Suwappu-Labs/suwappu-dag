@@ -105,6 +105,7 @@ impl StateView for MockState {
             orphan_certs: 3,
             inflight_fetches: 2,
             needed_blocks: 1,
+            awaiting_block: 0,
             gc_round: Some(40),
             peer_gc_round: Some(50),
             needs_snapshot: false,

@@ -98,6 +98,13 @@ the signed digest (a relay-poisoned squatter) is evicted at this point
 and refetched. When the block arrives (`handle_block`), the parked
 certificate is re-ingested and, if seated, voted for.
 
+A block that arrives before its certificate is known is held as one of
+at most two candidates per hash (bounded in total) and bound to the
+signed `payload_digest` only when the certificate is admitted; a relay
+that pre-squats a wrong payload therefore cannot cause the authentic
+block to be dropped (the property test found exactly that interleaving
+under first-write-wins).
+
 ### D2. The wire serves certificate and block together
 
 `GetCert` and `GetCertsByRound` replies send the block *before* the
@@ -141,18 +148,28 @@ rule this halts at the first withheld leader certificate.
 
 - **I-AV1 (availability by reference).** For every certificate in an
   honest node's DAG, that node holds the certificate's block, and every
-  parent of that certificate is in its DAG. Exit gates:
+  parent of that certificate is in its DAG (or tombstoned below the gc
+  round). Exit gates: `availability_is_an_admission_invariant` (× 10k:
+  the invariant after every event of an arbitrary interleaving of
+  certificate, block and wrong-payload-block arrivals with an optional
+  prune, plus admission liveness without a prune),
   `cert_is_admitted_only_with_its_block` (unit) and
   `withholding_author_does_not_stall_the_mesh` (four-node, fault
   injected).
 
 ## Residuals
 
-1. **Bounded parking.** `awaiting_block` is capped; under a flood of
-   header-only certificates from a Byzantine author the cap drops the
-   newest. The author's certificates are signature-verified before
-   parking, so the flood is bounded by seated identities and the
-   two-per-(author, round) cap from IQ-008 applies at admission.
+1. **Bounded parking.** A certificate is parked only after the same
+   round-window ceiling and two-per-(author, round) cap that gate
+   admission (the caps run before the block check), and the parking
+   buffer applies the per-slot cap to parked certificates as well; a
+   seated Byzantine author therefore holds at most two parked headers
+   per round inside one retention window. Block fetches use the
+   certificate leg's per-hash exponential back-off and a hash-rotated
+   two-peer fan-out, so a full buffer is not a request storm and a
+   block held by exactly one peer is eventually asked of it.
+   `suwappu_getSyncStatus.awaiting_block` counts parked certificates
+   separately from `needed_blocks`.
 2. **Latency.** A certificate whose block is delayed is admitted late;
    the author's own vote and its peers' votes follow the block. This is
    the Narwhal/Mysticeti cost model and is paid per certificate, not
@@ -162,4 +179,15 @@ rule this halts at the first withheld leader certificate.
    one (the digest is signed). Unchanged from S31.
 4. **Human sign-off** is required as for IQ-007/008: this changes which
    certificates an honest node references, hence the DAG topology under
-   partial block loss, and must be reviewed as a consensus change.
+   partial block loss, and must be reviewed as a consensus change. The
+   Validator-Ring vote as an implicit availability attestation (D3) is a
+   new load-bearing semantic for `validator_quorum_met` and belongs in
+   the paper-facing text.
+5. **Votes for never-admitted candidates.** `store_vote` accepts any
+   candidate hash from a Validator-Ring member; a certificate that is
+   parked and then dropped (cap, ceiling) leaves its votes until the
+   round is pruned. Bounded by the ring and the retention window;
+   carried from IQ-008 Residual 5.
+6. **Snapshots from a pre-S35 binary** may hold certificates without
+   blocks; install skips those on both the own-recovery and the peer
+   path and backfill re-supplies them.
