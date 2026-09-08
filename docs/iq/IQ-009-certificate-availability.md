@@ -155,21 +155,31 @@ rule this halts at the first withheld leader certificate.
   prune, plus admission liveness without a prune),
   `cert_is_admitted_only_with_its_block` (unit) and
   `withholding_author_does_not_stall_the_mesh` (four-node, fault
-  injected).
+  injected). The property models one equivocating author, so it also
+  pins the two-per-(author, round) cap for parked and admitted
+  certificates and exercises the DAG-S30.1 auto-eject; admission
+  liveness is asserted for non-equivocating authors only.
 
 ## Residuals
 
 1. **Bounded parking.** A certificate is parked only after the same
-   round-window ceiling and two-per-(author, round) cap that gate
-   admission (the caps run before the block check), and the parking
-   buffer applies the per-slot cap to parked certificates as well; a
-   seated Byzantine author therefore holds at most two parked headers
-   per round inside one retention window. Block fetches use the
-   certificate leg's per-hash exponential back-off and a hash-rotated
-   two-peer fan-out, so a full buffer is not a request storm and a
-   block held by exactly one peer is eventually asked of it.
-   `suwappu_getSyncStatus.awaiting_block` counts parked certificates
-   separately from `needed_blocks`.
+   gc floor, round-window ceiling and two-per-(author, round) cap that
+   gate admission (all run before the block check; the per-slot cap is
+   re-evaluated under the DAG write guard at insert so it is atomic
+   across inbox tasks), and the parking buffer applies the per-slot cap
+   to parked certificates as well. A seated Byzantine author therefore
+   holds at most `2 × (2 × gc_depth + lag)` parked headers (≈1,024 at
+   `GC_DEPTH = 256`), and `f` of them ≈ `1,024 f` — which exceeds the
+   4,096-entry buffer at n ≥ 13. The buffer therefore evicts
+   flooder-first (the highest-round parked certificate of the author
+   holding the most) rather than refusing honest late arrivals. Block
+   fetches use the certificate leg's per-hash exponential back-off, a
+   per-tick budget of 256 frames per leg (oldest-due first), and a
+   two-peer fan-out whose start rotates with the hash *and the attempt*
+   over a sorted peer list, so successive retries of one hash walk every
+   peer and a block held by exactly one of them is eventually asked of
+   it. `suwappu_getSyncStatus.awaiting_block` counts parked
+   certificates separately from `needed_blocks`.
 2. **Latency.** A certificate whose block is delayed is admitted late;
    the author's own vote and its peers' votes follow the block. This is
    the Narwhal/Mysticeti cost model and is paid per certificate, not
@@ -189,5 +199,12 @@ rule this halts at the first withheld leader certificate.
    round is pruned. Bounded by the ring and the retention window;
    carried from IQ-008 Residual 5.
 6. **Snapshots from a pre-S35 binary** may hold certificates without
-   blocks; install skips those on both the own-recovery and the peer
-   path and backfill re-supplies them.
+   blocks; install skips those (and their blocks) on both the
+   own-recovery and the peer path and backfill re-supplies them.
+7. **Candidate pre-squatting costs one refetch.** A relay can fill a
+   certificate's two candidate slots with wrong payloads before the
+   authentic block arrives; the authentic block is then dropped once,
+   the certificate parks on arrival, and the fetch retrieves it (the
+   parked path is not slot-limited). The candidate key set is capped at
+   4,096 hashes and tested before any entry is created, so the buffer
+   costs O(1) per frame under the state mutex.

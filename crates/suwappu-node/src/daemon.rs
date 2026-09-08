@@ -512,9 +512,13 @@ pub(crate) type FastPathKey = (OwnedObjectId, u64);
 const MAX_ORPHAN_CERTS: usize = 4096;
 /// Soft cap on certificates parked for a missing block (IQ-009 D1).
 const MAX_AWAITING_BLOCK: usize = 4096;
-/// Blocks held for a not-yet-known certificate, per hash and in total.
+/// Blocks held for a not-yet-known certificate: per hash, and hashes in
+/// total (so at most `2 × MAX_BLOCK_CANDIDATES` blocks).
 const MAX_BLOCK_CANDIDATES_PER_HASH: usize = 2;
 const MAX_BLOCK_CANDIDATES: usize = 4096;
+/// Fetch frames issued per sweeper tick per leg (certificates, blocks),
+/// oldest-due first: a full buffer never becomes a request storm.
+const MAX_FETCHES_PER_TICK: usize = 256;
 
 /// Interval at which the synchronizer re-issues `GetCert` for any
 /// missing parents still in `inflight_fetches`. Matches Sui's
@@ -1630,11 +1634,19 @@ async fn handle_block(
             // Certificate not known yet: hold the block as a candidate;
             // `ingest_cert` binds the one matching the signed digest.
             let mut inner = state.inner.lock().await;
-            let total: usize = inner.block_candidates.values().map(|v| v.len()).sum();
+            // Capacity is tested BEFORE any entry is created: the key set
+            // is what an attacker can grow (any `cert_hash` passes the
+            // self-consistency check), and it must never cost O(keys) per
+            // frame under the global mutex.
+            let known = inner.block_candidates.contains_key(&cert_hash);
+            if !known && inner.block_candidates.len() >= MAX_BLOCK_CANDIDATES {
+                debug!(peer = %from.0, "inbox: block candidate buffer full, dropping");
+                return;
+            }
             let slot = inner.block_candidates.entry(cert_hash).or_default();
             if !slot.iter().any(|b| b.payload_digest == digest) {
-                if slot.len() >= MAX_BLOCK_CANDIDATES_PER_HASH || total >= MAX_BLOCK_CANDIDATES {
-                    debug!(peer = %from.0, "inbox: block candidate buffer full, dropping");
+                if slot.len() >= MAX_BLOCK_CANDIDATES_PER_HASH {
+                    debug!(peer = %from.0, "inbox: block candidate slot full, dropping");
                 } else {
                     slot.push(block);
                 }
@@ -1927,6 +1939,11 @@ async fn ingest_cert(
                 debug!(peer = %from.0, author = c.author, round, ceiling, "inbox: cert round above the admissible window, dropped");
                 continue;
             }
+            // Obsolete by IQ-008 D1: never parked, never fetched.
+            if is_obsolete(round, dag.gc_round()) {
+                debug!(peer = %from.0, author = c.author, round, "inbox: cert at or below the gc round, dropped");
+                continue;
+            }
         }
 
         // IQ-009 D1: a certificate enters the DAG only together with its
@@ -1966,9 +1983,37 @@ async fn ingest_cert(
         if !held_block {
             let fetch = {
                 let mut inner = state.inner.lock().await;
-                if inner.awaiting_block.len() >= MAX_AWAITING_BLOCK {
-                    debug!(peer = %from.0, author = c.author, round, "inbox: awaiting-block buffer full, dropping cert");
-                    continue;
+                if inner.awaiting_block.len() >= MAX_AWAITING_BLOCK
+                    && !inner.awaiting_block.contains_key(&h)
+                {
+                    // Flooder-first eviction: the highest-round parked
+                    // certificate of the author holding the most parked
+                    // certificates makes room, so a Byzantine author
+                    // cannot make the buffer refuse honest late blocks.
+                    let mut per_author: HashMap<AuthorityId, usize> = HashMap::new();
+                    for p in inner.awaiting_block.values() {
+                        *per_author.entry(p.author).or_default() += 1;
+                    }
+                    let victim_author = per_author
+                        .iter()
+                        .max_by_key(|(a, n)| (**n, std::cmp::Reverse(**a)))
+                        .map(|(a, _)| *a);
+                    let victim = victim_author.and_then(|a| {
+                        inner
+                            .awaiting_block
+                            .iter()
+                            .filter(|(_, p)| p.author == a)
+                            .max_by_key(|(_, p)| p.round)
+                            .map(|(k, _)| *k)
+                    });
+                    match victim {
+                        Some(k) => {
+                            inner.awaiting_block.remove(&k);
+                            inner.needed_blocks.remove(&k);
+                            inner.block_fetch_history.remove(&k);
+                        }
+                        None => continue,
+                    }
                 }
                 // Per-(author, round) cap on parked certificates too: one
                 // seated author must not squat the buffer with distinct
@@ -1987,17 +2032,14 @@ async fn ingest_cert(
                 let first = !inner.awaiting_block.contains_key(&h);
                 inner.awaiting_block.insert(h, c);
                 inner.needed_blocks.insert(h);
+                if first {
+                    inner.block_fetch_history.insert(h, (now_unix_ms(), 1));
+                }
                 first
             };
             if fetch {
-                state
-                    .inner
-                    .lock()
-                    .await
-                    .block_fetch_history
-                    .insert(h, (now_unix_ms(), 1));
                 if let Some(outbound) = outbound {
-                    fetch_block_from_peers_prefer(h, Some(from), outbound);
+                    fetch_block_from_peers_prefer(h, Some(from), 0, outbound);
                 }
             }
             continue;
@@ -2005,6 +2047,19 @@ async fn ingest_cert(
 
         let insert_result = {
             let mut dag = state.dag.write().await;
+            // The per-slot cap is re-evaluated under the write guard: the
+            // read-side check above bounds parking, this one is what makes
+            // the cap atomic with the insert across concurrent inbox
+            // tasks (consensus-review finding, second S35 pass).
+            let dups = dag
+                .round_hashes(round)
+                .iter()
+                .filter(|h| dag.get(h).is_some_and(|x| x.author == c.author))
+                .count();
+            if dups >= MAX_CERTS_PER_AUTHOR_ROUND {
+                debug!(peer = %from.0, author = c.author, round, "inbox: equivocation already proven for this slot, dropped");
+                continue;
+            }
             dag.insert(c.clone())
         };
         match insert_result {
@@ -2098,7 +2153,7 @@ async fn ingest_cert(
                 }
                 if send_fetch {
                     if let Some(outbound) = outbound {
-                        fetch_cert_from_peers(missing, Some(from), outbound);
+                        fetch_cert_from_peers(missing, Some(from), 0, outbound);
                     }
                 }
             }
@@ -2805,7 +2860,7 @@ async fn handle_snapshot_chunk(
         let cap = n
             .max(1)
             .saturating_mul(MAX_CERTS_PER_AUTHOR_ROUND as u64)
-            .saturating_mul(gc_depth.saturating_add(ck.round).saturating_add(1));
+            .saturating_mul(gc_depth.min(ck.round).saturating_add(1));
         if snap.dag_certs.len() as u64 > cap || snap.blocks.len() as u64 > cap {
             tracing::warn!(peer = %from.0, height, "snapshot sync: oversized snapshot; discarded");
             state.inner.lock().await.snapshot_sync.trusted = None;
@@ -2857,6 +2912,9 @@ async fn handle_snapshot_chunk(
         inner.inflight_fetches.clear();
         inner.inflight_fetch_history.clear();
         inner.needed_blocks.clear();
+        inner.awaiting_block.clear();
+        inner.block_candidates.clear();
+        inner.block_fetch_history.clear();
         // Backfill gates on the peer tip; make sure it is fresh now rather
         // than at the next periodic poll — the seeds are pruning while we
         // wait.
@@ -3040,11 +3098,17 @@ async fn install_snapshot(state: &State, snap: StateSnapshot, own: bool) {
         .iter()
         .map(|b| (b.cert_hash, b.payload_digest))
         .collect();
+    let kept: HashSet<CertHash> = snap
+        .dag_certs
+        .iter()
+        .filter(|c| digests.get(&c.hash()) == Some(&c.payload_digest))
+        .map(|c| c.hash())
+        .collect();
     {
         let mut dag = state.dag.write().await;
         {
             let mut blocks = state.blocks.lock();
-            for b in &snap.blocks {
+            for b in snap.blocks.iter().filter(|b| kept.contains(&b.cert_hash)) {
                 blocks.insert(b.cert_hash, b.clone());
             }
         }
@@ -3440,14 +3504,15 @@ async fn prune_state(
         // obsolete certs and side tables stay consistent.
     }
 
-    // 2. Hash-keyed side tables: drop entries for evicted certs.
+    // 2. Hash-keyed side tables: drop entries for evicted certs, and
+    //    every block at or below the gc round whatever its certificate's
+    //    fate (a block held for a certificate that was parked and then
+    //    dropped is never in `evicted`).
     {
         let mut blocks = state.blocks.lock();
-        for h in &report.evicted {
-            if blocks.remove(h).is_some() {
-                out.blocks += 1;
-            }
-        }
+        let before = blocks.len();
+        blocks.retain(|h, b| !report.evicted.contains(h) && b.round > gc_round);
+        out.blocks += before - blocks.len();
     }
     {
         let mut votes = state.votes.lock();
@@ -3576,6 +3641,7 @@ const RPC_INDEX_EXTRA_DEPTH_MULTIPLIER: u64 = 4;
 fn fetch_cert_from_peers(
     hash: CertHash,
     prefer: Option<&PeerId>,
+    attempt: u32,
     outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
 ) {
     let mut sent = 0usize;
@@ -3589,12 +3655,14 @@ fn fetch_cert_from_peers(
     if sent >= 2 {
         return;
     }
-    // Start rotated by hash so retries are not pinned to two peers.
-    let peers: Vec<&PeerId> = outbound.keys().collect();
+    // Start rotated by hash AND attempt over a sorted peer list, so
+    // retries are never pinned to two peers.
+    let mut peers: Vec<&PeerId> = outbound.keys().collect();
+    peers.sort();
     if peers.is_empty() {
         return;
     }
-    let start = (hash.0[1] as usize) % peers.len();
+    let start = (hash.0[1] as usize + attempt as usize) % peers.len();
     for offset in 0..peers.len() {
         let peer = peers[(start + offset) % peers.len()];
         if Some(peer) == prefer {
@@ -3946,28 +4014,33 @@ async fn run_sync_sweeper(
 
         // DAG-S32: only retry orphans whose last attempt is older than
         // their per-orphan backoff. Bump the attempt counter as we go.
-        let due: Vec<CertHash> = {
+        let due: Vec<(CertHash, u32)> = {
             let mut inner = state.inner.lock().await;
-            let mut due_now = Vec::new();
+            let mut due_now: Vec<(CertHash, u64, u32)> = Vec::new();
             for h in inner.inflight_fetches.iter().copied().collect::<Vec<_>>() {
-                let entry = inner.inflight_fetch_history.entry(h).or_insert((0, 0));
-                let (last_ms, attempts) = *entry;
-                let elapsed = now_ms.saturating_sub(last_ms);
-                if elapsed >= orphan_pull_backoff_ms(attempts.max(1)) {
-                    *entry = (now_ms, attempts.saturating_add(1));
-                    due_now.push(h);
+                let (last_ms, attempts) = *inner.inflight_fetch_history.entry(h).or_insert((0, 0));
+                if now_ms.saturating_sub(last_ms) >= orphan_pull_backoff_ms(attempts.max(1)) {
+                    due_now.push((h, last_ms, attempts));
                 }
             }
-            due_now
+            // Oldest-due first, bounded per tick.
+            due_now.sort_by_key(|(_, last, _)| *last);
+            due_now.truncate(MAX_FETCHES_PER_TICK);
+            for (h, _, attempts) in &due_now {
+                inner
+                    .inflight_fetch_history
+                    .insert(*h, (now_ms, attempts.saturating_add(1)));
+            }
+            due_now.into_iter().map(|(h, _, a)| (h, a)).collect()
         };
-        for h in due {
-            fetch_cert_from_peers(h, None, &outbound);
+        for (h, attempt) in due {
+            fetch_cert_from_peers(h, None, attempt, &outbound);
         }
 
         // Fetch blocks for parked certificates (IQ-009 D1) and, as
         // defence in depth, for commits deferred on a missing block.
         // Same per-hash exponential back-off as the certificate leg.
-        let needed: Vec<CertHash> = {
+        let needed: Vec<(CertHash, u32)> = {
             let mut inner = state.inner.lock().await;
             let committed_prune: Vec<CertHash> = inner
                 .needed_blocks
@@ -3979,19 +4052,24 @@ async fn run_sync_sweeper(
                 inner.needed_blocks.remove(&h);
                 inner.block_fetch_history.remove(&h);
             }
-            let mut due = Vec::new();
+            let mut due: Vec<(CertHash, u64, u32)> = Vec::new();
             for h in inner.needed_blocks.iter().copied().collect::<Vec<_>>() {
-                let entry = inner.block_fetch_history.entry(h).or_insert((0, 0));
-                let (last_ms, attempts) = *entry;
+                let (last_ms, attempts) = *inner.block_fetch_history.entry(h).or_insert((0, 0));
                 if now_ms.saturating_sub(last_ms) >= orphan_pull_backoff_ms(attempts.max(1)) {
-                    *entry = (now_ms, attempts.saturating_add(1));
-                    due.push(h);
+                    due.push((h, last_ms, attempts));
                 }
             }
-            due
+            due.sort_by_key(|(_, last, _)| *last);
+            due.truncate(MAX_FETCHES_PER_TICK);
+            for (h, _, attempts) in &due {
+                inner
+                    .block_fetch_history
+                    .insert(*h, (now_ms, attempts.saturating_add(1)));
+            }
+            due.into_iter().map(|(h, _, a)| (h, a)).collect::<Vec<_>>()
         };
-        for h in needed {
-            fetch_block_from_peers(h, &outbound);
+        for (h, attempt) in needed {
+            fetch_block_from_peers(h, attempt, &outbound);
         }
     }
 }
@@ -4002,6 +4080,7 @@ async fn run_sync_sweeper(
 fn fetch_block_from_peers_prefer(
     hash: CertHash,
     prefer: Option<&PeerId>,
+    attempt: u32,
     outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
 ) {
     let mut sent = 0usize;
@@ -4012,13 +4091,15 @@ fn fetch_block_from_peers_prefer(
             }
         }
     }
-    // Rotate the start by hash so retries reach every peer over time:
-    // under I-AV1 a block may be held by exactly one of them.
-    let peers: Vec<&PeerId> = outbound.keys().collect();
+    // Start rotated by hash AND attempt over a sorted peer list, so
+    // successive retries of one hash walk every peer: under I-AV1 a block
+    // may be held by exactly one of them.
+    let mut peers: Vec<&PeerId> = outbound.keys().collect();
+    peers.sort();
     if peers.is_empty() {
         return;
     }
-    let start = (hash.0[0] as usize) % peers.len();
+    let start = (hash.0[0] as usize + attempt as usize) % peers.len();
     for offset in 0..peers.len() {
         if sent >= 2 {
             return;
@@ -4039,25 +4120,10 @@ fn fetch_block_from_peers_prefer(
 /// authentic block is not held.
 fn fetch_block_from_peers(
     hash: CertHash,
+    attempt: u32,
     outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
 ) {
-    fetch_block_from_peers_prefer(hash, None, outbound);
-}
-
-#[allow(dead_code)]
-fn fetch_block_from_peers_unrotated(
-    hash: CertHash,
-    outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
-) {
-    let mut sent = 0usize;
-    for tx in outbound.values() {
-        if tx.try_send(WireMessage::GetBlock(hash)).is_ok() {
-            sent += 1;
-            if sent >= 2 {
-                return;
-            }
-        }
-    }
+    fetch_block_from_peers_prefer(hash, None, attempt, outbound);
 }
 
 /// DAG-S31.4: drop-aware best-effort broadcast.
@@ -6207,6 +6273,10 @@ mod tests {
 
         const N: u32 = 3;
         const ROUNDS: u64 = 3;
+        /// Extra headers by author 0 at round 1 (equivocations): the
+        /// per-(author, round) cap must hold for parked and admitted
+        /// certificates alike.
+        const EXTRA: usize = 3;
 
         type Keys = Vec<(
             suwappu_crypto::mldsa::PublicKey,
@@ -6255,9 +6325,10 @@ mod tests {
 
             #[test]
             fn availability_is_an_admission_invariant(
-                order in Just((0..(N as usize * ROUNDS as usize * 3)).collect::<Vec<usize>>()).prop_shuffle(),
+                order in Just((0..((N as usize * ROUNDS as usize + EXTRA) * 3)).collect::<Vec<usize>>()).prop_shuffle(),
                 with_prune in any::<bool>(),
-                prune_at in 0usize..(N as usize * ROUNDS as usize * 3),
+                prune_at in 0usize..((N as usize * ROUNDS as usize + EXTRA) * 3),
+                prune_round in 0u64..ROUNDS,
                 omit_bits in any::<u32>(),
             ) {
                 let rt = tokio::runtime::Builder::new_current_thread()
@@ -6297,6 +6368,32 @@ mod tests {
                         }
                         prev = this;
                     }
+                    // Equivocating headers: author 0 at round 1 with distinct
+                    // digests (same parents).
+                    let round1_parents: Vec<CertHash> =
+                        certs.iter().filter(|c| c.round == 0).map(|c| c.hash()).collect();
+                    for k in 0..EXTRA {
+                        let mut c = Certificate {
+                            author: 0,
+                            round: 1,
+                            parents: round1_parents.clone(),
+                            payload_digest: compute_payload_digest(
+                                &[Intent::Transfer { from: [k as u8 + 3; 20], to: [9; 20], amount: 1 }],
+                                &[],
+                            ),
+                            signature: Vec::new(),
+                        };
+                        c.sign(&keys()[0].1);
+                        certs.push(c);
+                    }
+                    let extra_intents = |i: usize| -> Vec<Intent> {
+                        if i >= N as usize * ROUNDS as usize {
+                            let k = i - N as usize * ROUNDS as usize;
+                            vec![Intent::Transfer { from: [k as u8 + 3; 20], to: [9; 20], amount: 1 }]
+                        } else {
+                            Vec::new()
+                        }
+                    };
                     // Some blocks never arrive at all (omit bit set).
                     let omitted = |i: usize| (omit_bits >> (i % 32)) & 1 == 1;
                     let mut cert_seen = vec![false; certs.len()];
@@ -6314,7 +6411,7 @@ mod tests {
                         .collect();
                     for (pos, ev) in events.iter().enumerate() {
                         if with_prune && pos == prune_at {
-                            let _ = prune_state(&state, 0, "t", &log).await;
+                            let _ = prune_state(&state, prune_round, "t", &log).await;
                         }
                         match ev {
                             Ev::Cert(i) => {
@@ -6327,14 +6424,15 @@ mod tests {
                                 }
                                 block_seen[*i] = true;
                                 let c = &certs[*i];
+                                let intents = extra_intents(*i);
                                 handle_block(
                                     &state,
                                     BlockPayload {
-                                        payload_digest: digest,
+                                        payload_digest: c.payload_digest,
                                         author: c.author,
                                         round: c.round,
                                         cert_hash: c.hash(),
-                                        intents: Vec::new(),
+                                        intents,
                                         governance_auth: Vec::new(),
                                     },
                                     &from, &outbound, 0, "t", &log,
@@ -6358,8 +6456,24 @@ mod tests {
                                 .await;
                             }
                         }
-                        // I-AV1 after every event.
+                        // I-AV1 after every event, and the per-slot cap for
+                        // admitted and parked certificates alike.
+                        {
+                            let inner = state.inner.lock().await;
+                            let parked_slot = inner
+                                .awaiting_block
+                                .values()
+                                .filter(|c| c.author == 0 && c.round == 1)
+                                .count();
+                            prop_assert!(parked_slot <= MAX_CERTS_PER_AUTHOR_ROUND, "parked per-slot cap");
+                        }
                         let dag = state.dag.read().await;
+                        let admitted_slot = dag
+                            .round_hashes(1)
+                            .iter()
+                            .filter(|h| dag.get(h).is_some_and(|c| c.author == 0))
+                            .count();
+                        prop_assert!(admitted_slot <= MAX_CERTS_PER_AUTHOR_ROUND, "admitted per-slot cap");
                         for h in dag.linearize() {
                             let c = dag.get(&h).unwrap();
                             let held = state.blocks.lock().get(&h).map(|b| b.payload_digest);
@@ -6375,19 +6489,41 @@ mod tests {
                     if !with_prune {
                         // Liveness: a certificate whose block arrived, and whose
                         // ancestors all did too, is admitted; one whose block
-                        // never arrived is not.
+                        // never arrived is not. (The equivocating extras are
+                        // cap-limited, so only the base certificates are
+                        // checked here.)
+                        let (parked, orphans) = {
+                            let inner = state.inner.lock().await;
+                            (inner.awaiting_block.len(), inner.orphans.len())
+                        };
                         let dag = state.dag.read().await;
                         let mut admissible = vec![false; certs.len()];
-                        for (i, c) in certs.iter().enumerate() {
+                        for (i, c) in certs.iter().enumerate().take(N as usize * ROUNDS as usize) {
                             let parents_ok = c.parents.iter().all(|p| {
                                 certs.iter().position(|x| x.hash() == *p).is_some_and(|j| admissible[j])
                             });
+                            // Liveness is owed to non-equivocating authors
+                            // only: author 0 equivocates at round 1, so
+                            // whichever two of its headers fill the slot
+                            // first are the two admitted (the cap, asserted
+                            // above, is the property there), and once the
+                            // proof forms the auto-eject (DAG-S30.1) refuses
+                            // every later certificate of author 0 as
+                            // unseated. Its certificates take their actual
+                            // state; the recursion carries that to their
+                            // children.
+                            if c.author == 0 && c.round >= 1 {
+                                admissible[i] = dag.contains(&c.hash());
+                                continue;
+                            }
                             admissible[i] = cert_seen[i] && block_seen[i] && parents_ok;
                             prop_assert_eq!(
                                 dag.contains(&c.hash()),
                                 admissible[i],
-                                "cert {}: admitted={} expected={} (cert_seen={} block_seen={})",
-                                i, dag.contains(&c.hash()), admissible[i], cert_seen[i], block_seen[i]
+                                "cert {}: admitted={} expected={} (cert_seen={} block_seen={}) events={:?} omitted={:?} parked={} orphans={}",
+                                i, dag.contains(&c.hash()), admissible[i], cert_seen[i], block_seen[i], events,
+                                (0..certs.len()).filter(|k| omitted(*k)).collect::<Vec<_>>(),
+                                parked, orphans
                             );
                         }
                     }
@@ -6502,9 +6638,24 @@ mod tests {
                 "{label}: admitted {admitted} of v3's blockless certificates"
             );
         }
+        let mut parked_somewhere = false;
         for (i, d) in daemons.iter().enumerate().take(3) {
             no_withheld_admitted(&format!("v{i} (author alive)"), d, withheld_from).await;
+            // Positive control: the withheld certificates did arrive and
+            // are parked, i.e. the fault is a withholding, not a silence.
+            parked_somewhere |= d
+                .state
+                .inner
+                .lock()
+                .await
+                .awaiting_block
+                .values()
+                .any(|c| c.author == 3 && c.round >= withheld_from);
         }
+        assert!(
+            parked_somewhere,
+            "no survivor parked a withheld certificate; the fault was not exercised"
+        );
         let mut v3 = daemons.remove(3);
         v3.shutdown().await;
         drop(v3);

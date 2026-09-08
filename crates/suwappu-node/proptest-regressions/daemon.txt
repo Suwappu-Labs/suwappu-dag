@@ -5,3 +5,5 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc cb12b851945accfb27722fdb59e3e540f86ba9c364d4a939ad9afcad501c7ab4 # shrinks to order = [8, 0, 12, 1, 16, 5, 6, 15, 13, 9, 21, 4, 17, 10, 2, 23, 7, 14, 19, 25, 24, 3, 20, 11, 26, 22, 18], with_prune = false, prune_at = 0, omit_bits = 395477268
+cc e002284c07534463073817bd3d1fa99f72a97eda2ddd91224336b959f2200bc7 # shrinks to order = [0, 1, 2, 3, 14, 16, 6, 18, 19, 10, 11, 13, 7, 12, 8, 15, 26, 23, 29, 4, 5, 25, 27, 33, 28, 21, 30, 34, 24, 22, 20, 32, 9, 31, 17, 35], with_prune = false, prune_at = 0, prune_round = 0, omit_bits = 1587618288
+cc 8bc4751c4ec6ffab99f7cedde73910764d52b2e501a1f4523412eed4c3dd0958 # shrinks to order = [25, 19, 14, 16, 7, 5, 17, 20, 33, 9, 23, 27, 30, 13, 18, 10, 29, 0, 32, 2, 6, 31, 26, 28, 12, 21, 1, 4, 3, 11, 34, 15, 8, 35, 24, 22], with_prune = false, prune_at = 0, prune_round = 0, omit_bits = 17364480
