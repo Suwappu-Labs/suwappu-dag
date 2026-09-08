@@ -1191,10 +1191,6 @@ async fn release_unadmitted_block(state: &State, hash: CertHash) {
     }
 }
 
-/// Per-peer share of the candidate buffer: entries and encoded bytes a
-/// single configured peer may hold, so one Byzantine peer pinning its
-/// share at the ceiling cannot starve the candidates of honest peers
-/// (consensus-review finding, fifth S35 pass).
 /// Give back the budget and per-peer share held by candidates leaving
 /// the buffer (bound, pruned).
 fn release_candidates<'a>(inner: &mut StateInner, cands: impl Iterator<Item = &'a CandidateBlock>) {
@@ -1214,15 +1210,19 @@ fn release_candidates<'a>(inner: &mut StateInner, cands: impl Iterator<Item = &'
     }
 }
 
+/// Per-peer share of the candidate buffer: entries and encoded bytes a
+/// single configured peer may hold, so one peer pinning its share at
+/// the ceiling cannot starve the candidates of peers honest about their
+/// identity (consensus-review finding, fifth S35 pass). Entries are
+/// shared as keys (one entry per key is how a peer spends the key cap
+/// fastest) and floored so the shares never sum above the global caps;
+/// the byte share is floored at one frame so a large configured peer
+/// set never refuses a peer's first full-size block (seventh pass).
 fn candidate_share(peers: usize) -> (usize, usize) {
-    // Entries are shared as keys: one entry per key is how a peer spends
-    // the key cap fastest, so the entry share must not exceed the key
-    // share or one peer could exhaust `MAX_BLOCK_CANDIDATES` alone.
-    // Floor, so the shares never sum above the global caps.
     let n = peers.max(1);
     (
         (MAX_BLOCK_CANDIDATES / n).max(1),
-        (MAX_BLOCK_CANDIDATE_BYTES / n).max(1),
+        (MAX_BLOCK_CANDIDATE_BYTES / n).max(crate::wire::MAX_FRAME_BYTES),
     )
 }
 

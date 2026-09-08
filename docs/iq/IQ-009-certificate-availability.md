@@ -123,10 +123,11 @@ precondition)
   honest node, never becomes a parent of an honest certificate, and
   therefore never enters an honest node's causal history. A Byzantine
   certificate referencing it stays an orphan on every honest node —
-  identically, so the *DAG* does not diverge. The DAG-S30.1 auto-eject
-  is the exception: it fires on local admission of a second header for
-  one slot, and admission is now a function of block delivery, which
-  the equivocator controls per peer. See Residual 9.
+  identically, so the *DAG* does not diverge. The registry mutations
+  driven by local admission are the exception (the DAG-S30.1 auto-eject
+  and the DAG-S27.7 deferred activation): they fire when this node
+  admits a certificate, and admission is now a function of block
+  delivery, which the author controls per peer. See Residual 9.
 - Votes are cast at admission only, so `validator_quorum_met` for a
   leader also certifies that a stake quorum holds its block (a weaker
   cousin of Narwhal's availability certificate, at zero wire cost).
@@ -306,15 +307,18 @@ rule this halts at the first withheld leader certificate.
     derived from the chain-bound committees alone, never from the
     peer-supplied `n_authorities`, though a snapshot claiming no commit
     still widens it to `ck.round + 1` rounds and so pays for one hash
-    of its decoded body before the consistency checks refuse it (the
-    per-certificate signature loop is never reached).
-11. **Per-frame scans under the state mutex.** The candidate window
+    per certificate in the decoded window before the consistency checks
+    refuse it (the per-certificate signature loop is never reached).
+    The per-peer byte share is floored at one frame, so a large
+    configured peer set never refuses a peer's first full-size block.
+11. **Per-frame scans on the ingest path.** The candidate window
     check computes `highest_quorum_round` for a `Block` frame whose
     certificate is not known, a frame that costs the sender no
-    signature — O(retention window) per frame; and the orphan dedup and
-    per-slot count scan the whole orphan buffer, O(4,096) per
-    unknown-parent certificate (downstream of an ML-DSA verification,
-    so proportionate, but under the same mutex). Memoising the anchor
+    signature — O(retention window) per frame under the DAG read guard
+    (it contends with DAG writers, not the inbox); and the orphan dedup
+    and per-slot count scan the whole orphan buffer, O(4,096) per
+    unknown-parent certificate under the state mutex (downstream of an
+    ML-DSA verification, so proportionate). Memoising the anchor
     in `inner` (tracked follow-up from S34) and indexing the orphan
     buffer by (author, round) are due before the public testnet rather
     than after.
