@@ -1218,10 +1218,11 @@ fn candidate_share(peers: usize) -> (usize, usize) {
     // Entries are shared as keys: one entry per key is how a peer spends
     // the key cap fastest, so the entry share must not exceed the key
     // share or one peer could exhaust `MAX_BLOCK_CANDIDATES` alone.
+    // Floor, so the shares never sum above the global caps.
     let n = peers.max(1);
     (
-        MAX_BLOCK_CANDIDATES.div_ceil(n),
-        MAX_BLOCK_CANDIDATE_BYTES.div_ceil(n),
+        (MAX_BLOCK_CANDIDATES / n).max(1),
+        (MAX_BLOCK_CANDIDATE_BYTES / n).max(1),
     )
 }
 
@@ -7793,6 +7794,15 @@ mod tests {
                 .get(&h)
                 .is_some_and(|b| b.payload_digest == digest),
             "refused redelivery released the block of an admitted certificate"
+        );
+        // A plain redelivery of an admitted certificate whose parents are
+        // live takes the `DuplicateCertificate` arm: the block stays too.
+        let live = prev[1];
+        let live_cert = state.dag.read().await.get(&live).cloned().unwrap();
+        assert!(ingest_cert(&state, live_cert, &from, None).await.is_empty());
+        assert!(
+            state.blocks.lock().contains_key(&live),
+            "duplicate redelivery released the block of an admitted certificate"
         );
     }
 

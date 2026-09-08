@@ -234,44 +234,61 @@ rule this halts at the first withheld leader certificate.
    way. The property models a poisoned-round block. Commit-critical
    block fetches (a deferred commit, not a parked certificate) are never
    subject to the per-tick budget.
-9. **The auto-eject is locally observed, and observation is now
-   availability-dependent** (fourth-pass finding; pre-existing shape
-   and unchanged reach — IQ-009 makes the split *harder*, since a node
-   that receives the second header can pull its block from the one node
-   that admitted it and will then eject too). Author A equivocates at
-   round r with headers X and Y, broadcasts X with its block to all,
-   hands Y with its block to exactly one honest node P, and stops. P
-   admits both, forms the proof and the DAG-S30.1 drain rewrites its
-   Authority and Validator registries, stake table, pending stake AND
-   `n_authorities` with no commit gating; no other node can ever admit
-   Y (no honest node holds its block, the fetch fails for the whole
-   retention window, the parked entry is reaped at gc), so no other
-   node ejects. The consequence is stated in Invariant-1 terms: a
+9. **Registry mutations driven by local admission, which is now
+   availability-dependent** (fourth- and sixth-pass findings;
+   pre-existing shape and unchanged reach). Two mutations of the
+   Authority Ring's `n_authorities` and stake table fire on *local
+   admission* with no commit gating, and IQ-009 changes when local
+   admission happens (it now waits on the block):
+   - **The DAG-S30.1 auto-eject.** Author A equivocates at round r with
+     headers X and Y, broadcasts X with its block to all, hands Y with
+     its block to exactly one honest node P, and stops. P admits both,
+     forms the proof, and the drain rewrites its Authority and Validator
+     registries, stake table, pending stake and `n_authorities`. No
+     other node receives Y's *header*, so no other node ejects (block
+     availability is not the discriminator here: P holds Y's block and
+     would serve it; IQ-009 in fact shrinks this split, since any node
+     that does receive the header can pull the block from P and eject
+     too).
+   - **Deferred activation (Issue #18 / DAG-S27.7).** A newly-admitted
+     authority's first certificate promotes its pending stake and bumps
+     `n_authorities` at `ingest_cert`, on the node that admits it, when
+     it admits it. With zero Byzantine behaviour, node P admits the
+     certificate with its block one round before node Q (whose copy of
+     the block is delayed), and in that window P evaluates the commit
+     rule with `n + 1` and Q with `n`.
+   The consequence in Invariant-1 terms is the same for both: a
    divergent `n_authorities` is a divergent `round mod N` leader
    rotation and a divergent joint-quorum denominator between two honest
    nodes, hence a divergent commit order — a substrate fork and a
-   permanent checkpoint-root split from one Byzantine authority, not
-   merely a registry that differs. Before IQ-009 the same split needed
-   only the second *header* to reach one node, so this is not a
-   regression, but D3's "no divergence" claim covers the DAG only, not
-   the registry. The fix is to route the eject through the committed
-   epoch boundary like every other registry mutation
-   (`pending_governance`), so the ring changes at a committed round on
-   every node; that is a DAG-S30.1 change with its own review and is a
-   sign-off item here, not a code change in this sprint.
+   permanent checkpoint-root split — not merely a registry that differs.
+   Neither is a regression (before IQ-009 the same windows opened on
+   header delivery instead of block delivery), but D3's "no divergence"
+   claim covers the DAG only, not the registry. The fix for both is to
+   route the mutation through the committed epoch boundary like every
+   other registry change (`pending_governance`; compare the ejects
+   inside `apply_commit`, which are deterministic), so the ring changes
+   at a committed round on every node; that is a DAG-S30.1 / S27.7
+   change with its own review and is a sign-off item here, not a code
+   change in this sprint.
 10. **Bounds on the buffers IQ-009 added.** `awaiting_block` ≤ 4,096
     signed headers. `block_candidates` ≤ 4,096 hashes × 2 headers and
     ≤ 32 MiB encoded (a candidate is unauthenticated payload up to a
     1 MiB frame, so the entry cap alone would allow 8 GiB), and each
-    configured peer holds at most a `1/n` share of the keys and the
-    bytes, so one peer pinning its share at the ceiling for a whole
-    retention window cannot make the other peers' candidates drop (a
-    dropped candidate costs the certificate one park-and-refetch, not
-    admission). The orphan buffer holds one copy per certificate and at
-    most two per (author, round), like the parking buffer. A block bound
-    at certificate arrival is released again when the certificate is
-    refused (terminal DAG rejection, orphan buffer or slot full, window
-    or gc refusal of a parked header) *unless the DAG holds the
+    configured peer label holds at most a `1/n` share of the keys and
+    the bytes (floored, so the shares never sum above the caps). The
+    share is keyed on the peer's self-declared label — the configured
+    wire is unauthenticated (IQ-008 Residual 5) — so it isolates the
+    candidates of peers that are honest about their identity from one
+    that pins its own share at the ceiling; a host that connects under
+    every configured label can still pin the whole buffer, at a cost of
+    one park-and-refetch per certificate for the retention window, not
+    of admission. The orphan buffer holds one copy per certificate
+    (identity is the hash preimage: author, round, digest, parents) and
+    at most two per (author, round), like the parking buffer. A block
+    bound at certificate arrival is released again when the certificate
+    is refused (terminal DAG rejection, orphan buffer or slot full,
+    window or gc refusal of a parked header) *unless the DAG holds the
     certificate*, decided under the DAG guard while `ingest_cert`
     re-checks the block under the write guard before every insert, so
     a release and an admission of one hash never interleave; the block
@@ -284,12 +301,20 @@ rule this halts at the first withheld leader certificate.
     live set plus entries younger than four maximum back-offs. The
     snapshot reassembly buffer accepts chunks only from the peer the
     snapshot was requested from, at most 1,024 of them and none above
-    the chunk size; the pre-hash window bound is derived from the
-    chain-bound committees alone, never from the peer-supplied
-    `n_authorities`.
-11. **The anchor scan runs per inbound frame with an unknown hash.**
-    The candidate window check computes `highest_quorum_round` for a
-    `Block` frame whose certificate is not known, a frame that costs
-    the sender no signature. O(retention window) per frame; memoising
-    the anchor in `inner` (tracked follow-up from S34) is now due
-    before the public testnet rather than after.
+    the 768 KiB chunk size — 768 MiB of pre-verification memory from
+    that one peer, once per bootstrap; the pre-hash window bound is
+    derived from the chain-bound committees alone, never from the
+    peer-supplied `n_authorities`, though a snapshot claiming no commit
+    still widens it to `ck.round + 1` rounds and so pays for one hash
+    of its decoded body before the consistency checks refuse it (the
+    per-certificate signature loop is never reached).
+11. **Per-frame scans under the state mutex.** The candidate window
+    check computes `highest_quorum_round` for a `Block` frame whose
+    certificate is not known, a frame that costs the sender no
+    signature — O(retention window) per frame; and the orphan dedup and
+    per-slot count scan the whole orphan buffer, O(4,096) per
+    unknown-parent certificate (downstream of an ML-DSA verification,
+    so proportionate, but under the same mutex). Memoising the anchor
+    in `inner` (tracked follow-up from S34) and indexing the orphan
+    buffer by (author, round) are due before the public testnet rather
+    than after.
