@@ -155,10 +155,14 @@ rule this halts at the first withheld leader certificate.
   prune, plus admission liveness without a prune),
   `cert_is_admitted_only_with_its_block` (unit) and
   `withholding_author_does_not_stall_the_mesh` (four-node, fault
-  injected). The property models one equivocating author, so it also
-  pins the two-per-(author, round) cap for parked and admitted
-  certificates and exercises the DAG-S30.1 auto-eject; admission
-  liveness is asserted for non-equivocating authors only.
+  injected). The property models one equivocating author and a
+  poisoned-round block, so it also pins the two-per-(author, round) cap
+  for parked and admitted certificates, binds blocks to certificates on
+  digest, author and round, and asserts the DAG-S30.1 auto-eject (the
+  proof is drained explicitly at the end: the author is unseated iff two
+  of its headers were admitted in one slot); admission liveness is
+  asserted for non-equivocating authors, plus a positive control that a
+  directly admissible header of the equivocator is admitted.
 
 ## Residuals
 
@@ -170,9 +174,14 @@ rule this halts at the first withheld leader certificate.
    to parked certificates as well. A seated Byzantine author therefore
    holds at most `2 × (2 × gc_depth + lag)` parked headers (≈1,024 at
    `GC_DEPTH = 256`), and `f` of them ≈ `1,024 f` — which exceeds the
-   4,096-entry buffer at n ≥ 13. The buffer therefore evicts
-   flooder-first (the highest-round parked certificate of the author
-   holding the most) rather than refusing honest late arrivals. Block
+   4,096-entry buffer at n ≥ 13. The buffer therefore evicts rather
+   than refusing honest late arrivals: the victim is the author with the
+   most (author, round) slots holding two parked headers — an
+   equivocation signature no honest author has — then the most parked
+   overall, and its lowest-round entry goes (closest to the gc reap,
+   least needed at the frontier); an honest author whose blocks are
+   being withheld holds one parked header per round and is never
+   preferred over an equivocator. Block
    fetches use the certificate leg's per-hash exponential back-off, a
    per-tick budget of 256 frames per leg (oldest-due first), and a
    two-peer fan-out whose start rotates with the hash *and the attempt*
@@ -205,6 +214,20 @@ rule this halts at the first withheld leader certificate.
    certificate's two candidate slots with wrong payloads before the
    authentic block arrives; the authentic block is then dropped once,
    the certificate parks on arrival, and the fetch retrieves it (the
-   parked path is not slot-limited). The candidate key set is capped at
-   4,096 hashes and tested before any entry is created, so the buffer
-   costs O(1) per frame under the state mutex.
+   parked path is not slot-limited). Candidates are distinct by full
+   header (digest, author, round), so the authentic payload replayed
+   under a foreign round is a separate candidate and never shadows the
+   real one. The candidate key set is capped at 4,096 hashes and tested
+   before any entry is created, so the buffer costs O(1) per frame under
+   the state mutex.
+8. **A block's `author` and `round` are bound to the certificate.**
+   `payload_digest` is the only field the certificate signs; `author`,
+   `round` and `cert_hash` are what the block *claims*. A block is
+   stored for a certificate only if all three match it (the round is the
+   retention key of the block store, so it must not be attacker-chosen),
+   a candidate for a not-yet-known certificate is accepted only with a
+   claimed round inside the admissible window and is bound on the same
+   three fields, and a served snapshot's blocks are filtered the same
+   way. The property models a poisoned-round block. Commit-critical
+   block fetches (a deferred commit, not a parked certificate) are never
+   subject to the per-tick budget.

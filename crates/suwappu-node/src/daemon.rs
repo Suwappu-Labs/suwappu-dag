@@ -1129,6 +1129,20 @@ fn block_payload_is_consistent(block: &BlockPayload) -> bool {
     compute_payload_digest(&block.intents, &block.governance_auth) == block.payload_digest
 }
 
+/// A block is bound to a signed certificate header (`payload_digest`,
+/// `author`, `round`) only when all three agree. The digest is what the
+/// signature covers; author and round are what the block-side bookkeeping
+/// (`prune_state`, parked-block eviction, RPC indices) trusts, so a block
+/// claiming the right digest under a foreign round is still a forgery.
+fn block_matches_header(block: &BlockPayload, header: ([u8; 32], AuthorityId, u64)) -> bool {
+    (block.payload_digest, block.author, block.round) == header
+}
+
+/// Header of a signed certificate as `block_matches_header` expects it.
+fn cert_header(c: &Certificate) -> ([u8; 32], AuthorityId, u64) {
+    (c.payload_digest, c.author, c.round)
+}
+
 async fn run_inbox(
     self_label: String,
     self_id: AuthorityId,
@@ -1604,35 +1618,64 @@ async fn handle_block(
     // certificate isn't known yet, store best-effort (first-write-wins);
     // `ingest_cert` evicts a mismatched squatter when the certificate
     // arrives (consensus-review of 8eefd3d).
-    let known_digest = {
-        let dag_digest = state
+    //
+    // The binding covers the whole signed header the block claims to
+    // back — digest, author AND round — because `prune_state` and the
+    // parked-block accounting trust `BlockPayload.round` (consensus-review
+    // finding, third S35 pass: a digest-only binding let a relay pin a
+    // block above the gc round for ever, or evict it early).
+    let known_header = {
+        let dag_header = state
             .dag
             .read()
             .await
             .get(&cert_hash)
-            .map(|c| c.payload_digest);
-        match dag_digest {
-            Some(d) => Some(d),
+            .map(|c| (c.payload_digest, c.author, c.round));
+        match dag_header {
+            Some(h) => Some(h),
             None => state
                 .inner
                 .lock()
                 .await
                 .awaiting_block
                 .get(&cert_hash)
-                .map(|c| c.payload_digest),
+                .map(|c| (c.payload_digest, c.author, c.round)),
         }
     };
-    match known_digest {
-        Some(cd) if cd == digest => {
+    match known_header {
+        Some(kh) if block_matches_header(&block, kh) => {
             state.blocks.lock().insert(cert_hash, block);
         }
         Some(_) => {
-            debug!(peer = %from.0, "inbox: block does not match known cert digest, dropping");
+            debug!(peer = %from.0, "inbox: block does not match known cert header, dropping");
             return;
         }
         None => {
             // Certificate not known yet: hold the block as a candidate;
-            // `ingest_cert` binds the one matching the signed digest.
+            // `ingest_cert` binds the one matching the signed header.
+            // The claimed round is bounded by the same window as
+            // certificate admission (above the gc round, at most one
+            // retention window above the quorum anchor), so a relay
+            // cannot fill the buffer with rounds no certificate can ever
+            // claim, nor pin a candidate past every prune.
+            let (n_now, frontier_now) = {
+                let inner = state.inner.lock().await;
+                (
+                    inner.n_authorities,
+                    inner.last_committed_leader_round.unwrap_or(0),
+                )
+            };
+            {
+                let dag = state.dag.read().await;
+                let anchor = highest_quorum_round(&dag, n_now)
+                    .unwrap_or(0)
+                    .max(frontier_now);
+                let ceiling = anchor.saturating_add(dag.gc_depth());
+                if block.round > ceiling || is_obsolete(block.round, dag.gc_round()) {
+                    debug!(peer = %from.0, round = block.round, ceiling, "inbox: block candidate outside the admissible window, dropping");
+                    return;
+                }
+            }
             let mut inner = state.inner.lock().await;
             // Capacity is tested BEFORE any entry is created: the key set
             // is what an attacker can grow (any `cert_hash` passes the
@@ -1644,7 +1687,10 @@ async fn handle_block(
                 return;
             }
             let slot = inner.block_candidates.entry(cert_hash).or_default();
-            if !slot.iter().any(|b| b.payload_digest == digest) {
+            // Distinct by full header: the same digest under two rounds
+            // is two candidates, and only one of them can bind.
+            let hdr = (digest, block.author, block.round);
+            if !slot.iter().any(|b| block_matches_header(b, hdr)) {
                 if slot.len() >= MAX_BLOCK_CANDIDATES_PER_HASH {
                     debug!(peer = %from.0, "inbox: block candidate slot full, dropping");
                 } else {
@@ -1907,7 +1953,6 @@ async fn ingest_cert(
         // raw tip, so no single authority can ratchet it. A joiner far
         // behind its peers catches up by backfill and snapshot, not by
         // live pushes.
-        let cert_payload_digest = c.payload_digest;
         let (n_now, frontier_now) = {
             let inner = state.inner.lock().await;
             (
@@ -1951,10 +1996,11 @@ async fn ingest_cert(
         // fetched from the sender and one other peer; `handle_block`
         // re-admits it. A held block that does not match the signed
         // digest is a relay-poisoned squatter: evicted and refetched.
+        let header = cert_header(&c);
         let held_block = {
             let mut blocks = state.blocks.lock();
             match blocks.get(&h) {
-                Some(b) if b.payload_digest == c.payload_digest => true,
+                Some(b) if block_matches_header(b, header) => true,
                 Some(_) => {
                     blocks.remove(&h);
                     false
@@ -1964,13 +2010,10 @@ async fn ingest_cert(
         };
         let held_block = held_block || {
             // A candidate that arrived before the certificate: bind the
-            // one matching the signed digest, drop the rest.
+            // one matching the signed header, drop the rest.
             let mut inner = state.inner.lock().await;
             match inner.block_candidates.remove(&h) {
-                Some(cands) => match cands
-                    .into_iter()
-                    .find(|b| b.payload_digest == c.payload_digest)
-                {
+                Some(cands) => match cands.into_iter().find(|b| block_matches_header(b, header)) {
                     Some(b) => {
                         state.blocks.lock().insert(h, b);
                         true
@@ -1986,24 +2029,38 @@ async fn ingest_cert(
                 if inner.awaiting_block.len() >= MAX_AWAITING_BLOCK
                     && !inner.awaiting_block.contains_key(&h)
                 {
-                    // Flooder-first eviction: the highest-round parked
-                    // certificate of the author holding the most parked
-                    // certificates makes room, so a Byzantine author
-                    // cannot make the buffer refuse honest late blocks.
-                    let mut per_author: HashMap<AuthorityId, usize> = HashMap::new();
+                    // Flooder-first eviction, so a Byzantine author cannot
+                    // make the buffer refuse honest late blocks. The
+                    // victim author is the one parking the most
+                    // equivocating slots (two headers for one round is the
+                    // only way to hold more than one entry per round), then
+                    // the most entries; its LOWEST-round entry goes: that is
+                    // the one nearest the gc round, and the one an honest
+                    // author with a late block needs least (the highest
+                    // round is the one still being voted on). Ties break
+                    // by hash so every node evicts the same entry
+                    // (consensus-review finding, third S35 pass).
+                    let mut per_author: HashMap<AuthorityId, (usize, usize)> = HashMap::new();
+                    let mut per_slot: HashMap<(AuthorityId, u64), usize> = HashMap::new();
                     for p in inner.awaiting_block.values() {
-                        *per_author.entry(p.author).or_default() += 1;
+                        per_author.entry(p.author).or_default().1 += 1;
+                        *per_slot.entry((p.author, p.round)).or_default() += 1;
+                    }
+                    for ((a, _), n) in &per_slot {
+                        if *n > 1 {
+                            per_author.entry(*a).or_default().0 += 1;
+                        }
                     }
                     let victim_author = per_author
                         .iter()
-                        .max_by_key(|(a, n)| (**n, std::cmp::Reverse(**a)))
+                        .max_by_key(|(a, (eq, n))| (*eq, *n, std::cmp::Reverse(**a)))
                         .map(|(a, _)| *a);
                     let victim = victim_author.and_then(|a| {
                         inner
                             .awaiting_block
                             .iter()
                             .filter(|(_, p)| p.author == a)
-                            .max_by_key(|(_, p)| p.round)
+                            .min_by_key(|(k, p)| (p.round, **k))
                             .map(|(k, _)| *k)
                     });
                     match victim {
@@ -2012,7 +2069,13 @@ async fn ingest_cert(
                             inner.needed_blocks.remove(&k);
                             inner.block_fetch_history.remove(&k);
                         }
-                        None => continue,
+                        None => {
+                            // Unreachable while the buffer is non-empty;
+                            // logged rather than silently dropped so a
+                            // regression here is visible.
+                            tracing::warn!(peer = %from.0, author = c.author, round, "inbox: parking buffer full and no eviction victim, dropping cert");
+                            continue;
+                        }
                     }
                 }
                 // Per-(author, round) cap on parked certificates too: one
@@ -2060,10 +2123,15 @@ async fn ingest_cert(
                 debug!(peer = %from.0, author = c.author, round, "inbox: equivocation already proven for this slot, dropped");
                 continue;
             }
+            // Whether THIS insert fills the slot: parked headers for the
+            // same (author, round) can then never be admitted and are
+            // released below rather than left to occupy the buffer until
+            // the gc round passes them.
             dag.insert(c.clone())
+                .map(|r| (r, dups + 1 >= MAX_CERTS_PER_AUTHOR_ROUND))
         };
         match insert_result {
-            Ok(_) => {
+            Ok((_, slot_full)) => {
                 // Now that the SIGNED cert is known, evict any stored block
                 // for it that does not match the cert's payload_digest — a
                 // relay-poisoned stripped block cannot squat past cert
@@ -2072,7 +2140,7 @@ async fn ingest_cert(
                     let mut blocks = state.blocks.lock();
                     if blocks
                         .get(&h)
-                        .is_some_and(|b| b.payload_digest != cert_payload_digest)
+                        .is_some_and(|b| !block_matches_header(b, header))
                     {
                         blocks.remove(&h);
                     }
@@ -2090,6 +2158,19 @@ async fn ingest_cert(
                     inner.awaiting_block.remove(&h);
                     inner.needed_blocks.remove(&h);
                     inner.block_fetch_history.remove(&h);
+                    if slot_full {
+                        let stale: Vec<CertHash> = inner
+                            .awaiting_block
+                            .iter()
+                            .filter(|(_, p)| p.author == c.author && p.round == round)
+                            .map(|(k, _)| *k)
+                            .collect();
+                        for k in stale {
+                            inner.awaiting_block.remove(&k);
+                            inner.needed_blocks.remove(&k);
+                            inner.block_fetch_history.remove(&k);
+                        }
+                    }
                     // DAG-S27.7: promote pending stake on first cert.
                     promote_stake = inner.pending_stake.remove(&c.author).map(|s| (c.author, s));
                     // Issue #18 (deferred activation): if this is the
@@ -2856,11 +2937,16 @@ async fn handle_snapshot_chunk(
     // Cheap bound before any hashing: a padded snapshot is refused
     // without paying for its blocks.
     {
+        // Loose on purpose: the window an honest seed serves can hold
+        // rounds above the checkpoint round (up to the seed's own
+        // ceiling), so bounding by `gc_depth` here would refuse honest
+        // snapshots (consensus-review finding, third S35 pass). The
+        // exact window check is `verify_served_snapshot`'s.
         let n = snap.n_authorities as u64;
         let cap = n
             .max(1)
             .saturating_mul(MAX_CERTS_PER_AUTHOR_ROUND as u64)
-            .saturating_mul(gc_depth.min(ck.round).saturating_add(1));
+            .saturating_mul(ck.round.saturating_add(1));
         if snap.dag_certs.len() as u64 > cap || snap.blocks.len() as u64 > cap {
             tracing::warn!(peer = %from.0, height, "snapshot sync: oversized snapshot; discarded");
             state.inner.lock().await.snapshot_sync.trusted = None;
@@ -2872,13 +2958,16 @@ async fn handle_snapshot_chunk(
     // signed and that are self-consistent. `verify_served_snapshot` then
     // requires one for every certificate (IQ-009 D4).
     {
-        let digests: HashMap<CertHash, [u8; 32]> = snap
+        let headers: HashMap<CertHash, ([u8; 32], AuthorityId, u64)> = snap
             .dag_certs
             .iter()
-            .map(|c| (c.hash(), c.payload_digest))
+            .map(|c| (c.hash(), cert_header(c)))
             .collect();
         snap.blocks.retain(|b| {
-            digests.get(&b.cert_hash) == Some(&b.payload_digest) && block_payload_is_consistent(b)
+            headers
+                .get(&b.cert_hash)
+                .is_some_and(|hdr| block_matches_header(b, *hdr))
+                && block_payload_is_consistent(b)
         });
     }
     if let Err(why) =
@@ -3032,13 +3121,13 @@ fn verify_served_snapshot(
     }
     let mut per_slot: HashMap<(AuthorityId, u64), usize> = HashMap::new();
     // IQ-009 D4: every certificate in the window carries its block.
-    let block_digests: HashMap<CertHash, [u8; 32]> = snap
+    let block_headers: HashMap<CertHash, ([u8; 32], AuthorityId, u64)> = snap
         .blocks
         .iter()
-        .map(|b| (b.cert_hash, b.payload_digest))
+        .map(|b| (b.cert_hash, (b.payload_digest, b.author, b.round)))
         .collect();
     for c in &snap.dag_certs {
-        if block_digests.get(&c.hash()) != Some(&c.payload_digest) {
+        if block_headers.get(&c.hash()) != Some(&cert_header(c)) {
             return Err("certificate without its block");
         }
     }
@@ -3093,15 +3182,15 @@ async fn install_snapshot(state: &State, snap: StateSnapshot, own: bool) {
     // may hold certificates without their blocks): blocks first, then only
     // certificates whose digest-matching block is held; the rest are
     // re-pulled by backfill.
-    let digests: HashMap<CertHash, [u8; 32]> = snap
+    let headers: HashMap<CertHash, ([u8; 32], AuthorityId, u64)> = snap
         .blocks
         .iter()
-        .map(|b| (b.cert_hash, b.payload_digest))
+        .map(|b| (b.cert_hash, (b.payload_digest, b.author, b.round)))
         .collect();
     let kept: HashSet<CertHash> = snap
         .dag_certs
         .iter()
-        .filter(|c| digests.get(&c.hash()) == Some(&c.payload_digest))
+        .filter(|c| headers.get(&c.hash()) == Some(&cert_header(c)))
         .map(|c| c.hash())
         .collect();
     {
@@ -3119,7 +3208,7 @@ async fn install_snapshot(state: &State, snap: StateSnapshot, own: bool) {
             dag.insert_tombstone(*h, *r);
         }
         for c in &snap.dag_certs {
-            if digests.get(&c.hash()) != Some(&c.payload_digest) {
+            if !kept.contains(&c.hash()) {
                 tracing::debug!(
                     round = c.round,
                     "snapshot install: cert without its block skipped"
@@ -3400,7 +3489,7 @@ async fn recover_from_disk(
                     continue;
                 }
                 let h = cert.hash();
-                if block.payload_digest != cert.payload_digest {
+                if !block_matches_header(&block, cert_header(&cert)) {
                     tracing::error!(
                         round = cert.round,
                         "recovery: record block does not match its certificate; skipped"
@@ -3559,9 +3648,13 @@ async fn prune_state(
                 inner.needed_blocks.remove(&h);
                 inner.block_fetch_history.remove(&h);
             }
-            inner
-                .block_candidates
-                .retain(|_, v| v.iter().any(|b| b.round > gc_round));
+            // Per block, not per key: a key keeps only candidates still
+            // above the gc round, and an emptied key is dropped, so one
+            // in-window candidate cannot keep an obsolete sibling alive.
+            inner.block_candidates.retain(|_, v| {
+                v.retain(|b| b.round > gc_round);
+                !v.is_empty()
+            });
             // RPC indices keep a longer tail until the durable commit log
             // (S34.3) answers historical lookups; they are still bounded.
             let rpc_floor =
@@ -3652,17 +3745,15 @@ fn fetch_cert_from_peers(
             }
         }
     }
-    if sent >= 2 {
-        return;
-    }
     // Start rotated by hash AND attempt over a sorted peer list, so
-    // retries are never pinned to two peers.
+    // retries are never pinned to two peers. Each attempt asks two peers,
+    // so the step is two: consecutive attempts cover disjoint pairs.
     let mut peers: Vec<&PeerId> = outbound.keys().collect();
     peers.sort();
     if peers.is_empty() {
         return;
     }
-    let start = (hash.0[1] as usize + attempt as usize) % peers.len();
+    let start = (hash.0[1] as usize + 2 * attempt as usize) % peers.len();
     for offset in 0..peers.len() {
         let peer = peers[(start + offset) % peers.len()];
         if Some(peer) == prefer {
@@ -4052,15 +4143,28 @@ async fn run_sync_sweeper(
                 inner.needed_blocks.remove(&h);
                 inner.block_fetch_history.remove(&h);
             }
-            let mut due: Vec<(CertHash, u64, u32)> = Vec::new();
+            // Two classes share the set. A block a deferred commit needs
+            // (certificate admitted, not parked) is commit-critical and
+            // never competes for the per-tick budget: there are at most
+            // a handful, and a parking flood must not starve them
+            // (consensus-review finding, third S35 pass). Blocks for
+            // parked certificates are what the budget bounds.
+            let mut critical: Vec<(CertHash, u64, u32)> = Vec::new();
+            let mut parked: Vec<(CertHash, u64, u32)> = Vec::new();
             for h in inner.needed_blocks.iter().copied().collect::<Vec<_>>() {
                 let (last_ms, attempts) = *inner.block_fetch_history.entry(h).or_insert((0, 0));
                 if now_ms.saturating_sub(last_ms) >= orphan_pull_backoff_ms(attempts.max(1)) {
-                    due.push((h, last_ms, attempts));
+                    if inner.awaiting_block.contains_key(&h) {
+                        parked.push((h, last_ms, attempts));
+                    } else {
+                        critical.push((h, last_ms, attempts));
+                    }
                 }
             }
-            due.sort_by_key(|(_, last, _)| *last);
-            due.truncate(MAX_FETCHES_PER_TICK);
+            parked.sort_by_key(|(_, last, _)| *last);
+            parked.truncate(MAX_FETCHES_PER_TICK);
+            let mut due = critical;
+            due.extend(parked);
             for (h, _, attempts) in &due {
                 inner
                     .block_fetch_history
@@ -4093,13 +4197,14 @@ fn fetch_block_from_peers_prefer(
     }
     // Start rotated by hash AND attempt over a sorted peer list, so
     // successive retries of one hash walk every peer: under I-AV1 a block
-    // may be held by exactly one of them.
+    // may be held by exactly one of them. Each attempt asks two peers, so
+    // the step is two: consecutive attempts cover disjoint pairs.
     let mut peers: Vec<&PeerId> = outbound.keys().collect();
     peers.sort();
     if peers.is_empty() {
         return;
     }
-    let start = (hash.0[0] as usize + attempt as usize) % peers.len();
+    let start = (hash.0[0] as usize + 2 * attempt as usize) % peers.len();
     for offset in 0..peers.len() {
         if sent >= 2 {
             return;
@@ -4381,12 +4486,11 @@ async fn try_commit(
                 Some(c) => c,
                 None => break 'commit,
             };
-            let cert_payload_digest = cert.payload_digest;
+            let header = cert_header(&cert);
             // Bind the block to the SIGNED cert: only consume a block whose
-            // payload digest equals the committed cert's payload_digest
-            // (which the author signed). This means the intents AND the
-            // governance envelopes we apply are exactly what the author
-            // committed.
+            // header (payload digest, author, round) equals the committed
+            // cert's. This means the intents AND the governance envelopes
+            // we apply are exactly what the author committed.
             //
             // IQ-009 D1 makes this unreachable in steady state (a
             // certificate enters the DAG only with its block); it stays
@@ -4403,7 +4507,7 @@ async fn try_commit(
                 .blocks
                 .lock()
                 .get(&h)
-                .filter(|b| b.payload_digest == cert_payload_digest)
+                .filter(|b| block_matches_header(b, header))
                 .cloned();
             let block = match block_payload {
                 Some(b) => b,
@@ -6314,6 +6418,21 @@ mod tests {
             Cert(usize),
             Block(usize),
             WrongBlock(usize),
+            /// The authentic payload under a foreign round: passes the
+            /// digest check and the window check, must fail the header
+            /// binding (third-pass consensus-review finding).
+            PoisonedRound(usize),
+        }
+        const KINDS: usize = 4;
+        const EVENTS: usize = (N as usize * ROUNDS as usize + EXTRA) * KINDS;
+
+        /// Block variants a frame can carry, for the model of the
+        /// per-hash candidate buffer (`MAX_BLOCK_CANDIDATES_PER_HASH`).
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        enum Kind {
+            Right,
+            Wrong,
+            Poisoned,
         }
 
         proptest! {
@@ -6325,9 +6444,9 @@ mod tests {
 
             #[test]
             fn availability_is_an_admission_invariant(
-                order in Just((0..((N as usize * ROUNDS as usize + EXTRA) * 3)).collect::<Vec<usize>>()).prop_shuffle(),
+                order in Just((0..EVENTS).collect::<Vec<usize>>()).prop_shuffle(),
                 with_prune in any::<bool>(),
-                prune_at in 0usize..((N as usize * ROUNDS as usize + EXTRA) * 3),
+                prune_at in 0usize..EVENTS,
                 prune_round in 0u64..ROUNDS,
                 omit_bits in any::<u32>(),
             ) {
@@ -6394,35 +6513,82 @@ mod tests {
                             Vec::new()
                         }
                     };
+                    let hashes: Vec<CertHash> = certs.iter().map(|c| c.hash()).collect();
                     // Some blocks never arrive at all (omit bit set).
                     let omitted = |i: usize| (omit_bits >> (i % 32)) & 1 == 1;
                     let mut cert_seen = vec![false; certs.len()];
-                    let mut block_seen = vec![false; certs.len()];
+                    // Model of block availability per certificate. Before
+                    // the certificate is known, block frames for its hash
+                    // are candidates: at most `MAX_BLOCK_CANDIDATES_PER_HASH`
+                    // distinct headers, first-come. From the certificate
+                    // on, a frame matching the signed header binds and
+                    // any other is dropped. `bound[i]` is therefore: the
+                    // authentic block was among the first two candidates
+                    // when the certificate arrived, or arrived after it.
+                    let mut cand: Vec<Vec<Kind>> = vec![Vec::new(); certs.len()];
+                    let mut bound = vec![false; certs.len()];
+                    let mut max_admitted_slot = 0usize;
                     let events: Vec<Ev> = order
                         .iter()
                         .map(|&k| {
-                            let i = k / 3;
-                            match k % 3 {
+                            let i = k / KINDS;
+                            match k % KINDS {
                                 0 => Ev::Cert(i),
                                 1 => Ev::Block(i),
-                                _ => Ev::WrongBlock(i),
+                                2 => Ev::WrongBlock(i),
+                                _ => Ev::PoisonedRound(i),
                             }
                         })
                         .collect();
+                    let admitted_in_slot = |dag: &DagStore| {
+                        dag.round_hashes(1)
+                            .iter()
+                            .filter(|h| dag.get(h).is_some_and(|c| c.author == 0))
+                            .count()
+                    };
+                    let offer = |i: usize, kind: Kind, cand: &mut Vec<Vec<Kind>>, bound: &mut Vec<bool>, cert_seen: &[bool]| {
+                        if cert_seen[i] {
+                            if kind == Kind::Right {
+                                bound[i] = true;
+                            }
+                        } else if !cand[i].contains(&kind) && cand[i].len() < MAX_BLOCK_CANDIDATES_PER_HASH {
+                            cand[i].push(kind);
+                        }
+                    };
                     for (pos, ev) in events.iter().enumerate() {
                         if with_prune && pos == prune_at {
                             let _ = prune_state(&state, prune_round, "t", &log).await;
                         }
+                        // Positive control for the equivocating slot: a
+                        // (0, 1) header arriving with its block already
+                        // held, its parents admitted and the slot not yet
+                        // full is admitted (the cap is the only reason an
+                        // equivocator's header is refused).
+                        let mut must_admit: Option<usize> = None;
+                        if let Ev::Cert(i) = ev {
+                            let c = &certs[*i];
+                            if !with_prune && c.author == 0 && c.round == 1 && cand[*i].contains(&Kind::Right) {
+                                let dag = state.dag.read().await;
+                                if admitted_in_slot(&dag) < MAX_CERTS_PER_AUTHOR_ROUND
+                                    && c.parents.iter().all(|p| dag.contains(p))
+                                {
+                                    must_admit = Some(*i);
+                                }
+                            }
+                        }
                         match ev {
                             Ev::Cert(i) => {
                                 cert_seen[*i] = true;
+                                if cand[*i].contains(&Kind::Right) {
+                                    bound[*i] = true;
+                                }
                                 let _ = ingest_cert(&state, certs[*i].clone(), &from, None).await;
                             }
                             Ev::Block(i) => {
                                 if omitted(*i) {
                                     continue;
                                 }
-                                block_seen[*i] = true;
+                                offer(*i, Kind::Right, &mut cand, &mut bound, &cert_seen);
                                 let c = &certs[*i];
                                 let intents = extra_intents(*i);
                                 handle_block(
@@ -6431,7 +6597,7 @@ mod tests {
                                         payload_digest: c.payload_digest,
                                         author: c.author,
                                         round: c.round,
-                                        cert_hash: c.hash(),
+                                        cert_hash: hashes[*i],
                                         intents,
                                         governance_auth: Vec::new(),
                                     },
@@ -6440,6 +6606,7 @@ mod tests {
                                 .await;
                             }
                             Ev::WrongBlock(i) => {
+                                offer(*i, Kind::Wrong, &mut cand, &mut bound, &cert_seen);
                                 let c = &certs[*i];
                                 handle_block(
                                     &state,
@@ -6447,8 +6614,25 @@ mod tests {
                                         payload_digest: wrong_digest,
                                         author: c.author,
                                         round: c.round,
-                                        cert_hash: c.hash(),
+                                        cert_hash: hashes[*i],
                                         intents: wrong_intents.clone(),
+                                        governance_auth: Vec::new(),
+                                    },
+                                    &from, &outbound, 0, "t", &log,
+                                )
+                                .await;
+                            }
+                            Ev::PoisonedRound(i) => {
+                                offer(*i, Kind::Poisoned, &mut cand, &mut bound, &cert_seen);
+                                let c = &certs[*i];
+                                handle_block(
+                                    &state,
+                                    BlockPayload {
+                                        payload_digest: c.payload_digest,
+                                        author: c.author,
+                                        round: c.round + 5,
+                                        cert_hash: hashes[*i],
+                                        intents: extra_intents(*i),
                                         governance_auth: Vec::new(),
                                     },
                                     &from, &outbound, 0, "t", &log,
@@ -6466,18 +6650,35 @@ mod tests {
                                 .filter(|c| c.author == 0 && c.round == 1)
                                 .count();
                             prop_assert!(parked_slot <= MAX_CERTS_PER_AUTHOR_ROUND, "parked per-slot cap");
+                            // A candidate never claims a round the DAG has
+                            // already dropped, so no key outlives the gc.
+                            if let Some(gc) = inner.gc_round {
+                                for (h, v) in &inner.block_candidates {
+                                    prop_assert!(!v.is_empty(), "empty candidate key {:?}", h);
+                                    prop_assert!(v.iter().all(|b| b.round > gc), "candidate at or below the gc round");
+                                }
+                            }
+                            for (h, b) in state.blocks.lock().iter() {
+                                if let Some(gc) = inner.gc_round {
+                                    prop_assert!(b.round > gc, "held block {:?} at or below the gc round", h);
+                                }
+                            }
                         }
                         let dag = state.dag.read().await;
-                        let admitted_slot = dag
-                            .round_hashes(1)
-                            .iter()
-                            .filter(|h| dag.get(h).is_some_and(|c| c.author == 0))
-                            .count();
+                        let admitted_slot = admitted_in_slot(&dag);
                         prop_assert!(admitted_slot <= MAX_CERTS_PER_AUTHOR_ROUND, "admitted per-slot cap");
+                        max_admitted_slot = max_admitted_slot.max(admitted_slot);
+                        if let Some(i) = must_admit {
+                            prop_assert!(dag.contains(&hashes[i]), "directly admissible (0, 1) header {} refused; events={:?}", i, events);
+                        }
                         for h in dag.linearize() {
                             let c = dag.get(&h).unwrap();
-                            let held = state.blocks.lock().get(&h).map(|b| b.payload_digest);
-                            prop_assert_eq!(held, Some(c.payload_digest), "DAG cert without its block");
+                            let held = state
+                                .blocks
+                                .lock()
+                                .get(&h)
+                                .map(|b| (b.payload_digest, b.author, b.round));
+                            prop_assert_eq!(held, Some(cert_header(c)), "DAG cert without its header-bound block");
                             for p in &c.parents {
                                 prop_assert!(
                                     dag.contains(p) || dag.is_tombstoned(p),
@@ -6486,11 +6687,18 @@ mod tests {
                             }
                         }
                     }
+                    // The equivocation proof forms exactly when two headers
+                    // of the slot are admitted, and the drain ejects the
+                    // author (DAG-S30.1): a header refused by the cap must
+                    // never leave the author seated with a proof pending.
+                    try_commit(&state, "t", &log, &outbound).await;
+                    let seated = state.authority_registry.read().await.contains(0);
+                    prop_assert_eq!(seated, max_admitted_slot < MAX_CERTS_PER_AUTHOR_ROUND, "author 0 seated={} max admitted in slot={}", seated, max_admitted_slot);
                     if !with_prune {
-                        // Liveness: a certificate whose block arrived, and whose
-                        // ancestors all did too, is admitted; one whose block
-                        // never arrived is not. (The equivocating extras are
-                        // cap-limited, so only the base certificates are
+                        // Liveness: a certificate whose block was bound, and
+                        // whose ancestors all were too, is admitted; one whose
+                        // block never bound is not. (The equivocating extras
+                        // are cap-limited, so only the base certificates are
                         // checked here.)
                         let (parked, orphans) = {
                             let inner = state.inner.lock().await;
@@ -6500,28 +6708,28 @@ mod tests {
                         let mut admissible = vec![false; certs.len()];
                         for (i, c) in certs.iter().enumerate().take(N as usize * ROUNDS as usize) {
                             let parents_ok = c.parents.iter().all(|p| {
-                                certs.iter().position(|x| x.hash() == *p).is_some_and(|j| admissible[j])
+                                hashes.iter().position(|x| x == p).is_some_and(|j| admissible[j])
                             });
                             // Liveness is owed to non-equivocating authors
                             // only: author 0 equivocates at round 1, so
                             // whichever two of its headers fill the slot
-                            // first are the two admitted (the cap, asserted
-                            // above, is the property there), and once the
-                            // proof forms the auto-eject (DAG-S30.1) refuses
-                            // every later certificate of author 0 as
-                            // unseated. Its certificates take their actual
-                            // state; the recursion carries that to their
-                            // children.
+                            // first are the two admitted (the cap and the
+                            // positive control above are the properties
+                            // there), and once the proof forms the auto-eject
+                            // (DAG-S30.1) refuses every later certificate of
+                            // author 0 as unseated. Its certificates take
+                            // their actual state; the recursion carries that
+                            // to their children.
                             if c.author == 0 && c.round >= 1 {
-                                admissible[i] = dag.contains(&c.hash());
+                                admissible[i] = dag.contains(&hashes[i]);
                                 continue;
                             }
-                            admissible[i] = cert_seen[i] && block_seen[i] && parents_ok;
+                            admissible[i] = cert_seen[i] && bound[i] && parents_ok;
                             prop_assert_eq!(
-                                dag.contains(&c.hash()),
+                                dag.contains(&hashes[i]),
                                 admissible[i],
-                                "cert {}: admitted={} expected={} (cert_seen={} block_seen={}) events={:?} omitted={:?} parked={} orphans={}",
-                                i, dag.contains(&c.hash()), admissible[i], cert_seen[i], block_seen[i], events,
+                                "cert {}: admitted={} expected={} (cert_seen={} bound={} cand={:?}) events={:?} omitted={:?} parked={} orphans={}",
+                                i, dag.contains(&hashes[i]), admissible[i], cert_seen[i], bound[i], cand[i], events,
                                 (0..certs.len()).filter(|k| omitted(*k)).collect::<Vec<_>>(),
                                 parked, orphans
                             );
