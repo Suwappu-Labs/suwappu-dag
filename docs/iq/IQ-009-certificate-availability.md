@@ -235,36 +235,58 @@ rule this halts at the first withheld leader certificate.
    block fetches (a deferred commit, not a parked certificate) are never
    subject to the per-tick budget.
 9. **The auto-eject is locally observed, and observation is now
-   availability-dependent** (fourth-pass finding; pre-existing shape,
-   new reach). Author A equivocates at round r with headers X and Y,
-   broadcasts X with its block to all, hands Y with its block to exactly
-   one honest node P, and stops. P admits both, forms the proof and
-   drops A from its registries and stake table; no other node can ever
-   admit Y (no honest node holds its block, the fetch fails for the
-   whole retention window, the parked entry is reaped at gc), so no
-   other node ejects. P's `n_authorities`, quorum threshold and leader
-   rotation then differ from the mesh's. Before IQ-009 the same split
-   needed only the second *header* to reach one node, so this is not a
-   regression in reach, but D3's "no divergence" claim covers the DAG
-   only, not the registry. The fix is to route the eject through the
-   committed epoch boundary like every other registry mutation
+   availability-dependent** (fourth-pass finding; pre-existing shape
+   and unchanged reach — IQ-009 makes the split *harder*, since a node
+   that receives the second header can pull its block from the one node
+   that admitted it and will then eject too). Author A equivocates at
+   round r with headers X and Y, broadcasts X with its block to all,
+   hands Y with its block to exactly one honest node P, and stops. P
+   admits both, forms the proof and the DAG-S30.1 drain rewrites its
+   Authority and Validator registries, stake table, pending stake AND
+   `n_authorities` with no commit gating; no other node can ever admit
+   Y (no honest node holds its block, the fetch fails for the whole
+   retention window, the parked entry is reaped at gc), so no other
+   node ejects. The consequence is stated in Invariant-1 terms: a
+   divergent `n_authorities` is a divergent `round mod N` leader
+   rotation and a divergent joint-quorum denominator between two honest
+   nodes, hence a divergent commit order — a substrate fork and a
+   permanent checkpoint-root split from one Byzantine authority, not
+   merely a registry that differs. Before IQ-009 the same split needed
+   only the second *header* to reach one node, so this is not a
+   regression, but D3's "no divergence" claim covers the DAG only, not
+   the registry. The fix is to route the eject through the committed
+   epoch boundary like every other registry mutation
    (`pending_governance`), so the ring changes at a committed round on
    every node; that is a DAG-S30.1 change with its own review and is a
    sign-off item here, not a code change in this sprint.
 10. **Bounds on the buffers IQ-009 added.** `awaiting_block` ≤ 4,096
-    signed headers; `block_candidates` ≤ 4,096 hashes × 2 headers and
+    signed headers. `block_candidates` ≤ 4,096 hashes × 2 headers and
     ≤ 32 MiB encoded (a candidate is unauthenticated payload up to a
-    1 MiB frame, so the entry cap alone would allow 8 GiB); a block
-    bound at certificate arrival is released again if the DAG rejects
-    the certificate terminally or the orphan buffer is full, so the
-    block store never grows past the certificates the DAG holds plus
-    the parked and orphaned ones; `block_fetch_history` survives
-    eviction (a replayed header resumes its back-off rather than
-    fanning out afresh) and is capped at four times the parking buffer,
-    trimmed at prune to the live set plus entries younger than four
-    maximum back-offs; the snapshot reassembly buffer accepts chunks
-    only from the peer the snapshot was requested from and at most
-    1,024 of them.
+    1 MiB frame, so the entry cap alone would allow 8 GiB), and each
+    configured peer holds at most a `1/n` share of the keys and the
+    bytes, so one peer pinning its share at the ceiling for a whole
+    retention window cannot make the other peers' candidates drop (a
+    dropped candidate costs the certificate one park-and-refetch, not
+    admission). The orphan buffer holds one copy per certificate and at
+    most two per (author, round), like the parking buffer. A block bound
+    at certificate arrival is released again when the certificate is
+    refused (terminal DAG rejection, orphan buffer or slot full, window
+    or gc refusal of a parked header) *unless the DAG holds the
+    certificate*, decided under the DAG guard while `ingest_cert`
+    re-checks the block under the write guard before every insert, so
+    a release and an admission of one hash never interleave; the block
+    store is therefore bounded by the retention window (every entry is
+    above the gc round and is reaped by the next prune), and in steady
+    state by the certificates the DAG holds plus the parked and
+    orphaned ones. `block_fetch_history` survives eviction (a replayed
+    header resumes its back-off rather than fanning out afresh) and is
+    capped at four times the parking buffer, trimmed at prune to the
+    live set plus entries younger than four maximum back-offs. The
+    snapshot reassembly buffer accepts chunks only from the peer the
+    snapshot was requested from, at most 1,024 of them and none above
+    the chunk size; the pre-hash window bound is derived from the
+    chain-bound committees alone, never from the peer-supplied
+    `n_authorities`.
 11. **The anchor scan runs per inbound frame with an unknown hash.**
     The candidate window check computes `highest_quorum_round` for a
     `Block` frame whose certificate is not known, a frame that costs
