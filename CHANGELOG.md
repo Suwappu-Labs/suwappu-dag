@@ -127,7 +127,10 @@ will coincide with mainnet genesis.
   certificate; a served snapshot must carry a block for every
   certificate. `State::withhold_blocks` is the first `/goal` B2
   fault-injection knob; `withholding_author_does_not_stall_the_mesh`
-  exercises it. Decision record:
+  exercises it. A block is bound to its certificate on the full signed
+  header (digest, author, round) on every path; the parking, candidate
+  and fetch-history buffers are bounded in entries and bytes with a
+  flooder-first, deterministic eviction. Decision record:
   `docs/iq/IQ-009-certificate-availability.md`.
 - `suwappu_getSyncStatus` JSON-RPC method: the one-call answer to "is
   this node caught up?" for operators, the status page (G8) and the

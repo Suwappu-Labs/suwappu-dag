@@ -123,7 +123,10 @@ precondition)
   honest node, never becomes a parent of an honest certificate, and
   therefore never enters an honest node's causal history. A Byzantine
   certificate referencing it stays an orphan on every honest node —
-  identically, so no divergence.
+  identically, so the *DAG* does not diverge. The DAG-S30.1 auto-eject
+  is the exception: it fires on local admission of a second header for
+  one slot, and admission is now a function of block delivery, which
+  the equivocator controls per peer. See Residual 9.
 - Votes are cast at admission only, so `validator_quorum_met` for a
   leader also certifies that a stake quorum holds its block (a weaker
   cousin of Narwhal's availability certificate, at zero wire cost).
@@ -231,3 +234,40 @@ rule this halts at the first withheld leader certificate.
    way. The property models a poisoned-round block. Commit-critical
    block fetches (a deferred commit, not a parked certificate) are never
    subject to the per-tick budget.
+9. **The auto-eject is locally observed, and observation is now
+   availability-dependent** (fourth-pass finding; pre-existing shape,
+   new reach). Author A equivocates at round r with headers X and Y,
+   broadcasts X with its block to all, hands Y with its block to exactly
+   one honest node P, and stops. P admits both, forms the proof and
+   drops A from its registries and stake table; no other node can ever
+   admit Y (no honest node holds its block, the fetch fails for the
+   whole retention window, the parked entry is reaped at gc), so no
+   other node ejects. P's `n_authorities`, quorum threshold and leader
+   rotation then differ from the mesh's. Before IQ-009 the same split
+   needed only the second *header* to reach one node, so this is not a
+   regression in reach, but D3's "no divergence" claim covers the DAG
+   only, not the registry. The fix is to route the eject through the
+   committed epoch boundary like every other registry mutation
+   (`pending_governance`), so the ring changes at a committed round on
+   every node; that is a DAG-S30.1 change with its own review and is a
+   sign-off item here, not a code change in this sprint.
+10. **Bounds on the buffers IQ-009 added.** `awaiting_block` ≤ 4,096
+    signed headers; `block_candidates` ≤ 4,096 hashes × 2 headers and
+    ≤ 32 MiB encoded (a candidate is unauthenticated payload up to a
+    1 MiB frame, so the entry cap alone would allow 8 GiB); a block
+    bound at certificate arrival is released again if the DAG rejects
+    the certificate terminally or the orphan buffer is full, so the
+    block store never grows past the certificates the DAG holds plus
+    the parked and orphaned ones; `block_fetch_history` survives
+    eviction (a replayed header resumes its back-off rather than
+    fanning out afresh) and is capped at four times the parking buffer,
+    trimmed at prune to the live set plus entries younger than four
+    maximum back-offs; the snapshot reassembly buffer accepts chunks
+    only from the peer the snapshot was requested from and at most
+    1,024 of them.
+11. **The anchor scan runs per inbound frame with an unknown hash.**
+    The candidate window check computes `highest_quorum_round` for a
+    `Block` frame whose certificate is not known, a frame that costs
+    the sender no signature. O(retention window) per frame; memoising
+    the anchor in `inner` (tracked follow-up from S34) is now due
+    before the public testnet rather than after.
