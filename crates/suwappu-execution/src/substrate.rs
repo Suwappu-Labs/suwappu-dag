@@ -763,6 +763,22 @@ pub enum Intent {
         /// Asset identifier.
         asset_id: [u8; 32],
     },
+    /// Daemon-emitted slashing evidence (IQ-010 D3): two distinct
+    /// certificates signed by one Authority for one round. Any node
+    /// whose DAG holds both emits the pair in its next block; every
+    /// node verifies it at commit (same author and round, distinct
+    /// hashes, both signatures valid under the author's registered key,
+    /// author seated) and ejects the author at the next epoch boundary.
+    /// Carried on-chain so the ejection is a function of the committed
+    /// sequence rather than of one node's observation. The substrate
+    /// treats it as a no-op; the consensus layer owns the registry
+    /// transition.
+    EquivocationEvidence {
+        /// One of the two conflicting certificates.
+        cert_a: suwappu_consensus::Certificate,
+        /// The other. `cert_a.hash() != cert_b.hash()`.
+        cert_b: suwappu_consensus::Certificate,
+    },
 }
 
 /// Classification of a sequencer slashing event. Drives the
@@ -3103,6 +3119,9 @@ impl Substrate for InMemorySubstrate {
                 self.write_bytes_unchecked(registry_addr, new_bytes);
                 Ok(())
             }
+            // IQ-010 D3: slashing evidence is consumed by the consensus
+            // layer at commit; it touches no substrate state.
+            Intent::EquivocationEvidence { .. } => Ok(()),
         }
     }
 

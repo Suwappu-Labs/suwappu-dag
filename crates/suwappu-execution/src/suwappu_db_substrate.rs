@@ -231,7 +231,8 @@ impl Substrate for SuwappuDbSubstrate {
             // there.
             Intent::AddBridgeAsset { .. }
             | Intent::PauseBridgeAsset { .. }
-            | Intent::RemoveBridgeAsset { .. } => Ok(()),
+            | Intent::RemoveBridgeAsset { .. }
+            | Intent::EquivocationEvidence { .. } => Ok(()),
         }
     }
 
