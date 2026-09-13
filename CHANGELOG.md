@@ -112,6 +112,32 @@ will coincide with mainnet genesis.
     returned (three survivors held 300k of stake against a 400,001
     threshold on every leader). The round driver now records and
     broadcasts the author's own vote.
+- **DAG-S36 (IQ-010): deterministic committee transitions.** The
+  DagBft-C rule now runs over a `Committee` (the sorted set of active
+  authority ids) instead of the integer range `0..n`: the leader of
+  round `r` is the `r mod |C|`-th member, only members count as support,
+  and parents may be any registered author's certificates. Authority ids
+  are caller-chosen and never renumbered, so under the old rule any
+  ejection of a non-highest id (or admission of a non-contiguous one)
+  left dead leader slots and an author no proposer would reference — a
+  permanent halt at threshold. Membership now changes only in the
+  epoch-boundary governance drain, a function of the commit sequence:
+  a newly admitted authority is registered (its certificates verify and
+  may be parents) but activates — leader slots, quorum weight, stake —
+  at the first boundary after one of its certificates has been
+  committed (`live_proven`), replacing the ingest-time stake promotion
+  that let honest nodes decide leaders with different `n`; a detected
+  equivocation is carried as `Intent::EquivocationEvidence` in the
+  detector's next block, verified at commit and ejected at the boundary
+  on every node, replacing the local auto-eject. The commit walk re-reads
+  the committee before every slot decision. Checkpoint registry roots
+  and snapshot roots bind the committee and the live-proven set (V2).
+  `State::equivocate` is the second `/goal` B2 fault-injection knob;
+  `middle_ejection_keeps_the_mesh_committing` exercises it. Gates:
+  `proptest_committee.rs` (4 × 10k),
+  `activation_is_a_commit_sequence_function`,
+  `bogus_evidence_is_dropped`. Decision record:
+  `docs/iq/IQ-010-deterministic-committee-transitions.md`.
 - **DAG-S35 (IQ-009): certificate availability.** A certificate enters
   the DAG only together with its block (Narwhal §4.2 / Mysticeti §III
   admission rule): a signature-verified certificate whose block is not

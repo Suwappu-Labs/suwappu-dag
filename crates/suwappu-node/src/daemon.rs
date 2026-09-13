@@ -101,6 +101,11 @@ pub(crate) struct State {
     /// Never set in production; exercised by
     /// `withholding_author_does_not_stall_the_mesh`.
     pub(crate) withhold_blocks: std::sync::atomic::AtomicBool,
+    /// Fault-injection knob (`/goal` B2, IQ-010 D3): when set, the round
+    /// driver signs and broadcasts a second, conflicting certificate for
+    /// every round it authors. Never set in production; exercised by
+    /// `middle_ejection_keeps_the_mesh_committing`.
+    pub(crate) equivocate: std::sync::atomic::AtomicBool,
     pub(crate) stake_table: tokio::sync::RwLock<StakeTable>,
     pub(crate) authority_registry: tokio::sync::RwLock<AuthorityRegistry>,
     pub(crate) validator_registry: tokio::sync::RwLock<ValidatorRegistry>,
@@ -719,6 +724,7 @@ impl State {
             committed: parking_lot::Mutex::new(HashSet::new()),
             commit_lock: tokio::sync::Mutex::new(()),
             withhold_blocks: std::sync::atomic::AtomicBool::new(false),
+            equivocate: std::sync::atomic::AtomicBool::new(false),
             stake_table: tokio::sync::RwLock::new(stake_table),
             authority_registry: tokio::sync::RwLock::new(authority_registry),
             validator_registry: tokio::sync::RwLock::new(validator_registry),
@@ -5657,6 +5663,37 @@ async fn run_round_driver(
                 .with_round(target_round)
                 .with_cert_hash(&cert_hash.0),
         );
+        // Fault injection (IQ-010 D3): a conflicting twin of this round's
+        // certificate — same parents, one extra intent, distinct digest —
+        // signed and broadcast alongside the honest one.
+        let twin = if state.equivocate.load(std::sync::atomic::Ordering::Relaxed) {
+            let mut intents2 = block.intents.clone();
+            intents2.push(Intent::Transfer {
+                from: [0xEE; 20],
+                to: [0xEE; 20],
+                amount: 1,
+            });
+            let digest2 = compute_payload_digest(&intents2, &block.governance_auth);
+            let mut cert2 = Certificate {
+                author: self_id,
+                round: target_round,
+                parents: cert.parents.clone(),
+                payload_digest: digest2,
+                signature: Vec::new(),
+            };
+            cert2.sign(&state.self_secret_key);
+            let block2 = BlockPayload {
+                payload_digest: digest2,
+                author: self_id,
+                round: target_round,
+                cert_hash: cert2.hash(),
+                intents: intents2,
+                governance_auth: block.governance_auth.clone(),
+            };
+            Some((cert2, block2))
+        } else {
+            None
+        };
         if !state
             .withhold_blocks
             .load(std::sync::atomic::Ordering::Relaxed)
@@ -5676,6 +5713,22 @@ async fn run_round_driver(
             &self_label,
             &log,
         );
+        if let Some((cert2, block2)) = twin {
+            broadcast_all(
+                &state,
+                &outbound,
+                WireMessage::Block(block2),
+                &self_label,
+                &log,
+            );
+            broadcast_all(
+                &state,
+                &outbound,
+                WireMessage::Cert(cert2),
+                &self_label,
+                &log,
+            );
+        }
         if own_vote_stored {
             broadcast_all(
                 &state,
@@ -7204,6 +7257,585 @@ mod tests {
                 })?;
             }
         }
+    }
+
+    /// IQ-010 D3, the `/goal` B2 equivocation fault: one of four
+    /// validators signs two conflicting certificates per round for a
+    /// while. Every honest node admits both (two per slot), carries the
+    /// evidence in its next block, and ejects the equivocator at the SAME
+    /// epoch boundary; the committee shrinks to {0, 2, 3} — a middle id,
+    /// which the pre-IQ-010 `0..n` rotation could not survive — and the
+    /// survivors keep committing with agreeing roots.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn middle_ejection_keeps_the_mesh_committing() {
+        let n = 4u32;
+        let base_port: u16 = 24_900;
+        let keypairs: Vec<(
+            suwappu_crypto::mldsa::PublicKey,
+            suwappu_crypto::mldsa::SecretKey,
+        )> = (0..n).map(|_| suwappu_crypto::mldsa::keypair()).collect();
+        let manifest = GenesisManifest {
+            network_id: "test-eject-middle-4n".into(),
+            validators: (0..n)
+                .map(|i| GenesisValidator {
+                    authority_id: i,
+                    label: format!("v{}", i),
+                    mldsa_public_key_hex: hex::encode(keypairs[i as usize].0.as_bytes()),
+                    bls_public_key_hex: "00".into(),
+                    validator_stake_suwappu: 150_000,
+                    authority_stake_suwappu: 150_000,
+                })
+                .collect(),
+            corridors: Vec::new(),
+            prebalances: Vec::new(),
+            rounds_per_epoch: 16,
+            // No pruning inside the test window: the evidence block must
+            // still be inspectable at the end.
+            gc_depth_rounds: 4096,
+            checkpoint_cadence_rounds: 8,
+        };
+        let mut daemons = Vec::new();
+        for i in 0..n {
+            let peers: Vec<Peer> = (0..n)
+                .filter(|j| *j != i)
+                .map(|j| Peer {
+                    id: format!("v{}", j),
+                    addr: format!("127.0.0.1:{}", base_port + j as u16)
+                        .parse::<SocketAddr>()
+                        .unwrap(),
+                })
+                .collect();
+            let cfg = NodeConfig {
+                self_id: format!("v{}", i),
+                authority_id: i,
+                listen: format!("127.0.0.1:{}", base_port + i as u16)
+                    .parse::<SocketAddr>()
+                    .unwrap(),
+                client_listen: format!("127.0.0.1:{}", base_port + 100 + i as u16)
+                    .parse::<SocketAddr>()
+                    .unwrap(),
+                rpc_listen: None,
+                peers,
+                allow_post_genesis_join: false,
+                round_ms: 100,
+                checkpoint_cadence_rounds: 1,
+                mldsa_secret_key_path: write_mldsa_key_file(&keypairs[i as usize].1),
+                bls_secret_key_path: "/dev/null".into(),
+                genesis_manifest_path: "/dev/null".into(),
+                event_log_path: std::env::temp_dir()
+                    .join(format!("suwappu-daemon-eject-middle-test-v{}.ndjson", i)),
+                max_client_connections: 256,
+                client_idle_timeout_ms: 30_000,
+                client_per_ip_limit: 8,
+                rpc_per_ip_capacity: 60,
+                rpc_per_ip_refill_per_sec: 10,
+                bridge_oracle_address: None,
+                bridge_network_id: None,
+                metrics_listen: None,
+                data_dir: None,
+                store_fsync: false,
+            };
+            daemons.push(Daemon::start(cfg, manifest.clone()).await.unwrap());
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
+
+        // v1 equivocates for ~1.5 s (a dozen rounds), then behaves.
+        daemons[1]
+            .state
+            .equivocate
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        daemons[1]
+            .state
+            .equivocate
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+
+        // Every node — v1 included — ejects v1 at one and the same
+        // committed boundary. Recorded at the first observation; the
+        // poll is far faster than an epoch (1.6 s), so the boundary read
+        // alongside is the one the ejection landed at.
+        let mut ejected_at: Vec<Option<u64>> = vec![None; n as usize];
+        let deadline = std::time::Instant::now() + Duration::from_secs(40);
+        while ejected_at.iter().any(|e| e.is_none()) {
+            for (i, d) in daemons.iter().enumerate() {
+                if ejected_at[i].is_some() {
+                    continue;
+                }
+                let inner = d.state.inner.lock().await;
+                if !inner.committee.contains(1) {
+                    ejected_at[i] = Some(inner.epoch.last_boundary_round);
+                }
+            }
+            if std::time::Instant::now() > deadline {
+                let mut diag = Vec::new();
+                for (i, d) in daemons.iter().enumerate() {
+                    let inner = d.state.inner.lock().await;
+                    let reg = d.state.authority_registry.read().await;
+                    diag.push(format!(
+                        "v{i}: committee={:?} reg={} pending_gov={} detected={} emitted={} epoch={} frontier={:?}",
+                        inner.committee.members(),
+                        reg.len(),
+                        inner.pending_governance.len(),
+                        inner.detected_equivocations.len(),
+                        inner.evidence_emitted.len(),
+                        inner.epoch.current,
+                        inner.last_committed_leader_round
+                    ));
+                }
+                panic!(
+                    "equivocator not ejected everywhere within 40 s:\n  {}",
+                    diag.join("\n  ")
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let rounds: Vec<u64> = ejected_at.iter().map(|e| e.unwrap()).collect();
+        assert!(
+            rounds.iter().all(|r| *r == rounds[0]),
+            "ejection landed at different boundaries: {rounds:?} (I-CT1)"
+        );
+        for (i, d) in daemons.iter().enumerate() {
+            let inner = d.state.inner.lock().await;
+            assert_eq!(inner.committee.members(), &[0, 2, 3], "v{i}: committee");
+            assert!(
+                !d.state.authority_registry.read().await.contains(1),
+                "v{i}: registry"
+            );
+            assert_eq!(d.state.stake_table.read().await.weight(1), 0, "v{i}: stake");
+        }
+        // The evidence travelled on-chain: a committed block on v0 carries
+        // an `EquivocationEvidence` intent against author 1.
+        {
+            let committed = daemons[0].state.committed.lock().clone();
+            let blocks = daemons[0].state.blocks.lock();
+            let carried = blocks.iter().any(|(h, b)| {
+                committed.contains(h)
+                    && b.intents.iter().any(|i| {
+                        matches!(i, Intent::EquivocationEvidence { cert_a, .. } if cert_a.author == 1)
+                    })
+            });
+            assert!(carried, "no committed block carries the evidence");
+        }
+
+        // Survivors keep committing over the three-member committee (the
+        // pre-IQ-010 rotation had no parent edge to id 3 and a dead slot
+        // for id 1 here) and agree on the state root.
+        let survivors: Vec<usize> = vec![0, 2, 3];
+        let before: Vec<u64> = {
+            let mut v = Vec::new();
+            for i in &survivors {
+                v.push(
+                    daemons[*i]
+                        .state
+                        .inner
+                        .lock()
+                        .await
+                        .last_committed_leader_round
+                        .unwrap_or(0),
+                );
+            }
+            v
+        };
+        let mut advanced = false;
+        for _ in 0..300 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let mut all = true;
+            for (k, i) in survivors.iter().enumerate() {
+                let after = daemons[*i]
+                    .state
+                    .inner
+                    .lock()
+                    .await
+                    .last_committed_leader_round
+                    .unwrap_or(0);
+                all &= after >= before[k] + 15;
+            }
+            if all {
+                advanced = true;
+                break;
+            }
+        }
+        assert!(
+            advanced,
+            "a survivor's commit frontier stalled after the middle ejection"
+        );
+        let mut agreed = false;
+        for _ in 0..60 {
+            let mut fr = Vec::new();
+            for i in &survivors {
+                let inner = daemons[*i].state.inner.lock().await;
+                fr.push((
+                    inner.last_committed_leader_round,
+                    inner.substrate.state_root(),
+                ));
+            }
+            if fr.iter().all(|(f, _)| *f == fr[0].0) {
+                assert!(
+                    fr.iter().all(|(_, r)| *r == fr[0].1),
+                    "survivors disagree on the state root at an equal frontier"
+                );
+                agreed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(
+            agreed,
+            "survivors never reached an equal frontier to compare roots"
+        );
+        for mut d in daemons {
+            d.shutdown().await;
+        }
+    }
+
+    /// IQ-010 D2 / I-CT1 at the daemon level: two nodes fed the same
+    /// certificates, blocks and votes but running their commit walks at
+    /// different times (one after every round, one every five rounds)
+    /// register, prove live and activate a newly admitted authority — a
+    /// non-contiguous id, 7 into {0..3} — at the same committed boundary,
+    /// end with the same committee, stake table, commit set and state
+    /// root, and give id 7 leader slots afterwards. The lazily-committing
+    /// node drops 7's certificates until its own boundary registers 7 and
+    /// re-pulls them afterwards, exactly as the sync sweeper would.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn activation_is_a_commit_sequence_function() {
+        let n = 4u32;
+        let keys: Vec<(
+            suwappu_crypto::mldsa::PublicKey,
+            suwappu_crypto::mldsa::SecretKey,
+        )> = (0..n).map(|_| suwappu_crypto::mldsa::keypair()).collect();
+        let (cand_pk, cand_sk) = suwappu_crypto::mldsa::keypair();
+        const NEW_ID: AuthorityId = 7;
+        let manifest = GenesisManifest {
+            network_id: "iq010-activation-4n".into(),
+            validators: (0..n)
+                .map(|i| GenesisValidator {
+                    authority_id: i,
+                    label: format!("v{}", i),
+                    mldsa_public_key_hex: hex::encode(keys[i as usize].0.as_bytes()),
+                    bls_public_key_hex: "00".into(),
+                    validator_stake_suwappu: 150_000,
+                    authority_stake_suwappu: 150_000,
+                })
+                .collect(),
+            corridors: Vec::new(),
+            prebalances: Vec::new(),
+            rounds_per_epoch: 4,
+            gc_depth_rounds: 64,
+            checkpoint_cadence_rounds: 64,
+        };
+        let states = [
+            State::new(&manifest, keys[0].1.clone(), None),
+            State::new(&manifest, keys[0].1.clone(), None),
+        ];
+        let mut logs = Vec::new();
+        for i in 0..2 {
+            let (log, task) = EventLog::start(
+                &std::env::temp_dir().join(format!("suwappu-iq010-activation-{i}.ndjson")),
+            )
+            .await
+            .unwrap();
+            logs.push((log, task));
+        }
+        let outbound: HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>> = HashMap::new();
+        let from = PeerId("p".into());
+
+        // The governed admission of id 7: sponsor 0, co-signer 1, and the
+        // candidate's proof of possession.
+        let admit = Intent::AdmitAuthority {
+            authority_id: NEW_ID,
+            stake_suwappu: 150_000,
+            mldsa_public_key: cand_pk.as_bytes().to_vec(),
+            bls_public_key: vec![0u8; 48],
+        };
+        let digest = crate::client::intent_signing_digest(&manifest.network_id, &admit);
+        let sig = |sk: &suwappu_crypto::mldsa::SecretKey| {
+            suwappu_crypto::mldsa::sign(&digest, sk)
+                .unwrap()
+                .as_bytes()
+                .to_vec()
+        };
+        let auth = crate::client::GovAuth {
+            sponsor_pubkey_hash: crate::client::signer_pubkey_hash(keys[0].0.as_bytes()),
+            sponsor_signature: sig(&keys[0].1),
+            co_signer_pubkey_hash: crate::client::signer_pubkey_hash(keys[1].0.as_bytes()),
+            co_signature: sig(&keys[1].1),
+            candidate_pop_signature: sig(&cand_sk),
+        };
+
+        // The shared sequence: rounds 0..=ROUNDS, every genesis author
+        // each round, id 7 from round 5 on; parents = every certificate
+        // of the previous round (7's included).
+        const ROUNDS: u64 = 20;
+        let key_of = |a: AuthorityId| -> &suwappu_crypto::mldsa::SecretKey {
+            if a == NEW_ID {
+                &cand_sk
+            } else {
+                &keys[a as usize].1
+            }
+        };
+        let mut seq: Vec<(Certificate, BlockPayload)> = Vec::new();
+        let mut per_round: Vec<Vec<(Certificate, BlockPayload)>> = Vec::new();
+        let mut prev: Vec<CertHash> = Vec::new();
+        for r in 0..=ROUNDS {
+            let mut this_round = Vec::new();
+            let mut authors: Vec<AuthorityId> = (0..n).collect();
+            if r >= 5 {
+                authors.push(NEW_ID);
+            }
+            for a in authors {
+                let (intents, gov): (Vec<Intent>, Vec<(u32, crate::client::GovAuth)>) =
+                    if r == 1 && a == 0 {
+                        (vec![admit.clone()], vec![(0, auth.clone())])
+                    } else {
+                        (Vec::new(), Vec::new())
+                    };
+                let payload_digest = compute_payload_digest(&intents, &gov);
+                let mut c = Certificate {
+                    author: a,
+                    round: r,
+                    parents: prev.clone(),
+                    payload_digest,
+                    signature: Vec::new(),
+                };
+                c.sign(key_of(a));
+                let b = BlockPayload {
+                    payload_digest,
+                    author: a,
+                    round: r,
+                    cert_hash: c.hash(),
+                    intents,
+                    governance_auth: gov,
+                };
+                this_round.push((c, b));
+            }
+            prev = this_round.iter().map(|(c, _)| c.hash()).collect();
+            seq.extend(this_round.iter().cloned());
+            per_round.push(this_round);
+        }
+
+        // Feed one item (block first, then certificate) and cast every
+        // validator's vote for it; re-feeding is idempotent.
+        async fn feed(
+            state: &State,
+            item: &(Certificate, BlockPayload),
+            from: &PeerId,
+            outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
+            log: &EventLog,
+        ) {
+            let (c, b) = item;
+            let h = c.hash();
+            if !state.dag.read().await.contains(&h) {
+                handle_block(state, b.clone(), from, outbound, 0, "t", log).await;
+                let _ = ingest_cert(state, c.clone(), from, None).await;
+            }
+            for v in [0u32, 1, 2, 3, NEW_ID] {
+                store_vote(
+                    state,
+                    Vote {
+                        validator: v,
+                        candidate: h,
+                    },
+                )
+                .await;
+            }
+        }
+        // The sync sweeper's job: re-pull everything not yet admitted.
+        async fn resync(
+            state: &State,
+            seq: &[(Certificate, BlockPayload)],
+            from: &PeerId,
+            outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
+            log: &EventLog,
+        ) {
+            for _ in 0..3 {
+                for item in seq {
+                    feed(state, item, from, outbound, log).await;
+                }
+            }
+        }
+        let mut activated_at: [Option<u64>; 2] = [None, None];
+        async fn observe(state: &State, slot: &mut Option<u64>) {
+            if slot.is_none() {
+                let inner = state.inner.lock().await;
+                if inner.committee.contains(NEW_ID) {
+                    *slot = Some(inner.epoch.last_boundary_round);
+                }
+            }
+        }
+        for (r, items) in per_round.iter().enumerate() {
+            for (i, state) in states.iter().enumerate() {
+                for item in items {
+                    feed(state, item, &from, &outbound, &logs[i].0).await;
+                }
+                let eager = i == 0;
+                if eager || r % 5 == 4 {
+                    try_commit(state, "t", &logs[i].0, &outbound).await;
+                    resync(state, &seq[..], &from, &outbound, &logs[i].0).await;
+                    try_commit(state, "t", &logs[i].0, &outbound).await;
+                    observe(state, &mut activated_at[i]).await;
+                }
+            }
+        }
+        for (i, state) in states.iter().enumerate() {
+            for _ in 0..4 {
+                resync(state, &seq[..], &from, &outbound, &logs[i].0).await;
+                try_commit(state, "t", &logs[i].0, &outbound).await;
+                observe(state, &mut activated_at[i]).await;
+            }
+        }
+
+        let mut summary = Vec::new();
+        for state in &states {
+            let inner = state.inner.lock().await;
+            let committed: BTreeSet<CertHash> = state.committed.lock().iter().copied().collect();
+            summary.push((
+                inner.committee.clone(),
+                inner.live_proven.clone(),
+                state.stake_table.read().await.weight(NEW_ID),
+                inner.last_committed_leader_round,
+                inner.substrate.state_root(),
+                committed,
+                inner.epoch.current,
+            ));
+        }
+        assert_eq!(
+            summary[0].0.members(),
+            &[0, 1, 2, 3, NEW_ID],
+            "eager node's committee"
+        );
+        assert_eq!(summary[0].0, summary[1].0, "committees differ");
+        assert!(
+            summary[0].1.is_empty() && summary[1].1.is_empty(),
+            "live-proven not drained"
+        );
+        assert_eq!(summary[0].2, 150_000, "stake not activated");
+        assert_eq!(summary[0].2, summary[1].2);
+        assert_eq!(summary[0].3, summary[1].3, "commit frontier differs");
+        assert_eq!(summary[0].4, summary[1].4, "state roots differ");
+        assert_eq!(summary[0].5, summary[1].5, "commit sets differ");
+        assert!(
+            summary[0].6 >= 2,
+            "no boundary after the admission was crossed"
+        );
+        assert_eq!(
+            activated_at[0], activated_at[1],
+            "activation boundary differs (I-CT1)"
+        );
+        assert!(activated_at[0].is_some());
+        // Id 7 now holds leader slots in the rotation.
+        let slots: Vec<AuthorityId> = (0..10u64)
+            .map(|r| summary[0].0.leader(r).unwrap())
+            .collect();
+        assert!(
+            slots.contains(&NEW_ID),
+            "activated authority holds no leader slot: {slots:?}"
+        );
+    }
+
+    /// IQ-010 D3: evidence is accepted only when it is two distinct
+    /// certificates by one seated authority for one round, both validly
+    /// signed; valid evidence ejects at the boundary and is queued once.
+    #[tokio::test]
+    async fn bogus_evidence_is_dropped() {
+        let keys: Vec<(
+            suwappu_crypto::mldsa::PublicKey,
+            suwappu_crypto::mldsa::SecretKey,
+        )> = (0..4).map(|_| suwappu_crypto::mldsa::keypair()).collect();
+        let state = State::new(
+            &small_manifest("iq010-evidence-4n", &keys, 16),
+            keys[0].1.clone(),
+            None,
+        );
+        let (log, _task) =
+            EventLog::start(&std::env::temp_dir().join("suwappu-iq010-evidence.ndjson"))
+                .await
+                .unwrap();
+        let mk = |author: u32, round: u64, tag: u8, sk: &suwappu_crypto::mldsa::SecretKey| {
+            let mut c = Certificate {
+                author,
+                round,
+                parents: Vec::new(),
+                payload_digest: [tag; 32],
+                signature: Vec::new(),
+            };
+            c.sign(sk);
+            c
+        };
+        let a = mk(1, 3, 1, &keys[1].1);
+        let b = mk(1, 3, 2, &keys[1].1);
+        assert!(verify_equivocation_evidence(&state, &a, &b).await);
+        assert!(
+            !verify_equivocation_evidence(&state, &a, &a).await,
+            "same certificate"
+        );
+        assert!(
+            !verify_equivocation_evidence(&state, &a, &mk(1, 4, 2, &keys[1].1)).await,
+            "different rounds"
+        );
+        assert!(
+            !verify_equivocation_evidence(&state, &a, &mk(1, 3, 2, &keys[2].1)).await,
+            "signed by another key"
+        );
+        assert!(
+            !verify_equivocation_evidence(
+                &state,
+                &mk(9, 3, 1, &keys[1].1),
+                &mk(9, 3, 2, &keys[1].1)
+            )
+            .await,
+            "unseated author"
+        );
+        // Through the commit path: queued once, ejected at the boundary.
+        let evidence = Intent::EquivocationEvidence {
+            cert_a: a.clone(),
+            cert_b: b.clone(),
+        };
+        let digest = compute_payload_digest(std::slice::from_ref(&evidence), &[]);
+        let mut carrier = Certificate {
+            author: 0,
+            round: 5,
+            parents: Vec::new(),
+            payload_digest: digest,
+            signature: Vec::new(),
+        };
+        carrier.sign(&keys[0].1);
+        let block = BlockPayload {
+            payload_digest: digest,
+            author: 0,
+            round: 5,
+            cert_hash: carrier.hash(),
+            intents: vec![evidence.clone(), evidence.clone()],
+            governance_auth: Vec::new(),
+        };
+        apply_commit(
+            &state,
+            carrier.hash(),
+            carrier.clone(),
+            block.clone(),
+            5,
+            "t",
+            &log,
+            false,
+        )
+        .await;
+        apply_commit(&state, carrier.hash(), carrier, block, 5, "t", &log, false).await;
+        {
+            let inner = state.inner.lock().await;
+            let queued = inner
+                .pending_governance
+                .iter()
+                .filter(|(i, _)| matches!(i, Intent::EquivocationEvidence { .. }))
+                .count();
+            assert_eq!(queued, 1, "evidence queued once per slot");
+            assert!(inner.committee.contains(1), "ejection before the boundary");
+        }
+        apply_governance_intent(&state, &evidence, None, 16, "t", &log).await;
+        assert!(!state.authority_registry.read().await.contains(1));
+        assert_eq!(state.stake_table.read().await.weight(1), 0);
+        assert_eq!(state.inner.lock().await.committee.members(), &[0, 2, 3]);
+        // Replayed evidence against an ejected author is a no-op.
+        assert!(!verify_equivocation_evidence(&state, &a, &b).await);
     }
 
     /// IQ-009 D5 / I-AV1, the `/goal` B2 block-withholding fault: one of
