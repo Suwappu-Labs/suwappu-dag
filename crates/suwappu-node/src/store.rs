@@ -415,6 +415,11 @@ pub struct StateSnapshot {
     /// been committed; they join the committee at the next epoch
     /// boundary (IQ-010 D2). Commit-derived, so part of `snapshot_root`.
     pub live_proven: BTreeSet<u32>,
+    /// Authorities removed at a boundary: registered key and the last
+    /// round their certificates are still admitted (IQ-010 retirement
+    /// grace). Commit-derived, so part of `snapshot_root`.
+    #[serde(default)]
+    pub retired: BTreeMap<u32, (Vec<u8>, u64)>,
     /// Live DAG window (rounds above `gc_round`), topologically ordered.
     pub dag_certs: Vec<Certificate>,
     /// Tombstone window.
@@ -457,6 +462,7 @@ struct SnapshotBody<'a> {
     pending_governance: &'a [(Intent, Option<GovAuth>)],
     live_proven: &'a BTreeSet<u32>,
     committee_by_epoch: &'a BTreeMap<u64, Committee>,
+    retired: &'a BTreeMap<u32, (Vec<u8>, u64)>,
 }
 
 impl StateSnapshot {
@@ -476,6 +482,7 @@ impl StateSnapshot {
             pending_governance: &self.pending_governance,
             live_proven: &self.live_proven,
             committee_by_epoch: &self.committee_by_epoch,
+            retired: &self.retired,
         };
         let bytes = crate::codec::encode(&body).expect("snapshot body is serialisable");
         let mut h = blake3::Hasher::new();
@@ -784,6 +791,7 @@ mod tests {
                 (1u64, Committee::contiguous(4)),
             ]),
             live_proven: BTreeSet::new(),
+            retired: BTreeMap::new(),
             dag_certs: vec![cert(leader_round, 9)],
             tombstones: vec![(cert(1, 1).hash(), 1)],
             committed: vec![cert(leader_round, 9).hash()],

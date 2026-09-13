@@ -410,6 +410,15 @@ pub(crate) struct StateInner {
     /// been committed (IQ-010 D2); they join the committee at the next
     /// epoch boundary. Commit-derived: written by `apply_commit` only.
     pub(crate) live_proven: BTreeSet<AuthorityId>,
+    /// Authorities removed at a boundary, with their registered key and
+    /// the last round at which their certificates are still admitted
+    /// (two epochs past the removal). A node that crossed the boundary
+    /// later still references such certificates as parents; without the
+    /// grace an early node would refuse them for ever and orphan every
+    /// descendant (third S36 pass). Retired certificates are never
+    /// leaders or support — the committee pinned to their epoch decides
+    /// that — only DAG structure. Pruned with the gc round.
+    pub(crate) retired: BTreeMap<AuthorityId, (Vec<u8>, u64)>,
     /// Certs received whose parents aren't yet in the local DAG.
     pub(crate) orphans: HashMap<CertHash, Vec<Certificate>>,
     /// Cert hashes for which a `GetCert` request is outstanding.
@@ -774,6 +783,7 @@ impl State {
                     BTreeMap::from([(0u64, c.clone()), (1u64, c)])
                 },
                 live_proven: BTreeSet::new(),
+                retired: BTreeMap::new(),
                 orphans: HashMap::new(),
                 inflight_fetches: HashSet::new(),
                 needed_blocks: HashSet::new(),
@@ -2075,12 +2085,28 @@ async fn ingest_cert(
         // effectively never gossips it further, satisfying "reject /
         // don't-gossip on failure" without needing an explicit relay step
         // (this daemon doesn't push-relay certs; peers pull via GetCert).
-        let author_pubkey = state
-            .authority_registry
-            .read()
-            .await
-            .get(c.author)
-            .and_then(|m| suwappu_crypto::mldsa::PublicKey::from_bytes(&m.public_key_bytes).ok());
+        let author_pubkey = {
+            let registered = state
+                .authority_registry
+                .read()
+                .await
+                .get(c.author)
+                .map(|m| m.public_key_bytes.clone());
+            let key_bytes = match registered {
+                Some(k) => Some(k),
+                // IQ-010: a member removed at a boundary keeps its
+                // certificates admissible for a grace of two epochs.
+                None => state
+                    .inner
+                    .lock()
+                    .await
+                    .retired
+                    .get(&c.author)
+                    .filter(|(_, until)| round <= *until)
+                    .map(|(k, _)| k.clone()),
+            };
+            key_bytes.and_then(|k| suwappu_crypto::mldsa::PublicKey::from_bytes(&k).ok())
+        };
         match author_pubkey {
             Some(pk) if c.verify_signature(&pk) => {}
             Some(_) => {
@@ -2685,11 +2711,16 @@ async fn emit_checkpoint(
 }
 
 async fn current_registry_set(state: &State) -> RegistrySet {
+    // Canonical order: `inner` → `stake_table` → `authority_registry` →
+    // `validator_registry`, all held together so the set is consistent.
     let inner = state.inner.lock().await;
+    let stake_table = state.stake_table.read().await.clone();
+    let authority_registry = state.authority_registry.read().await.clone();
+    let validator_registry = state.validator_registry.read().await.clone();
     RegistrySet {
-        authority_registry: state.authority_registry.read().await.clone(),
-        validator_registry: state.validator_registry.read().await.clone(),
-        stake_table: state.stake_table.read().await.clone(),
+        authority_registry,
+        validator_registry,
+        stake_table,
         epoch: (
             inner.epoch.current,
             inner.epoch.rounds_per_epoch,
@@ -2697,6 +2728,17 @@ async fn current_registry_set(state: &State) -> RegistrySet {
         ),
         committee: inner.committee.clone(),
     }
+}
+
+/// Whether the checkpoint binding `next` must be retained in the served
+/// chain (IQ-008 D5 / IQ-010 D6): the chain witnesses every change of
+/// the *signing committee* — a registry change (admission, removal) or a
+/// committee change with the registry unchanged (activation). Keying on
+/// the registry alone dropped the link that establishes an activated
+/// member's signing rights, and every joiner then failed
+/// `verify_checkpoint_chain` on its first signature (third S36 pass).
+fn is_committee_transition(prev: &RegistrySet, next: &RegistrySet) -> bool {
+    prev.authority_registry != next.authority_registry || prev.committee != next.committee
 }
 
 /// The subset of `sigs` whose signer is a member of `committee` (IQ-010
@@ -2912,7 +2954,7 @@ async fn record_cosigned_checkpoint(
     // whole registry root, which also covers the epoch counter and would
     // make every epoch boundary a retained-forever link.
     let is_transition = inner.latest_checkpoint.as_ref().map_or(true, |l| {
-        l.registries.authority_registry != bundle.registries.authority_registry
+        is_committee_transition(&l.registries, &bundle.registries)
     });
     if is_transition {
         inner.checkpoint_transitions.push(bundle.clone());
@@ -3057,7 +3099,7 @@ async fn handle_checkpoint_chain(
         let mut trans: Vec<CheckpointBundle> = Vec::new();
         for b in chain.iter().cloned() {
             let changed = trans.last().map_or(true, |t| {
-                t.registries.authority_registry != b.registries.authority_registry
+                is_committee_transition(&t.registries, &b.registries)
             });
             if changed {
                 trans.push(b);
@@ -3555,6 +3597,7 @@ async fn install_snapshot(state: &State, snap: StateSnapshot, own: bool) {
     inner.committee = snap.committee;
     inner.committee_by_epoch = snap.committee_by_epoch;
     inner.live_proven = snap.live_proven;
+    inner.retired = snap.retired;
     inner.seen_at = seen_at;
     inner.detected_equivocations = detected;
     inner.gc_round = snap.gc_round;
@@ -3596,7 +3639,7 @@ async fn install_snapshot(state: &State, snap: StateSnapshot, own: bool) {
             .chain(std::iter::once(latest.clone()))
         {
             let changed = trans.last().map_or(true, |t| {
-                t.registries.authority_registry != b.registries.authority_registry
+                is_committee_transition(&t.registries, &b.registries)
             });
             if changed {
                 trans.push(b);
@@ -3713,6 +3756,7 @@ async fn capture_snapshot(state: &State) -> crate::store::StateSnapshot {
         committee: inner.committee.clone(),
         committee_by_epoch: inner.committee_by_epoch.clone(),
         live_proven: inner.live_proven.clone(),
+        retired: inner.retired.clone(),
         dag_certs,
         tombstones: {
             let mut t: Vec<(CertHash, u64)> = dag.tombstones().collect();
@@ -3792,7 +3836,7 @@ async fn recover_from_disk(
                     continue;
                 }
                 let changed = inner.latest_checkpoint.as_ref().map_or(true, |l| {
-                    l.registries.authority_registry != b.registries.authority_registry
+                    is_committee_transition(&l.registries, &b.registries)
                 });
                 if changed {
                     inner.checkpoint_transitions.push(b.clone());
@@ -3950,6 +3994,7 @@ async fn prune_state(
             inner.seen_at.retain(|(_, r), _| *r > gc_round);
             inner.evidence_emitted.retain(|(_, r)| *r > gc_round);
             inner.detected_equivocations.retain(|p| p.round > gc_round);
+            inner.retired.retain(|_, (_, until)| *until > gc_round);
             // IQ-010 D4: epochs no decidable slot can belong to. Pruned
             // here, from the frontier-derived gc round, so the schedule a
             // checkpoint snapshot binds is normalised like every other
@@ -4702,8 +4747,17 @@ async fn try_commit(
         // previous epoch; until that crossing has been committed the walk
         // defers here (nothing above can be decided either), so no node
         // ever decides a slot under a committee another node will not use.
-        let committee = state.inner.lock().await.committee_for_round(round).cloned();
+        let (committee, gc_now) = {
+            let inner = state.inner.lock().await;
+            (inner.committee_for_round(round).cloned(), inner.gc_round)
+        };
         let Some(committee) = committee else {
+            // A checkpoint emitted earlier in this walk may have pruned
+            // the schedule past a round the walk's own gc snapshot still
+            // considered live: obsolete now, skip rather than defer.
+            if is_obsolete(round, gc_now) {
+                continue;
+            }
             break 'commit;
         };
         let status = {
@@ -5234,7 +5288,8 @@ fn intent_to_main_lane_tx(intent: &Intent, round: Round, lineage: CertHash) -> O
 /// Apply a single governance Intent to State (DAG-S27.3).
 /// Extracted from try_commit's body so the S31.2 per-field-lock
 /// pattern stays readable. Lock acquisition order respects the
-/// canonical: stake_table → authority_registry → validator_registry → inner.
+/// canonical: inner → stake_table → authority_registry → validator_registry
+/// (module header).
 async fn apply_governance_intent(
     state: &State,
     intent: &Intent,
@@ -5420,14 +5475,20 @@ async fn remove_authority(
             );
         }
     }
-    let removed = state.authority_registry.write().await.remove(authority_id);
-    if removed.is_none() {
-        return;
-    }
-    state.validator_registry.write().await.remove(authority_id);
-    state.stake_table.write().await.remove(&authority_id);
+    // One critical section in the canonical order (`inner` →
+    // `stake_table` → `authority_registry` → `validator_registry`): no
+    // reader ever sees a registry without the member but a committee
+    // with it (third S36 pass).
     {
         let mut inner = state.inner.lock().await;
+        let mut stake_table = state.stake_table.write().await;
+        let mut authority_registry = state.authority_registry.write().await;
+        let mut validator_registry = state.validator_registry.write().await;
+        let Some(removed) = authority_registry.remove(authority_id) else {
+            return;
+        };
+        validator_registry.remove(authority_id);
+        stake_table.remove(&authority_id);
         inner.live_proven.remove(&authority_id);
         let members: Vec<AuthorityId> = inner
             .committee
@@ -5437,6 +5498,15 @@ async fn remove_authority(
             .filter(|id| *id != authority_id)
             .collect();
         inner.committee = Committee::new(members);
+        let grace = inner
+            .epoch
+            .rounds_per_epoch
+            .max(inner.gc_depth)
+            .saturating_mul(2);
+        inner.retired.insert(
+            authority_id,
+            (removed.public_key_bytes, cert_round.saturating_add(grace)),
+        );
     }
     log.emit(
         Event::now(self_label, Lane::Main, event)
@@ -5552,9 +5622,12 @@ fn membership_change_cap(committee_size: u32) -> usize {
 
 /// Shortest epoch a manifest may declare (`0` disables epochs). The walk
 /// defers at an epoch whose committee is not fixed until a leader of the
-/// previous epoch commits; an epoch must therefore hold enough leader
-/// slots that at least one decides `Direct` under any honest schedule.
-pub const MIN_ROUNDS_PER_EPOCH: u64 = 8;
+/// previous epoch commits, so an epoch must hold more leader slots than
+/// a Byzantine coalition can occupy: `f + 1` at the largest ring the
+/// registry admits (`AUTHORITY_RING_MAX = 50`, `f = 16`), since ids are
+/// caller-chosen and a coalition can hold consecutive slots (third S36
+/// pass).
+pub const MIN_ROUNDS_PER_EPOCH: u64 = ((suwappu_authority::AUTHORITY_RING_MAX as u64 - 1) / 3) + 1;
 
 /// Manifest constraints the daemon refuses to start under.
 pub fn validate_manifest(manifest: &GenesisManifest) -> anyhow::Result<()> {
@@ -6894,32 +6967,44 @@ mod tests {
         // a fully parallel test suite the 100 ms mesh slows several-fold,
         // and the equal-frontier sample the root check needs is a
         // coincidence between two moving frontiers.
+        // Every peer's (frontier → root) is recorded as it moves, sampled
+        // under its commit lock so the pair is consistent; v3 is compared
+        // at whatever frontier it reaches, so the check does not depend
+        // on catching two moving frontiers equal in one sample (a
+        // coincidence that a loaded runner misses).
         let mut caught_up = false;
+        let mut history: HashMap<u64, [u8; 32]> = HashMap::new();
         for _ in 0..600 {
             tokio::time::sleep(Duration::from_millis(100)).await;
+            for d in &daemons[..daemons.len() - 1] {
+                let _walk = d.state.commit_lock.lock().await;
+                let inner = d.state.inner.lock().await;
+                if let Some(f) = inner.last_committed_leader_round {
+                    let root = inner.substrate.state_root();
+                    if let Some(prev) = history.insert(f, root) {
+                        assert_eq!(prev, root, "a peer's root changed at a fixed frontier");
+                    }
+                }
+            }
             let (v3_authored, v3_frontier, v3_root) = {
-                let inner = daemons.last().unwrap().state.inner.lock().await;
+                let v3 = &daemons.last().unwrap().state;
+                let _walk = v3.commit_lock.lock().await;
+                let inner = v3.inner.lock().await;
                 (
                     inner.last_authored_round.unwrap_or(0),
                     inner.last_committed_leader_round,
                     inner.substrate.state_root(),
                 )
             };
-            if v3_authored <= authored_before || v3_frontier.is_none() {
+            if v3_authored <= authored_before {
                 continue;
             }
-            for d in &daemons[..daemons.len() - 1] {
-                let inner = d.state.inner.lock().await;
-                if inner.last_committed_leader_round == v3_frontier {
-                    assert_eq!(
-                        inner.substrate.state_root(),
-                        v3_root,
-                        "state roots disagree at an equal frontier after restart"
-                    );
-                    caught_up = true;
-                }
-            }
-            if caught_up {
+            if let Some(root) = v3_frontier.and_then(|f| history.get(&f)) {
+                assert_eq!(
+                    *root, v3_root,
+                    "state roots disagree at an equal frontier after restart"
+                );
+                caught_up = true;
                 break;
             }
         }
@@ -7562,7 +7647,7 @@ mod tests {
                 .collect(),
             corridors: Vec::new(),
             prebalances: Vec::new(),
-            rounds_per_epoch: 16,
+            rounds_per_epoch: 32,
             // No pruning inside the test window: the evidence block must
             // still be inspectable at the end.
             gc_depth_rounds: 4096,
@@ -8143,6 +8228,45 @@ mod tests {
         assert_eq!(state.inner.lock().await.committee.members(), &[0, 2, 3]);
         // Replayed evidence against an ejected author is a no-op.
         assert!(!verify_equivocation_evidence(&state, &a, &b).await);
+        // Retirement grace: the ejected author's certificates stay
+        // admissible (DAG structure only) for two epochs past the
+        // boundary, so a peer that crossed later and referenced them
+        // does not orphan every descendant; beyond it they are refused.
+        let from = PeerId("p".into());
+        {
+            // The grace horizon is what is under test, so pin it below
+            // the ingest ceiling (anchor 0 + gc_depth 16 on this empty
+            // DAG) rather than let the ceiling refuse first.
+            let mut inner = state.inner.lock().await;
+            let entry = inner
+                .retired
+                .get_mut(&1)
+                .expect("ejected member is retired");
+            entry.1 = 12;
+        }
+        let within = mk(1, 10, 7, &keys[1].1);
+        let beyond = mk(1, 14, 8, &keys[1].1);
+        assert!(ingest_cert(&state, within.clone(), &from, None)
+            .await
+            .is_empty());
+        assert!(
+            state
+                .inner
+                .lock()
+                .await
+                .awaiting_block
+                .contains_key(&within.hash()),
+            "retired member's certificate inside the grace was not admitted (parked on its block)"
+        );
+        assert!(ingest_cert(&state, beyond.clone(), &from, None)
+            .await
+            .is_empty());
+        assert!(!state
+            .inner
+            .lock()
+            .await
+            .awaiting_block
+            .contains_key(&beyond.hash()));
 
         // Per-block bound: a block front-loaded with bogus evidence spends
         // the budget and a valid pair behind it is not processed; the same
@@ -8275,6 +8399,98 @@ mod tests {
         assert!(ratify_checkpoint(ck, filtered, &signing).is_ok());
     }
 
+    /// IQ-010 D6 (third S36 pass): an activation changes the signing
+    /// committee without changing the registry. The served chain must
+    /// retain that checkpoint, or a joiner walking [CK1, CK3] verifies
+    /// CK3 under CK1's signing committee and refuses the activated
+    /// member's signature — and the whole chain with it.
+    #[test]
+    fn served_chain_witnesses_activations() {
+        use suwappu_execution::{verify_checkpoint_chain, ChainLink, CheckpointSignature};
+        let keys: Vec<(
+            suwappu_crypto::mldsa::PublicKey,
+            suwappu_crypto::mldsa::SecretKey,
+        )> = (0..5).map(|_| suwappu_crypto::mldsa::keypair()).collect();
+        let registry_of = |ids: &[u32]| {
+            let mut r = AuthorityRegistry::new();
+            for id in ids {
+                r.admit(AuthorityMember {
+                    id: *id,
+                    stake_suwappu: 150_000,
+                    public_key_bytes: keys[*id as usize].0.as_bytes().to_vec(),
+                })
+                .unwrap();
+            }
+            r
+        };
+        let set = |reg: &[u32], committee: &[u32], epoch: u64| RegistrySet {
+            authority_registry: registry_of(reg),
+            validator_registry: ValidatorRegistry::new(),
+            stake_table: StakeTable::new(),
+            epoch: (epoch, 32, epoch * 32),
+            committee: Committee::new(committee.iter().copied()),
+        };
+        let genesis = set(&[0, 1, 2, 3], &[0, 1, 2, 3], 0);
+        // CK1: id 4 admitted (registry changes, committee does not).
+        let s1 = set(&[0, 1, 2, 3, 4], &[0, 1, 2, 3], 1);
+        // CK2: id 4 activated (committee changes, registry does not).
+        let s2 = set(&[0, 1, 2, 3, 4], &[0, 1, 2, 3, 4], 2);
+        // CK3: steady state, signed by the five-member committee.
+        let s3 = s2.clone();
+        assert!(is_committee_transition(&genesis, &s1));
+        assert!(
+            is_committee_transition(&s1, &s2),
+            "activation must be a transition"
+        );
+        assert!(!is_committee_transition(&s2, &s3));
+        let mut prev = [0u8; 32];
+        let mut links = Vec::new();
+        let sets = [&s1, &s2, &s3];
+        for (i, s) in sets.iter().enumerate() {
+            let ck = Checkpoint {
+                height: i as u64,
+                round: 32 * (i as u64 + 1),
+                state_root: [i as u8 + 1; 32],
+                prev_checkpoint: prev,
+                registry_root: s.root(),
+                snapshot_root: [9; 32],
+            };
+            prev = ck.hash();
+            // Signed by the signing committee of the PREVIOUS link
+            // (genesis for the first): three of {0,1,2,3} for CK1 and CK2,
+            // then four of the five for CK3, including the activated 4.
+            let signers: Vec<u32> = if i < 2 {
+                vec![0, 1, 2]
+            } else {
+                vec![0, 1, 2, 4]
+            };
+            let digest = ck.hash();
+            let signatures = signers
+                .iter()
+                .map(|id| CheckpointSignature {
+                    authority: *id,
+                    signature: suwappu_crypto::mldsa::sign(&digest, &keys[*id as usize].1)
+                        .unwrap()
+                        .as_bytes()
+                        .to_vec(),
+                })
+                .collect();
+            links.push(ChainLink {
+                checkpoint: ck,
+                signatures,
+                next_committee: s.signing_committee(),
+                next_registry_root: s.root(),
+            });
+        }
+        // The chain the predicate retains: CK1 (admission), CK2
+        // (activation) and the latest.
+        assert!(verify_checkpoint_chain(&genesis.authority_registry, &links).is_ok());
+        // Keying on the registry alone drops CK2 and the joiner cannot
+        // verify CK3's signature by the activated member.
+        let registry_only: Vec<ChainLink> = vec![links[0].clone(), links[2].clone()];
+        assert!(verify_checkpoint_chain(&genesis.authority_registry, &registry_only).is_err());
+    }
+
     /// IQ-010 D4 / Residual 1a guards: the manifest floor on epoch length
     /// and the per-boundary change cap.
     #[test]
@@ -8284,7 +8500,7 @@ mod tests {
             validators: Vec::new(),
             corridors: Vec::new(),
             prebalances: Vec::new(),
-            rounds_per_epoch: 16,
+            rounds_per_epoch: 32,
             gc_depth_rounds: 64,
             checkpoint_cadence_rounds: 8,
         };
@@ -8293,6 +8509,7 @@ mod tests {
         assert!(validate_manifest(&m).is_ok(), "epochs disabled");
         m.rounds_per_epoch = MIN_ROUNDS_PER_EPOCH - 1;
         assert!(validate_manifest(&m).is_err(), "below the epoch floor");
+        assert_eq!(MIN_ROUNDS_PER_EPOCH, 17);
         m.rounds_per_epoch = MIN_ROUNDS_PER_EPOCH;
         m.checkpoint_cadence_rounds = 40;
         assert!(
@@ -9817,28 +10034,34 @@ mod tests {
 
         // Catch-up: within a few seconds the joiner's leader frontier
         // reaches a seed's, and at equal frontiers the roots must agree.
+        // Seeds' (frontier → root) recorded under their commit locks; the
+        // joiner is compared at whatever frontier it reaches after the
+        // install, not at a sampled coincidence.
         let mut agreed = false;
-        for _ in 0..80 {
+        let mut history: HashMap<u64, [u8; 32]> = HashMap::new();
+        for _ in 0..240 {
             tokio::time::sleep(Duration::from_millis(250)).await;
+            for d in &seeds {
+                let _walk = d.state.commit_lock.lock().await;
+                let inner = d.state.inner.lock().await;
+                if let Some(f) = inner.last_committed_leader_round {
+                    let root = inner.substrate.state_root();
+                    if let Some(prev) = history.insert(f, root) {
+                        assert_eq!(prev, root, "a seed's root changed at a fixed frontier");
+                    }
+                }
+            }
             let (jf, jr) = {
+                let _walk = joiner.state.commit_lock.lock().await;
                 let inner = joiner.state.inner.lock().await;
                 (
                     inner.last_committed_leader_round,
                     inner.substrate.state_root(),
                 )
             };
-            for d in &seeds {
-                let inner = d.state.inner.lock().await;
-                if jf.is_some() && jf == inner.last_committed_leader_round {
-                    assert_eq!(
-                        jr,
-                        inner.substrate.state_root(),
-                        "joiner root differs at equal frontier"
-                    );
-                    agreed = true;
-                }
-            }
-            if agreed {
+            if let Some(root) = jf.and_then(|f| history.get(&f)) {
+                assert_eq!(*root, jr, "joiner root differs at equal frontier");
+                agreed = true;
                 break;
             }
         }
@@ -10138,8 +10361,8 @@ mod tests {
             prebalances: Vec::new(),
             // Issue #18: short epochs so governance application
             // (which now lands at the next boundary) is exercised on
-            // CI-sane timescales. 16 rounds * 100ms = 1.6s/boundary.
-            rounds_per_epoch: 16,
+            // CI-sane timescales. 32 rounds * 100ms = 3.2s/boundary.
+            rounds_per_epoch: 32,
             gc_depth_rounds: suwappu_consensus::GC_DEPTH,
             checkpoint_cadence_rounds: 64,
         };

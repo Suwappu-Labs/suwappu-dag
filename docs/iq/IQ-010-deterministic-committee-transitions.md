@@ -174,7 +174,23 @@ not yet fixed; that slot becomes decidable once a certificate of the
 previous epoch commits, which needs only that epoch's own committee. A
 membership change committed in epoch `e` thus takes effect for the slots
 of epoch `e + 2` — the same one-epoch lag as Tendermint's `H + 2` rule.
-The schedule is commit-derived and part of `snapshot_root`.
+The schedule is commit-derived and part of `snapshot_root`. The pinning
+covers the Authority leg of the joint quorum — leader, supporters,
+anchors. The Validator leg (`validator_quorum_met`) reads the stake
+table as of the current committee, which moves at the crossing itself:
+during the one-epoch lag an authority removed at a boundary still holds
+its leader slots in the next epoch while its stake is already out of
+the denominator. Both legs are pure functions of the committed prefix
+and the gate is halt-not-fork, so a straddling slot can be deferred,
+never ratified to a different leader.
+
+An authority removed at a boundary is *retired* for a grace of two
+epochs: its certificates at rounds up to the grace are still admitted
+(signature against its retained key) so a node that crossed the
+boundary later and referenced them as parents does not leave every
+descendant orphaned on the nodes that crossed earlier; retired
+certificates are DAG structure only — the epoch's pinned committee
+decides leaders and support.
 
 ### D5. The fast path uses the committee
 
@@ -243,16 +259,25 @@ commit rule).
    committee changes per boundary — removals in queue order, then
    activations in id order — and carries the rest to the next
    boundary, deterministically (`membership_change_cap`,
-   `membership_changes_are_capped_per_boundary`). Separately, the walk
-   defers at an epoch whose committee is not fixed until a leader of the
-   previous epoch commits, so an epoch in which every leader slot ends
-   `Skip` would halt the chain; `rounds_per_epoch` below
-   `MIN_ROUNDS_PER_EPOCH` (8, or 0 to disable epochs) is refused at
-   startup (`validate_manifest`). Whether eight slots is enough margin
-   for the deployed ring size is a sign-off item.
+   `membership_changes_are_capped_per_boundary`). With `f` changes the
+   overlap is exactly `quorum_threshold(|C_e|)`: zero slack, every
+   surviving member of `C_e` must support a straddling slot for it to
+   decide directly (indirectly, any later anchor's history suffices).
+   Separately, the walk defers at an epoch whose committee is not fixed
+   until a leader of the previous epoch commits, so an epoch in which
+   every leader slot ends `Skip` would halt the chain; a Byzantine
+   coalition holding consecutive committee positions (ids are
+   caller-chosen) can silence `f` consecutive slots, so
+   `rounds_per_epoch` must exceed `f` at the largest ring:
+   `MIN_ROUNDS_PER_EPOCH = f(AUTHORITY_RING_MAX) + 1 = 17` (or 0 to
+   disable epochs) is refused below at startup (`validate_manifest`).
+   Sign-off item: the two bounds together.
 2. **Activation and ejection wait for the boundary** (up to
    `rounds_per_epoch`). An equivocator stays seated until then; its
-   certificates are capped at two per slot and it is within `f`.
+   certificates are capped at two per slot and it is within `f`. A
+   detection is reaped with its slot at the gc round, so ejection
+   depends on at least one detector authoring a block while the slot is
+   inside its retention window — true of every live committee member.
 3. **Registered, inactive members can grow the DAG** (their certificates
    are admitted and may be parents). Bounded by the per-slot cap, the
    ring ceiling (50) and the retention window.

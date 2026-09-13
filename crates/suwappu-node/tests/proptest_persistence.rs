@@ -112,6 +112,7 @@ fn snapshot_of(sub: &InMemorySubstrate, leader_round: u64, log_sequence: u64) ->
         .into_iter()
         .collect(),
         live_proven: Default::default(),
+        retired: Default::default(),
         dag_certs: Vec::new(),
         tombstones: Vec::new(),
         committed: Vec::new(),
