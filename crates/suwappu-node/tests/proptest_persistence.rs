@@ -105,6 +105,12 @@ fn snapshot_of(sub: &InMemorySubstrate, leader_round: u64, log_sequence: u64) ->
         epoch: (0, 1024, 0),
         pending_governance: Vec::new(),
         committee: suwappu_consensus::Committee::contiguous(4),
+        committee_by_epoch: [
+            (0u64, suwappu_consensus::Committee::contiguous(4)),
+            (1u64, suwappu_consensus::Committee::contiguous(4)),
+        ]
+        .into_iter()
+        .collect(),
         live_proven: Default::default(),
         dag_certs: Vec::new(),
         tombstones: Vec::new(),

@@ -42,7 +42,7 @@
 //! (`tests/proptest_persistence.rs`).
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
@@ -116,6 +116,24 @@ pub struct RegistrySet {
 }
 
 impl RegistrySet {
+    /// The Authority registry restricted to the active committee: the set
+    /// whose signatures ratify checkpoints and whose quorum they need
+    /// (IQ-010 D6). A registered-but-inactive member is carried in
+    /// `authority_registry` (its certificates verify) but never counts
+    /// toward, nor raises, a checkpoint quorum.
+    pub fn signing_committee(&self) -> AuthorityRegistry {
+        let mut reg = self.authority_registry.clone();
+        let inactive: Vec<u32> = reg
+            .members()
+            .map(|m| m.id)
+            .filter(|id| !self.committee.contains(*id))
+            .collect();
+        for id in inactive {
+            reg.remove(id);
+        }
+        reg
+    }
+
     /// Canonical commitment: `blake3("SUWAPPU-REGISTRY-ROOT-V2" ||
     /// bincode(self))`. The registries are `BTreeMap`-backed and the
     /// committee is sorted, so the encoding is deterministic.
@@ -390,6 +408,9 @@ pub struct StateSnapshot {
     /// The active committee (IQ-010 D2): registry members that hold
     /// leader slots, count toward quorum and carry stake weight.
     pub committee: Committee,
+    /// The committee each epoch's slots are decided under (IQ-010 D4).
+    /// Commit-derived, so part of `snapshot_root`.
+    pub committee_by_epoch: BTreeMap<u64, Committee>,
     /// Registered-but-inactive authorities one of whose certificates has
     /// been committed; they join the committee at the next epoch
     /// boundary (IQ-010 D2). Commit-derived, so part of `snapshot_root`.
@@ -435,6 +456,7 @@ struct SnapshotBody<'a> {
     committed: Vec<CertHash>,
     pending_governance: &'a [(Intent, Option<GovAuth>)],
     live_proven: &'a BTreeSet<u32>,
+    committee_by_epoch: &'a BTreeMap<u64, Committee>,
 }
 
 impl StateSnapshot {
@@ -453,6 +475,7 @@ impl StateSnapshot {
             committed,
             pending_governance: &self.pending_governance,
             live_proven: &self.live_proven,
+            committee_by_epoch: &self.committee_by_epoch,
         };
         let bytes = crate::codec::encode(&body).expect("snapshot body is serialisable");
         let mut h = blake3::Hasher::new();
@@ -756,6 +779,10 @@ mod tests {
             epoch: (0, 1024, 0),
             pending_governance: Vec::new(),
             committee: Committee::contiguous(4),
+            committee_by_epoch: BTreeMap::from([
+                (0u64, Committee::contiguous(4)),
+                (1u64, Committee::contiguous(4)),
+            ]),
             live_proven: BTreeSet::new(),
             dag_certs: vec![cert(leader_round, 9)],
             tombstones: vec![(cert(1, 1).hash(), 1)],

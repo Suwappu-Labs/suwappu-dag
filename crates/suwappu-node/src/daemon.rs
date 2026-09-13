@@ -399,6 +399,13 @@ pub(crate) struct StateInner {
     /// carry stake weight. Changes only in the epoch-boundary governance
     /// drain — a function of the commit sequence.
     pub(crate) committee: Committee,
+    /// The committee each epoch's slots are decided under (IQ-010 D4):
+    /// epoch `e` uses the committee that the drain into epoch `e − 1`
+    /// produced, so it is fixed before any slot of `e` can be decided and
+    /// a later boundary never re-schedules a slot still in the live
+    /// window. Genesis defines epochs 0 and 1; every crossing into `k`
+    /// defines `k + 1`. Commit-derived, so part of `snapshot_root`.
+    pub(crate) committee_by_epoch: BTreeMap<u64, Committee>,
     /// Registered-but-inactive authorities one of whose certificates has
     /// been committed (IQ-010 D2); they join the committee at the next
     /// epoch boundary. Commit-derived: written by `apply_commit` only.
@@ -495,6 +502,15 @@ pub(crate) struct StateInner {
     /// execution time (`InMemorySubstrate::state_root()` returns latest with no
     /// round→root history), so it must be captured here, not reconstructed.
     pub(crate) latest_bridge_header: Option<(u64, [u8; 32])>,
+}
+
+impl StateInner {
+    /// The committee the slot at `round` is decided under (IQ-010 D4), or
+    /// `None` while the boundary that fixes it has not been committed —
+    /// the commit walk defers at such a slot rather than guess.
+    pub(crate) fn committee_for_round(&self, round: u64) -> Option<&Committee> {
+        self.committee_by_epoch.get(&self.epoch.epoch_for(round))
+    }
 }
 
 /// Round-based epoch counter for validator-set governance (DAG-S25).
@@ -753,6 +769,10 @@ impl State {
                 served_snapshot: None,
                 snapshot_sync: SnapshotSync::default(),
                 committee: Committee::new(genesis_authority_registry.members().map(|m| m.id)),
+                committee_by_epoch: {
+                    let c = Committee::new(genesis_authority_registry.members().map(|m| m.id));
+                    BTreeMap::from([(0u64, c.clone()), (1u64, c)])
+                },
                 live_proven: BTreeSet::new(),
                 orphans: HashMap::new(),
                 inflight_fetches: HashSet::new(),
@@ -2511,7 +2531,11 @@ fn now_unix_ms() -> u64 {
 async fn verification_committee(state: &State) -> AuthorityRegistry {
     let inner = state.inner.lock().await;
     match &inner.latest_checkpoint {
-        Some(b) => b.registries.authority_registry.clone(),
+        // IQ-010 D6: the signing committee is the ACTIVE subset of the
+        // bound registry. A registered-but-inactive member (admitted,
+        // never shown up) must not raise the checkpoint quorum, or the
+        // chain freezes on admissions exactly as the commit rule used to.
+        Some(b) => b.registries.signing_committee(),
         None => state.genesis_authority_registry.clone(),
     }
 }
@@ -2985,7 +3009,7 @@ async fn handle_checkpoint_chain(
         .map(|b| ChainLink {
             checkpoint: b.cosigned.checkpoint.clone(),
             signatures: b.cosigned.signatures.clone(),
-            next_committee: b.registries.authority_registry.clone(),
+            next_committee: b.registries.signing_committee(),
             next_registry_root: b.registries.root(),
         })
         .collect();
@@ -3337,6 +3361,13 @@ fn verify_served_snapshot(
     {
         return Err("live-proven set is not registered-but-inactive");
     }
+    // The schedule must name the current epoch and the next, and the
+    // next epoch's committee is the one the latest drain produced.
+    if !snap.committee_by_epoch.contains_key(&snap.epoch.0)
+        || snap.committee_by_epoch.get(&(snap.epoch.0 + 1)) != Some(&snap.committee)
+    {
+        return Err("committee schedule inconsistent with the committee");
+    }
     let n = snap.committee.size() as u64;
     if snap.tombstones.len() as u64 > n.saturating_mul(gc_depth).saturating_add(n) {
         return Err("tombstone window too large");
@@ -3472,6 +3503,38 @@ async fn install_snapshot(state: &State, snap: StateSnapshot, own: bool) {
             }
         }
     }
+    // Equivocation bookkeeping for the installed window (IQ-010 D3): a
+    // served window may legitimately hold two headers for one slot, and
+    // a conflicting header arriving later must be detected against them.
+    let (seen_at, detected): (
+        BTreeMap<(AuthorityId, Round), CertHash>,
+        Vec<EquivocationProof>,
+    ) = {
+        let mut seen: BTreeMap<(AuthorityId, Round), CertHash> = BTreeMap::new();
+        let mut detected = Vec::new();
+        let mut certs: Vec<&Certificate> = snap
+            .dag_certs
+            .iter()
+            .filter(|c| kept.contains(&c.hash()))
+            .collect();
+        certs.sort_by_key(|c| (c.round, c.author, c.hash()));
+        for c in certs {
+            let h = c.hash();
+            match seen.get(&(c.author, c.round)) {
+                None => {
+                    seen.insert((c.author, c.round), h);
+                }
+                Some(prev) if *prev != h => detected.push(EquivocationProof {
+                    author: c.author,
+                    round: c.round,
+                    cert_a: *prev,
+                    cert_b: h,
+                }),
+                _ => {}
+            }
+        }
+        (seen, detected)
+    };
     *state.authority_registry.write().await = snap.authority_registry;
     *state.validator_registry.write().await = snap.validator_registry;
     *state.stake_table.write().await = snap.stake_table;
@@ -3488,7 +3551,10 @@ async fn install_snapshot(state: &State, snap: StateSnapshot, own: bool) {
     };
     inner.pending_governance = snap.pending_governance;
     inner.committee = snap.committee;
+    inner.committee_by_epoch = snap.committee_by_epoch;
     inner.live_proven = snap.live_proven;
+    inner.seen_at = seen_at;
+    inner.detected_equivocations = detected;
     inner.gc_round = snap.gc_round;
     inner.last_committed_leader_round = if snap.has_committed {
         Some(snap.leader_round)
@@ -3643,6 +3709,7 @@ async fn capture_snapshot(state: &State) -> crate::store::StateSnapshot {
         ),
         pending_governance: inner.pending_governance.clone(),
         committee: inner.committee.clone(),
+        committee_by_epoch: inner.committee_by_epoch.clone(),
         live_proven: inner.live_proven.clone(),
         dag_certs,
         tombstones: {
@@ -4621,8 +4688,16 @@ async fn try_commit(
         if is_obsolete(round, local_gc_round) {
             continue;
         }
+        // IQ-010 D4: the slot is decided under the committee pinned to its
+        // round's epoch. That committee is fixed by the crossing into the
+        // previous epoch; until that crossing has been committed the walk
+        // defers here (nothing above can be decided either), so no node
+        // ever decides a slot under a committee another node will not use.
+        let committee = state.inner.lock().await.committee_for_round(round).cloned();
+        let Some(committee) = committee else {
+            break 'commit;
+        };
         let status = {
-            let committee = state.inner.lock().await.committee.clone();
             let dag = state.dag.read().await;
             decide_slot_for(&dag, round, &committee)
         };
@@ -4943,27 +5018,41 @@ async fn apply_commit(
         if author_registered && !inner.committee.contains(cert_author) {
             inner.live_proven.insert(cert_author);
         }
+        let mut evidence_seen = 0usize;
         for (idx, intent) in intents.iter().enumerate() {
             if let Intent::EquivocationEvidence { cert_a, cert_b } = intent {
                 // IQ-010 D3: self-authenticating (the two signatures are
                 // the authorization); verified against the seated
-                // registry here and again at the boundary. Invalid or
-                // duplicate evidence is dropped, bounded per block.
+                // registry here and again at the boundary. Bounded per
+                // block (a Byzantine author cannot make every node verify
+                // a frame full of signatures under the commit lock), one
+                // queued entry per accused author (one ejection is all
+                // the boundary needs), and the cheap checks run before
+                // any signature is verified.
+                evidence_seen += 1;
+                if evidence_seen > MAX_EVIDENCE_PER_BLOCK {
+                    tracing::warn!(
+                        round = cert_round,
+                        "evidence beyond the per-block bound; dropped"
+                    );
+                    continue;
+                }
+                let already = inner.pending_governance.iter().any(|(i, _)| {
+                    matches!(i, Intent::EquivocationEvidence { cert_a: a, .. } if a.author == cert_a.author)
+                });
+                if already || cert_a.author != cert_b.author || cert_a.round != cert_b.round {
+                    continue;
+                }
                 drop(inner);
                 let ok = verify_equivocation_evidence(state, cert_a, cert_b).await;
                 inner = state.inner.lock().await;
                 if ok {
-                    let already = inner.pending_governance.iter().any(|(i, _)| {
-                        matches!(i, Intent::EquivocationEvidence { cert_a: a, .. } if a.author == cert_a.author && a.round == cert_a.round)
-                    });
-                    if !already {
-                        inner.pending_governance.push((intent.clone(), None));
-                        log.emit(
-                            Event::now(self_label, Lane::Main, "slashing_evidence")
-                                .with_round(cert_round)
-                                .with_authority_id(cert_a.author),
-                        );
-                    }
+                    inner.pending_governance.push((intent.clone(), None));
+                    log.emit(
+                        Event::now(self_label, Lane::Main, "slashing_evidence")
+                            .with_round(cert_round)
+                            .with_authority_id(cert_a.author),
+                    );
                 } else {
                     tracing::warn!(
                         round = cert_round,
@@ -5006,18 +5095,19 @@ async fn apply_commit(
     // Epoch boundary detection (DAG-S25 Phase G).
     // Issue #18: drains queued governance intents here so that
     // registry mutations land atomically at the boundary round.
-    let boundary_crossed = {
+    let crossing: Option<(u64, u64, Committee)> = {
         let mut inner = state.inner.lock().await;
         if inner.epoch.boundary_crossed_by(cert_round) {
+            let old_epoch = inner.epoch.current;
             let new_epoch = inner.epoch.epoch_for(cert_round);
             inner.epoch.current = new_epoch;
             inner.epoch.last_boundary_round = cert_round;
-            true
+            Some((old_epoch, new_epoch, inner.committee.clone()))
         } else {
-            false
+            None
         }
     };
-    if boundary_crossed {
+    if let Some((old_epoch, new_epoch, pre_drain)) = crossing {
         let queued: Vec<(Intent, Option<crate::client::GovAuth>)> = {
             let mut inner = state.inner.lock().await;
             std::mem::take(&mut inner.pending_governance)
@@ -5026,6 +5116,28 @@ async fn apply_commit(
             apply_governance_intent(state, intent, env.as_ref(), cert_round, self_label, log).await;
         }
         activate_live_proven(state, cert_round, self_label, log).await;
+        {
+            // IQ-010 D4: the committee this drain produced governs the
+            // slots of the NEXT epoch; every epoch skipped by this
+            // crossing (none once the walk defers on an undefined epoch,
+            // kept for snapshot-installed and replayed states) keeps the
+            // pre-drain committee. Entries below the retention window
+            // can never be consulted again.
+            let mut inner = state.inner.lock().await;
+            for e in (old_epoch + 1)..=new_epoch {
+                inner
+                    .committee_by_epoch
+                    .entry(e)
+                    .or_insert_with(|| pre_drain.clone());
+            }
+            let next = inner.committee.clone();
+            inner.committee_by_epoch.insert(new_epoch + 1, next);
+            let floor = inner
+                .gc_round
+                .map(|g| inner.epoch.epoch_for(g))
+                .unwrap_or(0);
+            inner.committee_by_epoch.retain(|e, _| *e >= floor);
+        }
         log.emit(Event::now(self_label, Lane::Main, "epoch_boundary").with_round(cert_round));
         let new_epoch = state.inner.lock().await.epoch.current;
         tracing::info!(
@@ -5241,6 +5353,26 @@ async fn remove_authority(
     self_label: &str,
     log: &EventLog,
 ) {
+    {
+        // A removal that would empty the committee is refused: an empty
+        // committee decides nothing, silently and for ever. Anything
+        // below four members has f = 0 and is logged.
+        let inner = state.inner.lock().await;
+        if inner.committee.contains(authority_id) && inner.committee.len() <= 1 {
+            tracing::error!(
+                authority = authority_id,
+                "refusing to remove the last committee member"
+            );
+            return;
+        }
+        if inner.committee.contains(authority_id) && inner.committee.len() <= 4 {
+            tracing::warn!(
+                authority = authority_id,
+                size = inner.committee.len() - 1,
+                "committee shrinks below four members: no Byzantine tolerance"
+            );
+        }
+    }
     let removed = state.authority_registry.write().await.remove(authority_id);
     if removed.is_none() {
         return;
@@ -5280,7 +5412,7 @@ async fn activate_live_proven(state: &State, cert_round: u64, self_label: &str, 
     if proven.is_empty() {
         return;
     }
-    let mut activated = Vec::new();
+    let mut activated: Vec<(AuthorityId, suwappu_consensus::Stake)> = Vec::new();
     for id in proven {
         // Stake weight comes from the Validator-Ring mirror the admit
         // created; a member the mirror failed for stays inactive.
@@ -5292,12 +5424,16 @@ async fn activate_live_proven(state: &State, cert_round: u64, self_label: &str, 
             .map(|m| m.stake_suwappu);
         let registered = state.authority_registry.read().await.contains(id);
         if let (true, Some(stake)) = (registered, stake) {
-            state.stake_table.write().await.insert(id, stake);
-            activated.push(id);
+            activated.push((id, stake));
         }
     }
+    // Stake table and committee move together (canonical lock order:
+    // stake_table before inner), so no reader ever sees a member with
+    // stake weight but no seat.
+    let mut stake_table = state.stake_table.write().await;
     let mut inner = state.inner.lock().await;
-    for id in &activated {
+    for (id, stake) in &activated {
+        stake_table.insert(*id, *stake);
         inner.live_proven.remove(id);
         log.emit(
             Event::now(self_label, Lane::Main, "authority_activated")
@@ -5314,7 +5450,7 @@ async fn activate_live_proven(state: &State, cert_round: u64, self_label: &str, 
             .members()
             .iter()
             .copied()
-            .chain(activated.iter().copied())
+            .chain(activated.iter().map(|(id, _)| *id))
             .collect();
         inner.committee = Committee::new(members);
     }
@@ -5418,10 +5554,16 @@ async fn run_round_driver(
             .collect();
         {
             let inner = state.inner.lock().await;
-            let committee = inner.committee.clone();
-            let n = committee.size();
             let dag = state.dag.read().await;
             let mut next = inner.last_authored_round.map(|r| r + 1).unwrap_or(0);
+            // The parent-quorum gate counts the committee pinned to the
+            // round being authored when that is already fixed, else the
+            // current one (a heuristic for pacing, not a decision).
+            let committee = inner
+                .committee_for_round(next)
+                .cloned()
+                .unwrap_or_else(|| inner.committee.clone());
+            let n = committee.size();
             // IQ-008: after an outage longer than the retention window the
             // parents round is pruned everywhere and can never fill; and a
             // node that fell behind inside the window only advances one
@@ -5495,18 +5637,20 @@ async fn run_round_driver(
             let proofs: Vec<EquivocationProof> = {
                 let mut inner = state.inner.lock().await;
                 let all = std::mem::take(&mut inner.detected_equivocations);
-                let mut fresh = Vec::new();
-                for p in all {
-                    if inner.evidence_emitted.insert((p.author, p.round)) {
-                        fresh.push(p);
-                    }
-                }
-                fresh
+                all.into_iter()
+                    .filter(|p| !inner.evidence_emitted.contains(&(p.author, p.round)))
+                    .collect()
             };
             let mut evidence = Vec::new();
+            let mut carried: Vec<(AuthorityId, Round)> = Vec::new();
+            let mut overflow: Vec<EquivocationProof> = Vec::new();
             {
                 let dag = state.dag.read().await;
-                for p in proofs.iter().take(MAX_EVIDENCE_PER_BLOCK) {
+                for p in proofs {
+                    if evidence.len() >= MAX_EVIDENCE_PER_BLOCK {
+                        overflow.push(p);
+                        continue;
+                    }
                     if let (Some(a), Some(b)) =
                         (dag.get(&p.cert_a).cloned(), dag.get(&p.cert_b).cloned())
                     {
@@ -5514,16 +5658,19 @@ async fn run_round_driver(
                             cert_a: a,
                             cert_b: b,
                         });
+                        carried.push((p.author, p.round));
                     }
+                    // A proof whose certificates are no longer held (pruned
+                    // or superseded by an install) is dropped, not marked:
+                    // a peer that still holds both carries it.
                 }
             }
-            if proofs.len() > MAX_EVIDENCE_PER_BLOCK {
-                // Carry the overflow next round.
+            {
+                // Marked only once the intent is actually built; the
+                // overflow is carried next round.
                 let mut inner = state.inner.lock().await;
-                for p in &proofs[MAX_EVIDENCE_PER_BLOCK..] {
-                    inner.evidence_emitted.remove(&(p.author, p.round));
-                    inner.detected_equivocations.push(*p);
-                }
+                inner.evidence_emitted.extend(carried);
+                inner.detected_equivocations.extend(overflow);
             }
             if !evidence.is_empty() {
                 evidence.append(&mut intents);
@@ -5771,6 +5918,15 @@ mod tests {
     //   24_600  withholding_author_does_not_stall_the_mesh (4n)
     //
     // Adding a test? Take the next free 200-wide band and list it here.
+
+    /// Multi-node loopback meshes are serialised across the test binary:
+    /// on a small runner several 100 ms meshes in parallel slow each other
+    /// several-fold and the fixed catch-up budgets miss (#171). Held for
+    /// the whole test.
+    static MESH_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    async fn mesh_serial() -> tokio::sync::MutexGuard<'static, ()> {
+        MESH_SERIAL.lock().await
+    }
 
     #[test]
     fn block_payload_consistency_rejects_forgery() {
@@ -6166,6 +6322,7 @@ mod tests {
     /// state root.
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn four_node_main_lane_commits() {
+        let _serial = mesh_serial().await;
         let n = 4u32;
         let base_port: u16 = 19_000;
 
@@ -6285,6 +6442,7 @@ mod tests {
     /// different moments on different nodes changes no post-root.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn four_node_gc_bounds_store() {
+        let _serial = mesh_serial().await;
         let n = 4u32;
         let base_port: u16 = 23_600;
         let gc_depth: u64 = 8;
@@ -6454,6 +6612,7 @@ mod tests {
     /// up to the cluster's state root.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn restart_resumes_from_disk_without_equivocating() {
+        let _serial = mesh_serial().await;
         let n = 4u32;
         let base_port: u16 = 23_800;
         let restarted: u32 = 3;
@@ -6657,6 +6816,7 @@ mod tests {
                 break;
             }
         }
+
         assert!(
             caught_up,
             "restarted validator did not resume authoring and catch up"
@@ -7268,6 +7428,7 @@ mod tests {
     /// survivors keep committing with agreeing roots.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn middle_ejection_keeps_the_mesh_committing() {
+        let _serial = mesh_serial().await;
         let n = 4u32;
         let base_port: u16 = 24_900;
         let keypairs: Vec<(
@@ -7496,7 +7657,12 @@ mod tests {
     /// end with the same committee, stake table, commit set and state
     /// root, and give id 7 leader slots afterwards. The lazily-committing
     /// node drops 7's certificates until its own boundary registers 7 and
-    /// re-pulls them afterwards, exactly as the sync sweeper would.
+    /// re-pulls them afterwards, exactly as the sync sweeper would — and
+    /// it is also missing author 3's round-6 certificate until round 13,
+    /// so slots around round 5 stay undecided on it across two epoch
+    /// boundaries and are decided only after the committee changed
+    /// (IQ-010 D4: the slot's own epoch pins the committee, so the late
+    /// decision names the same leader).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn activation_is_a_commit_sequence_function() {
         let n = 4u32;
@@ -7663,15 +7829,25 @@ mod tests {
                 }
             }
         }
+        // What the lazy node can see before round 13: everything but
+        // author 3's round-6 certificate.
+        let withheld = |c: &Certificate| c.author == 3 && c.round == 6;
+        let seq_early: Vec<(Certificate, BlockPayload)> =
+            seq.iter().filter(|(c, _)| !withheld(c)).cloned().collect();
         for (r, items) in per_round.iter().enumerate() {
             for (i, state) in states.iter().enumerate() {
+                let lazy = i == 1;
+                let visible: &[(Certificate, BlockPayload)] =
+                    if lazy && r < 13 { &seq_early } else { &seq };
                 for item in items {
+                    if lazy && r < 13 && withheld(&item.0) {
+                        continue;
+                    }
                     feed(state, item, &from, &outbound, &logs[i].0).await;
                 }
-                let eager = i == 0;
-                if eager || r % 5 == 4 {
+                if !lazy || r % 5 == 4 {
                     try_commit(state, "t", &logs[i].0, &outbound).await;
-                    resync(state, &seq[..], &from, &outbound, &logs[i].0).await;
+                    resync(state, visible, &from, &outbound, &logs[i].0).await;
                     try_commit(state, "t", &logs[i].0, &outbound).await;
                     observe(state, &mut activated_at[i]).await;
                 }
@@ -7836,6 +8012,127 @@ mod tests {
         assert_eq!(state.inner.lock().await.committee.members(), &[0, 2, 3]);
         // Replayed evidence against an ejected author is a no-op.
         assert!(!verify_equivocation_evidence(&state, &a, &b).await);
+
+        // Per-block bound: a block front-loaded with bogus evidence spends
+        // the budget and a valid pair behind it is not processed; the same
+        // valid pair alone is queued.
+        let x = mk(3, 4, 1, &keys[3].1);
+        let y = mk(3, 4, 2, &keys[3].1);
+        let valid = Intent::EquivocationEvidence {
+            cert_a: x.clone(),
+            cert_b: y.clone(),
+        };
+        let bogus = Intent::EquivocationEvidence {
+            cert_a: mk(2, 4, 1, &keys[2].1),
+            cert_b: mk(2, 5, 1, &keys[2].1),
+        };
+        let mut intents = vec![bogus; MAX_EVIDENCE_PER_BLOCK];
+        intents.push(valid.clone());
+        let mk_carrier = |intents: Vec<Intent>, round: u64| {
+            let digest = compute_payload_digest(&intents, &[]);
+            let mut c = Certificate {
+                author: 0,
+                round,
+                parents: Vec::new(),
+                payload_digest: digest,
+                signature: Vec::new(),
+            };
+            c.sign(&keys[0].1);
+            let b = BlockPayload {
+                payload_digest: digest,
+                author: 0,
+                round,
+                cert_hash: c.hash(),
+                intents,
+                governance_auth: Vec::new(),
+            };
+            (c, b)
+        };
+        let (c1, b1) = mk_carrier(intents, 6);
+        apply_commit(&state, c1.hash(), c1, b1, 6, "t", &log, false).await;
+        let queued_for_3 = |inner: &StateInner| {
+            inner.pending_governance.iter().any(|(i, _)| {
+                matches!(i, Intent::EquivocationEvidence { cert_a, .. } if cert_a.author == 3)
+            })
+        };
+        assert!(
+            !queued_for_3(&*state.inner.lock().await),
+            "evidence beyond the bound was processed"
+        );
+        let (c2, b2) = mk_carrier(vec![valid], 7);
+        apply_commit(&state, c2.hash(), c2, b2, 7, "t", &log, false).await;
+        assert!(queued_for_3(&*state.inner.lock().await));
+    }
+
+    /// IQ-010 D6: a registered-but-inactive member (admitted, never
+    /// shown up) does not raise the checkpoint quorum. The signing
+    /// committee is the registry restricted to the committee, and a
+    /// checkpoint ratifies against it with the committee's quorum.
+    #[test]
+    fn checkpoint_quorum_ignores_inactive_members() {
+        use suwappu_execution::{ratify_checkpoint, CheckpointSignature};
+        let keys: Vec<(
+            suwappu_crypto::mldsa::PublicKey,
+            suwappu_crypto::mldsa::SecretKey,
+        )> = (0..6).map(|_| suwappu_crypto::mldsa::keypair()).collect();
+        let mut registry = AuthorityRegistry::new();
+        for (i, k) in keys.iter().enumerate() {
+            registry
+                .admit(AuthorityMember {
+                    id: i as u32,
+                    stake_suwappu: 150_000,
+                    public_key_bytes: k.0.as_bytes().to_vec(),
+                })
+                .unwrap();
+        }
+        let set = RegistrySet {
+            authority_registry: registry.clone(),
+            validator_registry: ValidatorRegistry::new(),
+            stake_table: StakeTable::new(),
+            epoch: (0, 16, 0),
+            committee: Committee::contiguous(4),
+        };
+        let signing = set.signing_committee();
+        assert_eq!(signing.len(), 4);
+        assert_eq!(signing.quorum_threshold(), 3);
+        assert_eq!(
+            registry.quorum_threshold(),
+            5,
+            "the full registry would need five"
+        );
+        let ck = Checkpoint {
+            height: 1,
+            round: 16,
+            state_root: [1; 32],
+            prev_checkpoint: [0; 32],
+            registry_root: set.root(),
+            snapshot_root: [2; 32],
+        };
+        let digest = ck.hash();
+        let sigs: Vec<CheckpointSignature> = (0..3u32)
+            .map(|i| CheckpointSignature {
+                authority: i,
+                signature: suwappu_crypto::mldsa::sign(&digest, &keys[i as usize].1)
+                    .unwrap()
+                    .as_bytes()
+                    .to_vec(),
+            })
+            .collect();
+        assert!(ratify_checkpoint(ck.clone(), sigs.clone(), &signing).is_ok());
+        assert!(
+            ratify_checkpoint(ck.clone(), sigs.clone(), &registry).is_err(),
+            "the registry denominator would freeze the chain on admission"
+        );
+        // An inactive member's signature is not a committee signature.
+        let mut with_inactive = sigs[..2].to_vec();
+        with_inactive.push(CheckpointSignature {
+            authority: 5,
+            signature: suwappu_crypto::mldsa::sign(&digest, &keys[5].1)
+                .unwrap()
+                .as_bytes()
+                .to_vec(),
+        });
+        assert!(ratify_checkpoint(ck, with_inactive, &signing).is_err());
     }
 
     /// IQ-009 D5 / I-AV1, the `/goal` B2 block-withholding fault: one of
@@ -7848,6 +8145,7 @@ mod tests {
     /// agree on their roots.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn withholding_author_does_not_stall_the_mesh() {
+        let _serial = mesh_serial().await;
         let n = 4u32;
         let base_port: u16 = 24_600;
         let keypairs: Vec<(
@@ -9106,6 +9404,7 @@ mod tests {
     /// cluster's state root. This is /goal A7.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn joiner_bootstraps_from_cosigned_checkpoint_snapshot() {
+        let _serial = mesh_serial().await;
         let n = 4u32;
         let base_port: u16 = 24_000;
         let keypairs: Vec<(
@@ -9275,6 +9574,7 @@ mod tests {
                 break;
             }
         }
+
         assert!(
             agreed,
             "joiner never reached a seed's leader frontier after bootstrap"

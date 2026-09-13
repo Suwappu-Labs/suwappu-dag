@@ -157,12 +157,24 @@ evidence is dropped. The substrate treats the intent as a no-op. The
 DAG-S30.1 local auto-eject is removed; `EjectAuthority` (governance
 co-signed) remains for evidence the protocol does not carry.
 
-### D4. The commit walk reads the committee per slot
+### D4. Each slot is decided under the committee pinned to its epoch
 
-`try_commit` reads the committee (and the stake table) immediately before
-each `decide_slot_for`, after any `apply_commit` in the walk may have
-crossed a boundary, so the slot after a boundary is decided with the new
-committee on every node regardless of how the walk was chunked.
+A committee change must never re-schedule a slot that is still in the
+live window: with `candidate_rounds` spanning the whole window, a node
+that had slot 50 undecided when it crossed the boundary would otherwise
+evaluate it under the new committee — a different leader — while a node
+that decided it earlier committed the old leader (first review pass).
+The committee for the slots of epoch `e` is therefore the one produced
+by the drain that crossed into epoch `e − 1` (`committee_by_epoch`;
+genesis defines epochs 0 and 1, every crossing into `k` defines
+`k + 1`), so it is fixed before any slot of `e` can be decided and never
+changes afterwards. `try_commit` looks the committee up per slot and
+**defers** (breaks the walk) at the first slot whose epoch's committee is
+not yet fixed; that slot becomes decidable once a certificate of the
+previous epoch commits, which needs only that epoch's own committee. A
+membership change committed in epoch `e` thus takes effect for the slots
+of epoch `e + 2` — the same one-epoch lag as Tendermint's `H + 2` rule.
+The schedule is commit-derived and part of `snapshot_root`.
 
 ### D5. The fast path uses the committee
 
@@ -172,9 +184,17 @@ derived from `|C|`.
 ### D6. Checkpoints and snapshots bind the committee
 
 `RegistrySet` carries the committee (replacing `n_authorities`), so
-`registry_root` (V2) commits to it; `SnapshotBody` carries `live_proven`,
-so `snapshot_root` (V2) commits to the activation state. A served snapshot
-is rejected unless its committee is a subset of its Authority registry.
+`registry_root` (V2) commits to it; `SnapshotBody` carries `live_proven`
+and the epoch schedule, so `snapshot_root` (V2) commits to the activation
+state. A served snapshot is rejected unless its committee is a subset of
+its Authority registry, its live-proven set is registered-but-inactive,
+and its schedule names the current and next epoch consistently.
+Checkpoints are co-signed and verified against the *signing committee*
+— the bound registry restricted to the committee — so a
+registered-but-inactive member never raises the checkpoint quorum (the
+registry denominator froze the chain on any admission whose operator was
+slow to show up: exactly the denominator deadlock D2 removes from the
+commit rule).
 
 ## Invariants
 
@@ -208,7 +228,21 @@ is rejected unless its committee is a subset of its Authority registry.
 1. **IQ-004 late flips** reorder the commit sequence between nodes for
    everything commit-derived — governance, activation, ejection and the
    substrate alike. This IQ moves membership into that class; it does not
-   close the class. Tracked in IQ-004 / #45.
+   close the class. Tracked in IQ-004 / #45. With D4 a late flip changes
+   only the *position* of a committed leader, never its identity: the
+   slot's committee is pinned to its epoch on every node.
+1a. **Quorum intersection across an epoch boundary.** A slot in epoch
+   `e` is decided under `C_e`; its supporters and the anchors that can
+   reach it may lie in epoch `e + 1`, whose proposers gate their parent
+   quorum on `C_{e+1}`. The intersection argument that makes `Skip`
+   safe against a concurrent `Direct` assumes one committee along the
+   chain of parent quorums; it holds across the boundary only while
+   consecutive committees differ by at most `f` members. Governance is
+   expected to change membership by one authority per epoch; the code
+   does not yet cap the per-boundary change, and an epoch must be long
+   enough for at least one of its leaders to commit (or the walk defers
+   at the next epoch for ever). Both are candidates for a follow-up
+   guard and are sign-off items here.
 2. **Activation and ejection wait for the boundary** (up to
    `rounds_per_epoch`). An equivocator stays seated until then; its
    certificates are capped at two per slot and it is within `f`.
