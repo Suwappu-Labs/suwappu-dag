@@ -184,13 +184,18 @@ the denominator. Both legs are pure functions of the committed prefix
 and the gate is halt-not-fork, so a straddling slot can be deferred,
 never ratified to a different leader.
 
-An authority removed at a boundary is *retired* for a grace of two
-epochs: its certificates at rounds up to the grace are still admitted
-(signature against its retained key) so a node that crossed the
-boundary later and referenced them as parents does not leave every
-descendant orphaned on the nodes that crossed earlier; retired
-certificates are DAG structure only — the epoch's pinned committee
-decides leaders and support.
+An authority removed at a boundary is *retired* for a grace of one
+retention window (`gc_depth_rounds` past the removal round): its
+certificates at rounds up to the grace are still admitted (signature
+against its retained key) so a node that crossed the boundary later and
+referenced them as parents does not leave every descendant orphaned on
+the nodes that crossed earlier. The grace equals the era window a joiner
+verifies a served snapshot under, so every graced certificate is
+verifiable by a joiner, and a crossing skew beyond it is already refused
+by the ingest ceiling. Retired certificates are DAG structure only — the
+epoch's pinned committee decides leaders and support; a retired author
+cannot be ejected again (evidence against it is not carried) and cannot
+be re-activated.
 
 ### D5. The fast path uses the committee
 
@@ -271,16 +276,22 @@ commit rule).
    `rounds_per_epoch` must exceed `f` at the largest ring:
    `MIN_ROUNDS_PER_EPOCH = f(AUTHORITY_RING_MAX) + 1 = 17` (or 0 to
    disable epochs) is refused below at startup (`validate_manifest`).
-   Sign-off item: the two bounds together.
+   No relation between `rounds_per_epoch` and `gc_depth_rounds` is
+   enforced: with epochs longer than the retention window the ingest
+   ceiling (`anchor + gc_depth`) keeps every live round inside the
+   current or next epoch, whose committees are always fixed, so the
+   deferral is inert; the dangerous direction is a short epoch, which
+   the floor covers. Sign-off item: the two bounds together.
 2. **Activation and ejection wait for the boundary** (up to
    `rounds_per_epoch`). An equivocator stays seated until then; its
    certificates are capped at two per slot and it is within `f`. A
    detection is reaped with its slot at the gc round, so ejection
    depends on at least one detector authoring a block while the slot is
    inside its retention window — true of every live committee member.
-3. **Registered, inactive members can grow the DAG** (their certificates
-   are admitted and may be parents). Bounded by the per-slot cap, the
-   ring ceiling (50) and the retention window.
+3. **Registered, inactive members — and retired ones, for one retention
+   window — can grow the DAG** (their certificates are admitted and may
+   be parents). Bounded by the per-slot cap, the ring ceiling (50) and
+   the retention window.
 4. **The Validator Ring is still a mirror** of the Authority Ring
    (`/goal` A8); stake weight activation follows the committee.
 5. **Evidence size.** Two ML-DSA-65-signed certificates ≈ 7 KB per
@@ -292,3 +303,14 @@ commit rule).
    certificate, not a local admission.
 7. **Human sign-off** is required as for IQ-007/008/009: this changes the
    leader schedule and the quorum denominator's definition.
+8. **The served checkpoint chain is unbounded and rides one frame.**
+   Every signing-committee change is retained (`is_committee_transition`
+   — an admission now retains two links, admission and activation) and
+   `checkpoint_transitions` is never pruned; the `Checkpoints` reply is
+   a single 1 MiB frame. A link is ≈29 KB at n = 4 (quorum of ML-DSA-65
+   signatures plus two registries) and ≈360 KB at n = 50, so after
+   ≈36 membership events at n = 4 (≈3 at n = 50) the reply cannot be
+   sent and joiner bootstrap fails silently. Inherited from IQ-008 D5,
+   doubled in rate by this IQ. Fix direction: chunk the chain as
+   snapshots are, or let an operator supply a trusted checkpoint the
+   chain is served from. Sign-off item until then.

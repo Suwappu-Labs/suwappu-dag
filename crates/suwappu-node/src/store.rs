@@ -418,7 +418,6 @@ pub struct StateSnapshot {
     /// Authorities removed at a boundary: registered key and the last
     /// round their certificates are still admitted (IQ-010 retirement
     /// grace). Commit-derived, so part of `snapshot_root`.
-    #[serde(default)]
     pub retired: BTreeMap<u32, (Vec<u8>, u64)>,
     /// Live DAG window (rounds above `gc_round`), topologically ordered.
     pub dag_certs: Vec<Certificate>,

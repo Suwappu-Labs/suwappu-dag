@@ -412,7 +412,8 @@ pub(crate) struct StateInner {
     pub(crate) live_proven: BTreeSet<AuthorityId>,
     /// Authorities removed at a boundary, with their registered key and
     /// the last round at which their certificates are still admitted
-    /// (two epochs past the removal). A node that crossed the boundary
+    /// (one retention window past the removal — the era window a joiner
+    /// verifies served certificates under). A node that crossed the boundary
     /// later still references such certificates as parents; without the
     /// grace an early node would refuse them for ever and orphan every
     /// descendant (third S36 pass). Retired certificates are never
@@ -2085,17 +2086,18 @@ async fn ingest_cert(
         // effectively never gossips it further, satisfying "reject /
         // don't-gossip on failure" without needing an explicit relay step
         // (this daemon doesn't push-relay certs; peers pull via GetCert).
+        let registered_key = state
+            .authority_registry
+            .read()
+            .await
+            .get(c.author)
+            .map(|m| m.public_key_bytes.clone());
+        let via_grace = registered_key.is_none();
         let author_pubkey = {
-            let registered = state
-                .authority_registry
-                .read()
-                .await
-                .get(c.author)
-                .map(|m| m.public_key_bytes.clone());
-            let key_bytes = match registered {
+            let key_bytes = match registered_key {
                 Some(k) => Some(k),
                 // IQ-010: a member removed at a boundary keeps its
-                // certificates admissible for a grace of two epochs.
+                // certificates admissible for one retention window.
                 None => state
                     .inner
                     .lock()
@@ -2409,7 +2411,10 @@ async fn ingest_cert(
                         None => {
                             inner.seen_at.insert(key, h);
                         }
-                        Some(prev) if prev != h => {
+                        // A retired author cannot be ejected again, so its
+                        // equivocations are not evidence anyone can use
+                        // (fourth S36 pass).
+                        Some(prev) if prev != h && !via_grace => {
                             inner.detected_equivocations.push(EquivocationProof {
                                 author: c.author,
                                 round,
@@ -5498,11 +5503,13 @@ async fn remove_authority(
             .filter(|id| *id != authority_id)
             .collect();
         inner.committee = Committee::new(members);
-        let grace = inner
-            .epoch
-            .rounds_per_epoch
-            .max(inner.gc_depth)
-            .saturating_mul(2);
+        // The grace equals the retention window, which is also the era
+        // window a joiner verifies a served snapshot's certificates under
+        // (`verify_served_snapshot`): a longer grace would admit
+        // certificates no joiner could verify, and a crossing skew
+        // beyond the window is already refused by the ingest ceiling
+        // (fourth S36 pass).
+        let grace = inner.gc_depth;
         inner.retired.insert(
             authority_id,
             (removed.public_key_bytes, cert_round.saturating_add(grace)),
@@ -5815,10 +5822,17 @@ async fn run_round_driver(
         // once per slot, ahead of the user intents.
         {
             let proofs: Vec<EquivocationProof> = {
+                // Only a still-registered author can be ejected; evidence
+                // against anyone else would be committed, verified and
+                // dropped on every node for nothing.
+                let registry = state.authority_registry.read().await;
                 let mut inner = state.inner.lock().await;
                 let all = std::mem::take(&mut inner.detected_equivocations);
                 all.into_iter()
-                    .filter(|p| !inner.evidence_emitted.contains(&(p.author, p.round)))
+                    .filter(|p| {
+                        registry.contains(p.author)
+                            && !inner.evidence_emitted.contains(&(p.author, p.round))
+                    })
                     .collect()
             };
             let mut evidence = Vec::new();
@@ -7884,7 +7898,7 @@ mod tests {
                 .collect(),
             corridors: Vec::new(),
             prebalances: Vec::new(),
-            rounds_per_epoch: 4,
+            rounds_per_epoch: MIN_ROUNDS_PER_EPOCH,
             // Pruning runs inside the window (second S36 pass): the epoch
             // schedule both nodes bind into their snapshot roots must be
             // pruned identically from the frontier, not from the walk.
@@ -7933,7 +7947,8 @@ mod tests {
         // The shared sequence: rounds 0..=ROUNDS, every genesis author
         // each round, id 7 from round 5 on; parents = every certificate
         // of the previous round (7's included).
-        const ROUNDS: u64 = 30;
+        const RPE: u64 = MIN_ROUNDS_PER_EPOCH;
+        const ROUNDS: u64 = 4 * RPE + 4;
         let key_of = |a: AuthorityId| -> &suwappu_crypto::mldsa::SecretKey {
             if a == NEW_ID {
                 &cand_sk
@@ -7947,7 +7962,7 @@ mod tests {
         for r in 0..=ROUNDS {
             let mut this_round = Vec::new();
             let mut authors: Vec<AuthorityId> = (0..n).collect();
-            if r >= 5 {
+            if r > RPE {
                 authors.push(NEW_ID);
             }
             for a in authors {
@@ -8032,16 +8047,19 @@ mod tests {
         }
         // What the lazy node can see before round 13: everything but
         // author 3's round-6 certificate.
-        let withheld = |c: &Certificate| c.author == 3 && c.round == 6;
+        let withheld = |c: &Certificate| c.author == 3 && c.round == RPE + 3;
         let seq_early: Vec<(Certificate, BlockPayload)> =
             seq.iter().filter(|(c, _)| !withheld(c)).cloned().collect();
         for (r, items) in per_round.iter().enumerate() {
             for (i, state) in states.iter().enumerate() {
                 let lazy = i == 1;
-                let visible: &[(Certificate, BlockPayload)] =
-                    if lazy && r < 13 { &seq_early } else { &seq };
+                let visible: &[(Certificate, BlockPayload)] = if lazy && (r as u64) < 2 * RPE + 6 {
+                    &seq_early
+                } else {
+                    &seq
+                };
                 for item in items {
-                    if lazy && r < 13 && withheld(&item.0) {
+                    if lazy && (r as u64) < 2 * RPE + 6 && withheld(&item.0) {
                         continue;
                     }
                     feed(state, item, &from, &outbound, &logs[i].0).await;
@@ -8545,7 +8563,7 @@ mod tests {
                 .collect(),
             corridors: Vec::new(),
             prebalances: Vec::new(),
-            rounds_per_epoch: 4,
+            rounds_per_epoch: MIN_ROUNDS_PER_EPOCH,
             gc_depth_rounds: 64,
             checkpoint_cadence_rounds: 64,
         };
@@ -8595,8 +8613,9 @@ mod tests {
             };
             (c, b)
         };
-        let (c4, b4) = carrier(4);
-        apply_commit(&state, c4.hash(), c4, b4, 4, "t", &log, false).await;
+        let rpe = MIN_ROUNDS_PER_EPOCH;
+        let (c4, b4) = carrier(rpe);
+        apply_commit(&state, c4.hash(), c4, b4, rpe, "t", &log, false).await;
         {
             let inner = state.inner.lock().await;
             assert_eq!(
@@ -8612,8 +8631,8 @@ mod tests {
                 "epoch 1 keeps the pre-drain committee"
             );
         }
-        let (c8, b8) = carrier(8);
-        apply_commit(&state, c8.hash(), c8, b8, 8, "t", &log, false).await;
+        let (c8, b8) = carrier(2 * rpe);
+        apply_commit(&state, c8.hash(), c8, b8, 2 * rpe, "t", &log, false).await;
         let inner = state.inner.lock().await;
         assert_eq!(inner.committee.members(), &[0, 3]);
         assert!(inner.pending_governance.is_empty());
