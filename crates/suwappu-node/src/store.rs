@@ -42,7 +42,7 @@
 //! (`tests/proptest_persistence.rs`).
 
 use std::{
-    collections::BTreeMap,
+    collections::BTreeSet,
     fs::{self, File, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
@@ -50,14 +50,14 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use suwappu_authority::AuthorityRegistry;
-use suwappu_consensus::{CertHash, Certificate, StakeTable};
+use suwappu_consensus::{CertHash, Certificate, Committee, StakeTable};
 use suwappu_execution::{Checkpoint, CoSignedCheckpoint, InMemorySubstrate, Intent, Substrate};
 use suwappu_validator::ValidatorRegistry;
 
 use crate::{client::GovAuth, wire::BlockPayload};
 
 /// On-disk format version of both files. Bump on any layout change.
-pub const STORE_VERSION: u32 = 1;
+pub const STORE_VERSION: u32 = 2;
 
 const LOG_FILE: &str = "commit.log";
 const SNAPSHOT_PREFIX: &str = "snapshot-";
@@ -110,18 +110,19 @@ pub struct RegistrySet {
     pub stake_table: StakeTable,
     /// `(current, rounds_per_epoch, last_boundary_round)`.
     pub epoch: (u64, u64, u64),
-    /// Committee size used by the commit rule.
-    pub n_authorities: u32,
+    /// The active committee the commit rule runs over (IQ-010 D6): a
+    /// subset of the Authority registry's ids.
+    pub committee: Committee,
 }
 
 impl RegistrySet {
-    /// Canonical commitment: `blake3("SUWAPPU-REGISTRY-ROOT-V1" ||
-    /// bincode(self))`. The registries are `BTreeMap`-backed, so the
-    /// encoding is deterministic.
+    /// Canonical commitment: `blake3("SUWAPPU-REGISTRY-ROOT-V2" ||
+    /// bincode(self))`. The registries are `BTreeMap`-backed and the
+    /// committee is sorted, so the encoding is deterministic.
     pub fn root(&self) -> [u8; 32] {
         let bytes = crate::codec::encode(self).expect("RegistrySet is serialisable");
         let mut h = blake3::Hasher::new();
-        h.update(b"SUWAPPU-REGISTRY-ROOT-V1");
+        h.update(b"SUWAPPU-REGISTRY-ROOT-V2");
         h.update(&bytes);
         *h.finalize().as_bytes()
     }
@@ -386,10 +387,13 @@ pub struct StateSnapshot {
     pub epoch: (u64, u64, u64),
     /// Governance intents queued for the next boundary, with envelopes.
     pub pending_governance: Vec<(Intent, Option<GovAuth>)>,
-    /// Stake parked for admitted-but-not-yet-active authorities.
-    pub pending_stake: BTreeMap<u32, u128>,
-    /// Committee size used by the commit rule.
-    pub n_authorities: u32,
+    /// The active committee (IQ-010 D2): registry members that hold
+    /// leader slots, count toward quorum and carry stake weight.
+    pub committee: Committee,
+    /// Registered-but-inactive authorities one of whose certificates has
+    /// been committed; they join the committee at the next epoch
+    /// boundary (IQ-010 D2). Commit-derived, so part of `snapshot_root`.
+    pub live_proven: BTreeSet<u32>,
     /// Live DAG window (rounds above `gc_round`), topologically ordered.
     pub dag_certs: Vec<Certificate>,
     /// Tombstone window.
@@ -430,11 +434,12 @@ struct SnapshotBody<'a> {
     /// Sorted.
     committed: Vec<CertHash>,
     pending_governance: &'a [(Intent, Option<GovAuth>)],
+    live_proven: &'a BTreeSet<u32>,
 }
 
 impl StateSnapshot {
     /// Canonical commitment to the commit-derived body:
-    /// `blake3("SUWAPPU-SNAPSHOT-ROOT-V1" || bincode(body))` with the commit
+    /// `blake3("SUWAPPU-SNAPSHOT-ROOT-V2" || bincode(body))` with the commit
     /// marks sorted, so the value is independent of the capturing node's
     /// hash-set iteration order.
     pub fn commit_root(&self) -> [u8; 32] {
@@ -447,25 +452,13 @@ impl StateSnapshot {
             gc_round: self.gc_round,
             committed,
             pending_governance: &self.pending_governance,
+            live_proven: &self.live_proven,
         };
         let bytes = crate::codec::encode(&body).expect("snapshot body is serialisable");
         let mut h = blake3::Hasher::new();
-        h.update(b"SUWAPPU-SNAPSHOT-ROOT-V1");
+        h.update(b"SUWAPPU-SNAPSHOT-ROOT-V2");
         h.update(&bytes);
         *h.finalize().as_bytes()
-    }
-
-    /// Stake parked for admitted-but-not-yet-active authorities, derived
-    /// from the bound registries rather than taken from the wire: an
-    /// authority in the Validator Ring with no stake-table row is exactly
-    /// one whose first certificate has not been seen yet (DAG-S27.7
-    /// deferred activation).
-    pub fn derived_pending_stake(&self) -> BTreeMap<u32, u128> {
-        self.validator_registry
-            .members()
-            .filter(|m| self.stake_table.weight(m.id) == 0)
-            .map(|m| (m.id, m.stake_suwappu))
-            .collect()
     }
 
     /// The registry set this snapshot carries, for `RegistrySet::root`.
@@ -475,7 +468,7 @@ impl StateSnapshot {
             validator_registry: self.validator_registry.clone(),
             stake_table: self.stake_table.clone(),
             epoch: self.epoch,
-            n_authorities: self.n_authorities,
+            committee: self.committee.clone(),
         }
     }
 
@@ -762,8 +755,8 @@ mod tests {
             stake_table: StakeTable::new(),
             epoch: (0, 1024, 0),
             pending_governance: Vec::new(),
-            pending_stake: BTreeMap::new(),
-            n_authorities: 4,
+            committee: Committee::contiguous(4),
+            live_proven: BTreeSet::new(),
             dag_certs: vec![cert(leader_round, 9)],
             tombstones: vec![(cert(1, 1).hash(), 1)],
             committed: vec![cert(leader_round, 9).hash()],

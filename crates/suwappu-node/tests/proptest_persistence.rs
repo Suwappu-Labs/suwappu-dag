@@ -11,7 +11,7 @@
 //! Run at default 256 cases under CI; sprint close runs
 //! `PROPTEST_CASES=10000 cargo test -p suwappu-node --release --test proptest_persistence`.
 
-use std::{collections::BTreeMap, fs, path::PathBuf};
+use std::{fs, path::PathBuf};
 
 use proptest::prelude::*;
 use suwappu_consensus::Certificate;
@@ -104,8 +104,8 @@ fn snapshot_of(sub: &InMemorySubstrate, leader_round: u64, log_sequence: u64) ->
         stake_table: Default::default(),
         epoch: (0, 1024, 0),
         pending_governance: Vec::new(),
-        pending_stake: BTreeMap::new(),
-        n_authorities: 4,
+        committee: suwappu_consensus::Committee::contiguous(4),
+        live_proven: Default::default(),
         dag_certs: Vec::new(),
         tombstones: Vec::new(),
         committed: Vec::new(),
