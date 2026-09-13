@@ -231,18 +231,25 @@ commit rule).
    close the class. Tracked in IQ-004 / #45. With D4 a late flip changes
    only the *position* of a committed leader, never its identity: the
    slot's committee is pinned to its epoch on every node.
-1a. **Quorum intersection across an epoch boundary.** A slot in epoch
-   `e` is decided under `C_e`; its supporters and the anchors that can
-   reach it may lie in epoch `e + 1`, whose proposers gate their parent
-   quorum on `C_{e+1}`. The intersection argument that makes `Skip`
-   safe against a concurrent `Direct` assumes one committee along the
-   chain of parent quorums; it holds across the boundary only while
-   consecutive committees differ by at most `f` members. Governance is
-   expected to change membership by one authority per epoch; the code
-   does not yet cap the per-boundary change, and an epoch must be long
-   enough for at least one of its leaders to commit (or the walk defers
-   at the next epoch for ever). Both are candidates for a follow-up
-   guard and are sign-off items here.
+1a. **Liveness across an epoch boundary.** A slot in epoch `e` is
+   decided under `C_e` — leader, supporters and every anchor in the
+   chain — so the intersection argument that makes `Skip` safe against
+   a concurrent `Direct` is intact: every quorum along the chain is a
+   `C_e` quorum (second review pass). What the boundary threatens is
+   liveness: supporters and anchors above it are authored by `C_{e+1}`,
+   so a slot straddling the boundary can only muster
+   `|C_e ∩ C_{e+1}|` of its `quorum_threshold(|C_e|)` supporters. The
+   drain therefore applies at most `f = ⌊(|C| − 1) / 3⌋` (at least one)
+   committee changes per boundary — removals in queue order, then
+   activations in id order — and carries the rest to the next
+   boundary, deterministically (`membership_change_cap`,
+   `membership_changes_are_capped_per_boundary`). Separately, the walk
+   defers at an epoch whose committee is not fixed until a leader of the
+   previous epoch commits, so an epoch in which every leader slot ends
+   `Skip` would halt the chain; `rounds_per_epoch` below
+   `MIN_ROUNDS_PER_EPOCH` (8, or 0 to disable epochs) is refused at
+   startup (`validate_manifest`). Whether eight slots is enough margin
+   for the deployed ring size is a sign-off item.
 2. **Activation and ejection wait for the boundary** (up to
    `rounds_per_epoch`). An equivocator stays seated until then; its
    certificates are capped at two per slot and it is within `f`.

@@ -942,17 +942,7 @@ impl Daemon {
         let self_id: AuthorityId = cfg.authority_id;
         let self_label = cfg.self_id.clone();
         let round_ms = cfg.round_ms;
-        // IQ-008 D5: a joiner catches up from the served checkpoint
-        // snapshot by forward backfill, which only works while the
-        // checkpoint round is still inside every peer's live window.
-        if manifest.checkpoint_cadence_rounds.saturating_mul(2) > manifest.gc_depth_rounds {
-            return Err(anyhow::anyhow!(
-                "genesis manifest: checkpoint_cadence_rounds ({}) must be at most half of \
-                 gc_depth_rounds ({}), or joiners could never catch up after a snapshot",
-                manifest.checkpoint_cadence_rounds,
-                manifest.gc_depth_rounds
-            ));
-        }
+        validate_manifest(&manifest)?;
 
         let (log, log_task) = EventLog::start(&cfg.event_log_path).await?;
         let wire = Wire::start(WireConfig {
@@ -1455,14 +1445,15 @@ async fn run_inbox(
                 if is_dynamic {
                     debug!(peer = %from.0, "inbox: dropping CheckpointSig from dynamic peer");
                 } else {
+                    // IQ-010 D6: only a signing-committee member's
+                    // signature is accepted. A registered-but-inactive
+                    // member's would be buffered but never ratifiable
+                    // (`ratify_checkpoint` refuses unknown signers), and
+                    // would pin that height for ever (second S36 pass).
                     let committee = verification_committee(&state).await;
-                    let current = state.authority_registry.read().await.clone();
-                    let pk = committee
-                        .get(msg.authority)
-                        .or_else(|| current.get(msg.authority))
-                        .and_then(|m| {
-                            suwappu_crypto::mldsa::PublicKey::from_bytes(&m.public_key_bytes).ok()
-                        });
+                    let pk = committee.get(msg.authority).and_then(|m| {
+                        suwappu_crypto::mldsa::PublicKey::from_bytes(&m.public_key_bytes).ok()
+                    });
                     let valid = pk.is_some_and(|pk| {
                         suwappu_crypto::mldsa::Signature::from_bytes(&msg.signature)
                             .map(|sig| {
@@ -2664,15 +2655,12 @@ async fn emit_checkpoint(
         }
     }
 
-    // 4. Sign if eligible (seated now, or a member of the committee whose
-    //    signatures joiners will verify).
+    // 4. Sign if eligible: a member of the signing committee joiners will
+    //    verify against (IQ-010 D6). A registered-but-inactive node, or
+    //    one activated since the last co-signed checkpoint, does not sign
+    //    — nobody could count its signature.
     let committee = verification_committee(state).await;
-    let seated_now = state
-        .authority_registry
-        .read()
-        .await
-        .contains(state.self_id);
-    if seated_now || committee.contains(state.self_id) {
+    if committee.contains(state.self_id) {
         match sign_checkpoint(state.self_id, &state.self_secret_key, &ck) {
             Ok(sig) => {
                 buffer_checkpoint_sig(state, &ck, sig.clone()).await;
@@ -2709,6 +2697,17 @@ async fn current_registry_set(state: &State) -> RegistrySet {
         ),
         committee: inner.committee.clone(),
     }
+}
+
+/// The subset of `sigs` whose signer is a member of `committee` (IQ-010
+/// D6): what `ratify_checkpoint` can count.
+fn committee_signatures(
+    sigs: Vec<CheckpointSignature>,
+    committee: &AuthorityRegistry,
+) -> Vec<CheckpointSignature> {
+    sigs.into_iter()
+        .filter(|s| committee.contains(s.authority))
+        .collect()
 }
 
 /// Buffer a verified signature under its checkpoint hash, deduplicated by
@@ -2855,6 +2854,9 @@ async fn try_aggregate_checkpoint(state: &State, hash: [u8; 32], self_label: &st
             .unwrap_or_default();
         (ck, sigs, Some(snap))
     };
+    // Defence in depth for the inbox filter: `ratify_checkpoint` refuses
+    // the whole set on one unknown signer.
+    let sigs = committee_signatures(sigs, &committee);
     if (sigs.len() as u32) < committee.quorum_threshold() {
         return;
     }
@@ -3947,6 +3949,13 @@ async fn prune_state(
             inner.gc_round = Some(gc_round);
             inner.seen_at.retain(|(_, r), _| *r > gc_round);
             inner.evidence_emitted.retain(|(_, r)| *r > gc_round);
+            inner.detected_equivocations.retain(|p| p.round > gc_round);
+            // IQ-010 D4: epochs no decidable slot can belong to. Pruned
+            // here, from the frontier-derived gc round, so the schedule a
+            // checkpoint snapshot binds is normalised like every other
+            // pruned structure (`emit_checkpoint` prunes before capture).
+            let epoch_floor = inner.epoch.epoch_for(gc_round);
+            inner.committee_by_epoch.retain(|e, _| *e >= epoch_floor);
             inner.main_lane_index.retain(|tx| tx.round > gc_round);
             for h in &report.evicted {
                 inner.needed_blocks.remove(h);
@@ -5029,18 +5038,20 @@ async fn apply_commit(
                 // queued entry per accused author (one ejection is all
                 // the boundary needs), and the cheap checks run before
                 // any signature is verified.
+                let already = inner.pending_governance.iter().any(|(i, _)| {
+                    matches!(i, Intent::EquivocationEvidence { cert_a: a, .. } if a.author == cert_a.author)
+                });
+                if already || cert_a.author != cert_b.author || cert_a.round != cert_b.round {
+                    continue;
+                }
+                // Only entries that reach a signature check spend the
+                // per-block budget.
                 evidence_seen += 1;
                 if evidence_seen > MAX_EVIDENCE_PER_BLOCK {
                     tracing::warn!(
                         round = cert_round,
                         "evidence beyond the per-block bound; dropped"
                     );
-                    continue;
-                }
-                let already = inner.pending_governance.iter().any(|(i, _)| {
-                    matches!(i, Intent::EquivocationEvidence { cert_a: a, .. } if a.author == cert_a.author)
-                });
-                if already || cert_a.author != cert_b.author || cert_a.round != cert_b.round {
                     continue;
                 }
                 drop(inner);
@@ -5112,17 +5123,49 @@ async fn apply_commit(
             let mut inner = state.inner.lock().await;
             std::mem::take(&mut inner.pending_governance)
         };
-        for (intent, env) in &queued {
-            apply_governance_intent(state, intent, env.as_ref(), cert_round, self_label, log).await;
+        // IQ-010 Residual 1a: at most `f` committee changes per boundary
+        // (removals here, activations below), so consecutive committees
+        // keep a quorum of the earlier one in common and slots straddling
+        // the boundary stay decidable. The excess waits, in order, for
+        // the next boundary — deterministic on every node.
+        let cap = membership_change_cap(pre_drain.size());
+        let mut changes = 0usize;
+        let mut deferred: Vec<(Intent, Option<crate::client::GovAuth>)> = Vec::new();
+        for (intent, env) in queued.iter().cloned() {
+            let is_removal = matches!(
+                intent,
+                Intent::ExitAuthority { .. }
+                    | Intent::EjectAuthority { .. }
+                    | Intent::EquivocationEvidence { .. }
+            );
+            if is_removal && changes >= cap {
+                deferred.push((intent, env));
+                continue;
+            }
+            let before = state.inner.lock().await.committee.len();
+            apply_governance_intent(state, &intent, env.as_ref(), cert_round, self_label, log)
+                .await;
+            if state.inner.lock().await.committee.len() != before {
+                changes += 1;
+            }
         }
-        activate_live_proven(state, cert_round, self_label, log).await;
+        activate_live_proven(
+            state,
+            cert_round,
+            cap.saturating_sub(changes),
+            self_label,
+            log,
+        )
+        .await;
         {
             // IQ-010 D4: the committee this drain produced governs the
             // slots of the NEXT epoch; every epoch skipped by this
             // crossing (none once the walk defers on an undefined epoch,
             // kept for snapshot-installed and replayed states) keeps the
-            // pre-drain committee. Entries below the retention window
-            // can never be consulted again.
+            // pre-drain committee. Entries below the retention window are
+            // pruned with the gc round (`prune_state`), never here: the
+            // map is bound into `snapshot_root`, so its contents must be a
+            // function of the frontier, not of this walk's chunking.
             let mut inner = state.inner.lock().await;
             for e in (old_epoch + 1)..=new_epoch {
                 inner
@@ -5132,11 +5175,15 @@ async fn apply_commit(
             }
             let next = inner.committee.clone();
             inner.committee_by_epoch.insert(new_epoch + 1, next);
-            let floor = inner
-                .gc_round
-                .map(|g| inner.epoch.epoch_for(g))
-                .unwrap_or(0);
-            inner.committee_by_epoch.retain(|e, _| *e >= floor);
+            if !deferred.is_empty() {
+                tracing::warn!(
+                    round = cert_round,
+                    deferred = deferred.len(),
+                    "membership changes beyond the per-boundary cap carried to the next boundary"
+                );
+                deferred.append(&mut inner.pending_governance);
+                inner.pending_governance = deferred;
+            }
         }
         log.emit(Event::now(self_label, Lane::Main, "epoch_boundary").with_round(cert_round));
         let new_epoch = state.inner.lock().await.epoch.current;
@@ -5404,7 +5451,13 @@ async fn remove_authority(
 /// the same boundary, so an authority admitted and proven live before
 /// this boundary activates here; one admitted at this boundary needs a
 /// committed certificate first.
-async fn activate_live_proven(state: &State, cert_round: u64, self_label: &str, log: &EventLog) {
+async fn activate_live_proven(
+    state: &State,
+    cert_round: u64,
+    budget: usize,
+    self_label: &str,
+    log: &EventLog,
+) {
     let proven: Vec<AuthorityId> = {
         let inner = state.inner.lock().await;
         inner.live_proven.iter().copied().collect()
@@ -5413,7 +5466,14 @@ async fn activate_live_proven(state: &State, cert_round: u64, self_label: &str, 
         return;
     }
     let mut activated: Vec<(AuthorityId, suwappu_consensus::Stake)> = Vec::new();
+    let mut dropped: Vec<AuthorityId> = Vec::new();
     for id in proven {
+        if activated.len() >= budget {
+            // Beyond this boundary's change cap: stays proven, activates
+            // at a later boundary (ascending id order, so every node
+            // picks the same ones).
+            break;
+        }
         // Stake weight comes from the Validator-Ring mirror the admit
         // created; a member the mirror failed for stays inactive.
         let stake = state
@@ -5423,15 +5483,21 @@ async fn activate_live_proven(state: &State, cert_round: u64, self_label: &str, 
             .get(id)
             .map(|m| m.stake_suwappu);
         let registered = state.authority_registry.read().await.contains(id);
-        if let (true, Some(stake)) = (registered, stake) {
-            activated.push((id, stake));
+        match (registered, stake) {
+            (true, Some(stake)) => activated.push((id, stake)),
+            // Not registered any more (exited or ejected between proof
+            // and boundary) or lost its mirror: dropped.
+            _ => dropped.push(id),
         }
     }
-    // Stake table and committee move together (canonical lock order:
-    // stake_table before inner), so no reader ever sees a member with
-    // stake weight but no seat.
-    let mut stake_table = state.stake_table.write().await;
+    // Stake table and committee move together, under the canonical lock
+    // order (`inner` before `stake_table`; see the module header), so no
+    // reader ever sees a member with stake weight but no seat.
     let mut inner = state.inner.lock().await;
+    let mut stake_table = state.stake_table.write().await;
+    for id in &dropped {
+        inner.live_proven.remove(id);
+    }
     for (id, stake) in &activated {
         stake_table.insert(*id, *stake);
         inner.live_proven.remove(id);
@@ -5441,9 +5507,6 @@ async fn activate_live_proven(state: &State, cert_round: u64, self_label: &str, 
                 .with_authority_id(*id),
         );
     }
-    // Anything left in the set is not registered any more (exited or
-    // ejected between proof and boundary) or lost its mirror: drop it.
-    inner.live_proven.clear();
     if !activated.is_empty() {
         let members: Vec<AuthorityId> = inner
             .committee
@@ -5478,6 +5541,44 @@ async fn verify_equivocation_evidence(state: &State, a: &Certificate, b: &Certif
 /// Evidence intents carried per block (IQ-010 D3): two ML-DSA-65-signed
 /// certificates each, so the block stays well inside a frame.
 const MAX_EVIDENCE_PER_BLOCK: usize = 4;
+
+/// Committee changes applied per epoch boundary (IQ-010 Residual 1a):
+/// `f = ⌊(|C| − 1) / 3⌋`, at least one, so consecutive committees keep
+/// `quorum_threshold(|C|)` members in common and a slot whose supporters
+/// or anchors lie across the boundary can still muster its quorum.
+fn membership_change_cap(committee_size: u32) -> usize {
+    (((committee_size.max(1) - 1) / 3) as usize).max(1)
+}
+
+/// Shortest epoch a manifest may declare (`0` disables epochs). The walk
+/// defers at an epoch whose committee is not fixed until a leader of the
+/// previous epoch commits; an epoch must therefore hold enough leader
+/// slots that at least one decides `Direct` under any honest schedule.
+pub const MIN_ROUNDS_PER_EPOCH: u64 = 8;
+
+/// Manifest constraints the daemon refuses to start under.
+pub fn validate_manifest(manifest: &GenesisManifest) -> anyhow::Result<()> {
+    // IQ-008 D5: a joiner catches up from the served checkpoint snapshot
+    // by forward backfill, which only works while the checkpoint round
+    // is still inside every peer's live window.
+    if manifest.checkpoint_cadence_rounds.saturating_mul(2) > manifest.gc_depth_rounds {
+        return Err(anyhow::anyhow!(
+            "genesis manifest: checkpoint_cadence_rounds ({}) must be at most half of \
+             gc_depth_rounds ({}), or joiners could never catch up after a snapshot",
+            manifest.checkpoint_cadence_rounds,
+            manifest.gc_depth_rounds
+        ));
+    }
+    if manifest.rounds_per_epoch != 0 && manifest.rounds_per_epoch < MIN_ROUNDS_PER_EPOCH {
+        return Err(anyhow::anyhow!(
+            "genesis manifest: rounds_per_epoch ({}) must be 0 or at least {}, or an epoch \
+             with no committed leader would defer the commit walk for ever (IQ-010 D4)",
+            manifest.rounds_per_epoch,
+            MIN_ROUNDS_PER_EPOCH
+        ));
+    }
+    Ok(())
+}
 
 /// Byzantine fault tolerance: f = floor((n-1)/3). The minimum number of
 /// honest parents needed to make safe progress under partial synchrony is
@@ -5563,7 +5664,6 @@ async fn run_round_driver(
                 .committee_for_round(next)
                 .cloned()
                 .unwrap_or_else(|| inner.committee.clone());
-            let n = committee.size();
             // IQ-008: after an outage longer than the retention window the
             // parents round is pruned everywhere and can never fill; and a
             // node that fell behind inside the window only advances one
@@ -5592,7 +5692,14 @@ async fn run_round_driver(
             target_round = next;
             prev_round = target_round.saturating_sub(1);
             if inner.last_authored_round.is_some() {
-                let parents_count = distinct_authors_at(&dag, prev_round, &committee);
+                // The parents live at `prev_round`; count and threshold
+                // them under that round's committee.
+                let gate_committee = inner
+                    .committee_for_round(prev_round)
+                    .cloned()
+                    .unwrap_or_else(|| committee.clone());
+                let n = gate_committee.size();
+                let parents_count = distinct_authors_at(&dag, prev_round, &gate_committee);
                 let elapsed = round_started_at.elapsed();
                 let strict_ok = parents_count >= quorum_threshold(n);
                 let timeout_force = parents_count >= f_plus_one(n) && elapsed >= leader_timeout;
@@ -7373,7 +7480,13 @@ mod tests {
                         .detected_equivocations
                         .iter()
                         .any(|p| p.author == 0 && p.round == 1);
-                    prop_assert_eq!(queued, max_admitted_slot >= MAX_CERTS_PER_AUTHOR_ROUND, "evidence queued={} max admitted in slot={}", queued, max_admitted_slot);
+                    // A prune at or above round 1 reaps the proof with the
+                    // slot it is about (nothing can be admitted at round 1
+                    // after it), so evidence is owed only while the slot
+                    // is live.
+                    let expected = max_admitted_slot >= MAX_CERTS_PER_AUTHOR_ROUND
+                        && !(with_prune && prune_round >= 1);
+                    prop_assert_eq!(queued, expected, "evidence queued={} max admitted in slot={} with_prune={} prune_round={}", queued, max_admitted_slot, with_prune, prune_round);
                     if !with_prune {
                         // Liveness: a certificate whose block was bound, and
                         // whose ancestors all were too, is admitted; one whose
@@ -7687,8 +7800,11 @@ mod tests {
             corridors: Vec::new(),
             prebalances: Vec::new(),
             rounds_per_epoch: 4,
-            gc_depth_rounds: 64,
-            checkpoint_cadence_rounds: 64,
+            // Pruning runs inside the window (second S36 pass): the epoch
+            // schedule both nodes bind into their snapshot roots must be
+            // pruned identically from the frontier, not from the walk.
+            gc_depth_rounds: 8,
+            checkpoint_cadence_rounds: 4,
         };
         let states = [
             State::new(&manifest, keys[0].1.clone(), None),
@@ -7732,7 +7848,7 @@ mod tests {
         // The shared sequence: rounds 0..=ROUNDS, every genesis author
         // each round, id 7 from round 5 on; parents = every certificate
         // of the previous round (7's included).
-        const ROUNDS: u64 = 20;
+        const ROUNDS: u64 = 30;
         let key_of = |a: AuthorityId| -> &suwappu_crypto::mldsa::SecretKey {
             if a == NEW_ID {
                 &cand_sk
@@ -7873,8 +7989,23 @@ mod tests {
                 inner.substrate.state_root(),
                 committed,
                 inner.epoch.current,
+                inner.committee_by_epoch.clone(),
+                inner.gc_round,
             ));
         }
+        assert!(
+            summary[0].8.is_some(),
+            "no pruning happened inside the window"
+        );
+        assert_eq!(summary[0].8, summary[1].8, "gc rounds differ");
+        assert_eq!(
+            summary[0].7, summary[1].7,
+            "epoch schedules differ after pruning"
+        );
+        assert!(
+            summary[0].7.keys().next().copied() <= Some(summary[0].6),
+            "schedule dropped the current epoch"
+        );
         assert_eq!(
             summary[0].0.members(),
             &[0, 1, 2, 3, NEW_ID],
@@ -8022,9 +8153,12 @@ mod tests {
             cert_a: x.clone(),
             cert_b: y.clone(),
         };
+        // Bogus in the expensive sense: same author and round, distinct
+        // hashes, signed by the wrong key — it reaches the signature check
+        // and spends the budget. (A cheaply rejected pair does not.)
         let bogus = Intent::EquivocationEvidence {
-            cert_a: mk(2, 4, 1, &keys[2].1),
-            cert_b: mk(2, 5, 1, &keys[2].1),
+            cert_a: mk(2, 4, 1, &keys[3].1),
+            cert_b: mk(2, 4, 2, &keys[3].1),
         };
         let mut intents = vec![bogus; MAX_EVIDENCE_PER_BLOCK];
         intents.push(valid.clone());
@@ -8123,8 +8257,11 @@ mod tests {
             ratify_checkpoint(ck.clone(), sigs.clone(), &registry).is_err(),
             "the registry denominator would freeze the chain on admission"
         );
-        // An inactive member's signature is not a committee signature.
-        let mut with_inactive = sigs[..2].to_vec();
+        // An inactive member's signature is not a committee signature:
+        // `ratify_checkpoint` refuses the whole set on it, so the
+        // aggregator filters it out first (second S36 pass) and the
+        // remaining committee signatures still ratify.
+        let mut with_inactive = sigs.clone();
         with_inactive.push(CheckpointSignature {
             authority: 5,
             signature: suwappu_crypto::mldsa::sign(&digest, &keys[5].1)
@@ -8132,7 +8269,138 @@ mod tests {
                 .as_bytes()
                 .to_vec(),
         });
-        assert!(ratify_checkpoint(ck, with_inactive, &signing).is_err());
+        assert!(ratify_checkpoint(ck.clone(), with_inactive.clone(), &signing).is_err());
+        let filtered = committee_signatures(with_inactive, &signing);
+        assert_eq!(filtered.len(), 3);
+        assert!(ratify_checkpoint(ck, filtered, &signing).is_ok());
+    }
+
+    /// IQ-010 D4 / Residual 1a guards: the manifest floor on epoch length
+    /// and the per-boundary change cap.
+    #[test]
+    fn manifest_epoch_floor_and_change_cap() {
+        let mut m = GenesisManifest {
+            network_id: "floors".into(),
+            validators: Vec::new(),
+            corridors: Vec::new(),
+            prebalances: Vec::new(),
+            rounds_per_epoch: 16,
+            gc_depth_rounds: 64,
+            checkpoint_cadence_rounds: 8,
+        };
+        assert!(validate_manifest(&m).is_ok());
+        m.rounds_per_epoch = 0;
+        assert!(validate_manifest(&m).is_ok(), "epochs disabled");
+        m.rounds_per_epoch = MIN_ROUNDS_PER_EPOCH - 1;
+        assert!(validate_manifest(&m).is_err(), "below the epoch floor");
+        m.rounds_per_epoch = MIN_ROUNDS_PER_EPOCH;
+        m.checkpoint_cadence_rounds = 40;
+        assert!(
+            validate_manifest(&m).is_err(),
+            "cadence above half the gc depth"
+        );
+        assert_eq!(membership_change_cap(4), 1);
+        assert_eq!(membership_change_cap(7), 2);
+        assert_eq!(membership_change_cap(13), 4);
+        assert_eq!(membership_change_cap(1), 1);
+    }
+
+    /// IQ-010 Residual 1a: two valid ejections queued for one boundary of
+    /// a four-member committee (f = 1) apply one and carry the other, in
+    /// order, to the next boundary.
+    #[tokio::test]
+    async fn membership_changes_are_capped_per_boundary() {
+        let keys: Vec<(
+            suwappu_crypto::mldsa::PublicKey,
+            suwappu_crypto::mldsa::SecretKey,
+        )> = (0..4).map(|_| suwappu_crypto::mldsa::keypair()).collect();
+        let manifest = GenesisManifest {
+            network_id: "iq010-cap-4n".into(),
+            validators: (0..4u32)
+                .map(|i| GenesisValidator {
+                    authority_id: i,
+                    label: format!("v{}", i),
+                    mldsa_public_key_hex: hex::encode(keys[i as usize].0.as_bytes()),
+                    bls_public_key_hex: "00".into(),
+                    validator_stake_suwappu: 150_000,
+                    authority_stake_suwappu: 150_000,
+                })
+                .collect(),
+            corridors: Vec::new(),
+            prebalances: Vec::new(),
+            rounds_per_epoch: 4,
+            gc_depth_rounds: 64,
+            checkpoint_cadence_rounds: 64,
+        };
+        let state = State::new(&manifest, keys[0].1.clone(), None);
+        let (log, _task) = EventLog::start(&std::env::temp_dir().join("suwappu-iq010-cap.ndjson"))
+            .await
+            .unwrap();
+        let mk = |author: u32, round: u64, tag: u8| {
+            let mut c = Certificate {
+                author,
+                round,
+                parents: Vec::new(),
+                payload_digest: [tag; 32],
+                signature: Vec::new(),
+            };
+            c.sign(&keys[author as usize].1);
+            c
+        };
+        let ev = |author: u32| Intent::EquivocationEvidence {
+            cert_a: mk(author, 2, 1),
+            cert_b: mk(author, 2, 2),
+        };
+        state
+            .inner
+            .lock()
+            .await
+            .pending_governance
+            .extend([(ev(1), None), (ev(2), None)]);
+        // A committed certificate at round 4 crosses into epoch 1.
+        let carrier = |round: u64| {
+            let digest = compute_payload_digest(&[], &[]);
+            let mut c = Certificate {
+                author: 0,
+                round,
+                parents: Vec::new(),
+                payload_digest: digest,
+                signature: Vec::new(),
+            };
+            c.sign(&keys[0].1);
+            let b = BlockPayload {
+                payload_digest: digest,
+                author: 0,
+                round,
+                cert_hash: c.hash(),
+                intents: Vec::new(),
+                governance_auth: Vec::new(),
+            };
+            (c, b)
+        };
+        let (c4, b4) = carrier(4);
+        apply_commit(&state, c4.hash(), c4, b4, 4, "t", &log, false).await;
+        {
+            let inner = state.inner.lock().await;
+            assert_eq!(
+                inner.committee.members(),
+                &[0, 2, 3],
+                "one ejection per boundary at f = 1"
+            );
+            assert_eq!(inner.pending_governance.len(), 1, "the second waits");
+            assert_eq!(inner.committee_by_epoch[&2].members(), &[0, 2, 3]);
+            assert_eq!(
+                inner.committee_by_epoch[&1].members(),
+                &[0, 1, 2, 3],
+                "epoch 1 keeps the pre-drain committee"
+            );
+        }
+        let (c8, b8) = carrier(8);
+        apply_commit(&state, c8.hash(), c8, b8, 8, "t", &log, false).await;
+        let inner = state.inner.lock().await;
+        assert_eq!(inner.committee.members(), &[0, 3]);
+        assert!(inner.pending_governance.is_empty());
+        assert_eq!(inner.committee_by_epoch[&3].members(), &[0, 3]);
     }
 
     /// IQ-009 D5 / I-AV1, the `/goal` B2 block-withholding fault: one of
