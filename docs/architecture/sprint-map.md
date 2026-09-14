@@ -101,6 +101,7 @@ for the canonical day-to-day status.
 | DAG-S26 ✅ | (workspace) | Compliance harness |
 | DAG-S27 ✅ | suwappu-node | Throughput + governance — perf-testnet baseline |
 | DAG-S28–S33 ✅ | suwappu-node, suwappu-mempool, suwappu-rpc, scripts/perf | Perf campaigns, mempool, JSON-RPC MVP, indexer, WS subscriptions, cert-finality metric |
+| DAG-S34 🔍 | suwappu-consensus, suwappu-execution, suwappu-node | IQ-008: consensus-anchored GC (`proptest_gc.rs`), commit log + snapshots (`proptest_persistence.rs`), co-signed checkpoint chain + joiner snapshot sync (`proptest_checkpoint_chain.rs`); awaiting consensus sign-off |
 | (open) | suwappu-consensus | IQ-004 `decide_slot` orphan window — tracked in [#45](https://github.com/Suwappu-Labs/suwappu-dag/issues/45) |
 
 ## Phase gates

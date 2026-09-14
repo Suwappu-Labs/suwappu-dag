@@ -1,0 +1,316 @@
+# IQ-010 — Deterministic committee transitions: the committee is a function of the commit sequence
+
+**Status:** Recommendation, implemented on branch `claude/kasper-research-n9i4ct`
+as sprint DAG-S36. Consensus-touching (leader rotation, quorum counting,
+membership transitions, slashing evidence): requires `consensus-reviewer`
+and **human consensus-team sign-off** before it is treated as
+production-ready (same posture as IQ-007, IQ-008 and IQ-009).
+**Owner:** consensus
+**Date:** 2026-09-13
+**Tracking:** `/goal` item A12 (added by this IQ). Opened by IQ-009
+Residual 9 (the seventh DAG-S35 review pass named it the residual worth
+the most scrutiny); the investigation found the rotation itself does not
+survive a membership change either.
+
+## Question
+
+Which authorities form the committee that the DagBft-C commit rule runs
+over when a node decides a leader slot, and when does that committee
+change? Today the answer differs between honest nodes, and after any
+change it is not even the set of seated authorities.
+
+## Background: three defects on one surface
+
+1. **The rule indexes authorities by `0..n`, not by membership.**
+   `leader(round, n) = round mod n`, `parents_for_round` and
+   `distinct_authors_at` iterate `0..n`, and `supporters` counts every
+   author present in the DAG. Ids are caller-chosen (`AdmitAuthority
+   { authority_id }`) and `AuthorityRegistry::remove` leaves gaps, while
+   `n` is the registry *length*. After ejecting any id that is not the
+   highest, `n` shrinks and the ids do not renumber: the leader slot of
+   the missing id is skipped every `n`-th round, and the highest id is
+   `≥ n`, so no honest proposer ever selects its certificates as parents
+   and it can never support a leader. A four-node ring that ejects id 1
+   has `n = 3`, threshold 3, and only ids 0 and 2 reachable as
+   supporters — a permanent halt. Admitting a non-contiguous id (7 into
+   a ring of four) never gives it a leader slot or a parent edge at all.
+   The consensus-reviewer checklist names this class
+   (`dagbft-leader-rotation-needs-active-manifest`); the code has it.
+
+2. **Deferred activation fires on local admission** (Issue #18 /
+   DAG-S27.7). A newly admitted authority is in the registries (its
+   certificates verify and are admitted) but `n` and its stake are bumped
+   in `ingest_cert` when *this node* first admits one of its certificates.
+   Two consequences:
+   - *Non-determinism.* Node P admits the first certificate (with its
+     block, IQ-009) one round before node Q; in that window P decides
+     leaders with `n + 1` and Q with `n`, so they can commit different
+     certificates for one round — a substrate fork with zero Byzantine
+     behaviour (IQ-009 Residual 9, sixth and seventh review passes).
+   - *A quorum-intersection gap.* In the window the pending member's
+     certificates already count as supporters while `n` excludes it, so
+     two threshold-sized support sets among `n + 1` authors need only
+     intersect in one author, who may be Byzantine. DagBft-C's safety
+     argument needs an honest author in the intersection.
+
+3. **The equivocation auto-eject fires on local detection**
+   (DAG-S30.1). A node that admits two headers for one `(author, round)`
+   rewrites its registries, stake table and `n` in the next `try_commit`;
+   a node that received only one header does not. Same fork.
+
+A fourth detail makes even a correctly gated change take effect at
+different rounds on different nodes: `try_commit` reads `n` once per walk,
+so a change applied by an epoch-boundary commit *inside* a walk is used by
+the rest of that walk on one node and by the next slot on another. This
+is the "jitter" Issue #18 observed and worked around by moving governance
+to the boundary; the boundary alone does not remove it.
+
+## What the literature says
+
+- **Sui `consensus-core` / `Committee`** (`consensus/config/src/committee.rs`):
+  the committee is a per-epoch, index-addressed set (`AuthorityIndex`
+  is contiguous *within an epoch* precisely because the committee is
+  rebuilt at every epoch); leader schedule, quorum thresholds and stake
+  are all read from that object; it changes only through the end-of-epoch
+  transaction, which is itself executed in the committed sequence.
+- **Mysticeti (arXiv:2310.14821), §III–IV.** Leader slots are defined
+  over the committee of the epoch; reconfiguration happens between
+  epochs, never mid-epoch and never from one validator's observation.
+- **Tendermint / CometBFT.** Validator-set updates returned by `EndBlock`
+  take effect at height `H + 2`, a function of the committed chain;
+  `DuplicateVoteEvidence` is gossiped, *included in a block*, and applied
+  when that block executes — never on local observation
+  (Buchman, "Tendermint: Byzantine Fault Tolerance in the Age of
+  Blockchains", 2016; CometBFT spec, "Evidence").
+- **Ethereum consensus specs.** `ProposerSlashing` / `AttesterSlashing`
+  are block operations; the validator set changes only through the
+  state transition of the beacon chain (activation and exit queues), so
+  every node derives the same active set from the same finalized state.
+
+The common invariant: **the committee in force for deciding a slot is a
+deterministic function of the committed sequence, and membership
+evidence — a liveness proof or a slashing proof — is carried in blocks.**
+
+## Options considered
+
+1. **Renumber ids on every membership change** so `0..n` stays valid.
+   Breaks the binding between an authority's id and its registered key
+   (certificates are signed under the id), and every stored certificate,
+   vote and stake row would have to be rewritten. Rejected.
+2. **Keep the `0..n` rule and restrict governance** (admit only
+   `id == n`, eject only the highest id). Not a validator set; rejected.
+3. **Committee-indexed rule with boundary-only, commit-derived
+   transitions.** The committee is the sorted set of active member ids;
+   the leader of round `r` is `committee[r mod |C|]`; supporters and
+   quorum counts range over `C`; parents may be any registered author's
+   certificates. The committee changes only in the epoch-boundary
+   governance drain, and the two observation-driven transitions become
+   commit-derived: activation requires a *committed* certificate of the
+   pending member; ejection requires *committed* equivocation evidence.
+   The commit walk re-reads the committee before every slot decision.
+
+## Decision
+
+Option 3.
+
+### D1. The commit rule is defined over a `Committee`
+
+`suwappu_consensus::Committee` is a sorted, de-duplicated vector of
+authority ids. `leader_of(round, &committee)` is
+`committee[round mod |C|]`; `quorum_threshold(|C|)` is unchanged;
+`supporters` counts only committee members; `decide_slot_for`,
+`try_direct_decide_for`, `try_indirect_decide_for`, `finalize_for` and
+`joint_commit_for` take the committee. The `n`-based functions remain as
+wrappers over `Committee::contiguous(n)` so every DAG-S3..S5 gate is
+unchanged; the new gate proves the two agree on contiguous committees and
+that the committee rule is invariant under relabelling and under
+certificates by non-members.
+
+### D2. Membership has two states; both change only at the boundary
+
+- **Registered**: in the Authority (and mirrored Validator) registry.
+  Its certificates verify, are admitted, may be selected as parents by
+  honest proposers and therefore may be committed; its votes carry no
+  stake; it holds no leader slot and does not count toward a quorum.
+- **Active**: additionally in the committee and the stake table.
+
+The only code path that changes the committee, the registries or the
+stake table is `apply_governance_intent`, run in the epoch-boundary drain
+of `apply_commit` — a function of the commit sequence. Activation of a
+registered member happens at the first boundary *after one of its
+certificates has been committed* (`live_proven`, a commit-derived set
+carried in the snapshot root), which keeps Issue #18's liveness property
+— an authority that never shows up never enters the denominator or the
+rotation — without any node-local observation. `pending_stake` and the
+`ingest_cert` promotion are removed.
+
+### D3. Ejection is by on-chain evidence
+
+`Intent::EquivocationEvidence { cert_a, cert_b }` carries two full
+certificates. Any node whose DAG holds two headers for one
+`(author, round)` emits the intent in its next block (at most
+`MAX_EVIDENCE_PER_BLOCK`). At commit, every node verifies the evidence
+against the seated registry — same author and round, distinct hashes,
+both signatures valid under the author's registered key, author seated
+— and queues the ejection for the boundary drain; invalid or duplicate
+evidence is dropped. The substrate treats the intent as a no-op. The
+DAG-S30.1 local auto-eject is removed; `EjectAuthority` (governance
+co-signed) remains for evidence the protocol does not carry.
+
+### D4. Each slot is decided under the committee pinned to its epoch
+
+A committee change must never re-schedule a slot that is still in the
+live window: with `candidate_rounds` spanning the whole window, a node
+that had slot 50 undecided when it crossed the boundary would otherwise
+evaluate it under the new committee — a different leader — while a node
+that decided it earlier committed the old leader (first review pass).
+The committee for the slots of epoch `e` is therefore the one produced
+by the drain that crossed into epoch `e − 1` (`committee_by_epoch`;
+genesis defines epochs 0 and 1, every crossing into `k` defines
+`k + 1`), so it is fixed before any slot of `e` can be decided and never
+changes afterwards. `try_commit` looks the committee up per slot and
+**defers** (breaks the walk) at the first slot whose epoch's committee is
+not yet fixed; that slot becomes decidable once a certificate of the
+previous epoch commits, which needs only that epoch's own committee. A
+membership change committed in epoch `e` thus takes effect for the slots
+of epoch `e + 2` — the same one-epoch lag as Tendermint's `H + 2` rule.
+The schedule is commit-derived and part of `snapshot_root`. The pinning
+covers the Authority leg of the joint quorum — leader, supporters,
+anchors. The Validator leg (`validator_quorum_met`) reads the stake
+table as of the current committee, which moves at the crossing itself:
+during the one-epoch lag an authority removed at a boundary still holds
+its leader slots in the next epoch while its stake is already out of
+the denominator. Both legs are pure functions of the committed prefix
+and the gate is halt-not-fork, so a straddling slot can be deferred,
+never ratified to a different leader.
+
+An authority removed at a boundary is *retired* for a grace of one
+retention window (`gc_depth_rounds` past the removal round): its
+certificates at rounds up to the grace are still admitted (signature
+against its retained key) so a node that crossed the boundary later and
+referenced them as parents does not leave every descendant orphaned on
+the nodes that crossed earlier. The grace equals the era window a joiner
+verifies a served snapshot under, so every graced certificate is
+verifiable by a joiner, and a crossing skew beyond it is already refused
+by the ingest ceiling. Retired certificates are DAG structure only — the
+epoch's pinned committee decides leaders and support; a retired author
+cannot be ejected again (evidence against it is not carried) and cannot
+be re-activated.
+
+### D5. The fast path uses the committee
+
+Fast-path signers must be committee members; the fast-path quorum size is
+derived from `|C|`.
+
+### D6. Checkpoints and snapshots bind the committee
+
+`RegistrySet` carries the committee (replacing `n_authorities`), so
+`registry_root` (V2) commits to it; `SnapshotBody` carries `live_proven`
+and the epoch schedule, so `snapshot_root` (V2) commits to the activation
+state. A served snapshot is rejected unless its committee is a subset of
+its Authority registry, its live-proven set is registered-but-inactive,
+and its schedule names the current and next epoch consistently.
+Checkpoints are co-signed and verified against the *signing committee*
+— the bound registry restricted to the committee — so a
+registered-but-inactive member never raises the checkpoint quorum (the
+registry denominator froze the chain on any admission whose operator was
+slow to show up: exactly the denominator deadlock D2 removes from the
+commit rule).
+
+## Invariants
+
+- **I-CT1 (determinism).** The committee used to decide leader round `r`
+  is a function of the committed sequence up to that decision. Two nodes
+  with the same committed prefix decide `r` with the same committee.
+- **I-CT2 (rotation covers the committee).** Every leader slot names a
+  committee member, and every member holds slots.
+- **I-CT3 (counting matches the denominator).** Only committee members'
+  certificates count as support; the quorum-intersection argument holds
+  over `|C|`.
+
+## Exit gate
+
+- `crates/suwappu-consensus/tests/proptest_committee.rs` × 10k:
+  `contiguous_committee_matches_n_rule`,
+  `decisions_are_invariant_under_relabelling`,
+  `non_member_certificates_never_count`,
+  `committee_finality_is_monotone`.
+- Daemon: `middle_ejection_keeps_the_mesh_committing` (four nodes; id 1
+  equivocates, evidence is committed, every node ejects at the same
+  boundary and commits keep flowing with agreeing roots),
+  `activation_is_a_commit_sequence_function` (a non-contiguous id is
+  admitted, activates at the first boundary after a committed
+  certificate on every node, and then holds leader slots),
+  `bogus_evidence_is_dropped`, plus the IQ-007 and IQ-009 gates
+  unchanged.
+
+## Residuals
+
+1. **IQ-004 late flips** reorder the commit sequence between nodes for
+   everything commit-derived — governance, activation, ejection and the
+   substrate alike. This IQ moves membership into that class; it does not
+   close the class. Tracked in IQ-004 / #45. With D4 a late flip changes
+   only the *position* of a committed leader, never its identity: the
+   slot's committee is pinned to its epoch on every node.
+1a. **Liveness across an epoch boundary.** A slot in epoch `e` is
+   decided under `C_e` — leader, supporters and every anchor in the
+   chain — so the intersection argument that makes `Skip` safe against
+   a concurrent `Direct` is intact: every quorum along the chain is a
+   `C_e` quorum (second review pass). What the boundary threatens is
+   liveness: supporters and anchors above it are authored by `C_{e+1}`,
+   so a slot straddling the boundary can only muster
+   `|C_e ∩ C_{e+1}|` of its `quorum_threshold(|C_e|)` supporters. The
+   drain therefore applies at most `f = ⌊(|C| − 1) / 3⌋` (at least one)
+   committee changes per boundary — removals in queue order, then
+   activations in id order — and carries the rest to the next
+   boundary, deterministically (`membership_change_cap`,
+   `membership_changes_are_capped_per_boundary`). With `f` changes the
+   overlap is exactly `quorum_threshold(|C_e|)`: zero slack, every
+   surviving member of `C_e` must support a straddling slot for it to
+   decide directly (indirectly, any later anchor's history suffices).
+   Separately, the walk defers at an epoch whose committee is not fixed
+   until a leader of the previous epoch commits, so an epoch in which
+   every leader slot ends `Skip` would halt the chain; a Byzantine
+   coalition holding consecutive committee positions (ids are
+   caller-chosen) can silence `f` consecutive slots, so
+   `rounds_per_epoch` must exceed `f` at the largest ring:
+   `MIN_ROUNDS_PER_EPOCH = f(AUTHORITY_RING_MAX) + 1 = 17` (or 0 to
+   disable epochs) is refused below at startup (`validate_manifest`).
+   No relation between `rounds_per_epoch` and `gc_depth_rounds` is
+   enforced: with epochs longer than the retention window the ingest
+   ceiling (`anchor + gc_depth`) keeps every live round inside the
+   current or next epoch, whose committees are always fixed, so the
+   deferral is inert; the dangerous direction is a short epoch, which
+   the floor covers. Sign-off item: the two bounds together.
+2. **Activation and ejection wait for the boundary** (up to
+   `rounds_per_epoch`). An equivocator stays seated until then; its
+   certificates are capped at two per slot and it is within `f`. A
+   detection is reaped with its slot at the gc round, so ejection
+   depends on at least one detector authoring a block while the slot is
+   inside its retention window — true of every live committee member.
+3. **Registered, inactive members — and retired ones, for one retention
+   window — can grow the DAG** (their certificates are admitted and may
+   be parents). Bounded by the per-slot cap, the ring ceiling (50) and
+   the retention window.
+4. **The Validator Ring is still a mirror** of the Authority Ring
+   (`/goal` A8); stake weight activation follows the committee.
+5. **Evidence size.** Two ML-DSA-65-signed certificates ≈ 7 KB per
+   intent, at most `MAX_EVIDENCE_PER_BLOCK` per block; a node that has
+   emitted evidence for a slot does not re-emit it.
+6. **The consensus-reviewer checklist item 2** ("use the `pending_stake`
+   deferred-activation pattern") is superseded: activation is still
+   deferred until liveness is proven, but the proof is a committed
+   certificate, not a local admission.
+7. **Human sign-off** is required as for IQ-007/008/009: this changes the
+   leader schedule and the quorum denominator's definition.
+8. **The served checkpoint chain is unbounded and rides one frame.**
+   Every signing-committee change is retained (`is_committee_transition`
+   — an admission now retains two links, admission and activation) and
+   `checkpoint_transitions` is never pruned; the `Checkpoints` reply is
+   a single 1 MiB frame. A link is ≈29 KB at n = 4 (quorum of ML-DSA-65
+   signatures plus two registries) and ≈360 KB at n = 50, so after
+   ≈36 membership events at n = 4 (≈3 at n = 50) the reply cannot be
+   sent and joiner bootstrap fails silently. Inherited from IQ-008 D5,
+   doubled in rate by this IQ. Fix direction: chunk the chain as
+   snapshots are, or let an operator supply a trusted checkpoint the
+   chain is served from. Sign-off item until then.

@@ -28,6 +28,7 @@
 //! surface is read-only (Phase 2.1 MVP):
 //!
 //! - [`Client::get_epoch`]
+//! - [`Client::get_sync_status`]
 //! - [`Client::get_authority_registry`]
 //! - [`Client::get_validator_registry`]
 //! - [`Client::get_stake`]
@@ -70,8 +71,8 @@ pub use error::Error;
 use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::{json, Value};
 pub use suwappu_rpc::context::{
-    AuthorityMemberView, BalanceView, BlockView, EpochView, IntentView, TransactionView,
-    ValidatorMemberView,
+    AuthorityMemberView, BalanceView, BlockView, EpochView, IntentView, SyncStatusView,
+    TransactionView, ValidatorMemberView,
 };
 
 /// JSON-RPC client targeting a single suwappu-dag node's RPC endpoint.
@@ -108,6 +109,15 @@ impl Client {
     /// Current epoch snapshot.
     pub async fn get_epoch(&self) -> Result<EpochView, Error> {
         self.call("suwappu_getEpoch", Value::Null).await
+    }
+
+    /// This node's catch-up position relative to its peers: `synced`,
+    /// `rounds_behind`, `seated`, and the raw round numbers behind them.
+    /// Poll this to know when a freshly started or newly admitted
+    /// validator has caught up; a node with `peer_tip_round == 0` has
+    /// not heard from any peer yet, so treat its `synced` as unknown.
+    pub async fn get_sync_status(&self) -> Result<SyncStatusView, Error> {
+        self.call("suwappu_getSyncStatus", Value::Null).await
     }
 
     /// Ordered list of seated Authority Ring members.

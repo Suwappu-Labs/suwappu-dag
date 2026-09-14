@@ -66,8 +66,10 @@ pub struct NodeConfig {
     #[serde(default = "default_round_ms")]
     pub round_ms: u64,
 
-    /// Checkpoint cadence in rounds. Default 1 = checkpoint every round
-    /// (matches `suwappu_execution::DEFAULT_CHECKPOINT_CADENCE_ROUNDS`).
+    /// Superseded by `GenesisManifest::checkpoint_cadence_rounds` (IQ-008
+    /// D5): the cadence must be identical mesh-wide, so the manifest is
+    /// authoritative and this per-node value is ignored by the daemon.
+    /// Retained so existing node.toml files keep parsing.
     #[serde(default = "default_checkpoint_cadence")]
     pub checkpoint_cadence_rounds: u32,
 
@@ -147,6 +149,24 @@ pub struct NodeConfig {
     /// `networkId` immutable or the on-chain quorum check fails silently.
     #[serde(default)]
     pub bridge_network_id: Option<String>,
+
+    /// IQ-008 D4: directory for the durable commit log and state
+    /// snapshots. UNSET (the default) keeps the pre-S34 behaviour — all
+    /// state in memory, rebuilt from genesis on every start — which is
+    /// what tests and the perf cluster want. Operators set it (the
+    /// template uses `/var/lib/suwappu`) so a restart resumes from the
+    /// last snapshot plus log replay instead of from genesis, and so the
+    /// node never re-authors a round it already signed.
+    #[serde(default)]
+    pub data_dir: Option<PathBuf>,
+
+    /// IQ-008 D4: `fdatasync` the commit log after every appended record.
+    /// Default `true` — a validator's own authored-round marker MUST be
+    /// durable before its certificate is broadcast, or a crash-restart
+    /// can re-sign the same round and be slashed for equivocation.
+    /// Disable only on test rigs.
+    #[serde(default = "default_store_fsync")]
+    pub store_fsync: bool,
 }
 
 /// One peer entry inside [`NodeConfig::peers`].
@@ -187,6 +207,36 @@ pub struct GenesisManifest {
     /// boundary work doesn't dominate the round budget.
     #[serde(default = "default_rounds_per_epoch")]
     pub rounds_per_epoch: u64,
+
+    /// Garbage-collection depth in rounds (IQ-008 D1). A certificate is
+    /// obsolete once a leader this many rounds past it has committed,
+    /// and every committed leader's causal history is cut this many
+    /// rounds below the leader. Lives in the manifest, not `NodeConfig`,
+    /// because the commit floor is derived from it: two validators with
+    /// different depths would commit different sub-DAGs for the same
+    /// leader. Default `suwappu_consensus::GC_DEPTH` (256). Tests use
+    /// small values to exercise pruning quickly.
+    #[serde(default = "default_gc_depth_rounds")]
+    pub gc_depth_rounds: u64,
+
+    /// Checkpoint cadence in committed leader rounds (IQ-008 D5). At the
+    /// first committed leader at or past each multiple of this value the
+    /// Authority Ring co-signs a `Checkpoint` over the substrate root and
+    /// the committee, the node captures the snapshot it serves to
+    /// joiners, and (with `data_dir`) writes it to disk. Manifest-level
+    /// because every validator must sign the *same* rounds for a quorum
+    /// to form.
+    ///
+    /// MUST be well below `gc_depth_rounds`: a joiner installs the
+    /// snapshot at checkpoint round `C` and then backfills forward from
+    /// `C + 1`, which peers can only serve while `C + 1` is above their
+    /// gc round. That needs `cadence + (rounds elapsed during transfer)
+    /// < gc_depth`; the daemon refuses a manifest with
+    /// `cadence * 2 > gc_depth`. Default 32 (≈8 s at 250 ms rounds)
+    /// against the default depth of 256, leaving ≈56 s for a joiner to
+    /// transfer and install a snapshot. Tests use small values.
+    #[serde(default = "default_checkpoint_cadence_rounds")]
+    pub checkpoint_cadence_rounds: u64,
 
     /// Genesis pre-balances. Each entry is credited to the substrate
     /// exactly once when a fresh node constructs its state (block
@@ -293,6 +343,18 @@ fn default_checkpoint_cadence() -> u32 {
 
 fn default_rounds_per_epoch() -> u64 {
     1024
+}
+
+fn default_gc_depth_rounds() -> u64 {
+    suwappu_consensus::GC_DEPTH
+}
+
+fn default_checkpoint_cadence_rounds() -> u64 {
+    32
+}
+
+fn default_store_fsync() -> bool {
+    true
 }
 
 fn default_max_client_connections() -> u32 {
@@ -430,6 +492,8 @@ mod tests {
             }],
             corridors: Vec::new(),
             rounds_per_epoch: 1024,
+            gc_depth_rounds: suwappu_consensus::GC_DEPTH,
+            checkpoint_cadence_rounds: 1024,
             prebalances: Vec::new(),
         };
         let cfg = NodeConfig {
@@ -455,6 +519,8 @@ mod tests {
             bridge_oracle_address: None,
             bridge_network_id: None,
             metrics_listen: None,
+            data_dir: None,
+            store_fsync: false,
         };
         let err = manifest.validate_against(&cfg).unwrap_err();
         assert!(matches!(err, ConfigError::LabelMismatch { id: 0, .. }));

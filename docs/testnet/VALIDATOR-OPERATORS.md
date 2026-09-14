@@ -87,13 +87,21 @@ Minimum:
 > - **A restart loses all history.** There is no on-disk state to reload;
 >   a restarted node re-syncs from peers, and can only go back as far as
 >   its peers have held *in their own memory* since *their* last restart.
-> - Operations therefore depend on **periodic regenesis** until snapshot
->   persistence lands (`/goal` A6/A7). Expect scheduled restarts of the
->   whole network, not just your node.
+> - As of DAG-S34 (IQ-008) RAM is bounded: the DAG and every side table
+>   are pruned to `gc_depth_rounds` (manifest, default 256) behind the
+>   commit frontier, and with `data_dir` set the node keeps a durable
+>   commit log plus a snapshot at every checkpoint boundary, so a restart
+>   resumes from disk instead of genesis. A joiner that falls more than
+>   `gc_depth_rounds` behind bootstraps from the latest Authority-Ring
+>   co-signed checkpoint snapshot automatically (S34.4) — nothing to
+>   configure. This branch has not yet had the consensus-team sign-off
+>   IQ-008 requires; until it merges, expect occasional coordinated
+>   regenesis.
 >
-> Disk is used for the event log (`event_log_path`) and little else, so
-> the 2 TB figure is generous — but do not size RAM as if the 2 TB were
-> absorbing chain growth.
+> Disk holds the event log (`event_log_path`) and, with `data_dir` set,
+> the commit log (grows with chain history: roughly the byte size of
+> every committed block) plus two snapshots. Size disk for history, RAM
+> for `authorities × gc_depth_rounds` certificates.
 
 If you can't hit the network RTT requirement (e.g. you're on
 mobile-tier home internet), you'll see more dropped certs and
@@ -128,6 +136,25 @@ under-performing validators after 30 days; you can re-apply.
    certificates automatically once it observes itself seated. No
    seed-side config change is needed for you to sync: seeds accept
    late-joiner connections dynamically.
+
+   Watch both transitions from your own node. `synced` flips to `true`
+   once you are within two rounds of the seeds' tip; `seated` flips to
+   `true` at the epoch boundary that applies your admit:
+
+   ```sh
+   curl -s -X POST http://127.0.0.1:9092 -H 'content-type: application/json' \
+     -d '{"jsonrpc":"2.0","id":1,"method":"suwappu_getSyncStatus","params":null}'
+   # {"result":{"local_dag_round":…,"peer_tip_round":…,"rounds_behind":0,
+   #            "synced":true,"seated":false,"orphan_certs":0,…}}
+   ```
+
+   `peer_tip_round` stays `0` until a seed answers your first tip
+   request, so wait for it to be non-zero before trusting `synced`. A
+   `rounds_behind` that keeps growing, or an `orphan_certs` count that
+   never shrinks, means you are not reaching the seeds: check
+   `peers.txt` and your outbound firewall. The same numbers are on
+   `/metrics` as `suwappu_rounds_behind`, `suwappu_synced` and
+   `suwappu_seated`.
 
 ## Local setup
 
@@ -182,6 +209,11 @@ mldsa_secret_key_path = "/var/lib/suwappu/mldsa.sk"
 bls_secret_key_path = "/var/lib/suwappu/bls.sk"
 genesis_manifest_path = "/etc/suwappu/genesis.toml"
 event_log_path = "/var/log/suwappu/events.ndjson"
+# IQ-008 D4: durable commit log + snapshots. REQUIRED for a validator:
+# without it a restart rebuilds from genesis and, worse, may re-sign a
+# round it already signed — which peers slash as equivocation.
+data_dir = "/var/lib/suwappu/state"
+store_fsync = true
 
 # Pull the current peer list as a starting point. You can prune
 # to your 3 closest geographically once latency telemetry lands.

@@ -34,23 +34,30 @@
 pub mod bridge_header;
 pub mod cert;
 pub mod commit;
+pub mod committee;
 pub mod dag;
 pub mod equivocation;
 pub mod error;
+pub mod gc;
 pub mod joint;
 
 pub use cert::{AuthorityId, CertHash, Certificate, Round};
 pub use commit::{
-    causal_history, cert_at, commit_leader, decide_slot, finalize, leader, quorum_threshold,
-    try_direct_decide, try_indirect_decide, CommitteeSize, LeaderStatus,
+    causal_history, causal_history_bounded, cert_at, commit_leader, commit_leader_for, decide_slot,
+    decide_slot_for, finalize, finalize_for, leader, quorum_threshold, try_direct_decide,
+    try_direct_decide_for, try_indirect_decide, try_indirect_decide_for, CommitteeSize,
+    LeaderStatus,
 };
-pub use dag::DagStore;
+pub use committee::Committee;
+pub use dag::{DagStore, PruneReport};
 pub use equivocation::{
     detect_authority_equivocation, detect_validator_double_vote, EquivocationProof,
     ValidatorEquivocationProof,
 };
 pub use error::ConsensusError;
+pub use gc::{commit_floor, gc_round, is_obsolete, GC_DEPTH};
 pub use joint::{
-    authority_equivocators, joint_commit, validator_double_vote_stake, validator_quorum_met,
-    validator_quorum_threshold, voting_stake, Stake, StakeTable, ValidatorId, Vote,
+    authority_equivocators, joint_commit, joint_commit_for, validator_double_vote_stake,
+    validator_quorum_met, validator_quorum_threshold, voting_stake, Stake, StakeTable, ValidatorId,
+    Vote,
 };

@@ -39,6 +39,7 @@ import type {
   JsonRpcRequest,
   JsonRpcResponse,
   StakeEntry,
+  SyncStatusView,
   TransactionView,
   ValidatorMemberView,
 } from "./types.js";
@@ -165,6 +166,17 @@ export class Client {
   /** Current epoch snapshot. */
   async getEpoch(): Promise<EpochView> {
     return this.call<EpochView>("suwappu_getEpoch");
+  }
+
+  /**
+   * This node's catch-up position relative to its peers: `synced`,
+   * `rounds_behind`, `seated`, and the raw round numbers behind them.
+   * Poll it to know when a freshly started or newly admitted validator
+   * has caught up. A node with `peer_tip_round === 0` has not heard from
+   * any peer yet, so treat its `synced` as unknown.
+   */
+  async getSyncStatus(): Promise<SyncStatusView> {
+    return this.call<SyncStatusView>("suwappu_getSyncStatus");
   }
 
   /** Ordered list of seated Authority Ring members. */

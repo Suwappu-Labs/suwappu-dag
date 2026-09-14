@@ -24,16 +24,23 @@ use std::{
 
 use suwappu_authority::{AuthorityMember, AuthorityRegistry};
 use suwappu_consensus::{
+    causal_history_bounded,
     cert::{CertHash, Certificate, Round},
     commit::{cert_at, quorum_threshold},
+    commit_floor,
     dag::DagStore,
-    decide_slot,
+    decide_slot_for,
     equivocation::EquivocationProof,
+    gc::gc_round as gc_round_for,
+    is_obsolete,
     joint::{StakeTable, Vote},
-    validator_quorum_met, AuthorityId, ConsensusError, LeaderStatus,
+    validator_quorum_met, AuthorityId, Committee, ConsensusError, LeaderStatus,
 };
 use suwappu_execution::Substrate;
-use suwappu_execution::{execute_block, Block, InMemorySubstrate, Intent};
+use suwappu_execution::{
+    execute_block, ratify_checkpoint, sign_checkpoint, verify_checkpoint_chain, Block, ChainLink,
+    Checkpoint, CheckpointSignature, InMemorySubstrate, Intent,
+};
 use suwappu_fastpath::{
     binding::{is_main_lane_consistent, MainLaneTx, FAST_PATH_CONFIRMATION_K},
     cert::{FastPathCert, FastPathTx, OwnedObjectId},
@@ -48,7 +55,11 @@ use tracing::debug;
 use crate::{
     config::{ConfigError, GenesisManifest, NodeConfig},
     events::{Event, EventLog, Lane},
-    wire::{BlockPayload, PeerId, Wire, WireConfig, WireEvent, WireMessage, WireSplit},
+    store::{CheckpointBundle, RegistrySet, StateSnapshot},
+    wire::{
+        BlockPayload, CheckpointSigMsg, DynPeers, PeerId, Wire, WireConfig, WireEvent, WireMessage,
+        WireSplit, SNAPSHOT_CHUNK_BYTES,
+    },
 };
 
 /// DAG-S31.2 shared validator state with per-field locking.
@@ -76,6 +87,25 @@ pub(crate) struct State {
     pub(crate) votes: parking_lot::Mutex<HashMap<CertHash, Vec<Vote>>>,
     pub(crate) blocks: parking_lot::Mutex<HashMap<CertHash, BlockPayload>>,
     pub(crate) committed: parking_lot::Mutex<HashSet<CertHash>>,
+    /// Serialises the commit walk (`try_commit`) and every snapshot
+    /// capture. Per-peer inbox tasks each call `try_commit`; without this
+    /// two walks could interleave their `apply_commit` calls (reordering
+    /// substrate application between honest nodes), and a snapshot could
+    /// observe a certificate's commit mark before its block was applied
+    /// (the joiner and the recovery replay would then both skip it
+    /// forever). Lock order: `commit_lock` → `inner` → `dag`.
+    pub(crate) commit_lock: tokio::sync::Mutex<()>,
+    /// Fault-injection knob (`/goal` B2, IQ-009 D5): when set, the round
+    /// driver broadcasts its certificates but withholds their blocks, and
+    /// no block is served on `GetBlock` / `GetCert` / `GetCertsByRound`.
+    /// Never set in production; exercised by
+    /// `withholding_author_does_not_stall_the_mesh`.
+    pub(crate) withhold_blocks: std::sync::atomic::AtomicBool,
+    /// Fault-injection knob (`/goal` B2, IQ-010 D3): when set, the round
+    /// driver signs and broadcasts a second, conflicting certificate for
+    /// every round it authors. Never set in production; exercised by
+    /// `middle_ejection_keeps_the_mesh_committing`.
+    pub(crate) equivocate: std::sync::atomic::AtomicBool,
     pub(crate) stake_table: tokio::sync::RwLock<StakeTable>,
     pub(crate) authority_registry: tokio::sync::RwLock<AuthorityRegistry>,
     pub(crate) validator_registry: tokio::sync::RwLock<ValidatorRegistry>,
@@ -118,6 +148,34 @@ pub(crate) struct State {
     /// only when `StateInner::latest_bridge_header` advances to a new round.
     pub(crate) bridge_attestation_cache:
         parking_lot::Mutex<Option<suwappu_consensus::bridge_header::HeaderAttestation>>,
+    /// IQ-008 D4: snapshot directory (`NodeConfig::data_dir`), `None` for
+    /// an ephemeral node.
+    pub(crate) data_dir: Option<std::path::PathBuf>,
+    /// This node's authority id (`NodeConfig::authority_id`); the id it
+    /// signs checkpoints under.
+    pub(crate) self_id: AuthorityId,
+    /// The Authority Ring as published in the genesis manifest — the
+    /// trust root of the checkpoint-chain walk (IQ-008 D5).
+    pub(crate) genesis_authority_registry: AuthorityRegistry,
+    /// Connected dynamic peers, for push gossip (IQ-008 D5). Empty on a
+    /// node whose wire has not been attached (unit tests).
+    pub(crate) dyn_peers: DynPeers,
+}
+
+/// Joiner-side checkpoint-snapshot bootstrap state (IQ-008 D5).
+#[derive(Debug, Default)]
+pub(crate) struct SnapshotSync {
+    /// Unix ms of the last `GetCheckpoints` request (0 = never).
+    pub(crate) requested_at_ms: u64,
+    /// Chain-verified bundle whose snapshot we are fetching.
+    pub(crate) trusted: Option<CheckpointBundle>,
+    /// The peer the snapshot was requested from; chunks from any other
+    /// peer are ignored.
+    pub(crate) source: Option<PeerId>,
+    /// Reassembly buffer keyed by chunk index.
+    pub(crate) chunks: BTreeMap<u32, Vec<u8>>,
+    /// Expected chunk count once the first chunk arrives.
+    pub(crate) total: u32,
 }
 
 /// Material needed to produce this validator's bridge-header side-attestations.
@@ -265,7 +323,103 @@ pub(crate) struct StateInner {
     /// Drives the forward backfill loop (`run_backfill`) for late-join
     /// and restart catch-up.
     pub(crate) sync_tip: u64,
-    pub(crate) n_authorities: u32,
+    /// IQ-008 D5: one-shot request for the backfill loop to re-pull rounds
+    /// from here instead of from the local DAG tip. Set after a snapshot
+    /// install or a disk recovery: the certificates above the restored
+    /// leader frontier are already in the DAG (they travelled in the
+    /// snapshot / the log), but their Validator-Ring votes and possibly
+    /// their blocks did not, and forward backfill keys on the DAG tip so it
+    /// would never ask for them. Re-requesting the tail delivers the votes
+    /// (`Votes` frames) the joint quorum needs to commit past the frontier.
+    pub(crate) backfill_resume: Option<u64>,
+    /// Highest gc round any *configured* peer has reported via
+    /// `TipInfo`. When it is at or above our own DAG round, forward
+    /// backfill cannot succeed (IQ-008 D5) and `needs_snapshot` is set.
+    pub(crate) peer_gc_round: Option<u64>,
+    /// Set by the backfill loop once it observes that every round it
+    /// would request has been pruned by the peers holding the tip. Read
+    /// by the sync-status RPC; consumed by the checkpoint-snapshot
+    /// bootstrap (S34.4).
+    pub(crate) needs_snapshot: bool,
+    /// Manifest `gc_depth_rounds` (IQ-008 D1). Identical mesh-wide by
+    /// construction (same genesis.toml), which is what makes
+    /// `commit_floor` deterministic across nodes.
+    pub(crate) gc_depth: u64,
+    /// Our own gc round: `gc_round(last_committed_leader_round, gc_depth)`.
+    /// Mirrors `DagStore::gc_round()` so readers under `inner` need not
+    /// take the DAG lock. `None` until the chain is `gc_depth` deep.
+    pub(crate) gc_round: Option<u64>,
+    /// Round of the highest leader whose causal history this node has
+    /// committed. Sole input to `gc_round`; only leader commits move it.
+    pub(crate) last_committed_leader_round: Option<u64>,
+    /// IQ-008 D4: the durable commit log, `None` when `data_dir` is
+    /// unset. Lives under `inner` so a log append and the substrate
+    /// mutation it precedes happen under one guard, and so a snapshot's
+    /// `log_sequence` is read at the same instant as the state it covers.
+    pub(crate) store: Option<crate::store::CommitLog>,
+    /// Leader round at which the last snapshot was captured.
+    pub(crate) last_snapshot_leader_round: Option<u64>,
+    /// IQ-008 D5: manifest checkpoint cadence in committed leader rounds.
+    pub(crate) checkpoint_cadence: u64,
+    /// Next committed leader round at or past which a checkpoint is
+    /// emitted.
+    pub(crate) next_checkpoint_boundary: u64,
+    /// Height the next checkpoint will carry.
+    pub(crate) checkpoint_height: u64,
+    /// Hash of the last emitted checkpoint (`[0; 32]` before the first).
+    pub(crate) last_checkpoint_hash: [u8; 32],
+    /// Checkpoints this node computed and is still collecting signatures
+    /// for, keyed by hash, with the snapshot captured at each. Several
+    /// can be outstanding at once: a peer's signature for boundary B can
+    /// arrive after this node has already crossed boundary B + cadence
+    /// (it sits behind certificate frames in the same FIFO inbox), and
+    /// counting it only against a single "pending" checkpoint silently
+    /// starved co-signing under load (found by the restart test under a
+    /// fully parallel suite). Bounded to `MAX_BUFFERED_CHECKPOINTS`.
+    pub(crate) emitted_checkpoints: BTreeMap<[u8; 32], (Checkpoint, Arc<StateSnapshot>)>,
+    /// Verified signatures buffered per checkpoint hash. Bounded to the
+    /// most recent `MAX_BUFFERED_CHECKPOINTS` hashes.
+    pub(crate) checkpoint_sigs: BTreeMap<[u8; 32], (u64, Vec<CheckpointSignature>)>,
+    /// Committee-transition checkpoints (oldest first), each signed by
+    /// the committee the previous one established.
+    pub(crate) checkpoint_transitions: Vec<CheckpointBundle>,
+    /// Latest co-signed checkpoint, if any.
+    pub(crate) latest_checkpoint: Option<CheckpointBundle>,
+    /// Snapshot captured at the latest *emitted* checkpoint (awaiting
+    /// co-signature).
+    pub(crate) checkpoint_snapshot: Option<Arc<StateSnapshot>>,
+    /// Snapshot bound to the latest *co-signed* checkpoint — the one
+    /// served to joiners. Kept separately so emitting the next
+    /// checkpoint never un-serves the one joiners can verify.
+    pub(crate) served_snapshot: Option<Arc<StateSnapshot>>,
+    /// Joiner bootstrap state.
+    pub(crate) snapshot_sync: SnapshotSync,
+    /// The active committee the commit rule runs over (IQ-010 D2): the
+    /// registry members that hold leader slots, count toward quorum and
+    /// carry stake weight. Changes only in the epoch-boundary governance
+    /// drain — a function of the commit sequence.
+    pub(crate) committee: Committee,
+    /// The committee each epoch's slots are decided under (IQ-010 D4):
+    /// epoch `e` uses the committee that the drain into epoch `e − 1`
+    /// produced, so it is fixed before any slot of `e` can be decided and
+    /// a later boundary never re-schedules a slot still in the live
+    /// window. Genesis defines epochs 0 and 1; every crossing into `k`
+    /// defines `k + 1`. Commit-derived, so part of `snapshot_root`.
+    pub(crate) committee_by_epoch: BTreeMap<u64, Committee>,
+    /// Registered-but-inactive authorities one of whose certificates has
+    /// been committed (IQ-010 D2); they join the committee at the next
+    /// epoch boundary. Commit-derived: written by `apply_commit` only.
+    pub(crate) live_proven: BTreeSet<AuthorityId>,
+    /// Authorities removed at a boundary, with their registered key and
+    /// the last round at which their certificates are still admitted
+    /// (one retention window past the removal — the era window a joiner
+    /// verifies served certificates under). A node that crossed the boundary
+    /// later still references such certificates as parents; without the
+    /// grace an early node would refuse them for ever and orphan every
+    /// descendant (third S36 pass). Retired certificates are never
+    /// leaders or support — the committee pinned to their epoch decides
+    /// that — only DAG structure. Pruned with the gc round.
+    pub(crate) retired: BTreeMap<AuthorityId, (Vec<u8>, u64)>,
     /// Certs received whose parents aren't yet in the local DAG.
     pub(crate) orphans: HashMap<CertHash, Vec<Certificate>>,
     /// Cert hashes for which a `GetCert` request is outstanding.
@@ -275,6 +429,29 @@ pub(crate) struct StateInner {
     /// `GetBlock` for these; entries are removed once the block arrives
     /// (and the cert commits) or is otherwise no longer needed.
     pub(crate) needed_blocks: HashSet<CertHash>,
+    /// IQ-009 D1: signature-verified certificates whose block is not yet
+    /// held. A certificate enters the DAG only together with its block,
+    /// so these wait here (bounded like the orphan buffer) while the
+    /// block is fetched; `handle_block` re-admits them. Their hashes are
+    /// also in `needed_blocks` so the sync sweeper retries the fetch.
+    pub(crate) awaiting_block: HashMap<CertHash, Certificate>,
+    /// Per-hash `(last_attempt_ms, attempts)` for block fetches, the same
+    /// exponential back-off the certificate leg uses (no request storm
+    /// from a full parking buffer).
+    pub(crate) block_fetch_history: HashMap<CertHash, (u64, u32)>,
+    /// Blocks that arrived before their certificate was known, up to
+    /// `MAX_BLOCK_CANDIDATES_PER_HASH` per hash and
+    /// `MAX_BLOCK_CANDIDATES` in total. A block is bound to the signed
+    /// `payload_digest` only when its certificate is admitted, so a relay
+    /// that pre-squats a wrong payload cannot make the authentic block be
+    /// dropped (IQ-009 D1; found by `availability_is_an_admission_invariant`).
+    pub(crate) block_candidates: HashMap<CertHash, Vec<CandidateBlock>>,
+    /// Encoded bytes held in `block_candidates`, against
+    /// `MAX_BLOCK_CANDIDATE_BYTES`.
+    pub(crate) block_candidates_bytes: usize,
+    /// Per-source `(entries, encoded bytes)` held in `block_candidates`,
+    /// against `candidate_share`.
+    pub(crate) block_candidates_by_peer: HashMap<PeerId, (usize, usize)>,
     /// DAG-S32: per-orphan (last_attempt_unix_ms, attempt_count).
     /// Set on first request and on every sweeper-driven retry. Removed
     /// when the orphan is finally inserted into the DAG (alongside the
@@ -297,9 +474,6 @@ pub(crate) struct StateInner {
     pub(crate) ltp_received_count: u64,
     pub(crate) corridors: HashMap<(ChainId, ChainId), Corridor>,
     pub(crate) epoch: EpochState,
-    /// Stake parked for newly-admitted authorities (DAG-S27.7);
-    /// promoted into `state.stake_table` on first-cert insertion.
-    pub(crate) pending_stake: BTreeMap<AuthorityId, suwappu_consensus::Stake>,
     /// Issue #18: governance intents queued for application at the
     /// next epoch boundary. Applying `AdmitAuthority` / `ExitAuthority`
     /// / `EjectAuthority` at commit time caused transitional
@@ -313,9 +487,14 @@ pub(crate) struct StateInner {
     /// Equivocation detection O(1) per insert instead of O(dag)
     /// per try_commit.
     pub(crate) seen_at: BTreeMap<(AuthorityId, Round), CertHash>,
-    /// Equivocations detected at insertion time. `try_commit`
-    /// drains this queue instead of re-scanning the DAG.
+    /// Equivocations detected at insertion time. The round driver drains
+    /// this queue into `Intent::EquivocationEvidence` in this node's next
+    /// block (IQ-010 D3); the ejection itself happens when the committed
+    /// evidence reaches the epoch boundary, on every node alike.
     pub(crate) detected_equivocations: Vec<EquivocationProof>,
+    /// Slots this node has already carried evidence for, so a detection
+    /// is emitted once. Pruned with the gc round.
+    pub(crate) evidence_emitted: BTreeSet<(AuthorityId, Round)>,
     /// `round → committed cert hash` index. Populated from `try_commit`
     /// alongside the existing `state.blocks` insert so `suwappu_getBlock(round)`
     /// is O(log n) instead of O(blocks) scan. `BTreeMap` (rather than
@@ -333,6 +512,15 @@ pub(crate) struct StateInner {
     /// execution time (`InMemorySubstrate::state_root()` returns latest with no
     /// round→root history), so it must be captured here, not reconstructed.
     pub(crate) latest_bridge_header: Option<(u64, [u8; 32])>,
+}
+
+impl StateInner {
+    /// The committee the slot at `round` is decided under (IQ-010 D4), or
+    /// `None` while the boundary that fixes it has not been committed —
+    /// the commit walk defers at such a slot rather than guess.
+    pub(crate) fn committee_for_round(&self, round: u64) -> Option<&Committee> {
+        self.committee_by_epoch.get(&self.epoch.epoch_for(round))
+    }
 }
 
 /// Round-based epoch counter for validator-set governance (DAG-S25).
@@ -372,6 +560,30 @@ pub(crate) type FastPathKey = (OwnedObjectId, u64);
 /// flood unresolvable certs and OOM the node. 4096 ≈ 16 MB of
 /// bincode-serialized certs — far more than any honest reconvergence.
 const MAX_ORPHAN_CERTS: usize = 4096;
+/// Soft cap on certificates parked for a missing block (IQ-009 D1).
+const MAX_AWAITING_BLOCK: usize = 4096;
+/// Blocks held for a not-yet-known certificate: per hash, and hashes in
+/// total (so at most `2 × MAX_BLOCK_CANDIDATES` blocks).
+const MAX_BLOCK_CANDIDATES_PER_HASH: usize = 2;
+const MAX_BLOCK_CANDIDATES: usize = 4096;
+/// Byte budget of the candidate buffer (encoded size). A candidate is
+/// unauthenticated payload — no signature, no certificate — so the
+/// entry cap alone would let one configured peer hold
+/// `2 × 4096 × MAX_FRAME_BYTES` = 8 GiB here (consensus-review finding,
+/// fourth S35 pass). One frame is at most 1/32 of this budget.
+const MAX_BLOCK_CANDIDATE_BYTES: usize = 32 * 1024 * 1024;
+/// Entries of `block_fetch_history` kept beyond the live parked and
+/// commit-critical set, so an evicted-then-replayed certificate resumes
+/// its back-off instead of restarting it. When exceeded, the stale
+/// entries are dropped in one pass (amortised O(1) per park).
+const MAX_BLOCK_FETCH_HISTORY: usize = 4 * MAX_AWAITING_BLOCK;
+/// Snapshot chunks accepted from the serving peer for one bootstrap
+/// (`SNAPSHOT_CHUNK_BYTES` each): the reassembly buffer is bounded
+/// whatever `total` the peer claims.
+const MAX_SNAPSHOT_CHUNKS: u32 = 1024;
+/// Fetch frames issued per sweeper tick per leg (certificates, blocks),
+/// oldest-due first: a full buffer never becomes a request storm.
+const MAX_FETCHES_PER_TICK: usize = 256;
 
 /// Interval at which the synchronizer re-issues `GetCert` for any
 /// missing parents still in `inflight_fetches`. Matches Sui's
@@ -527,12 +739,18 @@ impl State {
                 tracing::warn!(err = %e, "genesis: prebalance application failed");
             }
         }
-        let n = manifest.validators.len() as u32;
+        let genesis_authority_registry = authority_registry.clone();
         Self {
-            dag: tokio::sync::RwLock::new(DagStore::new()),
+            // Tombstone window = manifest gc depth (IQ-008 D2), so a cert
+            // just above the gc round validates against its pruned
+            // parents for exactly one retention window.
+            dag: tokio::sync::RwLock::new(DagStore::with_gc_depth(manifest.gc_depth_rounds)),
             votes: parking_lot::Mutex::new(HashMap::new()),
             blocks: parking_lot::Mutex::new(HashMap::new()),
             committed: parking_lot::Mutex::new(HashSet::new()),
+            commit_lock: tokio::sync::Mutex::new(()),
+            withhold_blocks: std::sync::atomic::AtomicBool::new(false),
+            equivocate: std::sync::atomic::AtomicBool::new(false),
             stake_table: tokio::sync::RwLock::new(stake_table),
             authority_registry: tokio::sync::RwLock::new(authority_registry),
             validator_registry: tokio::sync::RwLock::new(validator_registry),
@@ -541,10 +759,40 @@ impl State {
                 last_authored_round: None,
                 max_observed_round: 0,
                 sync_tip: 0,
-                n_authorities: n,
+                backfill_resume: None,
+                peer_gc_round: None,
+                needs_snapshot: false,
+                gc_depth: manifest.gc_depth_rounds.max(1),
+                gc_round: None,
+                last_committed_leader_round: None,
+                store: None,
+                last_snapshot_leader_round: None,
+                checkpoint_cadence: manifest.checkpoint_cadence_rounds.max(1),
+                next_checkpoint_boundary: manifest.checkpoint_cadence_rounds.max(1),
+                checkpoint_height: 0,
+                last_checkpoint_hash: [0u8; 32],
+                emitted_checkpoints: BTreeMap::new(),
+                checkpoint_sigs: BTreeMap::new(),
+                checkpoint_transitions: Vec::new(),
+                latest_checkpoint: None,
+                checkpoint_snapshot: None,
+                served_snapshot: None,
+                snapshot_sync: SnapshotSync::default(),
+                committee: Committee::new(genesis_authority_registry.members().map(|m| m.id)),
+                committee_by_epoch: {
+                    let c = Committee::new(genesis_authority_registry.members().map(|m| m.id));
+                    BTreeMap::from([(0u64, c.clone()), (1u64, c)])
+                },
+                live_proven: BTreeSet::new(),
+                retired: BTreeMap::new(),
                 orphans: HashMap::new(),
                 inflight_fetches: HashSet::new(),
                 needed_blocks: HashSet::new(),
+                awaiting_block: HashMap::new(),
+                block_fetch_history: HashMap::new(),
+                block_candidates: HashMap::new(),
+                block_candidates_bytes: 0,
+                block_candidates_by_peer: HashMap::new(),
                 inflight_fetch_history: HashMap::new(),
                 fastpath_pending: HashMap::new(),
                 fastpath_committed: HashSet::new(),
@@ -558,10 +806,10 @@ impl State {
                     rounds_per_epoch: manifest.rounds_per_epoch,
                     last_boundary_round: 0,
                 },
-                pending_stake: BTreeMap::new(),
                 pending_governance: Vec::new(),
                 seen_at: BTreeMap::new(),
                 detected_equivocations: Vec::new(),
+                evidence_emitted: BTreeSet::new(),
                 blocks_by_round: BTreeMap::new(),
                 tx_to_block: HashMap::new(),
                 latest_bridge_header: None,
@@ -574,7 +822,26 @@ impl State {
             governance_envelopes: parking_lot::Mutex::new(HashMap::new()),
             bridge_signer,
             bridge_attestation_cache: parking_lot::Mutex::new(None),
+            data_dir: None,
+            self_id: 0,
+            genesis_authority_registry,
+            dyn_peers: Arc::new(parking_lot::RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Builder: attach the wire's dynamic-peer registry so broadcasts
+    /// reach late joiners (IQ-008 D5).
+    fn with_dyn_peers(mut self, dyn_peers: DynPeers) -> Self {
+        self.dyn_peers = dyn_peers;
+        self
+    }
+
+    /// Builder: runtime identity + persistence (IQ-008 D4/D5). Called by
+    /// `Daemon::start` before the state is shared.
+    fn with_runtime(mut self, data_dir: Option<std::path::PathBuf>, self_id: AuthorityId) -> Self {
+        self.data_dir = data_dir;
+        self.self_id = self_id;
+        self
     }
 
     /// Compute the `(object, nonce)` key for a fast-path tx.
@@ -583,23 +850,45 @@ impl State {
     }
 }
 
-/// Count distinct authors with a cert at `round` in the local DAG.
-/// DagBft-C admits round R+1 once `quorum_threshold(n)` distinct
-/// authors are observed at round R. Free function (was on `&State`
-/// pre-S31.2) because the caller now passes the DAG read guard.
-fn distinct_authors_at(dag: &DagStore, round: u64, n_authorities: u32) -> u32 {
-    (0..n_authorities)
-        .filter(|a| cert_at(dag, round, *a).is_some())
+/// Count distinct committee members with a cert at `round` in the local
+/// DAG. DagBft-C admits round R+1 once `quorum_threshold(|C|)` distinct
+/// members are observed at round R (IQ-010 D1: registered-but-inactive
+/// authors are not counted). Free function (was on `&State` pre-S31.2)
+/// because the caller now passes the DAG read guard.
+fn distinct_authors_at(dag: &DagStore, round: u64, committee: &Committee) -> u32 {
+    committee
+        .members()
+        .iter()
+        .filter(|a| cert_at(dag, round, **a).is_some())
         .count() as u32
 }
 
-/// Round R parents = every cert at round R-1 the local DAG has observed.
-fn parents_for_round(dag: &DagStore, round: u64, n_authorities: u32) -> Vec<CertHash> {
+/// Highest round at which the local DAG holds a quorum of distinct
+/// authors — the highest round a certificate can be built on top of.
+/// Used as the anchor for a forward jump of the authoring round: the
+/// DAG tip itself is not safe to anchor on, because one seated authority
+/// can push a single valid certificate at any round above its parent and
+/// a node that jumped after it would wait for parents that never come
+/// (consensus-review finding on S34.5). The scan runs from the top of the
+/// live window and stops at the first quorum round, so it is O(1) for a
+/// node keeping up and O(live rounds) at worst.
+fn highest_quorum_round(dag: &DagStore, committee: &Committee) -> Option<u64> {
+    let need = committee.quorum_threshold();
+    dag.rounds_rev()
+        .find(|r| distinct_authors_at(dag, *r, committee) >= need)
+}
+
+/// Round R parents = every cert at round R-1 by a *registered* authority
+/// the local DAG has observed (IQ-010 D2): a registered-but-inactive
+/// member's certificates are referenced so they can be committed, which
+/// is the liveness proof its activation waits for.
+fn parents_for_round(dag: &DagStore, round: u64, registered: &[AuthorityId]) -> Vec<CertHash> {
     if round == 0 {
         return Vec::new();
     }
-    (0..n_authorities)
-        .filter_map(|a| cert_at(dag, round - 1, a))
+    registered
+        .iter()
+        .filter_map(|a| cert_at(dag, round - 1, *a))
         .collect()
 }
 
@@ -613,12 +902,29 @@ pub struct Daemon {
     /// progress and inject intents).
     #[allow(dead_code)]
     pub(crate) state: Arc<State>,
+    /// Event log handle, kept so `shutdown` can record the final snapshot.
+    log: EventLog,
 }
 
 impl Drop for Daemon {
     fn drop(&mut self) {
         for t in self.tasks.drain(..) {
             t.abort();
+        }
+    }
+}
+
+impl Daemon {
+    /// Clean shutdown (IQ-008 D4): stop every task so no further commit
+    /// can land, then write a final snapshot so the next start replays
+    /// nothing. Safe to call on an ephemeral node (no-op). Dropping the
+    /// handle afterwards is still required.
+    pub async fn shutdown(&mut self) {
+        for t in self.tasks.drain(..) {
+            t.abort();
+        }
+        if self.state.data_dir.is_some() {
+            snapshot_now(&self.state, "shutdown", &self.log).await;
         }
     }
 }
@@ -647,6 +953,7 @@ impl Daemon {
         let self_id: AuthorityId = cfg.authority_id;
         let self_label = cfg.self_id.clone();
         let round_ms = cfg.round_ms;
+        validate_manifest(&manifest)?;
 
         let (log, log_task) = EventLog::start(&cfg.event_log_path).await?;
         let wire = Wire::start(WireConfig {
@@ -663,6 +970,7 @@ impl Daemon {
             inboxes,
             outbound,
             dyn_inbox,
+            dyn_peers,
             tasks: mut wire_tasks,
         } = wire.split();
         let outbound = Arc::new(outbound);
@@ -685,7 +993,25 @@ impl Daemon {
         // attestation is configured) so the RPC adapter can sign bridge
         // headers. `None` => attestation disabled; the daemon still runs.
         let bridge_signer = BridgeHeaderSigner::from_config(&cfg, &manifest);
-        let state = Arc::new(State::new(&manifest, self_secret_key, bridge_signer));
+        let state = Arc::new(
+            State::new(&manifest, self_secret_key, bridge_signer)
+                .with_runtime(cfg.data_dir.clone(), self_id)
+                .with_dyn_peers(dyn_peers),
+        );
+
+        // IQ-008 D4: recover from disk BEFORE any task can author, vote or
+        // serve — the authored-round marker in particular must be restored
+        // before the round driver's first tick.
+        if let Some(dir) = cfg.data_dir.as_deref() {
+            let recovered = recover_from_disk(&state, dir, cfg.store_fsync, &self_label, &log)
+                .await
+                .map_err(|e| anyhow::anyhow!("recovery from {}: {e}", dir.display()))?;
+            tracing::info!(
+                data_dir = %dir.display(),
+                recovered_leader_round = ?recovered,
+                "persistence enabled"
+            );
+        }
 
         // DAG-S31.4 / A3: client + JSON-RPC intent submissions flow
         // through `state.mempool` directly. The pre-A3 `intent_tx` /
@@ -802,6 +1128,7 @@ impl Daemon {
             let view = crate::rpc_adapter::NodeStateView::new(
                 state.clone(),
                 manifest.network_id.clone(),
+                self_id,
                 &log,
             );
             let ctx = std::sync::Arc::new(suwappu_rpc::RpcContext::new(std::sync::Arc::new(view)));
@@ -842,6 +1169,7 @@ impl Daemon {
             _log_task: log_task,
             tasks,
             state,
+            log,
         })
     }
 }
@@ -871,6 +1199,77 @@ fn block_payload_is_consistent(block: &BlockPayload) -> bool {
     compute_payload_digest(&block.intents, &block.governance_auth) == block.payload_digest
 }
 
+/// A block is bound to a signed certificate header (`payload_digest`,
+/// `author`, `round`) only when all three agree. The digest is what the
+/// signature covers; author and round are what the block-side bookkeeping
+/// (`prune_state`, parked-block eviction, RPC indices) trusts, so a block
+/// claiming the right digest under a foreign round is still a forgery.
+fn block_matches_header(block: &BlockPayload, header: ([u8; 32], AuthorityId, u64)) -> bool {
+    (block.payload_digest, block.author, block.round) == header
+}
+
+/// Header of a signed certificate as `block_matches_header` expects it.
+fn cert_header(c: &Certificate) -> ([u8; 32], AuthorityId, u64) {
+    (c.payload_digest, c.author, c.round)
+}
+
+/// A block held for a certificate that is not yet known, with its
+/// encoded size and source so the buffer's byte budget and per-peer
+/// share are exact and O(1) to update.
+#[derive(Clone, Debug)]
+pub(crate) struct CandidateBlock {
+    pub(crate) bytes: usize,
+    pub(crate) from: PeerId,
+    pub(crate) block: BlockPayload,
+}
+
+/// Release the block bound for `hash` unless the DAG holds the
+/// certificate. Decided under the DAG read guard: `ingest_cert` re-checks
+/// the block under the write guard before every insert, so a release
+/// and an admission of the same hash can never interleave (I-AV1;
+/// consensus-review finding, fifth S35 pass).
+async fn release_unadmitted_block(state: &State, hash: CertHash) {
+    let dag = state.dag.read().await;
+    if !dag.contains(&hash) {
+        state.blocks.lock().remove(&hash);
+    }
+}
+
+/// Give back the budget and per-peer share held by candidates leaving
+/// the buffer (bound, pruned).
+fn release_candidates<'a>(inner: &mut StateInner, cands: impl Iterator<Item = &'a CandidateBlock>) {
+    for c in cands {
+        inner.block_candidates_bytes = inner.block_candidates_bytes.saturating_sub(c.bytes);
+        let drained = match inner.block_candidates_by_peer.get_mut(&c.from) {
+            Some(used) => {
+                used.0 = used.0.saturating_sub(1);
+                used.1 = used.1.saturating_sub(c.bytes);
+                used.0 == 0
+            }
+            None => false,
+        };
+        if drained {
+            inner.block_candidates_by_peer.remove(&c.from);
+        }
+    }
+}
+
+/// Per-peer share of the candidate buffer: entries and encoded bytes a
+/// single configured peer may hold, so one peer pinning its share at
+/// the ceiling cannot starve the candidates of peers honest about their
+/// identity (consensus-review finding, fifth S35 pass). Entries are
+/// shared as keys (one entry per key is how a peer spends the key cap
+/// fastest) and floored so the shares never sum above the global caps;
+/// the byte share is floored at one frame so a large configured peer
+/// set never refuses a peer's first full-size block (seventh pass).
+fn candidate_share(peers: usize) -> (usize, usize) {
+    let n = peers.max(1);
+    (
+        (MAX_BLOCK_CANDIDATES / n).max(1),
+        (MAX_BLOCK_CANDIDATE_BYTES / n).max(crate::wire::MAX_FRAME_BYTES),
+    )
+}
+
 async fn run_inbox(
     self_label: String,
     self_id: AuthorityId,
@@ -890,36 +1289,17 @@ async fn run_inbox(
         let WireEvent { from, msg, reply } = ev;
         match msg {
             WireMessage::Cert(cert) => {
-                let h = cert.hash();
-                let round = cert.round;
-                log.emit(
-                    Event::now(&self_label, Lane::Main, "received")
-                        .with_round(round)
-                        .with_cert_hash(&h.0)
-                        .with_peer(from.0.clone()),
-                );
-                let inserted = ingest_cert(&state, cert, &from, &outbound).await;
-                // Post-genesis joiners ingest and commit but do not vote
-                // until seated in the Authority Ring: an unseated vote
-                // carries zero stake in `validator_quorum_met` anyway,
-                // and emitting it would just be gossip noise.
-                let seated = state.authority_registry.read().await.contains(self_id);
-                if seated {
-                    for ic in inserted {
-                        let vote = Vote {
-                            validator: self_id,
-                            candidate: ic.hash,
-                        };
-                        state.votes.lock().entry(ic.hash).or_default().push(vote);
-                        log.emit(
-                            Event::now(&self_label, Lane::Main, "voted")
-                                .with_round(ic.round)
-                                .with_cert_hash(&ic.hash.0),
-                        );
-                        broadcast_traced(&outbound, WireMessage::Vote(vote), &self_label, &log);
-                    }
-                }
-                try_commit(&state, &self_label, &log).await;
+                handle_cert(
+                    &state,
+                    cert,
+                    &from,
+                    &outbound,
+                    self_id,
+                    &self_label,
+                    &log,
+                    true,
+                )
+                .await;
             }
             WireMessage::Block(block) => {
                 // Dynamic (unauthenticated) peers only ever REQUEST blocks
@@ -929,39 +1309,8 @@ async fn run_inbox(
                 // responses are is_dynamic == false.
                 if is_dynamic {
                     debug!(peer = %from.0, "inbox: dropping Block from dynamic peer");
-                } else if !block_payload_is_consistent(&block) {
-                    // Self-consistency: payload_digest must equal
-                    // compute_payload_digest(intents, governance_auth), so a
-                    // relay cannot strip/mutate the intents OR the governance
-                    // envelopes.
-                    debug!(peer = %from.0, "inbox: block payload digest mismatch, dropping");
                 } else {
-                    // Bind to the SIGNED cert when we already have it: only
-                    // accept a block whose digest matches the cert's signed
-                    // payload_digest, and OVERWRITE any previously-stored
-                    // (e.g. relay-poisoned stripped) block for this cert with
-                    // the authentic one. When the cert isn't known yet, store
-                    // best-effort (first-write-wins); `ingest_cert` purges a
-                    // mismatched squatter when the cert arrives. This closes
-                    // the stripped-block poison that first-write-wins alone
-                    // left open (consensus-review of 8eefd3d).
-                    let cert_digest = state
-                        .dag
-                        .read()
-                        .await
-                        .get(&block.cert_hash)
-                        .map(|c| c.payload_digest);
-                    match cert_digest {
-                        Some(cd) if cd == block.payload_digest => {
-                            state.blocks.lock().insert(block.cert_hash, block);
-                        }
-                        Some(_) => {
-                            debug!(peer = %from.0, "inbox: block does not match known cert digest, dropping");
-                        }
-                        None => {
-                            state.blocks.lock().entry(block.cert_hash).or_insert(block);
-                        }
-                    }
+                    handle_block(&state, block, &from, &outbound, self_id, &self_label, &log).await;
                 }
             }
             WireMessage::Vote(vote) => {
@@ -970,20 +1319,45 @@ async fn run_inbox(
                 // would forge Validator-Ring stake.
                 if is_dynamic {
                     debug!(peer = %from.0, "inbox: dropping Vote from dynamic peer");
-                } else {
-                    state
-                        .votes
-                        .lock()
-                        .entry(vote.candidate)
-                        .or_default()
-                        .push(vote);
-                    try_commit(&state, &self_label, &log).await;
+                } else if store_vote(&state, vote).await {
+                    try_commit(&state, &self_label, &log, &outbound).await;
                 }
             }
             WireMessage::GetCert(hash) => {
                 let cert_opt = state.dag.read().await.get(&hash).cloned();
                 if let Some(cert) = cert_opt {
+                    // Block first so the receiver admits on arrival
+                    // (IQ-009 D2); in the DAG implies the block is held.
+                    let withhold = state
+                        .withhold_blocks
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    let block_opt = if withhold {
+                        None
+                    } else {
+                        state.blocks.lock().get(&hash).cloned()
+                    };
+                    if let Some(block) = block_opt {
+                        reply_to(&outbound, &from, &reply, WireMessage::Block(block));
+                    }
                     reply_to(&outbound, &from, &reply, WireMessage::Cert(cert));
+                    reply_votes(&state, hash, &outbound, &from, &reply);
+                }
+            }
+            WireMessage::Votes(votes) => {
+                // Same trust rule as a live `Vote`: unsigned, so only a
+                // configured peer may deliver them.
+                if is_dynamic {
+                    debug!(peer = %from.0, "inbox: dropping Votes from dynamic peer");
+                } else {
+                    let mut any = false;
+                    // One frame carries the votes for one certificate; a
+                    // relay cannot exceed the ring size honestly.
+                    for vote in votes.into_iter().take(MAX_VOTES_PER_FRAME) {
+                        any |= store_vote(&state, vote).await;
+                    }
+                    if any {
+                        try_commit(&state, &self_label, &log, &outbound).await;
+                    }
                 }
             }
             WireMessage::FastPath(cert) => {
@@ -1008,8 +1382,37 @@ async fn run_inbox(
             }
             WireMessage::Pong(_) => {}
             WireMessage::GetTip => {
-                let tip = state.dag.read().await.max_round().unwrap_or(0);
-                reply_to(&outbound, &from, &reply, WireMessage::Tip(tip));
+                // Advertise the anchor — the highest round holding a quorum
+                // of distinct authors (or the frontier) — rather than the
+                // raw `max_round`: it is the highest round a peer can
+                // build on and the only value no single authority can
+                // ratchet, so a behind peer's `sync_tip` is never pinned
+                // above what it can admit (consensus-review findings,
+                // fourth and fifth passes). Rounds above the anchor arrive
+                // by live push.
+                let (committee_now, frontier_now) = {
+                    let inner = state.inner.lock().await;
+                    (
+                        inner.committee.clone(),
+                        inner.last_committed_leader_round.unwrap_or(0),
+                    )
+                };
+                let (max_round, gc_round) = {
+                    let dag = state.dag.read().await;
+                    let anchor = highest_quorum_round(&dag, &committee_now)
+                        .unwrap_or(0)
+                        .max(frontier_now);
+                    (dag.max_round().unwrap_or(0).min(anchor), dag.gc_round())
+                };
+                reply_to(
+                    &outbound,
+                    &from,
+                    &reply,
+                    WireMessage::TipInfo {
+                        max_round,
+                        gc_round,
+                    },
+                );
             }
             WireMessage::Tip(r) => {
                 // Only configured peers set the backfill target: a
@@ -1022,6 +1425,138 @@ async fn run_inbox(
                     if r > inner.sync_tip {
                         inner.sync_tip = r;
                     }
+                }
+            }
+            WireMessage::TipInfo {
+                max_round,
+                gc_round,
+            } => {
+                // Same trust posture as `Tip`: a dynamic peer could claim
+                // an enormous gc round and trick us into abandoning
+                // forward backfill for a snapshot bootstrap.
+                if is_dynamic {
+                    debug!(peer = %from.0, "inbox: ignoring TipInfo from dynamic peer");
+                } else {
+                    let mut inner = state.inner.lock().await;
+                    if max_round > inner.sync_tip {
+                        inner.sync_tip = max_round;
+                    }
+                    if let Some(g) = gc_round {
+                        if inner.peer_gc_round.map_or(true, |cur| g > cur) {
+                            inner.peer_gc_round = Some(g);
+                        }
+                    }
+                }
+            }
+            WireMessage::CheckpointSig(msg) => {
+                // Configured peers only: the signature is verified against
+                // the verification committee's registered key, but the
+                // buffer is bounded per hash by signer count, so an
+                // unauthenticated flood could still churn it.
+                if is_dynamic {
+                    debug!(peer = %from.0, "inbox: dropping CheckpointSig from dynamic peer");
+                } else {
+                    // IQ-010 D6: only a signing-committee member's
+                    // signature is accepted. A registered-but-inactive
+                    // member's would be buffered but never ratifiable
+                    // (`ratify_checkpoint` refuses unknown signers), and
+                    // would pin that height for ever (second S36 pass).
+                    let committee = verification_committee(&state).await;
+                    let pk = committee.get(msg.authority).and_then(|m| {
+                        suwappu_crypto::mldsa::PublicKey::from_bytes(&m.public_key_bytes).ok()
+                    });
+                    let valid = pk.is_some_and(|pk| {
+                        suwappu_crypto::mldsa::Signature::from_bytes(&msg.signature)
+                            .map(|sig| {
+                                suwappu_crypto::mldsa::verify(&msg.checkpoint.hash(), &sig, &pk)
+                                    .is_ok()
+                            })
+                            .unwrap_or(false)
+                    });
+                    if valid {
+                        let hash = msg.checkpoint.hash();
+                        buffer_checkpoint_sig(
+                            &state,
+                            &msg.checkpoint,
+                            CheckpointSignature {
+                                authority: msg.authority,
+                                signature: msg.signature,
+                            },
+                        )
+                        .await;
+                        try_aggregate_checkpoint(&state, hash, &self_label, &log).await;
+                    } else {
+                        debug!(peer = %from.0, authority = msg.authority, "inbox: checkpoint signature rejected");
+                    }
+                }
+            }
+            WireMessage::GetCheckpoints => {
+                let chain = served_checkpoint_chain(&state).await;
+                if !chain.is_empty() {
+                    reply_to(&outbound, &from, &reply, WireMessage::Checkpoints(chain));
+                }
+            }
+            WireMessage::Checkpoints(chain) => {
+                if is_dynamic {
+                    debug!(peer = %from.0, "inbox: dropping Checkpoints from dynamic peer");
+                } else {
+                    handle_checkpoint_chain(&state, chain, &from, &reply, &outbound).await;
+                }
+            }
+            WireMessage::GetSnapshot(height) => {
+                let snap = {
+                    let inner = state.inner.lock().await;
+                    let served = inner
+                        .latest_checkpoint
+                        .as_ref()
+                        .is_some_and(|l| l.cosigned.checkpoint.height == height);
+                    inner.served_snapshot.clone().filter(|s| {
+                        served && s.checkpoint.as_ref().is_some_and(|c| c.height == height)
+                    })
+                };
+                if let Some(snap) = snap {
+                    match crate::codec::encode(&*snap) {
+                        Ok(bytes) => {
+                            let total = bytes.len().div_ceil(SNAPSHOT_CHUNK_BYTES).max(1) as u32;
+                            for (index, chunk) in bytes.chunks(SNAPSHOT_CHUNK_BYTES).enumerate() {
+                                reply_to(
+                                    &outbound,
+                                    &from,
+                                    &reply,
+                                    WireMessage::SnapshotChunk {
+                                        height,
+                                        index: index as u32,
+                                        total,
+                                        bytes: chunk.to_vec(),
+                                    },
+                                );
+                            }
+                        }
+                        Err(e) => tracing::error!(err = %e, "snapshot: encode failed"),
+                    }
+                }
+            }
+            WireMessage::SnapshotChunk {
+                height,
+                index,
+                total,
+                bytes,
+            } => {
+                if is_dynamic {
+                    debug!(peer = %from.0, "inbox: dropping SnapshotChunk from dynamic peer");
+                } else {
+                    handle_snapshot_chunk(
+                        &state,
+                        height,
+                        index,
+                        total,
+                        bytes,
+                        &from,
+                        &self_label,
+                        &log,
+                        &outbound,
+                    )
+                    .await;
                 }
             }
             WireMessage::GetCertsByRound(round) => {
@@ -1038,20 +1573,80 @@ async fn run_inbox(
                 };
                 for cert in certs {
                     let h = cert.hash();
-                    reply_to(&outbound, &from, &reply, WireMessage::Cert(cert));
-                    let block_opt = state.blocks.lock().get(&h).cloned();
+                    // Block before certificate (IQ-009 D2).
+                    let withhold = state
+                        .withhold_blocks
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    let block_opt = if withhold {
+                        None
+                    } else {
+                        state.blocks.lock().get(&h).cloned()
+                    };
                     if let Some(block) = block_opt {
                         reply_to(&outbound, &from, &reply, WireMessage::Block(block));
                     }
+                    reply_to(&outbound, &from, &reply, WireMessage::Cert(cert));
+                    reply_votes(&state, h, &outbound, &from, &reply);
                 }
             }
             WireMessage::GetBlock(hash) => {
+                if state
+                    .withhold_blocks
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    continue;
+                }
                 let block_opt = state.blocks.lock().get(&hash).cloned();
                 if let Some(block) = block_opt {
                     reply_to(&outbound, &from, &reply, WireMessage::Block(block));
                 }
             }
         }
+    }
+}
+
+/// Record a Validator-Ring vote, deduplicated per (candidate, validator).
+/// Returns `true` iff it was new — the caller only re-runs the commit
+/// walk for new information, and a re-requested backfill round (or a
+/// relay that echoes) cannot grow the slot without bound.
+/// Votes from validators outside the Validator Ring are dropped: they
+/// would carry zero stake anyway, and admitting them lets one peer grow
+/// the map with arbitrary ids. (Votes are still unsigned relay data —
+/// IQ-008 Residual 5.)
+async fn store_vote(state: &State, vote: Vote) -> bool {
+    if !state
+        .validator_registry
+        .read()
+        .await
+        .contains(vote.validator)
+    {
+        return false;
+    }
+    let mut votes = state.votes.lock();
+    let slot = votes.entry(vote.candidate).or_default();
+    if slot.iter().any(|v| v.validator == vote.validator) {
+        return false;
+    }
+    slot.push(vote);
+    true
+}
+
+/// Relay the votes held for `hash` after serving the certificate itself
+/// (IQ-008 D5). Votes live until the certificate is pruned, so a peer
+/// catching up over rounds this node already committed receives the
+/// Validator-Ring side of the joint quorum together with the
+/// Authority-Ring side, and ratifies those leaders through the same
+/// AND-gate a live node does.
+fn reply_votes(
+    state: &State,
+    hash: CertHash,
+    outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
+    from: &PeerId,
+    reply: &Option<tokio::sync::mpsc::Sender<WireMessage>>,
+) {
+    let votes: Vec<Vote> = state.votes.lock().get(&hash).cloned().unwrap_or_default();
+    if !votes.is_empty() {
+        reply_to(outbound, from, reply, WireMessage::Votes(votes));
     }
 }
 
@@ -1072,6 +1667,216 @@ fn reply_to(
     }
 }
 
+/// A certificate arrived (live gossip, a `GetCert` / `GetCertsByRound`
+/// reply, or a parked certificate whose block just arrived): admit it
+/// through `ingest_cert`, vote for everything admitted if seated, and run
+/// the commit walk.
+#[allow(clippy::too_many_arguments)]
+async fn handle_cert(
+    state: &State,
+    cert: Certificate,
+    from: &PeerId,
+    outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
+    self_id: AuthorityId,
+    self_label: &str,
+    log: &EventLog,
+    fresh: bool,
+) {
+    let h = cert.hash();
+    let round = cert.round;
+    if fresh {
+        log.emit(
+            Event::now(self_label, Lane::Main, "received")
+                .with_round(round)
+                .with_cert_hash(&h.0)
+                .with_peer(from.0.clone()),
+        );
+    }
+    let inserted = ingest_cert(state, cert, from, Some(outbound)).await;
+    // Post-genesis joiners ingest and commit but do not vote until seated
+    // in the Authority Ring: an unseated vote carries zero stake in
+    // `validator_quorum_met` anyway, and emitting it would just be gossip
+    // noise. IQ-009 D3: a vote is cast only at admission, and admission
+    // requires the block, so a vote also attests that the voter holds
+    // the block.
+    let seated = state.authority_registry.read().await.contains(self_id);
+    if seated {
+        for ic in inserted {
+            let vote = Vote {
+                validator: self_id,
+                candidate: ic.hash,
+            };
+            store_vote(state, vote).await;
+            log.emit(
+                Event::now(self_label, Lane::Main, "voted")
+                    .with_round(ic.round)
+                    .with_cert_hash(&ic.hash.0),
+            );
+            broadcast_all(state, outbound, WireMessage::Vote(vote), self_label, log);
+        }
+    }
+    try_commit(state, self_label, log, outbound).await;
+}
+
+/// A block arrived from a configured peer: check self-consistency, bind
+/// it to the signed certificate when that is known, store it, and admit
+/// any certificate that was parked waiting for it (IQ-009 D1).
+async fn handle_block(
+    state: &State,
+    block: BlockPayload,
+    from: &PeerId,
+    outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
+    self_id: AuthorityId,
+    self_label: &str,
+    log: &EventLog,
+) {
+    if !block_payload_is_consistent(&block) {
+        // Self-consistency: payload_digest must equal
+        // compute_payload_digest(intents, governance_auth), so a relay
+        // cannot strip/mutate the intents OR the governance envelopes.
+        debug!(peer = %from.0, "inbox: block payload digest mismatch, dropping");
+        return;
+    }
+    let cert_hash = block.cert_hash;
+    let digest = block.payload_digest;
+    // Bind to the SIGNED certificate when we already hold it (in the DAG
+    // or parked): only accept a block whose digest matches the signed
+    // payload_digest, and OVERWRITE any previously stored (e.g.
+    // relay-poisoned stripped) block with the authentic one. When the
+    // certificate isn't known yet, store best-effort (first-write-wins);
+    // `ingest_cert` evicts a mismatched squatter when the certificate
+    // arrives (consensus-review of 8eefd3d).
+    //
+    // The binding covers the whole signed header the block claims to
+    // back — digest, author AND round — because `prune_state` and the
+    // parked-block accounting trust `BlockPayload.round` (consensus-review
+    // finding, third S35 pass: a digest-only binding let a relay pin a
+    // block above the gc round for ever, or evict it early).
+    let known_header = {
+        let dag_header = state
+            .dag
+            .read()
+            .await
+            .get(&cert_hash)
+            .map(|c| (c.payload_digest, c.author, c.round));
+        match dag_header {
+            Some(h) => Some(h),
+            None => state
+                .inner
+                .lock()
+                .await
+                .awaiting_block
+                .get(&cert_hash)
+                .map(|c| (c.payload_digest, c.author, c.round)),
+        }
+    };
+    match known_header {
+        Some(kh) if block_matches_header(&block, kh) => {
+            state.blocks.lock().insert(cert_hash, block);
+        }
+        Some(_) => {
+            debug!(peer = %from.0, "inbox: block does not match known cert header, dropping");
+            return;
+        }
+        None => {
+            // Certificate not known yet: hold the block as a candidate;
+            // `ingest_cert` binds the one matching the signed header.
+            // The claimed round is bounded by the same window as
+            // certificate admission (above the gc round, at most one
+            // retention window above the quorum anchor), so a relay
+            // cannot fill the buffer with rounds no certificate can ever
+            // claim, nor pin a candidate past every prune.
+            let (committee_now, frontier_now) = {
+                let inner = state.inner.lock().await;
+                (
+                    inner.committee.clone(),
+                    inner.last_committed_leader_round.unwrap_or(0),
+                )
+            };
+            {
+                let dag = state.dag.read().await;
+                let anchor = highest_quorum_round(&dag, &committee_now)
+                    .unwrap_or(0)
+                    .max(frontier_now);
+                let ceiling = anchor.saturating_add(dag.gc_depth());
+                if block.round > ceiling || is_obsolete(block.round, dag.gc_round()) {
+                    debug!(peer = %from.0, round = block.round, ceiling, "inbox: block candidate outside the admissible window, dropping");
+                    return;
+                }
+            }
+            // Encoded size, outside the state mutex: the byte budget is
+            // what bounds this buffer (a candidate is unauthenticated
+            // payload up to a full frame), the entry caps only its shape.
+            let bytes = match crate::codec::encode(&block) {
+                Ok(v) => v.len(),
+                Err(_) => return,
+            };
+            let mut inner = state.inner.lock().await;
+            // Capacity is tested BEFORE any entry is created: the key set
+            // is what an attacker can grow (any `cert_hash` passes the
+            // self-consistency check), and it must never cost O(keys) per
+            // frame under the global mutex.
+            let known = inner.block_candidates.contains_key(&cert_hash);
+            if !known && inner.block_candidates.len() >= MAX_BLOCK_CANDIDATES {
+                debug!(peer = %from.0, "inbox: block candidate buffer full, dropping");
+                return;
+            }
+            if inner.block_candidates_bytes.saturating_add(bytes) > MAX_BLOCK_CANDIDATE_BYTES {
+                debug!(peer = %from.0, bytes, "inbox: block candidate byte budget exhausted, dropping");
+                return;
+            }
+            let (share_entries, share_bytes) = candidate_share(outbound.len());
+            let (used_entries, used_bytes) = inner
+                .block_candidates_by_peer
+                .get(from)
+                .copied()
+                .unwrap_or((0, 0));
+            if used_entries >= share_entries || used_bytes.saturating_add(bytes) > share_bytes {
+                debug!(peer = %from.0, bytes, "inbox: block candidate share of this peer exhausted, dropping");
+                return;
+            }
+            let slot = inner.block_candidates.entry(cert_hash).or_default();
+            // Distinct by full header: the same digest under two rounds
+            // is two candidates, and only one of them can bind.
+            let hdr = (digest, block.author, block.round);
+            if !slot.iter().any(|c| block_matches_header(&c.block, hdr)) {
+                if slot.len() >= MAX_BLOCK_CANDIDATES_PER_HASH {
+                    debug!(peer = %from.0, "inbox: block candidate slot full, dropping");
+                } else {
+                    slot.push(CandidateBlock {
+                        bytes,
+                        from: from.clone(),
+                        block,
+                    });
+                    inner.block_candidates_bytes += bytes;
+                    let used = inner
+                        .block_candidates_by_peer
+                        .entry(from.clone())
+                        .or_insert((0, 0));
+                    used.0 += 1;
+                    used.1 += bytes;
+                }
+            }
+            return;
+        }
+    }
+    // A parked certificate whose block this is: admit it now. The fetch
+    // bookkeeping is cleared first; only a commit deferred on the block
+    // (`try_commit`) re-arms it.
+    let parked = {
+        let mut inner = state.inner.lock().await;
+        let p = inner.awaiting_block.remove(&cert_hash);
+        if p.is_some() {
+            inner.needed_blocks.remove(&cert_hash);
+            inner.block_fetch_history.remove(&cert_hash);
+        }
+        p
+    };
+    if let Some(cert) = parked {
+        handle_cert(state, cert, from, outbound, self_id, self_label, log, false).await;
+    }
+}
+
 /// Forward backfill loop: poll peer tips, and whenever the local DAG is
 /// behind the best-known tip by more than a small lag threshold, request
 /// the missing rounds oldest-first via `GetCertsByRound`. Responses ride
@@ -1082,12 +1887,21 @@ async fn run_backfill(
     state: Arc<State>,
     outbound: Arc<HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>>,
 ) {
-    const BACKFILL_TICK_MS: u64 = 500;
-    const BACKFILL_BATCH_ROUNDS: u64 = 8;
-    const BACKFILL_LAG_THRESHOLD: u64 = 2;
+    // IQ-008 D5: a joiner that just installed a snapshot must out-run the
+    // seeds' pruning (budget = gc_depth - checkpoint_cadence rounds), so
+    // the loop polls tips every second and pulls 32 rounds per tick.
+    const BACKFILL_TICK_MS: u64 = 250;
+    const BACKFILL_BATCH_ROUNDS: u64 = 32;
+    // Shared with `suwappu_getSyncStatus` so "synced" over RPC means
+    // exactly "this loop is idle"; the two cannot drift apart.
+    const BACKFILL_LAG_THRESHOLD: u64 = suwappu_rpc::context::SyncStatusView::SYNCED_LAG_THRESHOLD;
 
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(BACKFILL_TICK_MS));
     let mut ticks: u64 = 0;
+    // Commit-gap requests for an unchanged window are throttled to one
+    // per second: a walk deferred on a block nobody holds any more must
+    // not turn into a request storm against the peers.
+    let mut last_gap_request: Option<(u64, u64)> = None;
     loop {
         tick.tick().await;
         // Refresh peer tips every 4 ticks (2s).
@@ -1096,17 +1910,121 @@ async fn run_backfill(
                 let _ = tx.try_send(WireMessage::GetTip);
             }
         }
+        // Every 8 ticks: if a checkpoint we emitted two or more boundaries
+        // ago never co-signed, ask peers for their chain — we may have
+        // ratified a checkpoint the mesh did not (`handle_checkpoint_chain`
+        // adopts a strictly newer verified chain in steady state).
+        if ticks % 8 == 0 {
+            let stalled = {
+                let inner = state.inner.lock().await;
+                let cadence = inner.checkpoint_cadence;
+                let boundary = inner.next_checkpoint_boundary;
+                inner
+                    .emitted_checkpoints
+                    .values()
+                    .any(|(c, _)| c.round.saturating_add(2 * cadence) <= boundary)
+            };
+            if stalled {
+                for tx in outbound.values().take(2) {
+                    let _ = tx.try_send(WireMessage::GetCheckpoints);
+                }
+            }
+        }
         ticks = ticks.wrapping_add(1);
 
         let local = state.dag.read().await.max_round().unwrap_or(0);
-        let target = state.inner.lock().await.sync_tip;
-        if target <= local.saturating_add(BACKFILL_LAG_THRESHOLD) {
+        let (target, peer_gc, resume, frontier, gc_depth) = {
+            let mut inner = state.inner.lock().await;
+            (
+                inner.sync_tip,
+                inner.peer_gc_round,
+                inner.backfill_resume.take(),
+                inner.last_committed_leader_round,
+                inner.gc_depth,
+            )
+        };
+        let resume = resume.filter(|r| *r <= local);
+        // The DAG tip can be current while the COMMIT frontier is far
+        // behind it (a node that came back from an outage receives the
+        // live stream at once but the rounds in between arrived without
+        // their blocks and votes, or not at all). What the node needs is
+        // everything above its frontier, so a wide commit gap is
+        // backfilled from the frontier, not from the tip — and it is the
+        // frontier, not the tip, that decides whether the peers have
+        // already pruned what we need.
+        let commit_gap_from = frontier
+            .map(|f| f.saturating_add(1))
+            .filter(|f| target > f.saturating_add(BACKFILL_LAG_THRESHOLD) && *f <= local);
+        if resume.is_none()
+            && commit_gap_from.is_none()
+            && target <= local.saturating_add(BACKFILL_LAG_THRESHOLD)
+        {
             continue;
         }
-        let from_round = local.saturating_add(1);
+        if resume.is_none() {
+            if let Some(f) = commit_gap_from {
+                if let Some((last_from, at)) = last_gap_request {
+                    if last_from == f && ticks.saturating_sub(at) < 4 {
+                        continue;
+                    }
+                }
+                last_gap_request = Some((f, ticks));
+            }
+        }
+        let from_round = resume
+            .or(commit_gap_from)
+            .unwrap_or_else(|| local.saturating_add(1));
+        // IQ-008 D5: if the peers that hold the tip have already pruned
+        // every round we would ask for, forward backfill is futile — the
+        // certificates no longer exist anywhere. Flag it for the
+        // checkpoint-snapshot bootstrap and stop hammering the peers.
+        if let Some(g) = peer_gc {
+            if from_round <= g {
+                let ask = {
+                    let mut inner = state.inner.lock().await;
+                    if !inner.needs_snapshot {
+                        inner.needs_snapshot = true;
+                        tracing::warn!(
+                            local_round = local,
+                            peer_gc_round = g,
+                            peer_tip = target,
+                            "backfill: peers have pruned past our DAG round; snapshot bootstrap required"
+                        );
+                    }
+                    let now = now_unix_ms();
+                    let elapsed = now.saturating_sub(inner.snapshot_sync.requested_at_ms);
+                    if elapsed >= SNAPSHOT_SYNC_RETRY_MS {
+                        // A trusted chain whose snapshot never arrived (the
+                        // peer moved on to a newer checkpoint, or dropped
+                        // the chunks) is abandoned and the walk restarts.
+                        if inner.snapshot_sync.trusted.is_some()
+                            && inner.snapshot_sync.chunks.is_empty()
+                        {
+                            inner.snapshot_sync.trusted = None;
+                        }
+                        inner.snapshot_sync.requested_at_ms = now;
+                        inner.snapshot_sync.trusted.is_none()
+                    } else {
+                        false
+                    }
+                };
+                if ask {
+                    // Two-peer fan-out, like every other sync request.
+                    for tx in outbound.values().take(2) {
+                        let _ = tx.try_send(WireMessage::GetCheckpoints);
+                    }
+                }
+                continue;
+            }
+        }
+        // A resumed tail is bounded by the local tip even when the peer
+        // tip poll has not answered yet.
+        // A batch never reaches past the ingest window of a small manifest
+        // depth (rounds above `anchor + gc_depth` would be dropped and
+        // re-requested).
         let to_round = from_round
-            .saturating_add(BACKFILL_BATCH_ROUNDS - 1)
-            .min(target);
+            .saturating_add(BACKFILL_BATCH_ROUNDS.min(gc_depth.max(1)) - 1)
+            .min(target.max(local));
         // Snapshot senders once; rotate the fan-out start per round so a
         // fixed pair of alive-but-behind peers doesn't absorb every
         // request (consensus-reviewer fairness finding).
@@ -1149,7 +2067,11 @@ async fn ingest_cert(
     state: &State,
     cert: Certificate,
     from: &PeerId,
-    outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
+    // `None` on the post-prune re-ingest path (IQ-008 D3), which runs
+    // inside `try_commit` without outbound handles: a still-unknown
+    // parent is buffered but not fetched — the sync sweeper picks it up
+    // on its next tick exactly as it would a fetch that was dropped.
+    outbound: Option<&HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>>,
 ) -> Vec<IngestedCert> {
     let mut inserted = Vec::new();
     let mut work: Vec<Certificate> = vec![cert];
@@ -1164,12 +2086,29 @@ async fn ingest_cert(
         // effectively never gossips it further, satisfying "reject /
         // don't-gossip on failure" without needing an explicit relay step
         // (this daemon doesn't push-relay certs; peers pull via GetCert).
-        let author_pubkey = state
+        let registered_key = state
             .authority_registry
             .read()
             .await
             .get(c.author)
-            .and_then(|m| suwappu_crypto::mldsa::PublicKey::from_bytes(&m.public_key_bytes).ok());
+            .map(|m| m.public_key_bytes.clone());
+        let via_grace = registered_key.is_none();
+        let author_pubkey = {
+            let key_bytes = match registered_key {
+                Some(k) => Some(k),
+                // IQ-010: a member removed at a boundary keeps its
+                // certificates admissible for one retention window.
+                None => state
+                    .inner
+                    .lock()
+                    .await
+                    .retired
+                    .get(&c.author)
+                    .filter(|(_, until)| round <= *until)
+                    .map(|(k, _)| k.clone()),
+            };
+            key_bytes.and_then(|k| suwappu_crypto::mldsa::PublicKey::from_bytes(&k).ok())
+        };
         match author_pubkey {
             Some(pk) if c.verify_signature(&pk) => {}
             Some(_) => {
@@ -1182,11 +2121,246 @@ async fn ingest_cert(
             }
         }
 
-        // Acquire dag write lock briefly for the insert.
-        let cert_payload_digest = c.payload_digest;
-        let insert_result = state.dag.write().await.insert(c.clone());
+        // Round window: a certificate more than one retention window
+        // above what this node can build on is not something it can
+        // decide, and admitting it would let one authority inflate every
+        // `decide_slot` anchor scan (O(max_round)) and the observed tip
+        // (consensus-review finding on S34.5). The ceiling is anchored on
+        // the highest quorum round (or the commit frontier), never on the
+        // raw tip, so no single authority can ratchet it. A joiner far
+        // behind its peers catches up by backfill and snapshot, not by
+        // live pushes.
+        let (committee_now, frontier_now) = {
+            let inner = state.inner.lock().await;
+            (
+                inner.committee.clone(),
+                inner.last_committed_leader_round.unwrap_or(0),
+            )
+        };
+        {
+            let dag = state.dag.read().await;
+            let anchor = highest_quorum_round(&dag, &committee_now)
+                .unwrap_or(0)
+                .max(frontier_now);
+            let ceiling = anchor.saturating_add(dag.gc_depth());
+            // Two certificates per (author, round) is all an equivocation
+            // proof needs; admitting more lets one authority grow the DAG
+            // (and every served snapshot) without bound. Both checks run
+            // BEFORE the block check so that parking (IQ-009) is bounded
+            // by the same window and cap as admission.
+            let dups = dag
+                .round_hashes(round)
+                .iter()
+                .filter(|h| dag.get(h).is_some_and(|x| x.author == c.author))
+                .count();
+            // A refused certificate may already have a block stored for
+            // it (`handle_block` stores for a parked certificate before
+            // re-admitting it); that block is released unless the DAG
+            // holds the certificate, under the guard held here.
+            let refused = if dups >= MAX_CERTS_PER_AUTHOR_ROUND {
+                debug!(peer = %from.0, author = c.author, round, "inbox: equivocation already proven for this slot, dropped");
+                true
+            } else if round > ceiling {
+                debug!(peer = %from.0, author = c.author, round, ceiling, "inbox: cert round above the admissible window, dropped");
+                true
+            } else if is_obsolete(round, dag.gc_round()) {
+                // Obsolete by IQ-008 D1: never parked, never fetched.
+                debug!(peer = %from.0, author = c.author, round, "inbox: cert at or below the gc round, dropped");
+                true
+            } else {
+                false
+            };
+            if refused {
+                if !dag.contains(&h) {
+                    state.blocks.lock().remove(&h);
+                }
+                continue;
+            }
+        }
+
+        // IQ-009 D1: a certificate enters the DAG only together with its
+        // block. Without it the certificate is parked and the block is
+        // fetched from the sender and one other peer; `handle_block`
+        // re-admits it. A held block that does not match the signed
+        // digest is a relay-poisoned squatter: evicted and refetched.
+        let header = cert_header(&c);
+        let held_block = {
+            let mut blocks = state.blocks.lock();
+            match blocks.get(&h) {
+                Some(b) if block_matches_header(b, header) => true,
+                Some(_) => {
+                    blocks.remove(&h);
+                    false
+                }
+                None => false,
+            }
+        };
+        let held_block = held_block || {
+            // A candidate that arrived before the certificate: bind the
+            // one matching the signed header, drop the rest.
+            let mut inner = state.inner.lock().await;
+            match inner.block_candidates.remove(&h) {
+                Some(cands) => {
+                    release_candidates(&mut inner, cands.iter());
+                    match cands
+                        .into_iter()
+                        .find(|c| block_matches_header(&c.block, header))
+                    {
+                        Some(c) => {
+                            state.blocks.lock().insert(h, c.block);
+                            true
+                        }
+                        None => false,
+                    }
+                }
+                None => false,
+            }
+        };
+        if !held_block {
+            let fetch = {
+                let mut inner = state.inner.lock().await;
+                if inner.awaiting_block.len() >= MAX_AWAITING_BLOCK
+                    && !inner.awaiting_block.contains_key(&h)
+                {
+                    // Flooder-first eviction, so a Byzantine author cannot
+                    // make the buffer refuse honest late blocks. The
+                    // victim author is the one parking the most
+                    // equivocating slots (two headers for one round is the
+                    // only way to hold more than one entry per round), then
+                    // the most entries; its LOWEST-round entry goes: that is
+                    // the one nearest the gc round, and the one an honest
+                    // author with a late block needs least (the highest
+                    // round is the one still being voted on). Ties break
+                    // by hash so every node evicts the same entry
+                    // (consensus-review finding, third S35 pass).
+                    let mut per_author: HashMap<AuthorityId, (usize, usize)> = HashMap::new();
+                    let mut per_slot: HashMap<(AuthorityId, u64), usize> = HashMap::new();
+                    for p in inner.awaiting_block.values() {
+                        per_author.entry(p.author).or_default().1 += 1;
+                        *per_slot.entry((p.author, p.round)).or_default() += 1;
+                    }
+                    for ((a, _), n) in &per_slot {
+                        if *n > 1 {
+                            per_author.entry(*a).or_default().0 += 1;
+                        }
+                    }
+                    let victim_author = per_author
+                        .iter()
+                        .max_by_key(|(a, (eq, n))| (*eq, *n, std::cmp::Reverse(**a)))
+                        .map(|(a, _)| *a);
+                    let victim = victim_author.and_then(|a| {
+                        inner
+                            .awaiting_block
+                            .iter()
+                            .filter(|(_, p)| p.author == a)
+                            .min_by_key(|(k, p)| (p.round, **k))
+                            .map(|(k, _)| *k)
+                    });
+                    match victim {
+                        Some(k) => {
+                            // The fetch history is kept: a replay of the
+                            // evicted header resumes its back-off rather
+                            // than fanning out afresh (fourth S35 pass).
+                            inner.awaiting_block.remove(&k);
+                            inner.needed_blocks.remove(&k);
+                        }
+                        None => {
+                            // Unreachable while the buffer is non-empty;
+                            // logged rather than silently dropped so a
+                            // regression here is visible.
+                            tracing::warn!(peer = %from.0, author = c.author, round, "inbox: parking buffer full and no eviction victim, dropping cert");
+                            continue;
+                        }
+                    }
+                }
+                // Per-(author, round) cap on parked certificates too: one
+                // seated author must not squat the buffer with distinct
+                // signed headers (consensus-review finding on S35).
+                let parked_here = inner
+                    .awaiting_block
+                    .values()
+                    .filter(|p| p.author == c.author && p.round == round)
+                    .count();
+                if parked_here >= MAX_CERTS_PER_AUTHOR_ROUND
+                    && !inner.awaiting_block.contains_key(&h)
+                {
+                    debug!(peer = %from.0, author = c.author, round, "inbox: parking cap for this slot reached, dropping cert");
+                    continue;
+                }
+                let first = !inner.awaiting_block.contains_key(&h);
+                inner.awaiting_block.insert(h, c);
+                inner.needed_blocks.insert(h);
+                // The arrival-time fan-out happens once per hash: a
+                // header parked, evicted and replayed keeps its history
+                // and is retried by the sweeper under its back-off.
+                let fetch_now = first && !inner.block_fetch_history.contains_key(&h);
+                if first {
+                    if inner.block_fetch_history.len() >= MAX_BLOCK_FETCH_HISTORY {
+                        let live = inner.needed_blocks.clone();
+                        inner.block_fetch_history.retain(|k, _| live.contains(k));
+                    }
+                    inner
+                        .block_fetch_history
+                        .entry(h)
+                        .or_insert((now_unix_ms(), 1));
+                }
+                fetch_now
+            };
+            if fetch {
+                if let Some(outbound) = outbound {
+                    fetch_block_from_peers_prefer(h, Some(from), 0, outbound);
+                }
+            }
+            continue;
+        }
+
+        let insert_result = {
+            let mut dag = state.dag.write().await;
+            // The per-slot cap is re-evaluated under the write guard: the
+            // read-side check above bounds parking, this one is what makes
+            // the cap atomic with the insert across concurrent inbox
+            // tasks (consensus-review finding, second S35 pass).
+            let dups = dag
+                .round_hashes(round)
+                .iter()
+                .filter(|h| dag.get(h).is_some_and(|x| x.author == c.author))
+                .count();
+            if dups >= MAX_CERTS_PER_AUTHOR_ROUND {
+                debug!(peer = %from.0, author = c.author, round, "inbox: equivocation already proven for this slot, dropped");
+                // The block bound above is dropped with the certificate
+                // unless the DAG already holds it (a redelivery): the
+                // block store is uncapped and reaped only by the gc
+                // round (fourth S35 pass).
+                if !dag.contains(&h) {
+                    state.blocks.lock().remove(&h);
+                }
+                continue;
+            }
+            // I-AV1 is decided under the write guard: the block bound
+            // above must still be held here, since a concurrent refusal
+            // of the same hash on another inbox task may have released it
+            // in between (every release runs under a DAG guard, so this
+            // check and the insert are atomic against it). If it is gone,
+            // the certificate goes round again and parks.
+            let held_now = state
+                .blocks
+                .lock()
+                .get(&h)
+                .is_some_and(|b| block_matches_header(b, header));
+            if !held_now {
+                debug!(peer = %from.0, author = c.author, round, "inbox: block released under a concurrent refusal; re-queued");
+                work.push(c);
+                continue;
+            }
+            // Whether THIS insert fills the slot: parked headers for the
+            // same (author, round) can then never be admitted and are
+            // released below rather than left to occupy the buffer until
+            // the gc round passes them.
+            dag.insert(c.clone())
+                .map(|r| (r, dups + 1 >= MAX_CERTS_PER_AUTHOR_ROUND))
+        };
         match insert_result {
-            Ok(_) => {
+            Ok((_, slot_full)) => {
                 // Now that the SIGNED cert is known, evict any stored block
                 // for it that does not match the cert's payload_digest — a
                 // relay-poisoned stripped block cannot squat past cert
@@ -1195,13 +2369,12 @@ async fn ingest_cert(
                     let mut blocks = state.blocks.lock();
                     if blocks
                         .get(&h)
-                        .is_some_and(|b| b.payload_digest != cert_payload_digest)
+                        .is_some_and(|b| !block_matches_header(b, header))
                     {
                         blocks.remove(&h);
                     }
                 }
                 // Update cold-path inner state.
-                let promote_stake: Option<(AuthorityId, suwappu_consensus::Stake)>;
                 let unblocked: Option<Vec<Certificate>>;
                 {
                     let mut inner = state.inner.lock().await;
@@ -1210,28 +2383,38 @@ async fn ingest_cert(
                     }
                     inner.inflight_fetches.remove(&h);
                     inner.inflight_fetch_history.remove(&h);
-                    // DAG-S27.7: promote pending stake on first cert.
-                    promote_stake = inner.pending_stake.remove(&c.author).map(|s| (c.author, s));
-                    // Issue #18 (deferred activation): if this is the
-                    // first cert from a newly-admitted authority, bump
-                    // `n_authorities` now. Until this moment, the new
-                    // authority was in the registry (so its certs are
-                    // recognized) but didn't count toward the quorum
-                    // denominator — `quorum_threshold` and round-robin
-                    // `leader` rotation continued using the pre-admit
-                    // `n`. Pairing this bump with the pending_stake
-                    // promotion guarantees the bump happens iff the
-                    // authority has actually shown up on the wire.
-                    if promote_stake.is_some() {
-                        inner.n_authorities = inner.n_authorities.saturating_add(1);
+                    inner.awaiting_block.remove(&h);
+                    inner.needed_blocks.remove(&h);
+                    inner.block_fetch_history.remove(&h);
+                    if slot_full {
+                        let stale: Vec<CertHash> = inner
+                            .awaiting_block
+                            .iter()
+                            .filter(|(_, p)| p.author == c.author && p.round == round)
+                            .map(|(k, _)| *k)
+                            .collect();
+                        for k in stale {
+                            inner.awaiting_block.remove(&k);
+                            inner.needed_blocks.remove(&k);
+                            inner.block_fetch_history.remove(&k);
+                        }
                     }
+                    // IQ-010 D2: a newly admitted authority's certificate is
+                    // admitted here like any other (its key is registered),
+                    // but nothing about the committee or the stake table
+                    // changes on this node's observation. Activation is a
+                    // function of the commit sequence (`apply_commit` marks
+                    // the author live-proven; the boundary drain activates).
                     // DAG-S30.1: incremental equivocation detection.
                     let key = (c.author, round);
                     match inner.seen_at.get(&key).copied() {
                         None => {
                             inner.seen_at.insert(key, h);
                         }
-                        Some(prev) if prev != h => {
+                        // A retired author cannot be ejected again, so its
+                        // equivocations are not evidence anyone can use
+                        // (fourth S36 pass).
+                        Some(prev) if prev != h && !via_grace => {
                             inner.detected_equivocations.push(EquivocationProof {
                                 author: c.author,
                                 round,
@@ -1243,9 +2426,6 @@ async fn ingest_cert(
                     }
                     unblocked = inner.orphans.remove(&h);
                 }
-                if let Some((id, stake)) = promote_stake {
-                    state.stake_table.write().await.insert(id, stake);
-                }
                 inserted.push(IngestedCert { hash: h, round });
                 if let Some(unblocked) = unblocked {
                     work.extend(unblocked);
@@ -1255,8 +2435,36 @@ async fn ingest_cert(
                 let send_fetch;
                 {
                     let mut inner = state.inner.lock().await;
-                    if inner.orphans.values().map(|v| v.len()).sum::<usize>() >= MAX_ORPHAN_CERTS {
-                        debug!(peer = %from.0, "inbox: orphan buffer full, dropping cert");
+                    // One buffered copy per certificate, and at most
+                    // `MAX_CERTS_PER_AUTHOR_ROUND` per (author, round) as
+                    // for parking: a replayed or minted-at-will orphan
+                    // cannot fill the buffer for honest ones (fifth S35
+                    // pass). Identity is the signed header plus parents.
+                    let mut same_slot = 0usize;
+                    let mut duplicate = false;
+                    for x in inner.orphans.values().flatten() {
+                        if x.author == c.author && x.round == round {
+                            same_slot += 1;
+                            if x.payload_digest == c.payload_digest && x.parents == c.parents {
+                                duplicate = true;
+                            }
+                        }
+                    }
+                    if duplicate {
+                        continue;
+                    }
+                    let total: usize = inner.orphans.values().map(|v| v.len()).sum();
+                    if total >= MAX_ORPHAN_CERTS || same_slot >= MAX_CERTS_PER_AUTHOR_ROUND {
+                        debug!(peer = %from.0, author = c.author, round, "inbox: orphan buffer full for this slot or in total, dropping cert");
+                        // Not buffered: its block goes too, unless the DAG
+                        // holds the certificate (a redelivery whose
+                        // parent's tombstone has since expired, or a
+                        // concurrent admission) — decided under the DAG
+                        // guard so no insert can interleave (I-AV1).
+                        let dag = state.dag.read().await;
+                        if !dag.contains(&h) {
+                            state.blocks.lock().remove(&h);
+                        }
                         continue;
                     }
                     inner.orphans.entry(missing).or_default().push(c);
@@ -1272,16 +2480,1649 @@ async fn ingest_cert(
                     }
                 }
                 if send_fetch {
-                    fetch_cert_from_peers(missing, Some(from), outbound);
+                    if let Some(outbound) = outbound {
+                        fetch_cert_from_peers(missing, Some(from), 0, outbound);
+                    }
                 }
+            }
+            Err(ConsensusError::BelowGcRound { round, gc_round }) => {
+                // Obsolete by IQ-008 D1: nothing to buffer, nothing to
+                // fetch. Expected from slow relays right after a prune.
+                debug!(peer = %from.0, round, gc_round, "inbox: cert below gc round, dropped");
+                release_unadmitted_block(state, h).await;
             }
             Err(e) => {
                 debug!(peer = %from.0, err = ?e, "inbox: dag rejected cert");
+                // A terminally rejected certificate (non-monotonic
+                // round, genesis with parents) never enters the DAG, so
+                // the block bound for it is released; a duplicate insert
+                // means the DAG holds the certificate, and its block
+                // stays (I-AV1).
+                release_unadmitted_block(state, h).await;
             }
         }
     }
     inserted
 }
+
+/// Most recent checkpoint hashes for which signatures are buffered.
+const MAX_BUFFERED_CHECKPOINTS: usize = 8;
+
+/// Capacity and per-signer foreign-entry quota of the checkpoint
+/// signature buffer for a ring of `n` authorities (`f = (n - 1) / 3`).
+/// The capacity scales as `2f + 2` past `MAX_BUFFERED_CHECKPOINTS`, so
+/// `f × quota < capacity` holds at every ring size: a Byzantine minority
+/// can never fill the buffer, and at least two slots stay free for the
+/// honest pre-emission entry (consensus-review finding, eleventh pass —
+/// with a fixed capacity the bound broke at n ≥ 25).
+fn sig_buffer_params(n_authorities: u32) -> (usize, usize) {
+    let n = (n_authorities as usize).max(1);
+    let f = (n - 1) / 3;
+    let cap = MAX_BUFFERED_CHECKPOINTS.max(2 * f + 2);
+    let quota = (cap / n).max(2).min(cap / (f + 1)).max(1);
+    debug_assert!(f * quota < cap);
+    (cap, quota)
+}
+/// Certificates admitted per (author, round): two suffice for an
+/// equivocation proof, and the cap is what makes the DAG — and the served
+/// snapshot window — bounded per round.
+const MAX_CERTS_PER_AUTHOR_ROUND: usize = 2;
+/// Upper bound on votes accepted from one `Votes` frame: one frame
+/// carries the votes for one certificate, so the Validator Ring size.
+const MAX_VOTES_PER_FRAME: usize = suwappu_validator::VALIDATOR_RING_MAX;
+/// A validator whose next authoring round lags the highest observed round
+/// by more than this jumps forward instead of walking one round per tick
+/// (it can never catch a mesh that also advances one round per tick).
+const AUTHOR_LAG_JUMP_ROUNDS: u64 = 8;
+/// Re-ask peers for the checkpoint chain after this long without a
+/// usable answer.
+const SNAPSHOT_SYNC_RETRY_MS: u64 = 2_000;
+
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// The committee a checkpoint's signatures are verified against: the one
+/// established by the latest co-signed checkpoint, or the genesis
+/// Authority Ring before any (IQ-008 D5). Identical to the joiner's walk
+/// in `verify_checkpoint_chain`, so a node never accepts a co-signature
+/// a joiner could not verify.
+async fn verification_committee(state: &State) -> AuthorityRegistry {
+    let inner = state.inner.lock().await;
+    match &inner.latest_checkpoint {
+        // IQ-010 D6: the signing committee is the ACTIVE subset of the
+        // bound registry. A registered-but-inactive member (admitted,
+        // never shown up) must not raise the checkpoint quorum, or the
+        // chain freezes on admissions exactly as the commit rule used to.
+        Some(b) => b.registries.signing_committee(),
+        None => state.genesis_authority_registry.clone(),
+    }
+}
+
+/// IQ-008 D5: a committed leader crossed a checkpoint boundary. Build the
+/// checkpoint over the current substrate root and committee, capture the
+/// snapshot that will be served for it, sign it if we are eligible, and
+/// broadcast the signature. Signatures already buffered for this
+/// checkpoint's hash are counted immediately.
+async fn emit_checkpoint(
+    state: &State,
+    boundary: u64,
+    self_label: &str,
+    log: &EventLog,
+    outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
+) {
+    // Caller holds `commit_lock`: nothing commits between the prune, the
+    // capture and the checkpoint built over it.
+    //
+    // 1. Prune to the frontier first so the captured commit marks are a
+    //    function of the leader sequence (the pass-grouping of leaders
+    //    per `try_commit` call is timing-dependent; the gc round derived
+    //    from the frontier is not), then capture.
+    let (leader_round, gc_depth, local_gc) = {
+        let inner = state.inner.lock().await;
+        (
+            inner.last_committed_leader_round,
+            inner.gc_depth,
+            inner.gc_round,
+        )
+    };
+    if let Some(g) = leader_round.and_then(|l| gc_round_for(l, gc_depth)) {
+        if local_gc.map_or(true, |cur| g > cur) {
+            prune_state(state, g, self_label, log).await;
+        }
+    }
+    let mut snap = capture_snapshot(state).await;
+    // The served window is exact: certificates above the boundary are
+    // receipt-timing dependent, are re-pulled by the receiver from its
+    // frontier anyway (`backfill_resume`), and would make the window's
+    // size unbounded in the tip-minus-frontier gap. Dropping them makes
+    // the window `(gc_round, ck.round]` with both ends checkpoint-bound,
+    // which is what lets the joiner bound its size
+    // (`verify_served_snapshot`).
+    snap.dag_certs.retain(|c| c.round <= boundary);
+    let kept: HashSet<CertHash> = snap.dag_certs.iter().map(|c| c.hash()).collect();
+    snap.blocks.retain(|b| kept.contains(&b.cert_hash));
+    snap.committed.retain(|h| kept.contains(h));
+    let registries = snap.registries();
+    let leader_round = snap.leader_round;
+
+    // 2. Build the checkpoint and advance the cursor (under `inner`).
+    let ck = {
+        let mut inner = state.inner.lock().await;
+        // Identity is anchored on what the mesh has already AGREED on: the
+        // boundary round (not the leader that happened to cross it first
+        // on this node) and the latest co-signed checkpoint's height and
+        // hash. A node whose signature set at one boundary differs (it
+        // missed the quorum's checkpoint, or the prev-hash chain of its
+        // own emissions drifted) re-anchors on the co-signed chain at the
+        // next boundary. A node whose STATE ROOT diverged (an IQ-004 late
+        // flip, Residual 1) does not rejoin: its root stays different
+        // until it re-bootstraps from a co-signed snapshot.
+        let (height, prev_checkpoint) = match &inner.latest_checkpoint {
+            Some(l) => (
+                l.cosigned.checkpoint.height + 1,
+                l.cosigned.checkpoint.hash(),
+            ),
+            None => (0, [0u8; 32]),
+        };
+        let ck = Checkpoint {
+            height,
+            round: boundary,
+            state_root: snap.state_root,
+            prev_checkpoint,
+            registry_root: registries.root(),
+            snapshot_root: snap.commit_root(),
+        };
+        let cadence = inner.checkpoint_cadence;
+        inner.next_checkpoint_boundary = boundary + cadence;
+        inner.checkpoint_height = height + 1;
+        inner.last_checkpoint_hash = ck.hash();
+        ck
+    };
+    log.emit(
+        Event::now(self_label, Lane::Main, "checkpoint")
+            .with_round(boundary)
+            .with_kind(format!("height={} leader={}", ck.height, leader_round)),
+    );
+
+    // 3. The snapshot at exactly this state: served to joiners once
+    //    co-signed, written to disk when persistence is on.
+    snap.checkpoint = Some(ck.clone());
+    let snap = Arc::new(snap);
+    {
+        let mut inner = state.inner.lock().await;
+        inner.checkpoint_snapshot = Some(snap.clone());
+        inner
+            .emitted_checkpoints
+            .insert(ck.hash(), (ck.clone(), snap.clone()));
+        while inner.emitted_checkpoints.len() > MAX_BUFFERED_CHECKPOINTS {
+            let oldest = inner
+                .emitted_checkpoints
+                .iter()
+                .min_by_key(|(_, (c, _))| (c.height, c.round))
+                .map(|(k, _)| *k);
+            match oldest {
+                Some(k) => {
+                    inner.emitted_checkpoints.remove(&k);
+                    // Its signatures would otherwise linger as a foreign
+                    // entry and charge every honest signer's quota.
+                    inner.checkpoint_sigs.remove(&k);
+                }
+                None => break,
+            }
+        }
+    }
+    if let Some(dir) = state.data_dir.clone() {
+        let snap = snap.clone();
+        match tokio::task::spawn_blocking(move || crate::store::write_snapshot(&dir, &snap)).await {
+            Ok(Ok(path)) => {
+                tracing::info!(round = leader_round, path = %path.display(), "snapshot written")
+            }
+            Ok(Err(e)) => tracing::error!(err = %e, round = leader_round, "snapshot write failed"),
+            Err(e) => tracing::error!(err = %e, round = leader_round, "snapshot task panicked"),
+        }
+    }
+
+    // 4. Sign if eligible: a member of the signing committee joiners will
+    //    verify against (IQ-010 D6). A registered-but-inactive node, or
+    //    one activated since the last co-signed checkpoint, does not sign
+    //    — nobody could count its signature.
+    let committee = verification_committee(state).await;
+    if committee.contains(state.self_id) {
+        match sign_checkpoint(state.self_id, &state.self_secret_key, &ck) {
+            Ok(sig) => {
+                buffer_checkpoint_sig(state, &ck, sig.clone()).await;
+                broadcast_all(
+                    state,
+                    outbound,
+                    WireMessage::CheckpointSig(CheckpointSigMsg {
+                        checkpoint: ck.clone(),
+                        authority: sig.authority,
+                        signature: sig.signature,
+                    }),
+                    self_label,
+                    log,
+                );
+            }
+            Err(e) => tracing::error!(err = %e, "checkpoint: signing failed"),
+        }
+    }
+
+    // 5. Count whatever arrived early.
+    try_aggregate_checkpoint(state, ck.hash(), self_label, log).await;
+}
+
+async fn current_registry_set(state: &State) -> RegistrySet {
+    // Canonical order: `inner` → `stake_table` → `authority_registry` →
+    // `validator_registry`, all held together so the set is consistent.
+    let inner = state.inner.lock().await;
+    let stake_table = state.stake_table.read().await.clone();
+    let authority_registry = state.authority_registry.read().await.clone();
+    let validator_registry = state.validator_registry.read().await.clone();
+    RegistrySet {
+        authority_registry,
+        validator_registry,
+        stake_table,
+        epoch: (
+            inner.epoch.current,
+            inner.epoch.rounds_per_epoch,
+            inner.epoch.last_boundary_round,
+        ),
+        committee: inner.committee.clone(),
+    }
+}
+
+/// Whether the checkpoint binding `next` must be retained in the served
+/// chain (IQ-008 D5 / IQ-010 D6): the chain witnesses every change of
+/// the *signing committee* — a registry change (admission, removal) or a
+/// committee change with the registry unchanged (activation). Keying on
+/// the registry alone dropped the link that establishes an activated
+/// member's signing rights, and every joiner then failed
+/// `verify_checkpoint_chain` on its first signature (third S36 pass).
+fn is_committee_transition(prev: &RegistrySet, next: &RegistrySet) -> bool {
+    prev.authority_registry != next.authority_registry || prev.committee != next.committee
+}
+
+/// The subset of `sigs` whose signer is a member of `committee` (IQ-010
+/// D6): what `ratify_checkpoint` can count.
+fn committee_signatures(
+    sigs: Vec<CheckpointSignature>,
+    committee: &AuthorityRegistry,
+) -> Vec<CheckpointSignature> {
+    sigs.into_iter()
+        .filter(|s| committee.contains(s.authority))
+        .collect()
+}
+
+/// Buffer a verified signature under its checkpoint hash, deduplicated by
+/// signer, keeping only the most recent `MAX_BUFFERED_CHECKPOINTS` hashes.
+async fn buffer_checkpoint_sig(state: &State, ck: &Checkpoint, sig: CheckpointSignature) {
+    let mut inner = state.inner.lock().await;
+    // Only heights this node could plausibly ratify next are buffered:
+    // a seated authority signing fabricated far-future checkpoints could
+    // otherwise evict every honest entry (consensus-review finding,
+    // seventh pass).
+    let floor = inner
+        .latest_checkpoint
+        .as_ref()
+        .map_or(0, |l| l.cosigned.checkpoint.height + 1);
+    let (cap, quota) = sig_buffer_params(inner.committee.size());
+    if ck.height < floor || ck.height > floor + cap as u64 {
+        return;
+    }
+    let hash = ck.hash();
+    // Per-signer quota on FOREIGN entries (checkpoints this node has not
+    // emitted): one authority may open at most `MAX / n` (at least two)
+    // of them. Without it a seated authority's one-signature fabrications
+    // tie the honest pre-emission entry for the next checkpoint on every
+    // eviction key but height — and that entry is always at the lowest
+    // admissible height (consensus-review finding, ninth pass). Adding a
+    // signature to an existing entry is never quota-limited.
+    if !inner.emitted_checkpoints.contains_key(&hash) && !inner.checkpoint_sigs.contains_key(&hash)
+    {
+        // See `sig_buffer_params`: f Byzantine signers hold fewer than
+        // `cap` entries between them at every ring size.
+        let held = inner
+            .checkpoint_sigs
+            .iter()
+            .filter(|(k, (_, sigs))| {
+                !inner.emitted_checkpoints.contains_key(*k)
+                    && sigs.iter().any(|s| s.authority == sig.authority)
+            })
+            .count();
+        if held >= quota {
+            return;
+        }
+    }
+    let entry = inner
+        .checkpoint_sigs
+        .entry(hash)
+        .or_insert_with(|| (ck.height, Vec::new()));
+    if !entry.1.iter().any(|s| s.authority == sig.authority) {
+        entry.1.push(sig);
+    }
+    // Own emissions never take every slot: two are always left for
+    // foreign entries (the next checkpoint's early signatures), evicting
+    // the lowest (height, round) own entry — a stalled emission that is
+    // the least likely to ratify.
+    loop {
+        let own: Vec<([u8; 32], (u64, u64))> = inner
+            .checkpoint_sigs
+            .keys()
+            .filter_map(|k| {
+                inner
+                    .emitted_checkpoints
+                    .get(k)
+                    .map(|(c, _)| (*k, (c.height, c.round)))
+            })
+            .collect();
+        if own.len() + 2 <= cap {
+            break;
+        }
+        match own.iter().min_by_key(|(_, hr)| *hr).map(|(k, _)| *k) {
+            Some(k) => {
+                inner.checkpoint_sigs.remove(&k);
+            }
+            None => break,
+        }
+    }
+    while inner.checkpoint_sigs.len() > cap {
+        // Evict foreign entries before anything this node emitted;
+        // among foreign entries, the one whose signers hold the most
+        // foreign entries first (a flooder's fabrications, never a
+        // singleton honest entry while any signer holds two), then the
+        // least-signed, then the HIGHEST height — the honest
+        // pre-emission entry is always at the lowest admissible height
+        // (consensus-review findings, eighth to tenth passes).
+        let load = |sigs: &[CheckpointSignature]| -> usize {
+            sigs.iter()
+                .map(|s| {
+                    inner
+                        .checkpoint_sigs
+                        .iter()
+                        .filter(|(k, (_, v))| {
+                            !inner.emitted_checkpoints.contains_key(*k)
+                                && v.iter().any(|x| x.authority == s.authority)
+                        })
+                        .count()
+                })
+                .max()
+                .unwrap_or(0)
+        };
+        let round_of = |k: &[u8; 32]| inner.emitted_checkpoints.get(k).map_or(0, |(c, _)| c.round);
+        let victim = inner
+            .checkpoint_sigs
+            .iter()
+            .min_by_key(|(k, (h, sigs))| {
+                let own = inner.emitted_checkpoints.contains_key(*k);
+                (
+                    own,
+                    std::cmp::Reverse(if own { 0 } else { load(sigs) }),
+                    sigs.len(),
+                    std::cmp::Reverse(if own { 0 } else { *h }),
+                    *h,
+                    round_of(k),
+                )
+            })
+            .map(|(k, _)| *k);
+        match victim {
+            Some(k) => {
+                inner.checkpoint_sigs.remove(&k);
+            }
+            None => break,
+        }
+    }
+}
+
+/// If a checkpoint this node emitted (and has not superseded by a
+/// co-signed one) has a quorum of verified signatures under the
+/// verification committee, ratify it, record the bundle, and persist.
+async fn try_aggregate_checkpoint(state: &State, hash: [u8; 32], self_label: &str, log: &EventLog) {
+    let committee = verification_committee(state).await;
+    let (ck, sigs, snapshot) = {
+        let inner = state.inner.lock().await;
+        let Some((ck, snap)) = inner.emitted_checkpoints.get(&hash).cloned() else {
+            return;
+        };
+        if inner
+            .latest_checkpoint
+            .as_ref()
+            .is_some_and(|l| l.cosigned.checkpoint.height >= ck.height)
+        {
+            return;
+        }
+        let sigs = inner
+            .checkpoint_sigs
+            .get(&hash)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default();
+        (ck, sigs, Some(snap))
+    };
+    // Defence in depth for the inbox filter: `ratify_checkpoint` refuses
+    // the whole set on one unknown signer.
+    let sigs = committee_signatures(sigs, &committee);
+    if (sigs.len() as u32) < committee.quorum_threshold() {
+        return;
+    }
+    let cosigned = match ratify_checkpoint(ck.clone(), sigs, &committee) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::debug!(err = %e, height = ck.height, "checkpoint: quorum not yet ratifiable");
+            return;
+        }
+    };
+    let registries = match snapshot
+        .as_ref()
+        .filter(|s| s.checkpoint.as_ref() == Some(&ck))
+    {
+        Some(s) => s.registries(),
+        None => current_registry_set(state).await,
+    };
+    if registries.root() != ck.registry_root {
+        tracing::error!(
+            height = ck.height,
+            "checkpoint: local registry set does not match the signed registry root"
+        );
+        return;
+    }
+    let bundle = CheckpointBundle {
+        cosigned,
+        registries,
+    };
+    record_cosigned_checkpoint(state, bundle, self_label, log).await;
+}
+
+/// Install a co-signed checkpoint into the served chain (transition rule:
+/// a checkpoint whose `registry_root` differs from the previous one's is
+/// a committee transition and is retained forever; otherwise only the
+/// latest is kept) and persist it.
+async fn record_cosigned_checkpoint(
+    state: &State,
+    bundle: CheckpointBundle,
+    self_label: &str,
+    log: &EventLog,
+) {
+    let height = bundle.cosigned.checkpoint.height;
+    let round = bundle.cosigned.checkpoint.round;
+    let mut inner = state.inner.lock().await;
+    if inner
+        .latest_checkpoint
+        .as_ref()
+        .is_some_and(|l| l.cosigned.checkpoint.height >= height)
+    {
+        return;
+    }
+    // A transition is a change of the Authority Ring itself — not of the
+    // whole registry root, which also covers the epoch counter and would
+    // make every epoch boundary a retained-forever link.
+    let is_transition = inner.latest_checkpoint.as_ref().map_or(true, |l| {
+        is_committee_transition(&l.registries, &bundle.registries)
+    });
+    if is_transition {
+        inner.checkpoint_transitions.push(bundle.clone());
+    }
+    inner.latest_checkpoint = Some(bundle.clone());
+    let served = inner
+        .emitted_checkpoints
+        .get(&bundle.cosigned.checkpoint.hash())
+        .map(|(_, s)| s.clone())
+        .or_else(|| {
+            inner
+                .checkpoint_snapshot
+                .clone()
+                .filter(|s| s.checkpoint.as_ref() == Some(&bundle.cosigned.checkpoint))
+        });
+    if let Some(snap) = served {
+        inner.served_snapshot = Some(snap);
+    }
+    // Everything at or below the co-signed height is settled.
+    inner
+        .emitted_checkpoints
+        .retain(|_, (c, _)| c.height > height);
+    inner
+        .checkpoint_sigs
+        .remove(&bundle.cosigned.checkpoint.hash());
+    if let Some(store) = inner.store.as_mut() {
+        if let Err(e) = store.append_checkpointed(bundle) {
+            tracing::error!(err = %e, height, "commit log: checkpointed append failed");
+        }
+    }
+    drop(inner);
+    log.emit(
+        Event::now(self_label, Lane::Main, "checkpoint_cosigned")
+            .with_round(round)
+            .with_kind(if is_transition {
+                "transition"
+            } else {
+                "latest"
+            }),
+    );
+    tracing::info!(
+        height,
+        round,
+        transition = is_transition,
+        "checkpoint co-signed"
+    );
+}
+
+/// The chain served to joiners: transitions plus the latest (if distinct).
+async fn served_checkpoint_chain(state: &State) -> Vec<CheckpointBundle> {
+    let inner = state.inner.lock().await;
+    let mut chain = inner.checkpoint_transitions.clone();
+    if let Some(latest) = &inner.latest_checkpoint {
+        if chain.last().map_or(true, |t| {
+            t.cosigned.checkpoint.height != latest.cosigned.checkpoint.height
+        }) {
+            chain.push(latest.clone());
+        }
+    }
+    chain
+}
+
+/// Joiner side: a peer answered `GetCheckpoints`. Verify the chain from
+/// the genesis committee; on success request the latest checkpoint's
+/// snapshot from that peer.
+async fn handle_checkpoint_chain(
+    state: &State,
+    chain: Vec<CheckpointBundle>,
+    from: &PeerId,
+    reply: &Option<tokio::sync::mpsc::Sender<WireMessage>>,
+    outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
+) {
+    let syncing = {
+        let inner = state.inner.lock().await;
+        if inner.needs_snapshot && inner.snapshot_sync.trusted.is_some() {
+            return;
+        }
+        if !inner.needs_snapshot {
+            // Steady state: only a chain strictly ahead of ours is worth
+            // the verification cost (any configured peer can send one).
+            let ahead = chain.last().is_some_and(|b| {
+                let c = &b.cosigned.checkpoint;
+                inner.latest_checkpoint.as_ref().map_or(true, |l| {
+                    (c.height, c.round)
+                        > (l.cosigned.checkpoint.height, l.cosigned.checkpoint.round)
+                })
+            });
+            if !ahead {
+                return;
+            }
+        }
+        inner.needs_snapshot
+    };
+    let links: Vec<ChainLink> = chain
+        .iter()
+        .map(|b| ChainLink {
+            checkpoint: b.cosigned.checkpoint.clone(),
+            signatures: b.cosigned.signatures.clone(),
+            next_committee: b.registries.signing_committee(),
+            next_registry_root: b.registries.root(),
+        })
+        .collect();
+    match verify_checkpoint_chain(&state.genesis_authority_registry, &links) {
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(peer = %from.0, err = %e, "snapshot sync: checkpoint chain rejected");
+            return;
+        }
+    }
+    let Some(latest) = chain.last().cloned() else {
+        return;
+    };
+    let height = latest.cosigned.checkpoint.height;
+    if !syncing {
+        // Steady state: adopt a verified chain that is strictly ahead of
+        // ours. A node that ratified a same-height checkpoint the
+        // majority did not (asymmetric signature delivery under load)
+        // would otherwise chain its next emission to a hash nobody else
+        // has and never co-sign again (consensus-review finding, seventh
+        // pass). Nothing is installed: consensus state is untouched, only
+        // the checkpoint cursor re-anchors on the mesh's chain.
+        let mut inner = state.inner.lock().await;
+        // Re-checked under the lock; lexicographic so two co-signed
+        // checkpoints at one height (possible with n >= 5 when honest
+        // nodes re-emit after a failed ratification) converge on the
+        // higher round instead of splitting the mesh's chain forever.
+        let ahead = inner.latest_checkpoint.as_ref().map_or(true, |l| {
+            (
+                latest.cosigned.checkpoint.height,
+                latest.cosigned.checkpoint.round,
+            ) > (l.cosigned.checkpoint.height, l.cosigned.checkpoint.round)
+        });
+        if !ahead {
+            return;
+        }
+        let ck = latest.cosigned.checkpoint.clone();
+        // The mesh may have co-signed a checkpoint this node emitted but
+        // never saw the quorum for: its snapshot is the one to serve.
+        if let Some((_, snap)) = inner.emitted_checkpoints.get(&ck.hash()) {
+            inner.served_snapshot = Some(snap.clone());
+        }
+        let mut trans: Vec<CheckpointBundle> = Vec::new();
+        for b in chain.iter().cloned() {
+            let changed = trans.last().map_or(true, |t| {
+                is_committee_transition(&t.registries, &b.registries)
+            });
+            if changed {
+                trans.push(b);
+            }
+        }
+        inner.checkpoint_transitions = trans;
+        inner.latest_checkpoint = Some(latest.clone());
+        inner.checkpoint_height = ck.height + 1;
+        inner.last_checkpoint_hash = ck.hash();
+        let cadence = inner.checkpoint_cadence;
+        inner.next_checkpoint_boundary = inner
+            .next_checkpoint_boundary
+            .max((ck.round / cadence + 1) * cadence);
+        inner
+            .emitted_checkpoints
+            .retain(|_, (c, _)| c.height > ck.height);
+        inner.checkpoint_sigs.retain(|_, (h, _)| *h > ck.height);
+        if let Some(store) = inner.store.as_mut() {
+            if let Err(e) = store.append_checkpointed(latest.clone()) {
+                tracing::error!(err = %e, height, "commit log: adopted checkpoint append failed");
+            }
+        }
+        tracing::info!(peer = %from.0, height, round = ck.round, "checkpoint: adopted the mesh's co-signed chain");
+        return;
+    }
+    {
+        let mut inner = state.inner.lock().await;
+        if inner
+            .last_committed_leader_round
+            .is_some_and(|l| l >= latest.cosigned.checkpoint.round)
+        {
+            // We are already past this checkpoint; nothing to install.
+            return;
+        }
+        inner.snapshot_sync.trusted = Some(latest);
+        inner.snapshot_sync.source = Some(from.clone());
+        inner.snapshot_sync.chunks.clear();
+        inner.snapshot_sync.total = 0;
+        inner.checkpoint_transitions = chain[..chain.len() - 1].to_vec();
+    }
+    tracing::info!(peer = %from.0, height, "snapshot sync: chain verified; requesting snapshot");
+    reply_to(outbound, from, reply, WireMessage::GetSnapshot(height));
+}
+
+/// Joiner side: one snapshot chunk arrived. On completion decode, verify
+/// against the trusted checkpoint, and install.
+#[allow(clippy::too_many_arguments)]
+async fn handle_snapshot_chunk(
+    state: &State,
+    height: u64,
+    index: u32,
+    total: u32,
+    bytes: Vec<u8>,
+    from: &PeerId,
+    self_label: &str,
+    log: &EventLog,
+    outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
+) {
+    let assembled: Option<Vec<u8>> = {
+        let mut inner = state.inner.lock().await;
+        let Some(trusted) = inner.snapshot_sync.trusted.clone() else {
+            return;
+        };
+        // Only the peer the snapshot was requested from may fill the
+        // reassembly buffer, and only up to `MAX_SNAPSHOT_CHUNKS`
+        // whatever `total` it claims (fourth S35 pass).
+        if inner.snapshot_sync.source.as_ref() != Some(from)
+            || trusted.cosigned.checkpoint.height != height
+            || total == 0
+            || total > MAX_SNAPSHOT_CHUNKS
+            || index >= total
+            || bytes.len() > SNAPSHOT_CHUNK_BYTES
+        {
+            return;
+        }
+        if inner.snapshot_sync.total != total {
+            inner.snapshot_sync.total = total;
+            inner.snapshot_sync.chunks.clear();
+        }
+        inner.snapshot_sync.chunks.insert(index, bytes);
+        if inner.snapshot_sync.chunks.len() as u32 == total {
+            let mut all = Vec::new();
+            for (_, c) in std::mem::take(&mut inner.snapshot_sync.chunks) {
+                all.extend_from_slice(&c);
+            }
+            Some(all)
+        } else {
+            None
+        }
+    };
+    let Some(all) = assembled else {
+        return;
+    };
+    let snap: StateSnapshot = match crate::codec::decode(&all) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(peer = %from.0, err = %e, "snapshot sync: undecodable snapshot");
+            return;
+        }
+    };
+    let trusted = state.inner.lock().await.snapshot_sync.trusted.clone();
+    let Some(trusted) = trusted else {
+        return;
+    };
+    let ck = &trusted.cosigned.checkpoint;
+    // Every committee the verified chain binds, with the round from which
+    // it governed (genesis from round 0): the window spans up to
+    // `gc_depth` rounds of history and may straddle an Authority-Ring
+    // change, so a certificate is admissible against the committee in
+    // force at its round (plus the one before it, as transition grace) —
+    // never against a key from any other era.
+    let (gc_depth, committees) = {
+        let inner = state.inner.lock().await;
+        let mut c = vec![(0u64, state.genesis_authority_registry.clone())];
+        c.extend(inner.checkpoint_transitions.iter().map(|b| {
+            (
+                b.cosigned.checkpoint.round,
+                b.registries.authority_registry.clone(),
+            )
+        }));
+        c.push((ck.round, trusted.registries.authority_registry.clone()));
+        (inner.gc_depth, c)
+    };
+    let mut snap = snap;
+    // Exact window bound before any hashing (`snapshot_window_cap`, the
+    // same bound `verify_served_snapshot` applies): a padded snapshot is
+    // refused without paying for its blocks.
+    {
+        let cap = snapshot_window_cap(&snap, ck, &committees);
+        if snap.dag_certs.len() as u64 > cap || snap.blocks.len() as u64 > cap {
+            tracing::warn!(peer = %from.0, height, "snapshot sync: oversized snapshot; discarded");
+            state.inner.lock().await.snapshot_sync.trusted = None;
+            return;
+        }
+    }
+    // Blocks are not bound by the checkpoint; keep only those that back
+    // a certificate in the window with the digest that certificate
+    // signed and that are self-consistent. `verify_served_snapshot` then
+    // requires one for every certificate (IQ-009 D4).
+    {
+        let headers: HashMap<CertHash, ([u8; 32], AuthorityId, u64)> = snap
+            .dag_certs
+            .iter()
+            .map(|c| (c.hash(), cert_header(c)))
+            .collect();
+        snap.blocks.retain(|b| {
+            headers
+                .get(&b.cert_hash)
+                .is_some_and(|hdr| block_matches_header(b, *hdr))
+                && block_payload_is_consistent(b)
+        });
+    }
+    if let Err(why) =
+        verify_served_snapshot(&snap, ck, &state.manifest_network_id, gc_depth, &committees)
+    {
+        tracing::warn!(peer = %from.0, height, why, "snapshot sync: snapshot rejected; discarded");
+        state.inner.lock().await.snapshot_sync.trusted = None;
+        return;
+    }
+    // Node-local fields the serving peer has no business setting.
+    snap.last_authored_round = None;
+    snap.log_sequence = 0;
+    // The served snapshot was captured before its own checkpoint was
+    // co-signed; carry the verified chain forward.
+    snap.checkpoint_chain = {
+        let inner = state.inner.lock().await;
+        let mut c = inner.checkpoint_transitions.clone();
+        c.push(trusted.clone());
+        c
+    };
+    install_snapshot(state, snap.clone(), false).await;
+    {
+        let mut inner = state.inner.lock().await;
+        inner.needs_snapshot = false;
+        inner.snapshot_sync = SnapshotSync::default();
+        // Everything buffered before the install refers to a world the
+        // snapshot superseded; a stale orphan waiting on a pruned parent
+        // would otherwise sit in the buffer forever.
+        inner.orphans.clear();
+        inner.inflight_fetches.clear();
+        inner.inflight_fetch_history.clear();
+        inner.needed_blocks.clear();
+        inner.awaiting_block.clear();
+        inner.block_candidates.clear();
+        inner.block_candidates_bytes = 0;
+        inner.block_candidates_by_peer.clear();
+        inner.block_fetch_history.clear();
+        // Backfill gates on the peer tip; make sure it is fresh now rather
+        // than at the next periodic poll — the seeds are pruning while we
+        // wait.
+        inner.sync_tip = inner.sync_tip.max(ck.round);
+        inner.backfill_resume = Some(snap.leader_round.saturating_add(1));
+        let arc = Arc::new(snap.clone());
+        inner.checkpoint_snapshot = Some(arc.clone());
+        inner.served_snapshot = Some(arc);
+    }
+    if let Some(dir) = state.data_dir.clone() {
+        let s2 = snap.clone();
+        let _ = tokio::task::spawn_blocking(move || crate::store::write_snapshot(&dir, &s2)).await;
+        let mut inner = state.inner.lock().await;
+        if let Some(store) = inner.store.as_mut() {
+            let _ = store.append_checkpointed(trusted.clone());
+        }
+    }
+    for tx in outbound.values() {
+        let _ = tx.try_send(WireMessage::GetTip);
+    }
+    log.emit(
+        Event::now(self_label, Lane::Main, "snapshot_installed")
+            .with_round(ck.round)
+            .with_peer(from.0.clone()),
+    );
+    tracing::info!(peer = %from.0, height, round = ck.round, "snapshot sync: installed verified snapshot");
+}
+
+/// Exact upper bound on the certificates (and blocks) a served snapshot
+/// may carry: at most `MAX_CERTS_PER_AUTHOR_ROUND` per author per live
+/// round, where every admissible author is a member of some committee
+/// the chain binds (the union of member ids over `committees`) and the
+/// live rounds are `(gc_round, ck.round]`. Provable, not a fudge factor;
+/// it reads only snapshot fields and the checkpoint, so it runs before
+/// any hashing of the snapshot.
+fn snapshot_window_cap(
+    snap: &StateSnapshot,
+    ck: &Checkpoint,
+    committees: &[(u64, AuthorityRegistry)],
+) -> u64 {
+    // The per-round author count comes from the chain-bound committees
+    // only: the snapshot's own committee is peer-supplied and is verified
+    // (via the registry root) only after this bound is applied, so it
+    // must not widen it (consensus-review finding, fifth S35 pass).
+    let live_rounds = match snap.gc_round {
+        Some(g) => ck.round.saturating_sub(g),
+        None => ck.round.saturating_add(1),
+    };
+    let union_ids: BTreeSet<AuthorityId> = committees
+        .iter()
+        .flat_map(|(_, reg)| reg.members().map(|m| m.id))
+        .collect();
+    let per_round = (union_ids.len().max(1) * MAX_CERTS_PER_AUTHOR_ROUND) as u64;
+    per_round.saturating_mul(live_rounds).max(per_round)
+}
+
+/// Install a snapshot into a node that has not committed past it: shared
+/// by disk recovery (IQ-008 D4) and joiner bootstrap (D5).
+/// Everything a joiner checks before installing a peer-served snapshot
+/// (IQ-008 D5). The checkpoint binds `state_root` (substrate),
+/// `registry_root` (committee + stake + epoch) and `snapshot_root`
+/// (leader frontier, gc round, commit marks, queued governance); the
+/// certificate window is checked structurally: every certificate is
+/// signed by a member of the Authority Ring in force at its round
+/// (`committees`: `(round, ring)` pairs oldest first, genesis at round 0;
+/// the rings established by checkpoints within `gc_depth` rounds below
+/// the certificate's round, the last one below it, and the next one as
+/// transition grace), lies above the bound
+/// gc round, and at most two certificates share an (author, round); the
+/// tombstone window lies at or below the gc round and is bounded in
+/// size. Returns the reason on failure.
+fn verify_served_snapshot(
+    snap: &StateSnapshot,
+    ck: &Checkpoint,
+    network_id: &str,
+    gc_depth: u64,
+    committees: &[(u64, AuthorityRegistry)],
+) -> Result<(), &'static str> {
+    if snap.checkpoint.as_ref() != Some(ck) {
+        return Err("checkpoint mismatch");
+    }
+    if snap.network_id != network_id {
+        return Err("network id mismatch");
+    }
+    // Structural bounds first, before any hashing: a padded snapshot is
+    // refused at the exact window bound without paying for its roots
+    // (consensus-review finding, fourth S35 pass).
+    // The checkpoint covers the leaders at or below its boundary round.
+    if snap.leader_round > ck.round {
+        return Err("leader frontier above the checkpoint round");
+    }
+    let expected_gc = if snap.has_committed {
+        gc_round_for(snap.leader_round, gc_depth)
+    } else {
+        None
+    };
+    if snap.gc_round != expected_gc {
+        return Err("gc round is not the frontier minus gc_depth");
+    }
+    // IQ-010 D6: the committee is bound by `registry_root`; structurally
+    // it must be a subset of the bound Authority registry, and the
+    // live-proven set (bound by `snapshot_root`) a subset of the
+    // registered-but-inactive members.
+    if snap
+        .committee
+        .members()
+        .iter()
+        .any(|id| !snap.authority_registry.contains(*id))
+    {
+        return Err("committee member not in the authority registry");
+    }
+    if snap
+        .live_proven
+        .iter()
+        .any(|id| !snap.authority_registry.contains(*id) || snap.committee.contains(*id))
+    {
+        return Err("live-proven set is not registered-but-inactive");
+    }
+    // The schedule must name the current epoch and the next, and the
+    // next epoch's committee is the one the latest drain produced.
+    if !snap.committee_by_epoch.contains_key(&snap.epoch.0)
+        || snap.committee_by_epoch.get(&(snap.epoch.0 + 1)) != Some(&snap.committee)
+    {
+        return Err("committee schedule inconsistent with the committee");
+    }
+    let n = snap.committee.size() as u64;
+    if snap.tombstones.len() as u64 > n.saturating_mul(gc_depth).saturating_add(n) {
+        return Err("tombstone window too large");
+    }
+    if let Some(g) = snap.gc_round {
+        if snap.tombstones.iter().any(|(_, r)| *r > g) {
+            return Err("tombstone above gc round");
+        }
+        if snap.dag_certs.iter().any(|c| c.round <= g) {
+            return Err("certificate at or below gc round");
+        }
+    } else if !snap.tombstones.is_empty() {
+        return Err("tombstones without a gc round");
+    }
+    // The served window is exactly (gc_round, ck.round]: both ends are
+    // checkpoint-bound (`ck.round` directly; `gc_round` through
+    // `snapshot_root`, checked below), so the bound is exact rather than
+    // a heuristic on how far the frontier may trail the boundary.
+    if snap.dag_certs.iter().any(|c| c.round > ck.round) {
+        return Err("certificate above the checkpoint round");
+    }
+    let max_certs = snapshot_window_cap(snap, ck, committees);
+    if snap.dag_certs.len() as u64 > max_certs || snap.blocks.len() as u64 > max_certs {
+        return Err("certificate window too large");
+    }
+    if snap.verify().is_err() || snap.state_root != ck.state_root {
+        return Err("state root mismatch");
+    }
+    if snap.registries().root() != ck.registry_root {
+        return Err("registry root mismatch");
+    }
+    if snap.commit_root() != ck.snapshot_root {
+        return Err("snapshot root mismatch");
+    }
+    let mut per_slot: HashMap<(AuthorityId, u64), usize> = HashMap::new();
+    // IQ-009 D4: every certificate in the window carries its block.
+    let block_headers: HashMap<CertHash, ([u8; 32], AuthorityId, u64)> = snap
+        .blocks
+        .iter()
+        .map(|b| (b.cert_hash, (b.payload_digest, b.author, b.round)))
+        .collect();
+    for c in &snap.dag_certs {
+        if block_headers.get(&c.hash()) != Some(&cert_header(c)) {
+            return Err("certificate without its block");
+        }
+    }
+    for c in &snap.dag_certs {
+        let slot = per_slot.entry((c.author, c.round)).or_default();
+        *slot += 1;
+        if *slot > MAX_CERTS_PER_AUTHOR_ROUND {
+            return Err("more than two certificates for one author and round");
+        }
+        // Committee in force at this round: a checkpoint at round R
+        // reports the ring after the leaders at or below R committed, so
+        // for a certificate at round r in (R_k, R_(k+1)] the ring in force
+        // is C_k or C_(k+1) (an admit inside the era). An honest node
+        // ingests against its LIVE registry, which trails its commit
+        // frontier by up to gc_depth rounds, so an ejected author's
+        // certificates legitimately sit up to gc_depth rounds above the
+        // eject: every ring seated within that lag is admissible too. A
+        // key seated only before r - gc_depth admits nothing at r.
+        let i = committees
+            .iter()
+            .rposition(|(rd, _)| *rd < c.round)
+            .unwrap_or(0);
+        let lo = committees
+            .iter()
+            .rposition(|(rd, _)| *rd < c.round.saturating_sub(gc_depth))
+            .unwrap_or(0)
+            .min(i);
+        let hi = (i + 1).min(committees.len() - 1);
+        let ok = committees[lo..=hi].iter().any(|(_, reg)| {
+            reg.get(c.author)
+                .and_then(|m| {
+                    suwappu_crypto::mldsa::PublicKey::from_bytes(&m.public_key_bytes).ok()
+                })
+                .is_some_and(|pk| c.verify_signature(&pk))
+        });
+        if !ok {
+            return Err("certificate not signed by the committee in force at its round");
+        }
+    }
+    Ok(())
+}
+
+/// `own` is true when the snapshot is this node's own (disk recovery):
+/// the authored-round marker is then restored from it. A peer-served
+/// snapshot never sets node-local markers.
+async fn install_snapshot(state: &State, snap: StateSnapshot, own: bool) {
+    // Same critical section as the commit walk: the substrate, the commit
+    // marks and the frontier are replaced together, and never under a
+    // walk that computed its sweep against the previous state.
+    let _commit_guard = state.commit_lock.lock().await;
+    // IQ-009 I-AV1 on both paths (a snapshot written by a pre-S35 binary
+    // may hold certificates without their blocks): blocks first, then only
+    // certificates whose digest-matching block is held; the rest are
+    // re-pulled by backfill.
+    let headers: HashMap<CertHash, ([u8; 32], AuthorityId, u64)> = snap
+        .blocks
+        .iter()
+        .map(|b| (b.cert_hash, (b.payload_digest, b.author, b.round)))
+        .collect();
+    let kept: HashSet<CertHash> = snap
+        .dag_certs
+        .iter()
+        .filter(|c| headers.get(&c.hash()) == Some(&cert_header(c)))
+        .map(|c| c.hash())
+        .collect();
+    {
+        let mut dag = state.dag.write().await;
+        {
+            let mut blocks = state.blocks.lock();
+            for b in snap.blocks.iter().filter(|b| kept.contains(&b.cert_hash)) {
+                blocks.insert(b.cert_hash, b.clone());
+            }
+        }
+        if let Some(g) = snap.gc_round {
+            dag.restore_gc_round(g);
+        }
+        for (h, r) in &snap.tombstones {
+            dag.insert_tombstone(*h, *r);
+        }
+        for c in &snap.dag_certs {
+            if !kept.contains(&c.hash()) {
+                tracing::debug!(
+                    round = c.round,
+                    "snapshot install: cert without its block skipped"
+                );
+                continue;
+            }
+            if let Err(e) = dag.insert(c.clone()) {
+                tracing::debug!(err = ?e, round = c.round, "snapshot install: cert not re-inserted");
+            }
+        }
+    }
+    // Equivocation bookkeeping for the installed window (IQ-010 D3): a
+    // served window may legitimately hold two headers for one slot, and
+    // a conflicting header arriving later must be detected against them.
+    let (seen_at, detected): (
+        BTreeMap<(AuthorityId, Round), CertHash>,
+        Vec<EquivocationProof>,
+    ) = {
+        let mut seen: BTreeMap<(AuthorityId, Round), CertHash> = BTreeMap::new();
+        let mut detected = Vec::new();
+        let mut certs: Vec<&Certificate> = snap
+            .dag_certs
+            .iter()
+            .filter(|c| kept.contains(&c.hash()))
+            .collect();
+        certs.sort_by_key(|c| (c.round, c.author, c.hash()));
+        for c in certs {
+            let h = c.hash();
+            match seen.get(&(c.author, c.round)) {
+                None => {
+                    seen.insert((c.author, c.round), h);
+                }
+                Some(prev) if *prev != h => detected.push(EquivocationProof {
+                    author: c.author,
+                    round: c.round,
+                    cert_a: *prev,
+                    cert_b: h,
+                }),
+                _ => {}
+            }
+        }
+        (seen, detected)
+    };
+    *state.authority_registry.write().await = snap.authority_registry;
+    *state.validator_registry.write().await = snap.validator_registry;
+    *state.stake_table.write().await = snap.stake_table;
+    {
+        let mut committed = state.committed.lock();
+        committed.extend(snap.committed.iter().copied());
+    }
+    let mut inner = state.inner.lock().await;
+    inner.substrate = snap.substrate;
+    inner.epoch = EpochState {
+        current: snap.epoch.0,
+        rounds_per_epoch: snap.epoch.1,
+        last_boundary_round: snap.epoch.2,
+    };
+    inner.pending_governance = snap.pending_governance;
+    inner.committee = snap.committee;
+    inner.committee_by_epoch = snap.committee_by_epoch;
+    inner.live_proven = snap.live_proven;
+    inner.retired = snap.retired;
+    inner.seen_at = seen_at;
+    inner.detected_equivocations = detected;
+    inner.gc_round = snap.gc_round;
+    inner.last_committed_leader_round = if snap.has_committed {
+        Some(snap.leader_round)
+    } else {
+        None
+    };
+    inner.last_snapshot_leader_round = Some(snap.leader_round);
+    if own {
+        if let Some(a) = snap.last_authored_round {
+            inner.last_authored_round = Some(inner.last_authored_round.map_or(a, |x| x.max(a)));
+        }
+        inner.max_observed_round = inner
+            .max_observed_round
+            .max(snap.last_authored_round.unwrap_or(0));
+    }
+    inner.max_observed_round = inner.max_observed_round.max(snap.leader_round);
+    inner.latest_bridge_header = if snap.has_committed {
+        Some((snap.leader_round, snap.state_root))
+    } else {
+        None
+    };
+    // Checkpoint chain + cursor. The stored cursor is node-local state:
+    // restored on the node's own recovery, ignored from a peer (the
+    // cursor is then derived from the trusted checkpoint below).
+    let (next_boundary, height, last_hash) = snap.checkpoint_cursor;
+    if own && next_boundary > 0 {
+        inner.next_checkpoint_boundary = next_boundary;
+        inner.checkpoint_height = height;
+        inner.last_checkpoint_hash = last_hash;
+    }
+    let mut transitions = snap.checkpoint_chain.clone();
+    if let Some(latest) = transitions.pop() {
+        // Re-derive transitions vs. latest from registry roots.
+        let mut trans: Vec<CheckpointBundle> = Vec::new();
+        for b in transitions
+            .into_iter()
+            .chain(std::iter::once(latest.clone()))
+        {
+            let changed = trans.last().map_or(true, |t| {
+                is_committee_transition(&t.registries, &b.registries)
+            });
+            if changed {
+                trans.push(b);
+            }
+        }
+        inner.checkpoint_transitions = trans;
+        // After installing a co-signed checkpoint, the next checkpoint is
+        // the one after it.
+        let ck = &latest.cosigned.checkpoint;
+        if !own || inner.checkpoint_height <= ck.height {
+            inner.checkpoint_height = ck.height + 1;
+            inner.last_checkpoint_hash = ck.hash();
+            let cadence = inner.checkpoint_cadence;
+            inner.next_checkpoint_boundary = (ck.round / cadence + 1) * cadence;
+        }
+        inner
+            .emitted_checkpoints
+            .retain(|_, (c, _)| c.height > ck.height);
+        inner.checkpoint_sigs.retain(|_, (h, _)| *h > ck.height);
+        inner.latest_checkpoint = Some(latest);
+    }
+}
+
+/// Capture a consistent [`crate::store::StateSnapshot`] and write it under
+/// `state.data_dir` (IQ-008 D4). The capture takes every lock briefly in
+/// the canonical order and clones; the encode + write runs on the
+/// blocking pool so the commit path is not stalled by disk. No-op for an
+/// ephemeral node.
+async fn snapshot_now(state: &State, self_label: &str, log: &EventLog) {
+    let Some(dir) = state.data_dir.clone() else {
+        return;
+    };
+    let _commit_guard = state.commit_lock.lock().await;
+    let snap = capture_snapshot(state).await;
+    let round = snap.leader_round;
+    log.emit(Event::now(self_label, Lane::Main, "snapshot").with_round(round));
+    match tokio::task::spawn_blocking(move || crate::store::write_snapshot(&dir, &snap)).await {
+        Ok(Ok(path)) => tracing::info!(round, path = %path.display(), "snapshot written"),
+        Ok(Err(e)) => tracing::error!(err = %e, round, "snapshot write failed"),
+        Err(e) => tracing::error!(err = %e, round, "snapshot task panicked"),
+    }
+}
+
+/// Clone the recoverable state at one point of the commit sequence.
+async fn capture_snapshot(state: &State) -> crate::store::StateSnapshot {
+    let mut inner = state.inner.lock().await;
+    let dag = state.dag.read().await;
+    let authority_registry = state.authority_registry.read().await.clone();
+    let validator_registry = state.validator_registry.read().await.clone();
+    let stake_table = state.stake_table.read().await.clone();
+    let leader_round = inner.last_committed_leader_round.unwrap_or(0);
+    inner.last_snapshot_leader_round = Some(leader_round);
+    let log_sequence = inner.store.as_ref().map_or(0, |s| s.next_sequence());
+    let last_authored_round = inner
+        .last_authored_round
+        .max(inner.store.as_ref().and_then(|s| s.last_authored_round()));
+    let dag_certs: Vec<Certificate> = dag
+        .linearize()
+        .into_iter()
+        .filter_map(|h| dag.get(&h).cloned())
+        .collect();
+    let live: HashSet<CertHash> = dag_certs.iter().map(|c| c.hash()).collect();
+    // Canonical order (the live sets are hash-keyed): two honest nodes
+    // at the same checkpoint produce byte-identical snapshot bodies.
+    let mut committed: Vec<CertHash> = state
+        .committed
+        .lock()
+        .iter()
+        .copied()
+        .filter(|h| live.contains(h))
+        .collect();
+    committed.sort();
+    let mut blocks: Vec<BlockPayload> = state
+        .blocks
+        .lock()
+        .iter()
+        .filter(|(h, _)| live.contains(h))
+        .map(|(_, b)| b.clone())
+        .collect();
+    blocks.sort_by_key(|b| b.cert_hash);
+    // IQ-010 D6: the committee is exactly the registry members with a
+    // stake-table row; a registered member without one is inactive.
+    debug_assert!(
+        validator_registry
+            .members()
+            .filter(|m| stake_table.weight(m.id) > 0)
+            .all(|m| inner.committee.contains(m.id))
+            && inner
+                .committee
+                .members()
+                .iter()
+                .all(|id| authority_registry.contains(*id)),
+        "committee is not the stake-weighted subset of the registries"
+    );
+    crate::store::StateSnapshot {
+        version: crate::store::STORE_VERSION,
+        network_id: state.manifest_network_id.clone(),
+        leader_round,
+        has_committed: inner.last_committed_leader_round.is_some(),
+        gc_round: inner.gc_round,
+        log_sequence,
+        last_authored_round,
+        state_root: inner.substrate.state_root(),
+        substrate: inner.substrate.clone(),
+        authority_registry,
+        validator_registry,
+        stake_table,
+        epoch: (
+            inner.epoch.current,
+            inner.epoch.rounds_per_epoch,
+            inner.epoch.last_boundary_round,
+        ),
+        pending_governance: inner.pending_governance.clone(),
+        committee: inner.committee.clone(),
+        committee_by_epoch: inner.committee_by_epoch.clone(),
+        live_proven: inner.live_proven.clone(),
+        retired: inner.retired.clone(),
+        dag_certs,
+        tombstones: {
+            let mut t: Vec<(CertHash, u64)> = dag.tombstones().collect();
+            t.sort();
+            t
+        },
+        committed,
+        blocks,
+        checkpoint: None,
+        checkpoint_chain: {
+            let mut c = inner.checkpoint_transitions.clone();
+            if let Some(l) = &inner.latest_checkpoint {
+                if c.last().map_or(true, |t| {
+                    t.cosigned.checkpoint.height != l.cosigned.checkpoint.height
+                }) {
+                    c.push(l.clone());
+                }
+            }
+            c
+        },
+        checkpoint_cursor: (
+            inner.next_checkpoint_boundary,
+            inner.checkpoint_height,
+            inner.last_checkpoint_hash,
+        ),
+    }
+}
+
+/// IQ-008 D4 recovery: install the newest valid snapshot (if any), replay
+/// every later `Committed` record through [`apply_commit`], restore the
+/// authored-round marker, prune to the recovered gc round, and hand the
+/// open log to the state. Returns the recovered leader round for the
+/// startup log line.
+async fn recover_from_disk(
+    state: &State,
+    dir: &std::path::Path,
+    fsync: bool,
+    self_label: &str,
+    log: &EventLog,
+) -> anyhow::Result<Option<u64>> {
+    let snapshot = crate::store::load_latest_snapshot(dir, &state.manifest_network_id)?;
+    let (store, records) = crate::store::CommitLog::open(dir, fsync)?;
+
+    // 1. Snapshot install (shared with the joiner path).
+    let mut replay_from = 0u64;
+    if let Some(snap) = snapshot {
+        replay_from = snap.log_sequence;
+        let leader_round = snap.leader_round;
+        let log_sequence = snap.log_sequence;
+        let has_ck = snap.checkpoint.is_some();
+        let arc = Arc::new(snap.clone());
+        install_snapshot(state, snap, true).await;
+        if has_ck {
+            state.inner.lock().await.checkpoint_snapshot = Some(arc);
+        }
+        tracing::info!(leader_round, log_sequence, "recovery: snapshot installed");
+    }
+
+    // 2. Log replay. Committed records re-run the exact commit body;
+    //    authored markers advance the equivocation guard.
+    let mut replayed = 0u64;
+    let mut authored_max: Option<u64> = None;
+    for rec in records {
+        match rec.event {
+            crate::store::LogEvent::Authored { round, .. } => {
+                authored_max = Some(authored_max.map_or(round, |m: u64| m.max(round)));
+            }
+            crate::store::LogEvent::Checkpointed(bundle) => {
+                let mut inner = state.inner.lock().await;
+                let b = *bundle;
+                let h = b.cosigned.checkpoint.height;
+                if inner
+                    .latest_checkpoint
+                    .as_ref()
+                    .is_some_and(|l| l.cosigned.checkpoint.height >= h)
+                {
+                    continue;
+                }
+                let changed = inner.latest_checkpoint.as_ref().map_or(true, |l| {
+                    is_committee_transition(&l.registries, &b.registries)
+                });
+                if changed {
+                    inner.checkpoint_transitions.push(b.clone());
+                }
+                inner.latest_checkpoint = Some(b);
+            }
+            crate::store::LogEvent::Committed {
+                sequence,
+                leader_round,
+                cert,
+                block,
+            } => {
+                if sequence < replay_from {
+                    continue;
+                }
+                let h = cert.hash();
+                if !block_matches_header(&block, cert_header(&cert)) {
+                    tracing::error!(
+                        round = cert.round,
+                        "recovery: record block does not match its certificate; skipped"
+                    );
+                    continue;
+                }
+                // Block before certificate (I-AV1), as on every other path.
+                state.blocks.lock().insert(h, block.clone());
+                {
+                    let mut dag = state.dag.write().await;
+                    if let Err(e) = dag.insert(cert.clone()) {
+                        // Parents below the floor or already pruned: keep
+                        // the hash resolvable for later children.
+                        if !dag.is_tombstoned(&h) && !dag.contains(&h) {
+                            dag.insert_tombstone(h, cert.round);
+                        }
+                        tracing::debug!(err = ?e, round = cert.round, "recovery: replayed cert tombstoned");
+                    }
+                }
+                if !state.committed.lock().insert(h) {
+                    continue;
+                }
+                apply_commit(state, h, cert, block, leader_round, self_label, log, false).await;
+                {
+                    let mut inner = state.inner.lock().await;
+                    if inner
+                        .last_committed_leader_round
+                        .map_or(true, |l| leader_round > l)
+                    {
+                        inner.last_committed_leader_round = Some(leader_round);
+                    }
+                }
+                replayed += 1;
+            }
+        }
+    }
+
+    // 3. Restore the authored marker (max of snapshot + log), promote the
+    //    loaded snapshot to "served" if its checkpoint is the latest
+    //    co-signed one, and prune.
+    let (leader_round, gc_depth) = {
+        let mut inner = state.inner.lock().await;
+        if let (Some(snap), Some(latest)) = (
+            inner.checkpoint_snapshot.clone(),
+            inner.latest_checkpoint.clone(),
+        ) {
+            if snap.checkpoint.as_ref() == Some(&latest.cosigned.checkpoint) {
+                inner.served_snapshot = Some(snap);
+            }
+        }
+        if let Some(a) = authored_max {
+            inner.last_authored_round = Some(inner.last_authored_round.map_or(a, |x| x.max(a)));
+            inner.max_observed_round = inner.max_observed_round.max(a);
+        }
+        inner.store = Some(store);
+        inner.backfill_resume = inner
+            .last_committed_leader_round
+            .map(|l| l.saturating_add(1));
+        (inner.last_committed_leader_round, inner.gc_depth)
+    };
+    if let Some(g) = leader_round.and_then(|l| gc_round_for(l, gc_depth)) {
+        prune_state(state, g, self_label, log).await;
+    }
+    tracing::info!(replayed, leader_round = ?leader_round, "recovery: commit log replayed");
+    Ok(leader_round)
+}
+
+/// Result of one [`prune_state`] pass, for the event log and metrics.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct PruneOutcome {
+    certs: usize,
+    blocks: usize,
+    votes: usize,
+    orphans_dropped: usize,
+    orphans_reinserted: usize,
+}
+
+/// Apply IQ-008 D3: evict every structure below `gc_round`.
+///
+/// Called from `try_commit` once the gc round advances. Takes each lock
+/// briefly in the canonical order (`inner → dag → … → votes → blocks →
+/// committed`) with no guard held across an await, except that the DAG
+/// write and the `inner` read of the orphan buffer are sequential, not
+/// nested. Orphans whose missing parent is now a tombstone are re-run
+/// through `ingest_cert` (they were signature-verified when buffered;
+/// re-verification is the price of reusing the one admission path).
+async fn prune_state(
+    state: &State,
+    gc_round: u64,
+    self_label: &str,
+    log: &EventLog,
+) -> PruneOutcome {
+    let mut out = PruneOutcome::default();
+
+    // 1. DAG: evict rounds <= gc_round, collect evicted hashes.
+    let report = state.dag.write().await.prune_below(gc_round);
+    out.certs = report.certs_pruned;
+    if report.certs_pruned == 0 && report.rounds_pruned == 0 {
+        // Nothing lived at or below gc_round (e.g. a fresh node whose
+        // peers are far ahead). Still record the round so ingest rejects
+        // obsolete certs and side tables stay consistent.
+    }
+
+    // 2. Hash-keyed side tables: drop entries for evicted certs, and
+    //    every block at or below the gc round whatever its certificate's
+    //    fate (a block held for a certificate that was parked and then
+    //    dropped is never in `evicted`).
+    {
+        let mut blocks = state.blocks.lock();
+        let before = blocks.len();
+        blocks.retain(|h, b| !report.evicted.contains(h) && b.round > gc_round);
+        out.blocks += before - blocks.len();
+    }
+    {
+        let mut votes = state.votes.lock();
+        for h in &report.evicted {
+            if votes.remove(h).is_some() {
+                out.votes += 1;
+            }
+        }
+    }
+    {
+        let mut committed = state.committed.lock();
+        for h in &report.evicted {
+            committed.remove(h);
+        }
+    }
+
+    // 3. Round-keyed cold state + orphan triage.
+    let reinsert: Vec<Certificate> = {
+        let tombstoned: HashSet<CertHash> = {
+            // Canonical order: `inner` before `dag`. Taking the DAG read
+            // guard first deadlocks against `capture_snapshot` (inner →
+            // dag) once a writer is queued on the writer-preferring RwLock.
+            let mut inner = state.inner.lock().await;
+            let dag = state.dag.read().await;
+            inner.gc_round = Some(gc_round);
+            inner.seen_at.retain(|(_, r), _| *r > gc_round);
+            inner.evidence_emitted.retain(|(_, r)| *r > gc_round);
+            inner.detected_equivocations.retain(|p| p.round > gc_round);
+            inner.retired.retain(|_, (_, until)| *until > gc_round);
+            // IQ-010 D4: epochs no decidable slot can belong to. Pruned
+            // here, from the frontier-derived gc round, so the schedule a
+            // checkpoint snapshot binds is normalised like every other
+            // pruned structure (`emit_checkpoint` prunes before capture).
+            let epoch_floor = inner.epoch.epoch_for(gc_round);
+            inner.committee_by_epoch.retain(|e, _| *e >= epoch_floor);
+            inner.main_lane_index.retain(|tx| tx.round > gc_round);
+            for h in &report.evicted {
+                inner.needed_blocks.remove(h);
+                inner.block_fetch_history.remove(h);
+                inner.inflight_fetches.remove(h);
+                inner.inflight_fetch_history.remove(h);
+            }
+            // Certificates parked on a missing block are obsolete once
+            // their round falls below the gc round (IQ-009 D1).
+            let obsolete: Vec<CertHash> = inner
+                .awaiting_block
+                .iter()
+                .filter(|(_, c)| c.round <= gc_round)
+                .map(|(h, _)| *h)
+                .collect();
+            for h in obsolete {
+                inner.awaiting_block.remove(&h);
+                inner.needed_blocks.remove(&h);
+                inner.block_fetch_history.remove(&h);
+            }
+            // Per block, not per key: a key keeps only candidates still
+            // above the gc round, and an emptied key is dropped, so one
+            // in-window candidate cannot keep an obsolete sibling alive.
+            let mut released: Vec<CandidateBlock> = Vec::new();
+            inner.block_candidates.retain(|_, v| {
+                v.retain(|c| {
+                    let keep = c.block.round > gc_round;
+                    if !keep {
+                        released.push(c.clone());
+                    }
+                    keep
+                });
+                !v.is_empty()
+            });
+            release_candidates(&mut inner, released.iter());
+            // Fetch history beyond the live set is memory of evicted
+            // parked headers (their back-off); it is bounded by
+            // `MAX_BLOCK_FETCH_HISTORY` at park time and trimmed here to
+            // the entries a replay could still resume.
+            if inner.block_fetch_history.len() > inner.needed_blocks.len() {
+                let live = inner.needed_blocks.clone();
+                let now = now_unix_ms();
+                inner.block_fetch_history.retain(|k, (last, _)| {
+                    live.contains(k) || now.saturating_sub(*last) < 4 * ORPHAN_PULL_MAX_BACKOFF_MS
+                });
+            }
+            // RPC indices keep a longer tail until the durable commit log
+            // (S34.3) answers historical lookups; they are still bounded.
+            let rpc_floor =
+                gc_round.saturating_sub(RPC_INDEX_EXTRA_DEPTH_MULTIPLIER * inner.gc_depth);
+            inner.blocks_by_round.retain(|r, _| *r > rpc_floor);
+            inner.tx_to_block.retain(|_, (r, _, _)| *r > rpc_floor);
+            inner
+                .orphans
+                .keys()
+                .filter(|missing| dag.is_tombstoned(missing))
+                .copied()
+                .collect()
+        };
+        let mut inner = state.inner.lock().await;
+        let mut reinsert = Vec::new();
+        let keys: Vec<CertHash> = inner.orphans.keys().copied().collect();
+        for missing in keys {
+            let Some(certs) = inner.orphans.remove(&missing) else {
+                continue;
+            };
+            let (live, stale): (Vec<Certificate>, Vec<Certificate>) =
+                certs.into_iter().partition(|c| c.round > gc_round);
+            out.orphans_dropped += stale.len();
+            if tombstoned.contains(&missing) {
+                // Parent is pruned but known: these certs now validate.
+                inner.inflight_fetches.remove(&missing);
+                inner.inflight_fetch_history.remove(&missing);
+                out.orphans_reinserted += live.len();
+                reinsert.extend(live);
+            } else if live.is_empty() {
+                // Every waiter was obsolete; stop fetching the parent.
+                inner.inflight_fetches.remove(&missing);
+                inner.inflight_fetch_history.remove(&missing);
+            } else {
+                inner.orphans.insert(missing, live);
+            }
+        }
+        reinsert
+    };
+
+    // 4. Re-admit orphans unblocked by tombstones. No votes are cast for
+    //    them: they sit `gc_depth` rounds behind the commit frontier, and
+    //    the joint-quorum gate is evaluated on leader certs, not on every
+    //    swept certificate.
+    let from = PeerId::new("gc-reinsert".to_string());
+    for cert in reinsert {
+        let _ = ingest_cert(state, cert, &from, None).await;
+    }
+
+    log.emit(
+        Event::now(self_label, Lane::Main, "gc_pruned")
+            .with_round(gc_round)
+            .with_kind("gc"),
+    );
+    tracing::info!(
+        gc_round,
+        certs = out.certs,
+        blocks = out.blocks,
+        votes = out.votes,
+        orphans_dropped = out.orphans_dropped,
+        orphans_reinserted = out.orphans_reinserted,
+        "gc: pruned state below gc round"
+    );
+    out
+}
+
+/// How far below the gc round the explorer-facing indices
+/// (`blocks_by_round`, `tx_to_block`) are retained, as a multiple of
+/// `gc_depth`. Bounded like everything else; superseded by the durable
+/// commit log in S34.3.
+const RPC_INDEX_EXTRA_DEPTH_MULTIPLIER: u64 = 4;
 
 /// Unicast `GetCert(hash)` to up to two peers — `prefer` (if any,
 /// usually the cert sender) and one other. Two-peer fan-out matches
@@ -1290,6 +4131,7 @@ async fn ingest_cert(
 fn fetch_cert_from_peers(
     hash: CertHash,
     prefer: Option<&PeerId>,
+    attempt: u32,
     outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
 ) {
     let mut sent = 0usize;
@@ -1300,14 +4142,21 @@ fn fetch_cert_from_peers(
             }
         }
     }
-    if sent >= 2 {
+    // Start rotated by hash AND attempt over a sorted peer list, so
+    // retries are never pinned to two peers. Each attempt asks two peers,
+    // so the step is two: consecutive attempts cover disjoint pairs.
+    let mut peers: Vec<&PeerId> = outbound.keys().collect();
+    peers.sort();
+    if peers.is_empty() {
         return;
     }
-    for (peer, tx) in outbound.iter() {
+    let start = (hash.0[1] as usize + 2 * attempt as usize) % peers.len();
+    for offset in 0..peers.len() {
+        let peer = peers[(start + offset) % peers.len()];
         if Some(peer) == prefer {
             continue;
         }
-        if tx.try_send(WireMessage::GetCert(hash)).is_ok() {
+        if outbound[peer].try_send(WireMessage::GetCert(hash)).is_ok() {
             sent += 1;
             if sent >= 2 {
                 return;
@@ -1356,7 +4205,7 @@ pub(crate) async fn propose_fastpath_tx(
     for out in outbound.values() {
         let _ = out.try_send(WireMessage::FastPath(cert.clone()));
     }
-    let q = fast_path_quorum_size(inner.n_authorities);
+    let q = fast_path_quorum_size(inner.committee.size());
     if signers.len() as u32 >= q {
         inner.fastpath_pending.remove(&key);
         inner.fastpath_committed.insert(key);
@@ -1397,9 +4246,10 @@ async fn handle_fastpath_cert(
     let key = State::fastpath_key(&cert.tx);
     let mut inner = state.inner.lock().await;
 
-    // Reject if any signer is outside committee bounds — Byzantine input.
+    // Reject if any signer is not a committee member — Byzantine input
+    // (IQ-010 D5: membership, not an id bound).
     for &s_id in &cert.signers {
-        if s_id >= inner.n_authorities {
+        if !inner.committee.contains(s_id) {
             debug!(signer = s_id, "fastpath: signer outside committee");
             return;
         }
@@ -1509,7 +4359,7 @@ async fn handle_fastpath_cert(
     }
 
     let signers_len = entry.signers.len() as u32;
-    let q = fast_path_quorum_size(inner.n_authorities);
+    let q = fast_path_quorum_size(inner.committee.size());
     if signers_len >= q {
         let signers_count = signers_len;
         inner.fastpath_pending.remove(&key);
@@ -1653,29 +4503,33 @@ async fn run_sync_sweeper(
 
         // DAG-S32: only retry orphans whose last attempt is older than
         // their per-orphan backoff. Bump the attempt counter as we go.
-        let due: Vec<CertHash> = {
+        let due: Vec<(CertHash, u32)> = {
             let mut inner = state.inner.lock().await;
-            let mut due_now = Vec::new();
+            let mut due_now: Vec<(CertHash, u64, u32)> = Vec::new();
             for h in inner.inflight_fetches.iter().copied().collect::<Vec<_>>() {
-                let entry = inner.inflight_fetch_history.entry(h).or_insert((0, 0));
-                let (last_ms, attempts) = *entry;
-                let elapsed = now_ms.saturating_sub(last_ms);
-                if elapsed >= orphan_pull_backoff_ms(attempts.max(1)) {
-                    *entry = (now_ms, attempts.saturating_add(1));
-                    due_now.push(h);
+                let (last_ms, attempts) = *inner.inflight_fetch_history.entry(h).or_insert((0, 0));
+                if now_ms.saturating_sub(last_ms) >= orphan_pull_backoff_ms(attempts.max(1)) {
+                    due_now.push((h, last_ms, attempts));
                 }
             }
-            due_now
+            // Oldest-due first, bounded per tick.
+            due_now.sort_by_key(|(_, last, _)| *last);
+            due_now.truncate(MAX_FETCHES_PER_TICK);
+            for (h, _, attempts) in &due_now {
+                inner
+                    .inflight_fetch_history
+                    .insert(*h, (now_ms, attempts.saturating_add(1)));
+            }
+            due_now.into_iter().map(|(h, _, a)| (h, a)).collect()
         };
-        for h in due {
-            fetch_cert_from_peers(h, None, &outbound);
+        for (h, attempt) in due {
+            fetch_cert_from_peers(h, None, attempt, &outbound);
         }
 
-        // Fetch deferred blocks: certs committed-in-order-blocked on a
-        // missing authentic block. Two-peer fan-out per block, mirroring
-        // the cert path. Entries are cleared by try_commit once the block
-        // arrives; prune any that have since committed.
-        let needed: Vec<CertHash> = {
+        // Fetch blocks for parked certificates (IQ-009 D1) and, as
+        // defence in depth, for commits deferred on a missing block.
+        // Same per-hash exponential back-off as the certificate leg.
+        let needed: Vec<(CertHash, u32)> = {
             let mut inner = state.inner.lock().await;
             let committed_prune: Vec<CertHash> = inner
                 .needed_blocks
@@ -1685,32 +4539,94 @@ async fn run_sync_sweeper(
                 .collect();
             for h in committed_prune {
                 inner.needed_blocks.remove(&h);
+                inner.block_fetch_history.remove(&h);
             }
-            inner.needed_blocks.iter().copied().collect()
+            // Two classes share the set. A block a deferred commit needs
+            // (certificate admitted, not parked) is commit-critical and
+            // never competes for the per-tick budget: there are at most
+            // a handful, and a parking flood must not starve them
+            // (consensus-review finding, third S35 pass). Blocks for
+            // parked certificates are what the budget bounds.
+            let mut critical: Vec<(CertHash, u64, u32)> = Vec::new();
+            let mut parked: Vec<(CertHash, u64, u32)> = Vec::new();
+            for h in inner.needed_blocks.iter().copied().collect::<Vec<_>>() {
+                let (last_ms, attempts) = *inner.block_fetch_history.entry(h).or_insert((0, 0));
+                if now_ms.saturating_sub(last_ms) >= orphan_pull_backoff_ms(attempts.max(1)) {
+                    if inner.awaiting_block.contains_key(&h) {
+                        parked.push((h, last_ms, attempts));
+                    } else {
+                        critical.push((h, last_ms, attempts));
+                    }
+                }
+            }
+            parked.sort_by_key(|(_, last, _)| *last);
+            parked.truncate(MAX_FETCHES_PER_TICK);
+            let mut due = critical;
+            due.extend(parked);
+            for (h, _, attempts) in &due {
+                inner
+                    .block_fetch_history
+                    .insert(*h, (now_ms, attempts.saturating_add(1)));
+            }
+            due.into_iter().map(|(h, _, a)| (h, a)).collect::<Vec<_>>()
         };
-        for h in needed {
-            fetch_block_from_peers(h, &outbound);
+        for (h, attempt) in needed {
+            fetch_block_from_peers(h, attempt, &outbound);
         }
     }
 }
 
-/// Unicast `GetBlock(hash)` to up to two peers — mirrors
-/// `fetch_cert_from_peers` for the block-availability layer. Used to
-/// repair a deferred commit whose authentic (cert-digest-matching) block
-/// hasn't arrived (or was poisoned by a stripped-block relay).
-fn fetch_block_from_peers(
+/// `fetch_block_from_peers` with the certificate's sender asked first:
+/// the peer that relayed the certificate is the one most likely to hold
+/// its block (IQ-009 D1).
+fn fetch_block_from_peers_prefer(
     hash: CertHash,
+    prefer: Option<&PeerId>,
+    attempt: u32,
     outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
 ) {
     let mut sent = 0usize;
-    for tx in outbound.values() {
-        if tx.try_send(WireMessage::GetBlock(hash)).is_ok() {
-            sent += 1;
-            if sent >= 2 {
-                return;
+    if let Some(p) = prefer {
+        if let Some(tx) = outbound.get(p) {
+            if tx.try_send(WireMessage::GetBlock(hash)).is_ok() {
+                sent += 1;
             }
         }
     }
+    // Start rotated by hash AND attempt over a sorted peer list, so
+    // successive retries of one hash walk every peer: under I-AV1 a block
+    // may be held by exactly one of them. Each attempt asks two peers, so
+    // the step is two: consecutive attempts cover disjoint pairs.
+    let mut peers: Vec<&PeerId> = outbound.keys().collect();
+    peers.sort();
+    if peers.is_empty() {
+        return;
+    }
+    let start = (hash.0[0] as usize + 2 * attempt as usize) % peers.len();
+    for offset in 0..peers.len() {
+        if sent >= 2 {
+            return;
+        }
+        let peer = peers[(start + offset) % peers.len()];
+        if Some(peer) == prefer {
+            continue;
+        }
+        if outbound[peer].try_send(WireMessage::GetBlock(hash)).is_ok() {
+            sent += 1;
+        }
+    }
+}
+
+/// Unicast `GetBlock(hash)` to up to two peers, start rotated by hash.
+/// Used by the sync sweeper for certificates parked on a missing block
+/// (IQ-009 D1) and, as defence in depth, for a deferred commit whose
+/// authentic block is not held.
+fn fetch_block_from_peers(
+    hash: CertHash,
+    attempt: u32,
+    outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
+) {
+    fetch_block_from_peers_prefer(hash, None, attempt, outbound);
 }
 
 /// DAG-S31.4: drop-aware best-effort broadcast.
@@ -1744,6 +4660,26 @@ fn broadcast_traced(
     }
 }
 
+/// `broadcast_traced` to configured peers plus best-effort push to every
+/// connected dynamic peer (IQ-008 D5). Dynamic peers get no `wire_drop`
+/// events: they are unauthenticated late joiners whose loss is their own
+/// catch-up problem, and pull-based sync still covers them.
+fn broadcast_all(
+    state: &State,
+    outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
+    msg: WireMessage,
+    self_label: &str,
+    log: &EventLog,
+) {
+    {
+        let dyn_peers = state.dyn_peers.read();
+        for tx in dyn_peers.values() {
+            let _ = tx.try_send(msg.clone());
+        }
+    }
+    broadcast_traced(outbound, msg, self_label, log);
+}
+
 fn wire_msg_kind(msg: &WireMessage) -> &'static str {
     match msg {
         WireMessage::Cert(_) => "cert",
@@ -1758,14 +4694,40 @@ fn wire_msg_kind(msg: &WireMessage) -> &'static str {
         WireMessage::Tip(_) => "tip",
         WireMessage::GetCertsByRound(_) => "get_certs_by_round",
         WireMessage::GetBlock(_) => "get_block",
+        WireMessage::TipInfo { .. } => "tip_info",
+        WireMessage::CheckpointSig(_) => "checkpoint_sig",
+        WireMessage::GetCheckpoints => "get_checkpoints",
+        WireMessage::Checkpoints(_) => "checkpoints",
+        WireMessage::GetSnapshot(_) => "get_snapshot",
+        WireMessage::SnapshotChunk { .. } => "snapshot_chunk",
+        WireMessage::Votes(_) => "votes",
     }
 }
 
-async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
-    // Snapshot votes + n_authorities + candidate_rounds in brief locks
-    // up-front so the rest of the function operates on owned data.
-    let votes_flat: Vec<Vote> = state.votes.lock().values().flatten().copied().collect();
-    let n = state.inner.lock().await.n_authorities;
+async fn try_commit(
+    state: &State,
+    self_label: &str,
+    log: &EventLog,
+    outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
+) {
+    // One commit walk at a time (see `State::commit_lock`).
+    let _commit_guard = state.commit_lock.lock().await;
+    // Snapshot gc state + candidate_rounds in brief locks up-front so the
+    // rest of the function operates on owned data. The committee is NOT
+    // snapshotted: it is re-read before every slot decision (IQ-010 D4),
+    // so a boundary crossed by a commit inside this walk decides the next
+    // slot with the new committee on every node, however the walk is
+    // chunked.
+    let (gc_depth, local_gc_round, mut last_leader_round) = {
+        let inner = state.inner.lock().await;
+        (
+            inner.gc_depth,
+            inner.gc_round,
+            inner.last_committed_leader_round,
+        )
+    };
+    // IQ-008 D3: the DAG holds only rounds above the gc round, so this
+    // walk is O(gc_depth) per pass instead of O(chain age).
     let candidate_rounds: BTreeSet<u64> = {
         let dag = state.dag.read().await;
         dag.rounds().collect()
@@ -1779,9 +4741,33 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
     // Every node therefore commits a strictly-growing prefix of the
     // canonical finalize order.
     'commit: for round in candidate_rounds {
+        // Obsolete slots are never committed (IQ-008 D1). The DAG has
+        // already dropped them; this guard covers the window between a
+        // gc-round advance and the prune that follows it.
+        if is_obsolete(round, local_gc_round) {
+            continue;
+        }
+        // IQ-010 D4: the slot is decided under the committee pinned to its
+        // round's epoch. That committee is fixed by the crossing into the
+        // previous epoch; until that crossing has been committed the walk
+        // defers here (nothing above can be decided either), so no node
+        // ever decides a slot under a committee another node will not use.
+        let (committee, gc_now) = {
+            let inner = state.inner.lock().await;
+            (inner.committee_for_round(round).cloned(), inner.gc_round)
+        };
+        let Some(committee) = committee else {
+            // A checkpoint emitted earlier in this walk may have pruned
+            // the schedule past a round the walk's own gc snapshot still
+            // considered live: obsolete now, skip rather than defer.
+            if is_obsolete(round, gc_now) {
+                continue;
+            }
+            break 'commit;
+        };
         let status = {
             let dag = state.dag.read().await;
-            decide_slot(&dag, round, n)
+            decide_slot_for(&dag, round, &committee)
         };
         let leader_hash = match status {
             LeaderStatus::Direct(h) => h,
@@ -1792,10 +4778,38 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
             continue;
         }
 
-        // Joint-quorum AND-gate: validator-ring stake side.
+        // IQ-008 Residual 1 evidence: a leader committing below the
+        // highest leader already committed is an IQ-004 late flip. Logged
+        // (not blocked) so the fault-injection run in /goal B2 can
+        // measure how often the class is reached and by how many rounds.
+        if let Some(prev) = last_leader_round {
+            if round < prev {
+                log.emit(
+                    Event::now(self_label, Lane::Main, "commit_out_of_order")
+                        .with_round(round)
+                        .with_cert_hash(&leader_hash.0),
+                );
+                tracing::warn!(
+                    leader_round = round,
+                    highest_committed_leader = prev,
+                    lag = prev - round,
+                    "commit: leader committed below the highest committed leader (IQ-004 late flip)"
+                );
+            }
+        }
+
+        // Joint-quorum AND-gate: validator-ring stake side. Only this
+        // candidate's votes are needed; the map holds the whole live
+        // window now that votes are relayed to catching-up peers.
         let stake_ok = {
+            let votes: Vec<Vote> = state
+                .votes
+                .lock()
+                .get(&leader_hash)
+                .cloned()
+                .unwrap_or_default();
             let st = state.stake_table.read().await;
-            validator_quorum_met(&st, leader_hash, &votes_flat)
+            validator_quorum_met(&st, leader_hash, &votes)
         };
         if !stake_ok {
             // DEFER THE WHOLE WALK, don't `continue`. This leader is
@@ -1814,31 +4828,92 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
             break 'commit;
         }
 
+        // IQ-008 D5: a checkpoint boundary strictly below this leader is
+        // crossed BEFORE its sweep, so the checkpoint's state root covers
+        // exactly the leaders at or below the boundary on every node —
+        // whether the boundary round itself had a leader or was skipped.
+        let advances_frontier = last_leader_round.map_or(true, |prev| round > prev);
+        if advances_frontier {
+            let pending_boundary = {
+                let inner = state.inner.lock().await;
+                let b = inner.next_checkpoint_boundary;
+                if round > b {
+                    let cadence = inner.checkpoint_cadence;
+                    Some(((round - 1) / cadence) * cadence)
+                } else {
+                    None
+                }
+            };
+            if let Some(b) = pending_boundary {
+                emit_checkpoint(state, b, self_label, log, outbound).await;
+            }
+        }
+
+        // IQ-008 D1: the committed sub-DAG is the leader's causal history
+        // cut at `commit_floor(leader_round, gc_depth)` — a function of
+        // the leader alone, so every node sweeps the same set regardless
+        // of its own pruning progress (I-GC1, `proptest_gc.rs`).
+        //
+        // A leader below the frontier (IQ-004 late flip) has a floor below
+        // this node's gc round; rounds in between are gone, so the sweep
+        // is clamped to the gc round. This is the pruned-store behaviour
+        // made explicit (`bounded_history_below_gc_is_clamped`), logged as
+        // `gc_late_flip` because a peer that has not pruned as far may
+        // sweep more (IQ-008 Residual 1).
+        let gc_now = state.inner.lock().await.gc_round;
+        let floor = match (commit_floor(round, gc_depth), gc_now) {
+            (Some(f), Some(g)) if f < g => {
+                log.emit(
+                    Event::now(self_label, Lane::Main, "gc_late_flip")
+                        .with_round(round)
+                        .with_cert_hash(&leader_hash.0),
+                );
+                tracing::warn!(
+                    leader_round = round,
+                    floor = f,
+                    gc_round = g,
+                    "commit: late-flip leader's floor is below the gc round; sweep clamped"
+                );
+                Some(g)
+            }
+            (None, Some(g)) => {
+                log.emit(
+                    Event::now(self_label, Lane::Main, "gc_late_flip")
+                        .with_round(round)
+                        .with_cert_hash(&leader_hash.0),
+                );
+                Some(g)
+            }
+            (f, _) => f,
+        };
         let history = {
             let dag = state.dag.read().await;
-            suwappu_consensus::causal_history(&dag, leader_hash)
+            causal_history_bounded(&dag, leader_hash, floor)
         };
         for h in history {
             if state.committed.lock().contains(&h) {
                 continue;
             }
-            // `None` is unreachable today: `h` came from
-            // `causal_history`, which only yields certs already in the
-            // DAG, and the DAG is append-only (no eviction/pruning). If
-            // pruning is ever added, this `continue` would skip a cert
-            // while committing finalize-later ones — reopening the
-            // ordering-divergence class fixed above; it must become a
-            // walk-wide defer (`break 'commit`) at that point.
-            let (cert_round, cert_payload_digest) = match state.dag.read().await.get(&h) {
-                Some(c) => (c.round, c.payload_digest),
-                None => continue,
+            // `h` came from `causal_history_bounded` against the live DAG
+            // a moment ago. The only way it is gone now is a concurrent
+            // prune from another inbox task's `try_commit`; in that case
+            // committing finalize-later certs while skipping this one
+            // would reopen the ordering-divergence class fixed above, so
+            // defer the whole walk and let the next pass re-derive the
+            // sweep from the pruned DAG.
+            let cert = match state.dag.read().await.get(&h).cloned() {
+                Some(c) => c,
+                None => break 'commit,
             };
+            let header = cert_header(&cert);
             // Bind the block to the SIGNED cert: only consume a block whose
-            // payload digest equals the committed cert's payload_digest
-            // (which the author signed). This means the intents AND the
-            // governance envelopes we apply are exactly what the author
-            // committed.
+            // header (payload digest, author, round) equals the committed
+            // cert's. This means the intents AND the governance envelopes
+            // we apply are exactly what the author committed.
             //
+            // IQ-009 D1 makes this unreachable in steady state (a
+            // certificate enters the DAG only with its block); it stays
+            // as defence in depth for the recovery and install paths.
             // If a cert-matching block is NOT yet available (never arrived,
             // or a Byzantine relay poisoned the slot with a self-consistent
             // stripped block), we must NOT commit an empty block — doing so
@@ -1851,10 +4926,10 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
                 .blocks
                 .lock()
                 .get(&h)
-                .filter(|b| b.payload_digest == cert_payload_digest)
-                .map(|b| (b.intents.clone(), b.governance_auth.clone()));
-            let (intents, block_gov_auth) = match block_payload {
-                Some(p) => p,
+                .filter(|b| block_matches_header(b, header))
+                .cloned();
+            let block = match block_payload {
+                Some(b) => b,
                 None => {
                     // Record the missing block for the sync sweeper to
                     // fetch (try_commit has no outbound handle), and defer
@@ -1874,156 +4949,309 @@ async fn try_commit(state: &State, self_label: &str, log: &EventLog) {
             }
             // No longer waiting on this block.
             state.inner.lock().await.needed_blocks.remove(&h);
-            // DAG-S26.1: capture intent hashes for compliance trace.
-            // Computed once and reused for the `tx_to_block` index below
-            // so we don't pay blake3 twice per intent.
-            let intent_hash_bytes: Vec<[u8; 32]> = intents
-                .iter()
-                .map(|i| {
-                    let bytes = crate::codec::encode(i).expect("intent serialize");
-                    *blake3::hash(&bytes).as_bytes()
-                })
-                .collect();
-            let intent_hashes: Vec<String> = intent_hash_bytes.iter().map(hex::encode).collect();
-            let block = Block {
-                round: cert_round,
-                intents: intents.clone(),
+            apply_commit(state, h, cert, block, round, self_label, log, true).await;
+        }
+        // The whole sweep for this leader committed (no defer above):
+        // advance the leader frontier that drives the gc round.
+        if advances_frontier {
+            last_leader_round = Some(round);
+            let at_boundary = {
+                let mut inner = state.inner.lock().await;
+                inner.last_committed_leader_round = Some(round);
+                round == inner.next_checkpoint_boundary
             };
-            // Substrate execution under inner lock.
-            {
-                let mut inner = state.inner.lock().await;
-                let report = execute_block(&mut inner.substrate, &block);
-                // Bridge header attestation: capture (round, post_root) at the
-                // single canonical commit point — the only place the pair is
-                // co-available (the substrate exposes only the latest root, with
-                // no round→root history). Lossy-latest; read out-of-band and
-                // signed lazily by the RPC adapter, never under this lock.
-                inner.latest_bridge_header = Some((report.round, report.post_root));
-                // IQ-003: index single-owner-equivalent main-lane txs so
-                // the fast-path receiver can K-binding cross-check.
-                // Skip governance/admin intents — only state-touching
-                // transfers can conflict with a fast-path cert.
-                for intent in &intents {
-                    if let Some(ml_tx) = intent_to_main_lane_tx(intent, cert_round, h) {
-                        inner.main_lane_index.push(ml_tx);
-                    }
-                }
-                // Secondary indices for `suwappu_getBlock(round)` and
-                // `suwappu_getTransaction(hash)`. Populated here (and only
-                // here) so the indices are tight-coupled to the canonical
-                // commit path — no second `try_commit` writer.
-                inner.blocks_by_round.insert(cert_round, h);
-                for (idx, tx_hash) in intent_hash_bytes.iter().enumerate() {
-                    inner.tx_to_block.insert(*tx_hash, (cert_round, h, idx));
-                }
-            }
-
-            // Issue #18: queue Phase G governance intents for
-            // epoch-boundary application. Applying at commit time made
-            // n_authorities update at different rounds across daemons
-            // (jitter), causing transitional quorum-threshold asymmetry
-            // that stalled the eject path (n=5→n=4: threshold changes
-            // from 4 to 3 mid-flight). Draining at the epoch boundary
-            // (below) makes governance transitions atomic across the
-            // mesh. Non-governance intents (Transfer) already executed
-            // via execute_block above — they are unchanged.
-            {
-                let mut inner = state.inner.lock().await;
-                for (idx, intent) in intents.iter().enumerate() {
-                    if matches!(
-                        intent,
-                        Intent::AdmitAuthority { .. }
-                            | Intent::ExitAuthority { .. }
-                            | Intent::EjectAuthority { .. }
-                    ) {
-                        // Carry the block's authorization envelope for this
-                        // intent (by index) into the pending queue so it is
-                        // re-verified at the epoch boundary. A Byzantine
-                        // author that omits it leaves `None`, and the apply
-                        // path then drops the intent.
-                        let env = block_gov_auth
-                            .iter()
-                            .find(|(i, _)| *i as usize == idx)
-                            .map(|(_, a)| a.clone());
-                        inner.pending_governance.push((intent.clone(), env));
-                    }
-                }
-            }
-
-            log.emit(
-                Event::now(self_label, Lane::Main, "committed")
-                    .with_round(cert_round)
-                    .with_cert_hash(&h.0)
-                    .with_intent_hashes(intent_hashes),
-            );
-            state.votes.lock().remove(&h);
-
-            // Epoch boundary detection (DAG-S25 Phase G).
-            // Issue #18: drains queued governance intents here so that
-            // registry mutations land atomically at the boundary round.
-            let boundary_crossed = {
-                let mut inner = state.inner.lock().await;
-                if inner.epoch.boundary_crossed_by(cert_round) {
-                    let new_epoch = inner.epoch.epoch_for(cert_round);
-                    inner.epoch.current = new_epoch;
-                    inner.epoch.last_boundary_round = cert_round;
-                    true
-                } else {
-                    false
-                }
-            };
-            if boundary_crossed {
-                let queued: Vec<(Intent, Option<crate::client::GovAuth>)> = {
-                    let mut inner = state.inner.lock().await;
-                    std::mem::take(&mut inner.pending_governance)
-                };
-                for (intent, env) in &queued {
-                    apply_governance_intent(
-                        state,
-                        intent,
-                        env.as_ref(),
-                        cert_round,
-                        self_label,
-                        log,
-                    )
-                    .await;
-                }
-                log.emit(
-                    Event::now(self_label, Lane::Main, "epoch_boundary").with_round(cert_round),
-                );
-                let new_epoch = state.inner.lock().await.epoch.current;
-                tracing::info!(
-                    epoch = new_epoch,
-                    round = cert_round,
-                    drained = queued.len(),
-                    "epoch boundary crossed; governance applied"
-                );
+            if at_boundary {
+                emit_checkpoint(state, round, self_label, log, outbound).await;
             }
         }
     }
 
-    // DAG-S30.1: drain the equivocation queue.
-    let proofs: Vec<EquivocationProof> =
-        std::mem::take(&mut state.inner.lock().await.detected_equivocations);
-    for proof in proofs {
-        let id = proof.author;
-        if state.authority_registry.read().await.contains(id) {
-            state.authority_registry.write().await.remove(id);
-            state.validator_registry.write().await.remove(id);
-            state.stake_table.write().await.remove(&id);
-            let new_n = state.authority_registry.read().await.len() as u32;
-            {
-                let mut inner = state.inner.lock().await;
-                inner.pending_stake.remove(&id);
-                inner.n_authorities = new_n;
-            }
-            log.emit(Event::now(self_label, Lane::Main, "slashing_evidence").with_authority_id(id));
-            log.emit(Event::now(self_label, Lane::Main, "authority_ejected").with_authority_id(id));
-            tracing::warn!(
-                authority = id,
-                "auto-ejected on detected authority equivocation"
-            );
+    // IQ-008 D1/D3: advance the gc round from the leader frontier and
+    // prune everything at or below it. Monotone; a no-op until the chain
+    // is `gc_depth` rounds deep.
+    if let Some(new_gc) = last_leader_round.and_then(|l| gc_round_for(l, gc_depth)) {
+        // Re-read: a checkpoint emitted during the walk prunes first.
+        let advance = match state.inner.lock().await.gc_round {
+            Some(cur) => new_gc > cur,
+            None => true,
+        };
+        if advance {
+            prune_state(state, new_gc, self_label, log).await;
         }
+    }
+
+    // IQ-010 D3: detected equivocations are NOT applied here. The round
+    // driver carries them as `Intent::EquivocationEvidence` in this node's
+    // next block; the ejection happens when the committed evidence reaches
+    // the epoch boundary, identically on every node.
+}
+
+/// Apply one committed certificate — the tail of the commit path shared
+/// by the live sweep in `try_commit` and by log replay at startup
+/// (IQ-008 D4). `record = true` appends the cert + block to the durable
+/// commit log *before* the block is applied (write-ahead); replay passes
+/// `false` because the record being replayed is the source.
+///
+/// Everything below the log append is byte-for-byte the pre-S34 commit
+/// body: substrate execution, bridge-header capture, IQ-003 index, RPC
+/// indices, governance queueing, the `committed` event, vote cleanup and
+/// the epoch-boundary governance apply. Keeping it in one function is
+/// what makes recovery replay equivalent to live execution (I-P1).
+#[allow(clippy::too_many_arguments)]
+async fn apply_commit(
+    state: &State,
+    h: CertHash,
+    cert: Certificate,
+    block: BlockPayload,
+    leader_round: u64,
+    self_label: &str,
+    log: &EventLog,
+    record: bool,
+) {
+    let cert_round = cert.round;
+    let cert_author = cert.author;
+    let intents = block.intents.clone();
+    let block_gov_auth = block.governance_auth.clone();
+    if record {
+        let mut inner = state.inner.lock().await;
+        if let Some(store) = inner.store.as_mut() {
+            if let Err(e) = store.append_committed(leader_round, cert, block) {
+                // A validator that cannot persist keeps running (liveness)
+                // but is no longer crash-recoverable; the operator alarm is
+                // the log line. Never silently drop the commit itself.
+                tracing::error!(err = %e, round = cert_round, "commit log append failed");
+            }
+        }
+    }
+    // DAG-S26.1: capture intent hashes for compliance trace.
+    // Computed once and reused for the `tx_to_block` index below
+    // so we don't pay blake3 twice per intent.
+    let intent_hash_bytes: Vec<[u8; 32]> = intents
+        .iter()
+        .map(|i| {
+            let bytes = crate::codec::encode(i).expect("intent serialize");
+            *blake3::hash(&bytes).as_bytes()
+        })
+        .collect();
+    let intent_hashes: Vec<String> = intent_hash_bytes.iter().map(hex::encode).collect();
+    let block = Block {
+        round: cert_round,
+        intents: intents.clone(),
+    };
+    // Substrate execution under inner lock.
+    {
+        let mut inner = state.inner.lock().await;
+        let report = execute_block(&mut inner.substrate, &block);
+        // Bridge header attestation: capture (round, post_root) at the
+        // single canonical commit point — the only place the pair is
+        // co-available (the substrate exposes only the latest root, with
+        // no round→root history). Lossy-latest; read out-of-band and
+        // signed lazily by the RPC adapter, never under this lock.
+        inner.latest_bridge_header = Some((report.round, report.post_root));
+        // IQ-003: index single-owner-equivalent main-lane txs so
+        // the fast-path receiver can K-binding cross-check.
+        // Skip governance/admin intents — only state-touching
+        // transfers can conflict with a fast-path cert.
+        for intent in &intents {
+            if let Some(ml_tx) = intent_to_main_lane_tx(intent, cert_round, h) {
+                inner.main_lane_index.push(ml_tx);
+            }
+        }
+        // Secondary indices for `suwappu_getBlock(round)` and
+        // `suwappu_getTransaction(hash)`. Populated here (and only
+        // here) so the indices are tight-coupled to the canonical
+        // commit path — no second `try_commit` writer.
+        inner.blocks_by_round.insert(cert_round, h);
+        for (idx, tx_hash) in intent_hash_bytes.iter().enumerate() {
+            inner.tx_to_block.insert(*tx_hash, (cert_round, h, idx));
+        }
+    }
+
+    // IQ-010 D2: a committed certificate by a registered-but-inactive
+    // author is the liveness proof its activation waits for. Recorded
+    // here, in the commit sequence, so every node marks it at the same
+    // position; the boundary drain below turns it into membership.
+    let author_registered = state.authority_registry.read().await.contains(cert_author);
+    // Issue #18: queue Phase G governance intents for
+    // epoch-boundary application. Applying at commit time made
+    // n_authorities update at different rounds across daemons
+    // (jitter), causing transitional quorum-threshold asymmetry
+    // that stalled the eject path (n=5→n=4: threshold changes
+    // from 4 to 3 mid-flight). Draining at the epoch boundary
+    // (below) makes governance transitions atomic across the
+    // mesh. Non-governance intents (Transfer) already executed
+    // via execute_block above — they are unchanged.
+    {
+        let mut inner = state.inner.lock().await;
+        if author_registered && !inner.committee.contains(cert_author) {
+            inner.live_proven.insert(cert_author);
+        }
+        let mut evidence_seen = 0usize;
+        for (idx, intent) in intents.iter().enumerate() {
+            if let Intent::EquivocationEvidence { cert_a, cert_b } = intent {
+                // IQ-010 D3: self-authenticating (the two signatures are
+                // the authorization); verified against the seated
+                // registry here and again at the boundary. Bounded per
+                // block (a Byzantine author cannot make every node verify
+                // a frame full of signatures under the commit lock), one
+                // queued entry per accused author (one ejection is all
+                // the boundary needs), and the cheap checks run before
+                // any signature is verified.
+                let already = inner.pending_governance.iter().any(|(i, _)| {
+                    matches!(i, Intent::EquivocationEvidence { cert_a: a, .. } if a.author == cert_a.author)
+                });
+                if already || cert_a.author != cert_b.author || cert_a.round != cert_b.round {
+                    continue;
+                }
+                // Only entries that reach a signature check spend the
+                // per-block budget.
+                evidence_seen += 1;
+                if evidence_seen > MAX_EVIDENCE_PER_BLOCK {
+                    tracing::warn!(
+                        round = cert_round,
+                        "evidence beyond the per-block bound; dropped"
+                    );
+                    continue;
+                }
+                drop(inner);
+                let ok = verify_equivocation_evidence(state, cert_a, cert_b).await;
+                inner = state.inner.lock().await;
+                if ok {
+                    inner.pending_governance.push((intent.clone(), None));
+                    log.emit(
+                        Event::now(self_label, Lane::Main, "slashing_evidence")
+                            .with_round(cert_round)
+                            .with_authority_id(cert_a.author),
+                    );
+                } else {
+                    tracing::warn!(
+                        round = cert_round,
+                        "equivocation evidence failed verification; dropped"
+                    );
+                }
+                continue;
+            }
+            if matches!(
+                intent,
+                Intent::AdmitAuthority { .. }
+                    | Intent::ExitAuthority { .. }
+                    | Intent::EjectAuthority { .. }
+            ) {
+                // Carry the block's authorization envelope for this
+                // intent (by index) into the pending queue so it is
+                // re-verified at the epoch boundary. A Byzantine
+                // author that omits it leaves `None`, and the apply
+                // path then drops the intent.
+                let env = block_gov_auth
+                    .iter()
+                    .find(|(i, _)| *i as usize == idx)
+                    .map(|(_, a)| a.clone());
+                inner.pending_governance.push((intent.clone(), env));
+            }
+        }
+    }
+
+    log.emit(
+        Event::now(self_label, Lane::Main, "committed")
+            .with_round(cert_round)
+            .with_cert_hash(&h.0)
+            .with_intent_hashes(intent_hashes),
+    );
+    // Votes are NOT dropped at commit (they were before S34.4): they are
+    // relayed to peers backfilling this round (`reply_votes`) and evicted
+    // with the certificate when it falls below the gc round
+    // (`prune_state`), so the slot count stays bounded by the live window.
+
+    // Epoch boundary detection (DAG-S25 Phase G).
+    // Issue #18: drains queued governance intents here so that
+    // registry mutations land atomically at the boundary round.
+    let crossing: Option<(u64, u64, Committee)> = {
+        let mut inner = state.inner.lock().await;
+        if inner.epoch.boundary_crossed_by(cert_round) {
+            let old_epoch = inner.epoch.current;
+            let new_epoch = inner.epoch.epoch_for(cert_round);
+            inner.epoch.current = new_epoch;
+            inner.epoch.last_boundary_round = cert_round;
+            Some((old_epoch, new_epoch, inner.committee.clone()))
+        } else {
+            None
+        }
+    };
+    if let Some((old_epoch, new_epoch, pre_drain)) = crossing {
+        let queued: Vec<(Intent, Option<crate::client::GovAuth>)> = {
+            let mut inner = state.inner.lock().await;
+            std::mem::take(&mut inner.pending_governance)
+        };
+        // IQ-010 Residual 1a: at most `f` committee changes per boundary
+        // (removals here, activations below), so consecutive committees
+        // keep a quorum of the earlier one in common and slots straddling
+        // the boundary stay decidable. The excess waits, in order, for
+        // the next boundary — deterministic on every node.
+        let cap = membership_change_cap(pre_drain.size());
+        let mut changes = 0usize;
+        let mut deferred: Vec<(Intent, Option<crate::client::GovAuth>)> = Vec::new();
+        for (intent, env) in queued.iter().cloned() {
+            let is_removal = matches!(
+                intent,
+                Intent::ExitAuthority { .. }
+                    | Intent::EjectAuthority { .. }
+                    | Intent::EquivocationEvidence { .. }
+            );
+            if is_removal && changes >= cap {
+                deferred.push((intent, env));
+                continue;
+            }
+            let before = state.inner.lock().await.committee.len();
+            apply_governance_intent(state, &intent, env.as_ref(), cert_round, self_label, log)
+                .await;
+            if state.inner.lock().await.committee.len() != before {
+                changes += 1;
+            }
+        }
+        activate_live_proven(
+            state,
+            cert_round,
+            cap.saturating_sub(changes),
+            self_label,
+            log,
+        )
+        .await;
+        {
+            // IQ-010 D4: the committee this drain produced governs the
+            // slots of the NEXT epoch; every epoch skipped by this
+            // crossing (none once the walk defers on an undefined epoch,
+            // kept for snapshot-installed and replayed states) keeps the
+            // pre-drain committee. Entries below the retention window are
+            // pruned with the gc round (`prune_state`), never here: the
+            // map is bound into `snapshot_root`, so its contents must be a
+            // function of the frontier, not of this walk's chunking.
+            let mut inner = state.inner.lock().await;
+            for e in (old_epoch + 1)..=new_epoch {
+                inner
+                    .committee_by_epoch
+                    .entry(e)
+                    .or_insert_with(|| pre_drain.clone());
+            }
+            let next = inner.committee.clone();
+            inner.committee_by_epoch.insert(new_epoch + 1, next);
+            if !deferred.is_empty() {
+                tracing::warn!(
+                    round = cert_round,
+                    deferred = deferred.len(),
+                    "membership changes beyond the per-boundary cap carried to the next boundary"
+                );
+                deferred.append(&mut inner.pending_governance);
+                inner.pending_governance = deferred;
+            }
+        }
+        log.emit(Event::now(self_label, Lane::Main, "epoch_boundary").with_round(cert_round));
+        let new_epoch = state.inner.lock().await.epoch.current;
+        tracing::info!(
+            epoch = new_epoch,
+            round = cert_round,
+            drained = queued.len(),
+            "epoch boundary crossed; governance applied"
+        );
     }
 }
 
@@ -2065,7 +5293,8 @@ fn intent_to_main_lane_tx(intent: &Intent, round: Round, lineage: CertHash) -> O
 /// Apply a single governance Intent to State (DAG-S27.3).
 /// Extracted from try_commit's body so the S31.2 per-field-lock
 /// pattern stays readable. Lock acquisition order respects the
-/// canonical: stake_table → authority_registry → validator_registry → inner.
+/// canonical: inner → stake_table → authority_registry → validator_registry
+/// (module header).
 async fn apply_governance_intent(
     state: &State,
     intent: &Intent,
@@ -2082,6 +5311,32 @@ async fn apply_governance_intent(
     // mesh — and a Byzantine block author that embedded an un-cosigned
     // (or forged) governance intent has it dropped here, closing the
     // block-author bypass of the ingress dual-signature gate.
+    // IQ-010 D3: slashing evidence carries its own authorization (two
+    // signatures by the accused); it is verified below, not enveloped.
+    if let Intent::EquivocationEvidence { cert_a, cert_b } = intent {
+        if !verify_equivocation_evidence(state, cert_a, cert_b).await {
+            tracing::warn!(
+                round = cert_round,
+                "equivocation evidence no longer verifies at the boundary; dropped"
+            );
+            return;
+        }
+        remove_authority(
+            state,
+            cert_a.author,
+            cert_round,
+            "authority_ejected",
+            self_label,
+            log,
+        )
+        .await;
+        tracing::warn!(
+            authority = cert_a.author,
+            round = cert_a.round,
+            "ejected on committed equivocation evidence"
+        );
+        return;
+    }
     match auth {
         Some(a) => {
             if let Err(reason) =
@@ -2125,14 +5380,10 @@ async fn apply_governance_intent(
                 });
             match admit_result {
                 Ok(()) => {
-                    // DAG-S27.7: park stake; activated on first cert.
-                    state
-                        .inner
-                        .lock()
-                        .await
-                        .pending_stake
-                        .insert(*authority_id, *stake_suwappu as u128);
-                    let _ = state
+                    // The Validator-Ring mirror carries the stake that
+                    // activation moves into the stake table; on a failed
+                    // mirror the member never activates (IQ-010 D2).
+                    let mirrored = state
                         .validator_registry
                         .write()
                         .await
@@ -2140,21 +5391,18 @@ async fn apply_governance_intent(
                             id: *authority_id,
                             stake_suwappu: *stake_suwappu as u128,
                         });
-                    // Issue #18 (deferred activation): the registries are
-                    // grown to the new size so the new authority's certs
-                    // are recognized when they arrive, but
-                    // `inner.n_authorities` is INTENTIONALLY NOT bumped
-                    // here. Bumping it now would (a) collapse the
-                    // `quorum_threshold(n)` jump that the post-admit
-                    // cluster can't meet under jitter, and (b) shift the
-                    // round-robin `leader(round, n)` rotation onto an
-                    // authority that hasn't yet produced any cert. We
-                    // defer the bump to the first-cert ingest site
-                    // (`ingest_cert`, next to the existing pending_stake
-                    // promotion), where we have proof the new authority
-                    // is actually participating. See the
-                    // `bft-stake-denominator-deadlock-on-admit` skill for
-                    // the full class of bug this avoids.
+                    if let Err(e) = mirrored {
+                        tracing::error!(err = ?e, authority = *authority_id, "validator-ring mirror of admit failed");
+                    }
+                    // IQ-010 D2: the new authority is REGISTERED (its
+                    // certificates verify, are admitted and may be
+                    // parents) but not ACTIVE: it holds no leader slot,
+                    // counts toward no quorum and carries no stake until
+                    // the first boundary after one of its certificates has
+                    // been committed (`activate_live_proven`). That keeps
+                    // Issue #18's liveness property — an authority that
+                    // never shows up never enters the denominator or the
+                    // rotation — as a function of the commit sequence.
                     log.emit(
                         Event::now(self_label, Lane::Main, "authority_admitted")
                             .with_round(cert_round)
@@ -2167,43 +5415,29 @@ async fn apply_governance_intent(
             }
         }
         Intent::ExitAuthority { authority_id } => {
-            let removed = state.authority_registry.write().await.remove(*authority_id);
-            if removed.is_some() {
-                state.validator_registry.write().await.remove(*authority_id);
-                state.stake_table.write().await.remove(authority_id);
-                let new_n = state.authority_registry.read().await.len() as u32;
-                {
-                    let mut inner = state.inner.lock().await;
-                    inner.pending_stake.remove(authority_id);
-                    inner.n_authorities = new_n;
-                }
-                log.emit(
-                    Event::now(self_label, Lane::Main, "authority_exited")
-                        .with_round(cert_round)
-                        .with_authority_id(*authority_id),
-                );
-            }
+            remove_authority(
+                state,
+                *authority_id,
+                cert_round,
+                "authority_exited",
+                self_label,
+                log,
+            )
+            .await;
         }
         Intent::EjectAuthority {
             authority_id,
             proof_ref: _proof,
         } => {
-            let removed = state.authority_registry.write().await.remove(*authority_id);
-            if removed.is_some() {
-                state.validator_registry.write().await.remove(*authority_id);
-                state.stake_table.write().await.remove(authority_id);
-                let new_n = state.authority_registry.read().await.len() as u32;
-                {
-                    let mut inner = state.inner.lock().await;
-                    inner.pending_stake.remove(authority_id);
-                    inner.n_authorities = new_n;
-                }
-                log.emit(
-                    Event::now(self_label, Lane::Main, "authority_ejected")
-                        .with_round(cert_round)
-                        .with_authority_id(*authority_id),
-                );
-            }
+            remove_authority(
+                state,
+                *authority_id,
+                cert_round,
+                "authority_ejected",
+                self_label,
+                log,
+            )
+            .await;
         }
         Intent::Transfer { .. } => {}
         // `Intent` is `#[non_exhaustive]` (C4). Future variants
@@ -2212,6 +5446,218 @@ async fn apply_governance_intent(
         // lands.
         _ => {}
     }
+}
+
+/// Remove an authority from every membership structure at the epoch
+/// boundary (IQ-010 D2): registries, stake table, committee, live-proven
+/// set. The committee change is what moves the leader schedule and the
+/// quorum denominator, on every node at the same committed round.
+async fn remove_authority(
+    state: &State,
+    authority_id: AuthorityId,
+    cert_round: u64,
+    event: &'static str,
+    self_label: &str,
+    log: &EventLog,
+) {
+    {
+        // A removal that would empty the committee is refused: an empty
+        // committee decides nothing, silently and for ever. Anything
+        // below four members has f = 0 and is logged.
+        let inner = state.inner.lock().await;
+        if inner.committee.contains(authority_id) && inner.committee.len() <= 1 {
+            tracing::error!(
+                authority = authority_id,
+                "refusing to remove the last committee member"
+            );
+            return;
+        }
+        if inner.committee.contains(authority_id) && inner.committee.len() <= 4 {
+            tracing::warn!(
+                authority = authority_id,
+                size = inner.committee.len() - 1,
+                "committee shrinks below four members: no Byzantine tolerance"
+            );
+        }
+    }
+    // One critical section in the canonical order (`inner` →
+    // `stake_table` → `authority_registry` → `validator_registry`): no
+    // reader ever sees a registry without the member but a committee
+    // with it (third S36 pass).
+    {
+        let mut inner = state.inner.lock().await;
+        let mut stake_table = state.stake_table.write().await;
+        let mut authority_registry = state.authority_registry.write().await;
+        let mut validator_registry = state.validator_registry.write().await;
+        let Some(removed) = authority_registry.remove(authority_id) else {
+            return;
+        };
+        validator_registry.remove(authority_id);
+        stake_table.remove(&authority_id);
+        inner.live_proven.remove(&authority_id);
+        let members: Vec<AuthorityId> = inner
+            .committee
+            .members()
+            .iter()
+            .copied()
+            .filter(|id| *id != authority_id)
+            .collect();
+        inner.committee = Committee::new(members);
+        // The grace equals the retention window, which is also the era
+        // window a joiner verifies a served snapshot's certificates under
+        // (`verify_served_snapshot`): a longer grace would admit
+        // certificates no joiner could verify, and a crossing skew
+        // beyond the window is already refused by the ingest ceiling
+        // (fourth S36 pass).
+        let grace = inner.gc_depth;
+        inner.retired.insert(
+            authority_id,
+            (removed.public_key_bytes, cert_round.saturating_add(grace)),
+        );
+    }
+    log.emit(
+        Event::now(self_label, Lane::Main, event)
+            .with_round(cert_round)
+            .with_authority_id(authority_id),
+    );
+}
+
+/// Epoch-boundary activation (IQ-010 D2): every registered member whose
+/// certificate has been committed since it was admitted joins the
+/// committee and the stake table now. Runs after the governance drain of
+/// the same boundary, so an authority admitted and proven live before
+/// this boundary activates here; one admitted at this boundary needs a
+/// committed certificate first.
+async fn activate_live_proven(
+    state: &State,
+    cert_round: u64,
+    budget: usize,
+    self_label: &str,
+    log: &EventLog,
+) {
+    let proven: Vec<AuthorityId> = {
+        let inner = state.inner.lock().await;
+        inner.live_proven.iter().copied().collect()
+    };
+    if proven.is_empty() {
+        return;
+    }
+    let mut activated: Vec<(AuthorityId, suwappu_consensus::Stake)> = Vec::new();
+    let mut dropped: Vec<AuthorityId> = Vec::new();
+    for id in proven {
+        if activated.len() >= budget {
+            // Beyond this boundary's change cap: stays proven, activates
+            // at a later boundary (ascending id order, so every node
+            // picks the same ones).
+            break;
+        }
+        // Stake weight comes from the Validator-Ring mirror the admit
+        // created; a member the mirror failed for stays inactive.
+        let stake = state
+            .validator_registry
+            .read()
+            .await
+            .get(id)
+            .map(|m| m.stake_suwappu);
+        let registered = state.authority_registry.read().await.contains(id);
+        match (registered, stake) {
+            (true, Some(stake)) => activated.push((id, stake)),
+            // Not registered any more (exited or ejected between proof
+            // and boundary) or lost its mirror: dropped.
+            _ => dropped.push(id),
+        }
+    }
+    // Stake table and committee move together, under the canonical lock
+    // order (`inner` before `stake_table`; see the module header), so no
+    // reader ever sees a member with stake weight but no seat.
+    let mut inner = state.inner.lock().await;
+    let mut stake_table = state.stake_table.write().await;
+    for id in &dropped {
+        inner.live_proven.remove(id);
+    }
+    for (id, stake) in &activated {
+        stake_table.insert(*id, *stake);
+        inner.live_proven.remove(id);
+        log.emit(
+            Event::now(self_label, Lane::Main, "authority_activated")
+                .with_round(cert_round)
+                .with_authority_id(*id),
+        );
+    }
+    if !activated.is_empty() {
+        let members: Vec<AuthorityId> = inner
+            .committee
+            .members()
+            .iter()
+            .copied()
+            .chain(activated.iter().map(|(id, _)| *id))
+            .collect();
+        inner.committee = Committee::new(members);
+    }
+}
+
+/// IQ-010 D3: the two certificates are evidence iff they are signed by
+/// one seated authority for one round and are distinct. Verified against
+/// the registry in force where it runs (commit, then boundary).
+async fn verify_equivocation_evidence(state: &State, a: &Certificate, b: &Certificate) -> bool {
+    if a.author != b.author || a.round != b.round || a.hash() == b.hash() {
+        return false;
+    }
+    let pk = state
+        .authority_registry
+        .read()
+        .await
+        .get(a.author)
+        .and_then(|m| suwappu_crypto::mldsa::PublicKey::from_bytes(&m.public_key_bytes).ok());
+    match pk {
+        Some(pk) => a.verify_signature(&pk) && b.verify_signature(&pk),
+        None => false,
+    }
+}
+
+/// Evidence intents carried per block (IQ-010 D3): two ML-DSA-65-signed
+/// certificates each, so the block stays well inside a frame.
+const MAX_EVIDENCE_PER_BLOCK: usize = 4;
+
+/// Committee changes applied per epoch boundary (IQ-010 Residual 1a):
+/// `f = ⌊(|C| − 1) / 3⌋`, at least one, so consecutive committees keep
+/// `quorum_threshold(|C|)` members in common and a slot whose supporters
+/// or anchors lie across the boundary can still muster its quorum.
+fn membership_change_cap(committee_size: u32) -> usize {
+    (((committee_size.max(1) - 1) / 3) as usize).max(1)
+}
+
+/// Shortest epoch a manifest may declare (`0` disables epochs). The walk
+/// defers at an epoch whose committee is not fixed until a leader of the
+/// previous epoch commits, so an epoch must hold more leader slots than
+/// a Byzantine coalition can occupy: `f + 1` at the largest ring the
+/// registry admits (`AUTHORITY_RING_MAX = 50`, `f = 16`), since ids are
+/// caller-chosen and a coalition can hold consecutive slots (third S36
+/// pass).
+pub const MIN_ROUNDS_PER_EPOCH: u64 = ((suwappu_authority::AUTHORITY_RING_MAX as u64 - 1) / 3) + 1;
+
+/// Manifest constraints the daemon refuses to start under.
+pub fn validate_manifest(manifest: &GenesisManifest) -> anyhow::Result<()> {
+    // IQ-008 D5: a joiner catches up from the served checkpoint snapshot
+    // by forward backfill, which only works while the checkpoint round
+    // is still inside every peer's live window.
+    if manifest.checkpoint_cadence_rounds.saturating_mul(2) > manifest.gc_depth_rounds {
+        return Err(anyhow::anyhow!(
+            "genesis manifest: checkpoint_cadence_rounds ({}) must be at most half of \
+             gc_depth_rounds ({}), or joiners could never catch up after a snapshot",
+            manifest.checkpoint_cadence_rounds,
+            manifest.gc_depth_rounds
+        ));
+    }
+    if manifest.rounds_per_epoch != 0 && manifest.rounds_per_epoch < MIN_ROUNDS_PER_EPOCH {
+        return Err(anyhow::anyhow!(
+            "genesis manifest: rounds_per_epoch ({}) must be 0 or at least {}, or an epoch \
+             with no committed leader would defer the commit walk for ever (IQ-010 D4)",
+            manifest.rounds_per_epoch,
+            MIN_ROUNDS_PER_EPOCH
+        ));
+    }
+    Ok(())
 }
 
 /// Byzantine fault tolerance: f = floor((n-1)/3). The minimum number of
@@ -2280,14 +5726,60 @@ async fn run_round_driver(
         let target_round;
         let prev_round;
         let parents;
+        let registered: Vec<AuthorityId> = state
+            .authority_registry
+            .read()
+            .await
+            .members()
+            .map(|m| m.id)
+            .collect();
         {
             let inner = state.inner.lock().await;
-            let n = inner.n_authorities;
             let dag = state.dag.read().await;
-            target_round = inner.last_authored_round.map(|r| r + 1).unwrap_or(0);
+            let mut next = inner.last_authored_round.map(|r| r + 1).unwrap_or(0);
+            // The parent-quorum gate counts the committee pinned to the
+            // round being authored when that is already fixed, else the
+            // current one (a heuristic for pacing, not a decision).
+            let committee = inner
+                .committee_for_round(next)
+                .cloned()
+                .unwrap_or_else(|| inner.committee.clone());
+            // IQ-008: after an outage longer than the retention window the
+            // parents round is pruned everywhere and can never fill; and a
+            // node that fell behind inside the window only advances one
+            // round per tick, exactly like the mesh, so it never catches
+            // up. Jump to the observed tip. The authored marker is
+            // monotone, so a forward jump can never re-sign a round.
+            if inner.last_authored_round.is_some() {
+                let behind_gc = inner.gc_round.is_some_and(|g| next.saturating_sub(1) <= g);
+                let lagging =
+                    next.saturating_add(AUTHOR_LAG_JUMP_ROUNDS) < inner.max_observed_round;
+                if behind_gc || lagging {
+                    // Anchor on a round we can actually build on, never on
+                    // the raw tip (see `highest_quorum_round`).
+                    if let Some(anchor) = highest_quorum_round(&dag, &committee) {
+                        if anchor + 1 > next {
+                            tracing::warn!(
+                                from = next,
+                                to = anchor + 1,
+                                "round driver: jumping to the highest quorum round"
+                            );
+                            next = anchor + 1;
+                        }
+                    }
+                }
+            }
+            target_round = next;
             prev_round = target_round.saturating_sub(1);
             if inner.last_authored_round.is_some() {
-                let parents_count = distinct_authors_at(&dag, prev_round, n);
+                // The parents live at `prev_round`; count and threshold
+                // them under that round's committee.
+                let gate_committee = inner
+                    .committee_for_round(prev_round)
+                    .cloned()
+                    .unwrap_or_else(|| committee.clone());
+                let n = gate_committee.size();
+                let parents_count = distinct_authors_at(&dag, prev_round, &gate_committee);
                 let elapsed = round_started_at.elapsed();
                 let strict_ok = parents_count >= quorum_threshold(n);
                 let timeout_force = parents_count >= f_plus_one(n) && elapsed >= leader_timeout;
@@ -2312,7 +5804,7 @@ async fn run_round_driver(
                     );
                 }
             }
-            parents = parents_for_round(&dag, target_round, n);
+            parents = parents_for_round(&dag, target_round, &registered);
         }
         round_started_at = tokio::time::Instant::now();
 
@@ -2324,8 +5816,61 @@ async fn run_round_driver(
         // `state.mempool.submit` so per-peer rate limits + dedup +
         // capacity-floor eviction live at admission, and the round
         // driver simply pops the top-priority intents at propose time.
-        let intents: Vec<suwappu_execution::Intent> =
+        let mut intents: Vec<suwappu_execution::Intent> =
             state.mempool.drain_for_block(MAX_INTENTS_PER_BLOCK);
+        // IQ-010 D3: carry equivocations this node detected as evidence,
+        // once per slot, ahead of the user intents.
+        {
+            let proofs: Vec<EquivocationProof> = {
+                // Only a still-registered author can be ejected; evidence
+                // against anyone else would be committed, verified and
+                // dropped on every node for nothing.
+                let registry = state.authority_registry.read().await;
+                let mut inner = state.inner.lock().await;
+                let all = std::mem::take(&mut inner.detected_equivocations);
+                all.into_iter()
+                    .filter(|p| {
+                        registry.contains(p.author)
+                            && !inner.evidence_emitted.contains(&(p.author, p.round))
+                    })
+                    .collect()
+            };
+            let mut evidence = Vec::new();
+            let mut carried: Vec<(AuthorityId, Round)> = Vec::new();
+            let mut overflow: Vec<EquivocationProof> = Vec::new();
+            {
+                let dag = state.dag.read().await;
+                for p in proofs {
+                    if evidence.len() >= MAX_EVIDENCE_PER_BLOCK {
+                        overflow.push(p);
+                        continue;
+                    }
+                    if let (Some(a), Some(b)) =
+                        (dag.get(&p.cert_a).cloned(), dag.get(&p.cert_b).cloned())
+                    {
+                        evidence.push(Intent::EquivocationEvidence {
+                            cert_a: a,
+                            cert_b: b,
+                        });
+                        carried.push((p.author, p.round));
+                    }
+                    // A proof whose certificates are no longer held (pruned
+                    // or superseded by an install) is dropped, not marked:
+                    // a peer that still holds both carries it.
+                }
+            }
+            {
+                // Marked only once the intent is actually built; the
+                // overflow is carried next round.
+                let mut inner = state.inner.lock().await;
+                inner.evidence_emitted.extend(carried);
+                inner.detected_equivocations.extend(overflow);
+            }
+            if !evidence.is_empty() {
+                evidence.append(&mut intents);
+                intents = evidence;
+            }
+        }
 
         // Per-intent hashes for the `tx_to_block` secondary index and the
         // governance-envelope lookup. Computed BEFORE the payload digest.
@@ -2390,6 +5935,18 @@ async fn run_round_driver(
         // equivocation detection.
         {
             let mut inner = state.inner.lock().await;
+            // IQ-008 D4: the authored-round marker is written and synced
+            // BEFORE this cert can leave the process (broadcast is Phase
+            // 4). A crash between here and the broadcast costs one unsent
+            // cert; a crash-restart that re-signed this round would cost
+            // the whole bond (Invariant 5). Persistence failure here is
+            // fatal to authoring for this tick, not to the process.
+            if let Some(store) = inner.store.as_mut() {
+                if let Err(e) = store.append_authored(target_round, cert_hash) {
+                    tracing::error!(err = %e, round = target_round, "authored marker append failed; skipping propose");
+                    continue;
+                }
+            }
             inner.last_authored_round = Some(target_round);
             if target_round > inner.max_observed_round {
                 inner.max_observed_round = target_round;
@@ -2416,8 +5973,29 @@ async fn run_round_driver(
                 _ => {}
             }
         }
-        let _ = state.dag.write().await.insert(cert.clone());
+        // Block before certificate, locally too: in the DAG implies the
+        // block is held (IQ-009 I-AV1).
         state.blocks.lock().insert(cert_hash, block.clone());
+        let _ = state.dag.write().await.insert(cert.clone());
+        // The author ratifies its own certificate on the Validator-Ring
+        // side exactly as every other seated validator does on ingest.
+        // Without this an author's certificate could only ever gather
+        // n - 1 votes, and a four-node ring with one member down held the
+        // commit frontier forever (found by the DAG-S34 restart test with
+        // an outage longer than the retention window: the three survivors
+        // had 2 votes = 300k against a 400,001 threshold on every leader).
+        let own_vote = Vote {
+            validator: self_id,
+            candidate: cert_hash,
+        };
+        let own_vote_stored = store_vote(&state, own_vote).await;
+        if own_vote_stored {
+            log.emit(
+                Event::now(&self_label, Lane::Main, "voted")
+                    .with_round(target_round)
+                    .with_cert_hash(&cert_hash.0),
+            );
+        }
 
         // Phase 4 (unlocked): event log emit + cluster broadcast. No
         // state access, pure I/O.
@@ -2426,8 +6004,81 @@ async fn run_round_driver(
                 .with_round(target_round)
                 .with_cert_hash(&cert_hash.0),
         );
-        broadcast_traced(&outbound, WireMessage::Block(block), &self_label, &log);
-        broadcast_traced(&outbound, WireMessage::Cert(cert), &self_label, &log);
+        // Fault injection (IQ-010 D3): a conflicting twin of this round's
+        // certificate — same parents, one extra intent, distinct digest —
+        // signed and broadcast alongside the honest one.
+        let twin = if state.equivocate.load(std::sync::atomic::Ordering::Relaxed) {
+            let mut intents2 = block.intents.clone();
+            intents2.push(Intent::Transfer {
+                from: [0xEE; 20],
+                to: [0xEE; 20],
+                amount: 1,
+            });
+            let digest2 = compute_payload_digest(&intents2, &block.governance_auth);
+            let mut cert2 = Certificate {
+                author: self_id,
+                round: target_round,
+                parents: cert.parents.clone(),
+                payload_digest: digest2,
+                signature: Vec::new(),
+            };
+            cert2.sign(&state.self_secret_key);
+            let block2 = BlockPayload {
+                payload_digest: digest2,
+                author: self_id,
+                round: target_round,
+                cert_hash: cert2.hash(),
+                intents: intents2,
+                governance_auth: block.governance_auth.clone(),
+            };
+            Some((cert2, block2))
+        } else {
+            None
+        };
+        if !state
+            .withhold_blocks
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            broadcast_all(
+                &state,
+                &outbound,
+                WireMessage::Block(block),
+                &self_label,
+                &log,
+            );
+        }
+        broadcast_all(
+            &state,
+            &outbound,
+            WireMessage::Cert(cert),
+            &self_label,
+            &log,
+        );
+        if let Some((cert2, block2)) = twin {
+            broadcast_all(
+                &state,
+                &outbound,
+                WireMessage::Block(block2),
+                &self_label,
+                &log,
+            );
+            broadcast_all(
+                &state,
+                &outbound,
+                WireMessage::Cert(cert2),
+                &self_label,
+                &log,
+            );
+        }
+        if own_vote_stored {
+            broadcast_all(
+                &state,
+                &outbound,
+                WireMessage::Vote(own_vote),
+                &self_label,
+                &log,
+            );
+        }
     }
 }
 
@@ -2454,8 +6105,22 @@ mod tests {
     //   23_000  phase_g_admit (4n)
     //   23_200  phase_g_eject (4n)
     //   23_400  phase_g_growing_prefix_under_transient_unavailability (4n)
+    //   23_600  four_node_gc_bounds_store (4n)
+    //   23_800  restart_resumes_from_disk_without_equivocating (4n)
+    //   24_000  joiner_bootstraps_from_cosigned_checkpoint_snapshot (4n + 1)
+    //   24_300  round_driver_records_own_vote
+    //   24_600  withholding_author_does_not_stall_the_mesh (4n)
     //
     // Adding a test? Take the next free 200-wide band and list it here.
+
+    /// Multi-node loopback meshes are serialised across the test binary:
+    /// on a small runner several 100 ms meshes in parallel slow each other
+    /// several-fold and the fixed catch-up budgets miss (#171). Held for
+    /// the whole test.
+    static MESH_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    async fn mesh_serial() -> tokio::sync::MutexGuard<'static, ()> {
+        MESH_SERIAL.lock().await
+    }
 
     #[test]
     fn block_payload_consistency_rejects_forgery() {
@@ -2528,7 +6193,7 @@ mod tests {
     use std::net::SocketAddr;
 
     use super::*;
-    use crate::config::{GenesisValidator, Peer};
+    use crate::config::{GenesisPrebalance, GenesisValidator, Peer};
 
     /// Write an ML-DSA-65 secret key's raw bytes to a fresh temp file and
     /// return its path, for use as `NodeConfig::mldsa_secret_key_path` — the
@@ -2688,6 +6353,8 @@ mod tests {
             corridors: Vec::new(),
             prebalances: Vec::new(),
             rounds_per_epoch: 1024,
+            gc_depth_rounds: suwappu_consensus::GC_DEPTH,
+            checkpoint_cadence_rounds: 64,
         };
         let cfg = NodeConfig {
             self_id: "v0".into(),
@@ -2712,6 +6379,8 @@ mod tests {
             bridge_oracle_address: None,
             bridge_network_id: None,
             metrics_listen: None,
+            data_dir: None,
+            store_fsync: false,
         };
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2775,6 +6444,8 @@ mod tests {
             corridors: Vec::new(),
             prebalances: Vec::new(),
             rounds_per_epoch: 1024,
+            gc_depth_rounds: suwappu_consensus::GC_DEPTH,
+            checkpoint_cadence_rounds: 64,
         };
         let cfg = NodeConfig {
             self_id: "v0".into(),
@@ -2799,6 +6470,8 @@ mod tests {
             bridge_oracle_address: None,
             bridge_network_id: None,
             metrics_listen: None,
+            data_dir: None,
+            store_fsync: false,
         };
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2843,6 +6516,7 @@ mod tests {
     /// state root.
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn four_node_main_lane_commits() {
+        let _serial = mesh_serial().await;
         let n = 4u32;
         let base_port: u16 = 19_000;
 
@@ -2877,6 +6551,8 @@ mod tests {
             corridors: Vec::new(),
             prebalances: Vec::new(),
             rounds_per_epoch: 1024,
+            gc_depth_rounds: suwappu_consensus::GC_DEPTH,
+            checkpoint_cadence_rounds: 64,
         };
 
         let mut daemons = Vec::new();
@@ -2918,6 +6594,8 @@ mod tests {
                 bridge_oracle_address: None,
                 bridge_network_id: None,
                 metrics_listen: None,
+                data_dir: None,
+                store_fsync: false,
             };
             let d = Daemon::start(cfg, manifest.clone()).await.unwrap();
             daemons.push(d);
@@ -2943,6 +6621,3692 @@ mod tests {
         let first = state_roots[0];
         for r in &state_roots[1..] {
             assert_eq!(*r, first, "state roots disagree across daemons");
+        }
+    }
+
+    /// IQ-008 D1/D3 at the daemon layer: a 4-node cluster run for many
+    /// multiples of a small `gc_depth_rounds` keeps every growth surface
+    /// bounded and still agrees on the substrate state root.
+    ///
+    /// The pure-consensus invariants (I-GC1..3) are the 10k-case
+    /// `proptest_gc.rs`; this test is the deterministic scenario for the
+    /// piece those cannot see — that the daemon actually advances the gc
+    /// round from the leader frontier, prunes every side table, keeps
+    /// serving and committing across prunes, and that pruning at
+    /// different moments on different nodes changes no post-root.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn four_node_gc_bounds_store() {
+        let _serial = mesh_serial().await;
+        let n = 4u32;
+        let base_port: u16 = 23_600;
+        let gc_depth: u64 = 8;
+
+        let keypairs: Vec<(
+            suwappu_crypto::mldsa::PublicKey,
+            suwappu_crypto::mldsa::SecretKey,
+        )> = (0..n).map(|_| suwappu_crypto::mldsa::keypair()).collect();
+
+        let manifest = GenesisManifest {
+            network_id: "test-gc-4n".into(),
+            validators: (0..n)
+                .map(|i| GenesisValidator {
+                    authority_id: i,
+                    label: format!("v{}", i),
+                    mldsa_public_key_hex: hex::encode(keypairs[i as usize].0.as_bytes()),
+                    bls_public_key_hex: "00".into(),
+                    validator_stake_suwappu: 150_000,
+                    authority_stake_suwappu: 150_000,
+                })
+                .collect(),
+            corridors: Vec::new(),
+            prebalances: Vec::new(),
+            rounds_per_epoch: 1024,
+            gc_depth_rounds: gc_depth,
+            checkpoint_cadence_rounds: 4,
+        };
+
+        let mut daemons = Vec::new();
+        for i in 0..n {
+            let peers: Vec<Peer> = (0..n)
+                .filter(|j| *j != i)
+                .map(|j| Peer {
+                    id: format!("v{}", j),
+                    addr: format!("127.0.0.1:{}", base_port + j as u16)
+                        .parse::<SocketAddr>()
+                        .unwrap(),
+                })
+                .collect();
+            let cfg = NodeConfig {
+                self_id: format!("v{}", i),
+                authority_id: i,
+                listen: format!("127.0.0.1:{}", base_port + i as u16)
+                    .parse::<SocketAddr>()
+                    .unwrap(),
+                client_listen: format!("127.0.0.1:{}", base_port + 100 + i as u16)
+                    .parse::<SocketAddr>()
+                    .unwrap(),
+                rpc_listen: None,
+                peers,
+                allow_post_genesis_join: false,
+                round_ms: 100,
+                checkpoint_cadence_rounds: 1,
+                mldsa_secret_key_path: write_mldsa_key_file(&keypairs[i as usize].1),
+                bls_secret_key_path: "/dev/null".into(),
+                genesis_manifest_path: "/dev/null".into(),
+                event_log_path: std::env::temp_dir()
+                    .join(format!("suwappu-daemon-gc-test-v{}.ndjson", i)),
+                max_client_connections: 256,
+                client_idle_timeout_ms: 30_000,
+                client_per_ip_limit: 8,
+                rpc_per_ip_capacity: 60,
+                rpc_per_ip_refill_per_sec: 10,
+                bridge_oracle_address: None,
+                bridge_network_id: None,
+                metrics_listen: None,
+                data_dir: None,
+                store_fsync: false,
+            };
+            let d = Daemon::start(cfg, manifest.clone()).await.unwrap();
+            daemons.push(d);
+        }
+
+        // ~60 rounds at 100 ms: several full gc windows past the first
+        // prune, which needs the leader frontier to reach `gc_depth`.
+        tokio::time::sleep(Duration::from_secs(6)).await;
+
+        // Generous bound: the live window is (gc_round, max_round], i.e.
+        // gc_depth rounds plus the few rounds between the last committed
+        // leader and the tip. Anything past 3x the depth means pruning
+        // is not keeping up.
+        let live_bound = (n as u64) * (3 * gc_depth);
+        let mut state_roots = Vec::new();
+        for d in &daemons {
+            // Hold the commit lock while sampling: a prune advances the
+            // DAG's gc round and the daemon's in two steps, and a sample
+            // taken between them is not a bug.
+            let _quiesce = d.state.commit_lock.lock().await;
+            let (dag_len, dag_gc, tombstones, max_round) = {
+                let dag = d.state.dag.read().await;
+                (
+                    dag.len() as u64,
+                    dag.gc_round(),
+                    dag.tombstone_count() as u64,
+                    dag.max_round().unwrap_or(0),
+                )
+            };
+            let blocks_len = d.state.blocks.lock().len() as u64;
+            let votes_len = d.state.votes.lock().len() as u64;
+            let committed_len = d.state.committed.lock().len() as u64;
+            let inner = d.state.inner.lock().await;
+            let label = inner.last_authored_round;
+            assert!(
+                max_round >= 3 * gc_depth,
+                "{label:?}: cluster did not progress far enough (max_round {max_round})"
+            );
+            assert!(
+                dag_gc.is_some() && inner.gc_round == dag_gc,
+                "{label:?}: gc round never advanced (dag {dag_gc:?}, inner {:?})",
+                inner.gc_round
+            );
+            let gc = dag_gc.unwrap();
+            assert_eq!(
+                Some(gc),
+                inner
+                    .last_committed_leader_round
+                    .and_then(|l| l.checked_sub(gc_depth)),
+                "{label:?}: gc round is not leader frontier minus depth"
+            );
+            assert!(
+                dag_len <= live_bound,
+                "{label:?}: dag has {dag_len} certs (> {live_bound})"
+            );
+            assert!(
+                tombstones <= (n as u64) * gc_depth + n as u64,
+                "{label:?}: {tombstones} tombstones"
+            );
+            assert!(
+                blocks_len <= live_bound,
+                "{label:?}: {blocks_len} blocks retained"
+            );
+            assert!(
+                votes_len <= live_bound,
+                "{label:?}: {votes_len} vote slots retained"
+            );
+            assert!(
+                committed_len <= live_bound,
+                "{label:?}: {committed_len} commit marks retained"
+            );
+            assert!(
+                inner.seen_at.keys().all(|(_, r)| *r > gc),
+                "{label:?}: seen_at retains rounds at or below gc"
+            );
+            assert!(
+                inner.main_lane_index.iter().all(|tx| tx.round > gc),
+                "{label:?}: main_lane_index retains rounds at or below gc"
+            );
+            assert!(
+                !inner.needs_snapshot,
+                "{label:?}: a genesis validator must never need a snapshot"
+            );
+            state_roots.push(inner.substrate.state_root());
+        }
+        let first = state_roots[0];
+        for r in &state_roots[1..] {
+            assert_eq!(
+                *r, first,
+                "state roots disagree across daemons after pruning"
+            );
+        }
+    }
+
+    /// IQ-008 D4 at the daemon layer: a validator with `data_dir` set is
+    /// stopped mid-run and restarted from disk. It must (1) never re-sign a
+    /// round it already authored — its peers would eject it for
+    /// equivocation — (2) resume with the substrate it had, and (3) catch
+    /// up to the cluster's state root.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn restart_resumes_from_disk_without_equivocating() {
+        let _serial = mesh_serial().await;
+        let n = 4u32;
+        let base_port: u16 = 23_800;
+        let restarted: u32 = 3;
+        let data_dir = std::env::temp_dir().join(format!(
+            "suwappu-restart-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&data_dir);
+
+        let keypairs: Vec<(
+            suwappu_crypto::mldsa::PublicKey,
+            suwappu_crypto::mldsa::SecretKey,
+        )> = (0..n).map(|_| suwappu_crypto::mldsa::keypair()).collect();
+        let manifest = GenesisManifest {
+            network_id: "test-restart-4n".into(),
+            validators: (0..n)
+                .map(|i| GenesisValidator {
+                    authority_id: i,
+                    label: format!("v{}", i),
+                    mldsa_public_key_hex: hex::encode(keypairs[i as usize].0.as_bytes()),
+                    bls_public_key_hex: "00".into(),
+                    validator_stake_suwappu: 150_000,
+                    authority_stake_suwappu: 150_000,
+                })
+                .collect(),
+            corridors: Vec::new(),
+            prebalances: vec![GenesisPrebalance {
+                address: format!("0x{}", "11".repeat(20)),
+                balance_suwappu: 1_000_000,
+                role: None,
+            }],
+            rounds_per_epoch: 1024,
+            gc_depth_rounds: 16,
+            // Checkpoint (and therefore snapshot) often so the restart
+            // exercises snapshot + tail replay.
+            checkpoint_cadence_rounds: 6,
+        };
+        let cfg_for = |i: u32| -> NodeConfig {
+            let peers: Vec<Peer> = (0..n)
+                .filter(|j| *j != i)
+                .map(|j| Peer {
+                    id: format!("v{}", j),
+                    addr: format!("127.0.0.1:{}", base_port + j as u16)
+                        .parse::<SocketAddr>()
+                        .unwrap(),
+                })
+                .collect();
+            NodeConfig {
+                self_id: format!("v{}", i),
+                authority_id: i,
+                listen: format!("127.0.0.1:{}", base_port + i as u16)
+                    .parse::<SocketAddr>()
+                    .unwrap(),
+                client_listen: format!("127.0.0.1:{}", base_port + 100 + i as u16)
+                    .parse::<SocketAddr>()
+                    .unwrap(),
+                rpc_listen: None,
+                peers,
+                allow_post_genesis_join: false,
+                round_ms: 100,
+                checkpoint_cadence_rounds: 1,
+                mldsa_secret_key_path: write_mldsa_key_file(&keypairs[i as usize].1),
+                bls_secret_key_path: "/dev/null".into(),
+                genesis_manifest_path: "/dev/null".into(),
+                event_log_path: std::env::temp_dir()
+                    .join(format!("suwappu-daemon-restart-test-v{}.ndjson", i)),
+                max_client_connections: 256,
+                client_idle_timeout_ms: 30_000,
+                client_per_ip_limit: 8,
+                rpc_per_ip_capacity: 60,
+                rpc_per_ip_refill_per_sec: 10,
+                bridge_oracle_address: None,
+                bridge_network_id: None,
+                metrics_listen: None,
+                data_dir: if i == restarted {
+                    Some(data_dir.clone())
+                } else {
+                    None
+                },
+                store_fsync: false,
+            }
+        };
+
+        let mut daemons: Vec<Daemon> = Vec::new();
+        for i in 0..n {
+            daemons.push(Daemon::start(cfg_for(i), manifest.clone()).await.unwrap());
+        }
+        // Submit a transfer so the substrate is not trivially genesis.
+        {
+            let mut client = crate::client::LoadGenClient::connect(
+                cfg_for(0).client_listen,
+                keypairs[0].1.clone(),
+                keypairs[0].0.clone(),
+                manifest.network_id.clone(),
+            )
+            .await
+            .unwrap();
+            client
+                .submit(Intent::Transfer {
+                    from: [0x11; 20],
+                    to: [0x22; 20],
+                    amount: 777,
+                })
+                .await
+                .unwrap();
+        }
+        tokio::time::sleep(Duration::from_secs(4)).await;
+
+        // Stop v3 cleanly (final snapshot) and record where it was.
+        let mut v3 = daemons.remove(restarted as usize);
+        v3.shutdown().await;
+        drop(v3);
+        // The baseline is what the node itself wrote at shutdown (the
+        // mesh keeps committing while the reading above would be taken,
+        // so an in-memory reading races the final snapshot).
+        let final_snap = crate::store::load_latest_snapshot(&data_dir, &manifest.network_id)
+            .expect("shutdown snapshot readable")
+            .expect("shutdown snapshot present");
+        let authored_before = final_snap.last_authored_round.unwrap();
+        let leader_before = final_snap.leader_round;
+        let root_before = final_snap.state_root;
+        assert!(
+            leader_before >= 8,
+            "cluster did not progress before restart"
+        );
+        // Let the peers keep committing without v3 for longer than the
+        // retention window (gc_depth = 16 rounds at 100 ms): on restart
+        // v3's own DAG tail is below every peer's gc round, so it must
+        // recover from disk, bootstrap the window from a co-signed
+        // checkpoint snapshot, and jump its authoring round forward
+        // (consensus-review finding: a one-round-per-tick walker never
+        // catches a mesh that also advances one round per tick).
+        tokio::time::sleep(Duration::from_millis(4_000)).await;
+
+        // Restart from disk.
+        let v3 = Daemon::start(cfg_for(restarted), manifest.clone())
+            .await
+            .unwrap();
+        {
+            let inner = v3.state.inner.lock().await;
+            assert!(
+                inner.last_authored_round.unwrap_or(0) >= authored_before,
+                "authored marker regressed across restart: {:?} < {}",
+                inner.last_authored_round,
+                authored_before
+            );
+            assert_eq!(
+                inner.last_committed_leader_round,
+                Some(leader_before),
+                "recovered leader frontier differs from the one snapshotted at shutdown"
+            );
+            assert_eq!(
+                inner.substrate.state_root(),
+                root_before,
+                "recovered substrate differs"
+            );
+            assert!(
+                inner.store.is_some(),
+                "commit log not attached after recovery"
+            );
+        }
+        daemons.push(v3);
+
+        // (2)+(3): within a bounded time v3 authors past its pre-restart
+        // marker and, at an equal leader frontier, matches a peer's
+        // substrate root.
+        // Budget is generous (60 s) and the sampling fine (100 ms): under
+        // a fully parallel test suite the 100 ms mesh slows several-fold,
+        // and the equal-frontier sample the root check needs is a
+        // coincidence between two moving frontiers.
+        // Every peer's (frontier → root) is recorded as it moves, sampled
+        // under its commit lock so the pair is consistent; v3 is compared
+        // at whatever frontier it reaches, so the check does not depend
+        // on catching two moving frontiers equal in one sample (a
+        // coincidence that a loaded runner misses).
+        let mut caught_up = false;
+        let mut history: HashMap<u64, [u8; 32]> = HashMap::new();
+        for _ in 0..600 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            for d in &daemons[..daemons.len() - 1] {
+                let _walk = d.state.commit_lock.lock().await;
+                let inner = d.state.inner.lock().await;
+                if let Some(f) = inner.last_committed_leader_round {
+                    let root = inner.substrate.state_root();
+                    if let Some(prev) = history.insert(f, root) {
+                        assert_eq!(prev, root, "a peer's root changed at a fixed frontier");
+                    }
+                }
+            }
+            let (v3_authored, v3_frontier, v3_root) = {
+                let v3 = &daemons.last().unwrap().state;
+                let _walk = v3.commit_lock.lock().await;
+                let inner = v3.inner.lock().await;
+                (
+                    inner.last_authored_round.unwrap_or(0),
+                    inner.last_committed_leader_round,
+                    inner.substrate.state_root(),
+                )
+            };
+            if v3_authored <= authored_before {
+                continue;
+            }
+            if let Some(root) = v3_frontier.and_then(|f| history.get(&f)) {
+                assert_eq!(
+                    *root, v3_root,
+                    "state roots disagree at an equal frontier after restart"
+                );
+                caught_up = true;
+                break;
+            }
+        }
+
+        assert!(
+            caught_up,
+            "restarted validator did not resume authoring and catch up"
+        );
+        // (1) No peer ejected v3 — i.e. v3 never equivocated on restart.
+        for d in &daemons {
+            assert!(
+                d.state.authority_registry.read().await.contains(restarted),
+                "restarted validator was ejected (equivocation on restart)"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    /// Consensus-review (S34.5, third pass): the authoring anchor ignores a
+    /// far-future single-author certificate and follows the highest round
+    /// that holds a quorum of distinct authors.
+    #[test]
+    fn highest_quorum_round_follows_quorum_not_tip() {
+        let n = 4u32;
+        let mut dag = DagStore::with_gc_depth(16);
+        let mut prev: Vec<CertHash> = Vec::new();
+        for r in 0..5u64 {
+            let mut this = Vec::new();
+            for a in 0..n {
+                let cert = Certificate {
+                    author: a,
+                    round: r,
+                    parents: prev.clone(),
+                    payload_digest: [a as u8 + 1; 32],
+                    signature: Vec::new(),
+                };
+                this.push(cert.hash());
+                dag.insert(cert).unwrap();
+            }
+            prev = this;
+        }
+        assert_eq!(
+            highest_quorum_round(&dag, &Committee::contiguous(n)),
+            Some(4)
+        );
+        // One authority alone at round 5: below quorum, anchor unchanged.
+        let lone = Certificate {
+            author: 1,
+            round: 5,
+            parents: prev.clone(),
+            payload_digest: [0x55; 32],
+            signature: Vec::new(),
+        };
+        let lone_hash = lone.hash();
+        dag.insert(lone).unwrap();
+        assert_eq!(
+            highest_quorum_round(&dag, &Committee::contiguous(n)),
+            Some(4)
+        );
+        // The same authority pushes a certificate 20 rounds ahead on top
+        // of its own lone certificate: valid to insert, still not an
+        // anchor.
+        let far = Certificate {
+            author: 1,
+            round: 25,
+            parents: vec![lone_hash],
+            payload_digest: [0x66; 32],
+            signature: Vec::new(),
+        };
+        dag.insert(far).unwrap();
+        assert_eq!(dag.max_round(), Some(25));
+        assert_eq!(
+            highest_quorum_round(&dag, &Committee::contiguous(n)),
+            Some(4)
+        );
+        // Exactly quorum_threshold(4) = 3 distinct authors at round 5
+        // makes it the anchor.
+        for a in [0u32, 2] {
+            dag.insert(Certificate {
+                author: a,
+                round: 5,
+                parents: prev.clone(),
+                payload_digest: [a as u8 + 0x10; 32],
+                signature: Vec::new(),
+            })
+            .unwrap();
+        }
+        assert_eq!(
+            highest_quorum_round(&dag, &Committee::contiguous(n)),
+            Some(5)
+        );
+    }
+
+    /// IQ-009 D1 (I-AV1): a signature-verified certificate without its
+    /// block is parked, not admitted; a self-consistent block whose digest
+    /// does not match the signed one is refused; the matching block admits
+    /// the certificate, and the seated node votes for it at that moment.
+    #[tokio::test]
+    async fn cert_is_admitted_only_with_its_block() {
+        let n = 4u32;
+        let keypairs: Vec<(
+            suwappu_crypto::mldsa::PublicKey,
+            suwappu_crypto::mldsa::SecretKey,
+        )> = (0..n).map(|_| suwappu_crypto::mldsa::keypair()).collect();
+        let manifest = GenesisManifest {
+            network_id: "avail-4n".into(),
+            validators: (0..n)
+                .map(|i| GenesisValidator {
+                    authority_id: i,
+                    label: format!("v{}", i),
+                    mldsa_public_key_hex: hex::encode(keypairs[i as usize].0.as_bytes()),
+                    bls_public_key_hex: "00".into(),
+                    validator_stake_suwappu: 150_000,
+                    authority_stake_suwappu: 150_000,
+                })
+                .collect(),
+            corridors: Vec::new(),
+            prebalances: Vec::new(),
+            rounds_per_epoch: 1024,
+            gc_depth_rounds: 16,
+            checkpoint_cadence_rounds: 4,
+        };
+        let state = State::new(&manifest, keypairs[0].1.clone(), None);
+        let (log, _task) = EventLog::start(&std::env::temp_dir().join("suwappu-avail-test.ndjson"))
+            .await
+            .unwrap();
+        let outbound: HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>> = HashMap::new();
+        let from = PeerId("v1".into());
+        let digest = compute_payload_digest(&[], &[]);
+        let mut cert = Certificate {
+            author: 1,
+            round: 0,
+            parents: Vec::new(),
+            payload_digest: digest,
+            signature: Vec::new(),
+        };
+        cert.sign(&keypairs[1].1);
+        let h = cert.hash();
+
+        // No block held: parked, fetched, not in the DAG.
+        assert!(ingest_cert(&state, cert.clone(), &from, Some(&outbound))
+            .await
+            .is_empty());
+        assert!(!state.dag.read().await.contains(&h));
+        {
+            let inner = state.inner.lock().await;
+            assert!(inner.awaiting_block.contains_key(&h));
+            assert!(inner.needed_blocks.contains(&h));
+        }
+        // A self-consistent block for a different payload is refused.
+        let wrong_intents = vec![Intent::Transfer {
+            from: [0x11; 20],
+            to: [0x22; 20],
+            amount: 1,
+        }];
+        let wrong = BlockPayload {
+            payload_digest: compute_payload_digest(&wrong_intents, &[]),
+            author: 1,
+            round: 0,
+            cert_hash: h,
+            intents: wrong_intents,
+            governance_auth: Vec::new(),
+        };
+        handle_block(&state, wrong, &from, &outbound, 0, "v0", &log).await;
+        assert!(!state.dag.read().await.contains(&h));
+        assert!(!state.blocks.lock().contains_key(&h));
+        assert!(state.inner.lock().await.awaiting_block.contains_key(&h));
+        // The matching block admits it, and the seated node votes.
+        let right = BlockPayload {
+            payload_digest: digest,
+            author: 1,
+            round: 0,
+            cert_hash: h,
+            intents: Vec::new(),
+            governance_auth: Vec::new(),
+        };
+        handle_block(&state, right, &from, &outbound, 0, "v0", &log).await;
+        assert!(state.dag.read().await.contains(&h));
+        assert!(state.blocks.lock().contains_key(&h));
+        {
+            let inner = state.inner.lock().await;
+            assert!(!inner.awaiting_block.contains_key(&h));
+            assert!(!inner.needed_blocks.contains(&h));
+        }
+        assert!(state
+            .votes
+            .lock()
+            .get(&h)
+            .is_some_and(|v| v.iter().any(|vote| vote.validator == 0)));
+        // Block first, certificate second admits in one step.
+        let digest2 = compute_payload_digest(&[], &[]);
+        let mut cert2 = Certificate {
+            author: 2,
+            round: 0,
+            parents: Vec::new(),
+            payload_digest: digest2,
+            signature: Vec::new(),
+        };
+        cert2.sign(&keypairs[2].1);
+        let h2 = cert2.hash();
+        let block2 = BlockPayload {
+            payload_digest: digest2,
+            author: 2,
+            round: 0,
+            cert_hash: h2,
+            intents: Vec::new(),
+            governance_auth: Vec::new(),
+        };
+        handle_block(&state, block2, &from, &outbound, 0, "v0", &log).await;
+        assert_eq!(
+            ingest_cert(&state, cert2, &from, Some(&outbound))
+                .await
+                .len(),
+            1
+        );
+        assert!(state.dag.read().await.contains(&h2));
+    }
+
+    /// IQ-009 I-AV1 as a property (DAG-S35 exit gate): for any
+    /// interleaving of certificate arrivals, block arrivals, wrong-payload
+    /// block arrivals and an optional prune, every certificate in the DAG
+    /// holds a digest-matching block and every parent is admitted or
+    /// tombstoned; and without a prune, every certificate whose block
+    /// arrived is eventually admitted (the parking buffer is drained by
+    /// the block, the orphan buffer by the parent).
+    ///
+    /// Run at 256 cases under CI; sprint close runs
+    /// `PROPTEST_CASES=10000 cargo test -p suwappu-node --release --lib availability_is_an_admission_invariant`.
+    mod availability_props {
+        use super::*;
+        use proptest::prelude::*;
+
+        const N: u32 = 3;
+        const ROUNDS: u64 = 3;
+        /// Extra headers by author 0 at round 1 (equivocations): the
+        /// per-(author, round) cap must hold for parked and admitted
+        /// certificates alike.
+        const EXTRA: usize = 3;
+
+        type Keys = Vec<(
+            suwappu_crypto::mldsa::PublicKey,
+            suwappu_crypto::mldsa::SecretKey,
+        )>;
+
+        fn keys() -> &'static Keys {
+            static KEYS: std::sync::OnceLock<Keys> = std::sync::OnceLock::new();
+            KEYS.get_or_init(|| (0..N).map(|_| suwappu_crypto::mldsa::keypair()).collect())
+        }
+
+        fn manifest() -> GenesisManifest {
+            GenesisManifest {
+                network_id: "avail-props".into(),
+                validators: (0..N)
+                    .map(|i| GenesisValidator {
+                        authority_id: i,
+                        label: format!("v{}", i),
+                        mldsa_public_key_hex: hex::encode(keys()[i as usize].0.as_bytes()),
+                        bls_public_key_hex: "00".into(),
+                        validator_stake_suwappu: 150_000,
+                        authority_stake_suwappu: 150_000,
+                    })
+                    .collect(),
+                corridors: Vec::new(),
+                prebalances: Vec::new(),
+                rounds_per_epoch: 1024,
+                gc_depth_rounds: 16,
+                checkpoint_cadence_rounds: 4,
+            }
+        }
+
+        #[derive(Clone, Debug)]
+        enum Ev {
+            Cert(usize),
+            Block(usize),
+            WrongBlock(usize),
+            /// The authentic payload under a foreign round: passes the
+            /// digest check and the window check, must fail the header
+            /// binding (third-pass consensus-review finding).
+            PoisonedRound(usize),
+        }
+        const KINDS: usize = 4;
+        const EVENTS: usize = (N as usize * ROUNDS as usize + EXTRA) * KINDS;
+
+        /// Block variants a frame can carry, for the model of the
+        /// per-hash candidate buffer (`MAX_BLOCK_CANDIDATES_PER_HASH`).
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        enum Kind {
+            Right,
+            Wrong,
+            Poisoned,
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig {
+                cases: std::env::var("PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(256),
+                max_shrink_iters: 32,
+                .. ProptestConfig::default()
+            })]
+
+            #[test]
+            fn availability_is_an_admission_invariant(
+                order in Just((0..EVENTS).collect::<Vec<usize>>()).prop_shuffle(),
+                with_prune in any::<bool>(),
+                prune_at in 0usize..EVENTS,
+                prune_round in 0u64..ROUNDS,
+                omit_bits in any::<u32>(),
+            ) {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(async {
+                    let state = State::new(&manifest(), keys()[0].1.clone(), None);
+                    let (log, _task) = EventLog::start(
+                        &std::env::temp_dir().join("suwappu-avail-props.ndjson"),
+                    )
+                    .await
+                    .unwrap();
+                    let outbound: HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>> =
+                        HashMap::new();
+                    let from = PeerId("p".into());
+                    // Build the certificates: full rounds, each cert's
+                    // parents = every cert of the previous round.
+                    let digest = compute_payload_digest(&[], &[]);
+                    let wrong_intents = vec![Intent::Transfer { from: [1; 20], to: [2; 20], amount: 1 }];
+                    let wrong_digest = compute_payload_digest(&wrong_intents, &[]);
+                    let mut certs: Vec<Certificate> = Vec::new();
+                    let mut prev: Vec<CertHash> = Vec::new();
+                    for r in 0..ROUNDS {
+                        let mut this = Vec::new();
+                        for a in 0..N {
+                            let mut c = Certificate {
+                                author: a,
+                                round: r,
+                                parents: prev.clone(),
+                                payload_digest: digest,
+                                signature: Vec::new(),
+                            };
+                            c.sign(&keys()[a as usize].1);
+                            this.push(c.hash());
+                            certs.push(c);
+                        }
+                        prev = this;
+                    }
+                    // Equivocating headers: author 0 at round 1 with distinct
+                    // digests (same parents).
+                    let round1_parents: Vec<CertHash> =
+                        certs.iter().filter(|c| c.round == 0).map(|c| c.hash()).collect();
+                    for k in 0..EXTRA {
+                        let mut c = Certificate {
+                            author: 0,
+                            round: 1,
+                            parents: round1_parents.clone(),
+                            payload_digest: compute_payload_digest(
+                                &[Intent::Transfer { from: [k as u8 + 3; 20], to: [9; 20], amount: 1 }],
+                                &[],
+                            ),
+                            signature: Vec::new(),
+                        };
+                        c.sign(&keys()[0].1);
+                        certs.push(c);
+                    }
+                    let extra_intents = |i: usize| -> Vec<Intent> {
+                        if i >= N as usize * ROUNDS as usize {
+                            let k = i - N as usize * ROUNDS as usize;
+                            vec![Intent::Transfer { from: [k as u8 + 3; 20], to: [9; 20], amount: 1 }]
+                        } else {
+                            Vec::new()
+                        }
+                    };
+                    let hashes: Vec<CertHash> = certs.iter().map(|c| c.hash()).collect();
+                    // Some blocks never arrive at all (omit bit set).
+                    let omitted = |i: usize| (omit_bits >> (i % 32)) & 1 == 1;
+                    let mut cert_seen = vec![false; certs.len()];
+                    // Model of block availability per certificate. Before
+                    // the certificate is known, block frames for its hash
+                    // are candidates: at most `MAX_BLOCK_CANDIDATES_PER_HASH`
+                    // distinct headers, first-come. From the certificate
+                    // on, a frame matching the signed header binds and
+                    // any other is dropped. `bound[i]` is therefore: the
+                    // authentic block was among the first two candidates
+                    // when the certificate arrived, or arrived after it.
+                    let mut cand: Vec<Vec<Kind>> = vec![Vec::new(); certs.len()];
+                    let mut bound = vec![false; certs.len()];
+                    let mut max_admitted_slot = 0usize;
+                    let events: Vec<Ev> = order
+                        .iter()
+                        .map(|&k| {
+                            let i = k / KINDS;
+                            match k % KINDS {
+                                0 => Ev::Cert(i),
+                                1 => Ev::Block(i),
+                                2 => Ev::WrongBlock(i),
+                                _ => Ev::PoisonedRound(i),
+                            }
+                        })
+                        .collect();
+                    let admitted_in_slot = |dag: &DagStore| {
+                        dag.round_hashes(1)
+                            .iter()
+                            .filter(|h| dag.get(h).is_some_and(|c| c.author == 0))
+                            .count()
+                    };
+                    let offer = |i: usize, kind: Kind, cand: &mut Vec<Vec<Kind>>, bound: &mut Vec<bool>, cert_seen: &[bool]| {
+                        if cert_seen[i] {
+                            if kind == Kind::Right {
+                                bound[i] = true;
+                            }
+                        } else if !cand[i].contains(&kind) && cand[i].len() < MAX_BLOCK_CANDIDATES_PER_HASH {
+                            cand[i].push(kind);
+                        }
+                    };
+                    for (pos, ev) in events.iter().enumerate() {
+                        if with_prune && pos == prune_at {
+                            let _ = prune_state(&state, prune_round, "t", &log).await;
+                        }
+                        // Positive control for the equivocating slot: a
+                        // (0, 1) header arriving with its block already
+                        // held, its parents admitted and the slot not yet
+                        // full is admitted (the cap is the only reason an
+                        // equivocator's header is refused).
+                        let mut must_admit: Option<usize> = None;
+                        if let Ev::Cert(i) = ev {
+                            let c = &certs[*i];
+                            if !with_prune && c.author == 0 && c.round == 1 && cand[*i].contains(&Kind::Right) {
+                                let dag = state.dag.read().await;
+                                if admitted_in_slot(&dag) < MAX_CERTS_PER_AUTHOR_ROUND
+                                    && c.parents.iter().all(|p| dag.contains(p))
+                                {
+                                    must_admit = Some(*i);
+                                }
+                            }
+                        }
+                        match ev {
+                            Ev::Cert(i) => {
+                                cert_seen[*i] = true;
+                                if cand[*i].contains(&Kind::Right) {
+                                    bound[*i] = true;
+                                }
+                                let _ = ingest_cert(&state, certs[*i].clone(), &from, None).await;
+                            }
+                            Ev::Block(i) => {
+                                if omitted(*i) {
+                                    continue;
+                                }
+                                offer(*i, Kind::Right, &mut cand, &mut bound, &cert_seen);
+                                let c = &certs[*i];
+                                let intents = extra_intents(*i);
+                                handle_block(
+                                    &state,
+                                    BlockPayload {
+                                        payload_digest: c.payload_digest,
+                                        author: c.author,
+                                        round: c.round,
+                                        cert_hash: hashes[*i],
+                                        intents,
+                                        governance_auth: Vec::new(),
+                                    },
+                                    &from, &outbound, 0, "t", &log,
+                                )
+                                .await;
+                            }
+                            Ev::WrongBlock(i) => {
+                                offer(*i, Kind::Wrong, &mut cand, &mut bound, &cert_seen);
+                                let c = &certs[*i];
+                                handle_block(
+                                    &state,
+                                    BlockPayload {
+                                        payload_digest: wrong_digest,
+                                        author: c.author,
+                                        round: c.round,
+                                        cert_hash: hashes[*i],
+                                        intents: wrong_intents.clone(),
+                                        governance_auth: Vec::new(),
+                                    },
+                                    &from, &outbound, 0, "t", &log,
+                                )
+                                .await;
+                            }
+                            Ev::PoisonedRound(i) => {
+                                offer(*i, Kind::Poisoned, &mut cand, &mut bound, &cert_seen);
+                                let c = &certs[*i];
+                                handle_block(
+                                    &state,
+                                    BlockPayload {
+                                        payload_digest: c.payload_digest,
+                                        author: c.author,
+                                        round: c.round + 5,
+                                        cert_hash: hashes[*i],
+                                        intents: extra_intents(*i),
+                                        governance_auth: Vec::new(),
+                                    },
+                                    &from, &outbound, 0, "t", &log,
+                                )
+                                .await;
+                            }
+                        }
+                        // I-AV1 after every event, and the per-slot cap for
+                        // admitted and parked certificates alike.
+                        {
+                            let inner = state.inner.lock().await;
+                            let parked_slot = inner
+                                .awaiting_block
+                                .values()
+                                .filter(|c| c.author == 0 && c.round == 1)
+                                .count();
+                            prop_assert!(parked_slot <= MAX_CERTS_PER_AUTHOR_ROUND, "parked per-slot cap");
+                            // A candidate never claims a round the DAG has
+                            // already dropped, so no key outlives the gc.
+                            if let Some(gc) = inner.gc_round {
+                                for (h, v) in &inner.block_candidates {
+                                    prop_assert!(!v.is_empty(), "empty candidate key {:?}", h);
+                                    prop_assert!(v.iter().all(|c| c.block.round > gc), "candidate at or below the gc round");
+                                }
+                            }
+                            for (h, b) in state.blocks.lock().iter() {
+                                if let Some(gc) = inner.gc_round {
+                                    prop_assert!(b.round > gc, "held block {:?} at or below the gc round", h);
+                                }
+                            }
+                        }
+                        let dag = state.dag.read().await;
+                        let admitted_slot = admitted_in_slot(&dag);
+                        prop_assert!(admitted_slot <= MAX_CERTS_PER_AUTHOR_ROUND, "admitted per-slot cap");
+                        max_admitted_slot = max_admitted_slot.max(admitted_slot);
+                        if let Some(i) = must_admit {
+                            prop_assert!(dag.contains(&hashes[i]), "directly admissible (0, 1) header {} refused; events={:?}", i, events);
+                        }
+                        for h in dag.linearize() {
+                            let c = dag.get(&h).unwrap();
+                            let held = state
+                                .blocks
+                                .lock()
+                                .get(&h)
+                                .map(|b| (b.payload_digest, b.author, b.round));
+                            prop_assert_eq!(held, Some(cert_header(c)), "DAG cert without its header-bound block");
+                            for p in &c.parents {
+                                prop_assert!(
+                                    dag.contains(p) || dag.is_tombstoned(p),
+                                    "DAG cert with an unknown parent"
+                                );
+                            }
+                        }
+                    }
+                    // The equivocation proof forms exactly when two headers
+                    // of the slot are admitted. IQ-010 D3: the proof is
+                    // queued as on-chain evidence for this node's next
+                    // block; nothing is ejected locally (the committed
+                    // evidence ejects at the boundary on every node), so
+                    // the author stays seated here.
+                    try_commit(&state, "t", &log, &outbound).await;
+                    let seated = state.authority_registry.read().await.contains(0);
+                    prop_assert!(seated, "local observation must never eject");
+                    let queued = state
+                        .inner
+                        .lock()
+                        .await
+                        .detected_equivocations
+                        .iter()
+                        .any(|p| p.author == 0 && p.round == 1);
+                    // A prune at or above round 1 reaps the proof with the
+                    // slot it is about (nothing can be admitted at round 1
+                    // after it), so evidence is owed only while the slot
+                    // is live.
+                    let expected = max_admitted_slot >= MAX_CERTS_PER_AUTHOR_ROUND
+                        && !(with_prune && prune_round >= 1);
+                    prop_assert_eq!(queued, expected, "evidence queued={} max admitted in slot={} with_prune={} prune_round={}", queued, max_admitted_slot, with_prune, prune_round);
+                    if !with_prune {
+                        // Liveness: a certificate whose block was bound, and
+                        // whose ancestors all were too, is admitted; one whose
+                        // block never bound is not. (The equivocating extras
+                        // are cap-limited, so only the base certificates are
+                        // checked here.)
+                        let (parked, orphans) = {
+                            let inner = state.inner.lock().await;
+                            (inner.awaiting_block.len(), inner.orphans.len())
+                        };
+                        let dag = state.dag.read().await;
+                        let mut admissible = vec![false; certs.len()];
+                        for (i, c) in certs.iter().enumerate().take(N as usize * ROUNDS as usize) {
+                            let parents_ok = c.parents.iter().all(|p| {
+                                hashes.iter().position(|x| x == p).is_some_and(|j| admissible[j])
+                            });
+                            // Liveness is owed to non-equivocating authors
+                            // only: author 0 equivocates at round 1, so
+                            // whichever two of its headers fill the slot
+                            // first are the two admitted (the cap and the
+                            // positive control above are the properties
+                            // there). Its certificates take their actual
+                            // state; the recursion carries that to their
+                            // children.
+                            if c.author == 0 && c.round >= 1 {
+                                admissible[i] = dag.contains(&hashes[i]);
+                                continue;
+                            }
+                            admissible[i] = cert_seen[i] && bound[i] && parents_ok;
+                            prop_assert_eq!(
+                                dag.contains(&hashes[i]),
+                                admissible[i],
+                                "cert {}: admitted={} expected={} (cert_seen={} bound={} cand={:?}) events={:?} omitted={:?} parked={} orphans={}",
+                                i, dag.contains(&hashes[i]), admissible[i], cert_seen[i], bound[i], cand[i], events,
+                                (0..certs.len()).filter(|k| omitted(*k)).collect::<Vec<_>>(),
+                                parked, orphans
+                            );
+                        }
+                    }
+                    Ok(())
+                })?;
+            }
+        }
+    }
+
+    /// IQ-010 D3, the `/goal` B2 equivocation fault: one of four
+    /// validators signs two conflicting certificates per round for a
+    /// while. Every honest node admits both (two per slot), carries the
+    /// evidence in its next block, and ejects the equivocator at the SAME
+    /// epoch boundary; the committee shrinks to {0, 2, 3} — a middle id,
+    /// which the pre-IQ-010 `0..n` rotation could not survive — and the
+    /// survivors keep committing with agreeing roots.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn middle_ejection_keeps_the_mesh_committing() {
+        let _serial = mesh_serial().await;
+        let n = 4u32;
+        let base_port: u16 = 24_900;
+        let keypairs: Vec<(
+            suwappu_crypto::mldsa::PublicKey,
+            suwappu_crypto::mldsa::SecretKey,
+        )> = (0..n).map(|_| suwappu_crypto::mldsa::keypair()).collect();
+        let manifest = GenesisManifest {
+            network_id: "test-eject-middle-4n".into(),
+            validators: (0..n)
+                .map(|i| GenesisValidator {
+                    authority_id: i,
+                    label: format!("v{}", i),
+                    mldsa_public_key_hex: hex::encode(keypairs[i as usize].0.as_bytes()),
+                    bls_public_key_hex: "00".into(),
+                    validator_stake_suwappu: 150_000,
+                    authority_stake_suwappu: 150_000,
+                })
+                .collect(),
+            corridors: Vec::new(),
+            prebalances: Vec::new(),
+            rounds_per_epoch: 32,
+            // No pruning inside the test window: the evidence block must
+            // still be inspectable at the end.
+            gc_depth_rounds: 4096,
+            checkpoint_cadence_rounds: 8,
+        };
+        let mut daemons = Vec::new();
+        for i in 0..n {
+            let peers: Vec<Peer> = (0..n)
+                .filter(|j| *j != i)
+                .map(|j| Peer {
+                    id: format!("v{}", j),
+                    addr: format!("127.0.0.1:{}", base_port + j as u16)
+                        .parse::<SocketAddr>()
+                        .unwrap(),
+                })
+                .collect();
+            let cfg = NodeConfig {
+                self_id: format!("v{}", i),
+                authority_id: i,
+                listen: format!("127.0.0.1:{}", base_port + i as u16)
+                    .parse::<SocketAddr>()
+                    .unwrap(),
+                client_listen: format!("127.0.0.1:{}", base_port + 100 + i as u16)
+                    .parse::<SocketAddr>()
+                    .unwrap(),
+                rpc_listen: None,
+                peers,
+                allow_post_genesis_join: false,
+                round_ms: 100,
+                checkpoint_cadence_rounds: 1,
+                mldsa_secret_key_path: write_mldsa_key_file(&keypairs[i as usize].1),
+                bls_secret_key_path: "/dev/null".into(),
+                genesis_manifest_path: "/dev/null".into(),
+                event_log_path: std::env::temp_dir()
+                    .join(format!("suwappu-daemon-eject-middle-test-v{}.ndjson", i)),
+                max_client_connections: 256,
+                client_idle_timeout_ms: 30_000,
+                client_per_ip_limit: 8,
+                rpc_per_ip_capacity: 60,
+                rpc_per_ip_refill_per_sec: 10,
+                bridge_oracle_address: None,
+                bridge_network_id: None,
+                metrics_listen: None,
+                data_dir: None,
+                store_fsync: false,
+            };
+            daemons.push(Daemon::start(cfg, manifest.clone()).await.unwrap());
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
+
+        // v1 equivocates for ~1.5 s (a dozen rounds), then behaves.
+        daemons[1]
+            .state
+            .equivocate
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        daemons[1]
+            .state
+            .equivocate
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+
+        // Every node — v1 included — ejects v1 at one and the same
+        // committed boundary. Recorded at the first observation; the
+        // poll is far faster than an epoch (1.6 s), so the boundary read
+        // alongside is the one the ejection landed at.
+        let mut ejected_at: Vec<Option<u64>> = vec![None; n as usize];
+        let deadline = std::time::Instant::now() + Duration::from_secs(40);
+        while ejected_at.iter().any(|e| e.is_none()) {
+            for (i, d) in daemons.iter().enumerate() {
+                if ejected_at[i].is_some() {
+                    continue;
+                }
+                let inner = d.state.inner.lock().await;
+                if !inner.committee.contains(1) {
+                    ejected_at[i] = Some(inner.epoch.last_boundary_round);
+                }
+            }
+            if std::time::Instant::now() > deadline {
+                let mut diag = Vec::new();
+                for (i, d) in daemons.iter().enumerate() {
+                    let inner = d.state.inner.lock().await;
+                    let reg = d.state.authority_registry.read().await;
+                    diag.push(format!(
+                        "v{i}: committee={:?} reg={} pending_gov={} detected={} emitted={} epoch={} frontier={:?}",
+                        inner.committee.members(),
+                        reg.len(),
+                        inner.pending_governance.len(),
+                        inner.detected_equivocations.len(),
+                        inner.evidence_emitted.len(),
+                        inner.epoch.current,
+                        inner.last_committed_leader_round
+                    ));
+                }
+                panic!(
+                    "equivocator not ejected everywhere within 40 s:\n  {}",
+                    diag.join("\n  ")
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let rounds: Vec<u64> = ejected_at.iter().map(|e| e.unwrap()).collect();
+        assert!(
+            rounds.iter().all(|r| *r == rounds[0]),
+            "ejection landed at different boundaries: {rounds:?} (I-CT1)"
+        );
+        for (i, d) in daemons.iter().enumerate() {
+            let inner = d.state.inner.lock().await;
+            assert_eq!(inner.committee.members(), &[0, 2, 3], "v{i}: committee");
+            assert!(
+                !d.state.authority_registry.read().await.contains(1),
+                "v{i}: registry"
+            );
+            assert_eq!(d.state.stake_table.read().await.weight(1), 0, "v{i}: stake");
+        }
+        // The evidence travelled on-chain: a committed block on v0 carries
+        // an `EquivocationEvidence` intent against author 1.
+        {
+            let committed = daemons[0].state.committed.lock().clone();
+            let blocks = daemons[0].state.blocks.lock();
+            let carried = blocks.iter().any(|(h, b)| {
+                committed.contains(h)
+                    && b.intents.iter().any(|i| {
+                        matches!(i, Intent::EquivocationEvidence { cert_a, .. } if cert_a.author == 1)
+                    })
+            });
+            assert!(carried, "no committed block carries the evidence");
+        }
+
+        // Survivors keep committing over the three-member committee (the
+        // pre-IQ-010 rotation had no parent edge to id 3 and a dead slot
+        // for id 1 here) and agree on the state root.
+        let survivors: Vec<usize> = vec![0, 2, 3];
+        let before: Vec<u64> = {
+            let mut v = Vec::new();
+            for i in &survivors {
+                v.push(
+                    daemons[*i]
+                        .state
+                        .inner
+                        .lock()
+                        .await
+                        .last_committed_leader_round
+                        .unwrap_or(0),
+                );
+            }
+            v
+        };
+        let mut advanced = false;
+        for _ in 0..300 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let mut all = true;
+            for (k, i) in survivors.iter().enumerate() {
+                let after = daemons[*i]
+                    .state
+                    .inner
+                    .lock()
+                    .await
+                    .last_committed_leader_round
+                    .unwrap_or(0);
+                all &= after >= before[k] + 15;
+            }
+            if all {
+                advanced = true;
+                break;
+            }
+        }
+        assert!(
+            advanced,
+            "a survivor's commit frontier stalled after the middle ejection"
+        );
+        let mut agreed = false;
+        for _ in 0..60 {
+            let mut fr = Vec::new();
+            for i in &survivors {
+                let inner = daemons[*i].state.inner.lock().await;
+                fr.push((
+                    inner.last_committed_leader_round,
+                    inner.substrate.state_root(),
+                ));
+            }
+            if fr.iter().all(|(f, _)| *f == fr[0].0) {
+                assert!(
+                    fr.iter().all(|(_, r)| *r == fr[0].1),
+                    "survivors disagree on the state root at an equal frontier"
+                );
+                agreed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(
+            agreed,
+            "survivors never reached an equal frontier to compare roots"
+        );
+        for mut d in daemons {
+            d.shutdown().await;
+        }
+    }
+
+    /// IQ-010 D2 / I-CT1 at the daemon level: two nodes fed the same
+    /// certificates, blocks and votes but running their commit walks at
+    /// different times (one after every round, one every five rounds)
+    /// register, prove live and activate a newly admitted authority — a
+    /// non-contiguous id, 7 into {0..3} — at the same committed boundary,
+    /// end with the same committee, stake table, commit set and state
+    /// root, and give id 7 leader slots afterwards. The lazily-committing
+    /// node drops 7's certificates until its own boundary registers 7 and
+    /// re-pulls them afterwards, exactly as the sync sweeper would — and
+    /// it is also missing author 3's round-6 certificate until round 13,
+    /// so slots around round 5 stay undecided on it across two epoch
+    /// boundaries and are decided only after the committee changed
+    /// (IQ-010 D4: the slot's own epoch pins the committee, so the late
+    /// decision names the same leader).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn activation_is_a_commit_sequence_function() {
+        let n = 4u32;
+        let keys: Vec<(
+            suwappu_crypto::mldsa::PublicKey,
+            suwappu_crypto::mldsa::SecretKey,
+        )> = (0..n).map(|_| suwappu_crypto::mldsa::keypair()).collect();
+        let (cand_pk, cand_sk) = suwappu_crypto::mldsa::keypair();
+        const NEW_ID: AuthorityId = 7;
+        let manifest = GenesisManifest {
+            network_id: "iq010-activation-4n".into(),
+            validators: (0..n)
+                .map(|i| GenesisValidator {
+                    authority_id: i,
+                    label: format!("v{}", i),
+                    mldsa_public_key_hex: hex::encode(keys[i as usize].0.as_bytes()),
+                    bls_public_key_hex: "00".into(),
+                    validator_stake_suwappu: 150_000,
+                    authority_stake_suwappu: 150_000,
+                })
+                .collect(),
+            corridors: Vec::new(),
+            prebalances: Vec::new(),
+            rounds_per_epoch: MIN_ROUNDS_PER_EPOCH,
+            // Pruning runs inside the window (second S36 pass): the epoch
+            // schedule both nodes bind into their snapshot roots must be
+            // pruned identically from the frontier, not from the walk.
+            gc_depth_rounds: 8,
+            checkpoint_cadence_rounds: 4,
+        };
+        let states = [
+            State::new(&manifest, keys[0].1.clone(), None),
+            State::new(&manifest, keys[0].1.clone(), None),
+        ];
+        let mut logs = Vec::new();
+        for i in 0..2 {
+            let (log, task) = EventLog::start(
+                &std::env::temp_dir().join(format!("suwappu-iq010-activation-{i}.ndjson")),
+            )
+            .await
+            .unwrap();
+            logs.push((log, task));
+        }
+        let outbound: HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>> = HashMap::new();
+        let from = PeerId("p".into());
+
+        // The governed admission of id 7: sponsor 0, co-signer 1, and the
+        // candidate's proof of possession.
+        let admit = Intent::AdmitAuthority {
+            authority_id: NEW_ID,
+            stake_suwappu: 150_000,
+            mldsa_public_key: cand_pk.as_bytes().to_vec(),
+            bls_public_key: vec![0u8; 48],
+        };
+        let digest = crate::client::intent_signing_digest(&manifest.network_id, &admit);
+        let sig = |sk: &suwappu_crypto::mldsa::SecretKey| {
+            suwappu_crypto::mldsa::sign(&digest, sk)
+                .unwrap()
+                .as_bytes()
+                .to_vec()
+        };
+        let auth = crate::client::GovAuth {
+            sponsor_pubkey_hash: crate::client::signer_pubkey_hash(keys[0].0.as_bytes()),
+            sponsor_signature: sig(&keys[0].1),
+            co_signer_pubkey_hash: crate::client::signer_pubkey_hash(keys[1].0.as_bytes()),
+            co_signature: sig(&keys[1].1),
+            candidate_pop_signature: sig(&cand_sk),
+        };
+
+        // The shared sequence: rounds 0..=ROUNDS, every genesis author
+        // each round, id 7 from round 5 on; parents = every certificate
+        // of the previous round (7's included).
+        const RPE: u64 = MIN_ROUNDS_PER_EPOCH;
+        const ROUNDS: u64 = 4 * RPE + 4;
+        let key_of = |a: AuthorityId| -> &suwappu_crypto::mldsa::SecretKey {
+            if a == NEW_ID {
+                &cand_sk
+            } else {
+                &keys[a as usize].1
+            }
+        };
+        let mut seq: Vec<(Certificate, BlockPayload)> = Vec::new();
+        let mut per_round: Vec<Vec<(Certificate, BlockPayload)>> = Vec::new();
+        let mut prev: Vec<CertHash> = Vec::new();
+        for r in 0..=ROUNDS {
+            let mut this_round = Vec::new();
+            let mut authors: Vec<AuthorityId> = (0..n).collect();
+            if r > RPE {
+                authors.push(NEW_ID);
+            }
+            for a in authors {
+                let (intents, gov): (Vec<Intent>, Vec<(u32, crate::client::GovAuth)>) =
+                    if r == 1 && a == 0 {
+                        (vec![admit.clone()], vec![(0, auth.clone())])
+                    } else {
+                        (Vec::new(), Vec::new())
+                    };
+                let payload_digest = compute_payload_digest(&intents, &gov);
+                let mut c = Certificate {
+                    author: a,
+                    round: r,
+                    parents: prev.clone(),
+                    payload_digest,
+                    signature: Vec::new(),
+                };
+                c.sign(key_of(a));
+                let b = BlockPayload {
+                    payload_digest,
+                    author: a,
+                    round: r,
+                    cert_hash: c.hash(),
+                    intents,
+                    governance_auth: gov,
+                };
+                this_round.push((c, b));
+            }
+            prev = this_round.iter().map(|(c, _)| c.hash()).collect();
+            seq.extend(this_round.iter().cloned());
+            per_round.push(this_round);
+        }
+
+        // Feed one item (block first, then certificate) and cast every
+        // validator's vote for it; re-feeding is idempotent.
+        async fn feed(
+            state: &State,
+            item: &(Certificate, BlockPayload),
+            from: &PeerId,
+            outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
+            log: &EventLog,
+        ) {
+            let (c, b) = item;
+            let h = c.hash();
+            if !state.dag.read().await.contains(&h) {
+                handle_block(state, b.clone(), from, outbound, 0, "t", log).await;
+                let _ = ingest_cert(state, c.clone(), from, None).await;
+            }
+            for v in [0u32, 1, 2, 3, NEW_ID] {
+                store_vote(
+                    state,
+                    Vote {
+                        validator: v,
+                        candidate: h,
+                    },
+                )
+                .await;
+            }
+        }
+        // The sync sweeper's job: re-pull everything not yet admitted.
+        async fn resync(
+            state: &State,
+            seq: &[(Certificate, BlockPayload)],
+            from: &PeerId,
+            outbound: &HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>>,
+            log: &EventLog,
+        ) {
+            for _ in 0..3 {
+                for item in seq {
+                    feed(state, item, from, outbound, log).await;
+                }
+            }
+        }
+        let mut activated_at: [Option<u64>; 2] = [None, None];
+        async fn observe(state: &State, slot: &mut Option<u64>) {
+            if slot.is_none() {
+                let inner = state.inner.lock().await;
+                if inner.committee.contains(NEW_ID) {
+                    *slot = Some(inner.epoch.last_boundary_round);
+                }
+            }
+        }
+        // What the lazy node can see before round 13: everything but
+        // author 3's round-6 certificate.
+        let withheld = |c: &Certificate| c.author == 3 && c.round == RPE + 3;
+        let seq_early: Vec<(Certificate, BlockPayload)> =
+            seq.iter().filter(|(c, _)| !withheld(c)).cloned().collect();
+        for (r, items) in per_round.iter().enumerate() {
+            for (i, state) in states.iter().enumerate() {
+                let lazy = i == 1;
+                let visible: &[(Certificate, BlockPayload)] = if lazy && (r as u64) < 2 * RPE + 6 {
+                    &seq_early
+                } else {
+                    &seq
+                };
+                for item in items {
+                    if lazy && (r as u64) < 2 * RPE + 6 && withheld(&item.0) {
+                        continue;
+                    }
+                    feed(state, item, &from, &outbound, &logs[i].0).await;
+                }
+                if !lazy || r % 5 == 4 {
+                    try_commit(state, "t", &logs[i].0, &outbound).await;
+                    resync(state, visible, &from, &outbound, &logs[i].0).await;
+                    try_commit(state, "t", &logs[i].0, &outbound).await;
+                    observe(state, &mut activated_at[i]).await;
+                }
+            }
+        }
+        for (i, state) in states.iter().enumerate() {
+            for _ in 0..4 {
+                resync(state, &seq[..], &from, &outbound, &logs[i].0).await;
+                try_commit(state, "t", &logs[i].0, &outbound).await;
+                observe(state, &mut activated_at[i]).await;
+            }
+        }
+
+        let mut summary = Vec::new();
+        for state in &states {
+            let inner = state.inner.lock().await;
+            let committed: BTreeSet<CertHash> = state.committed.lock().iter().copied().collect();
+            summary.push((
+                inner.committee.clone(),
+                inner.live_proven.clone(),
+                state.stake_table.read().await.weight(NEW_ID),
+                inner.last_committed_leader_round,
+                inner.substrate.state_root(),
+                committed,
+                inner.epoch.current,
+                inner.committee_by_epoch.clone(),
+                inner.gc_round,
+            ));
+        }
+        assert!(
+            summary[0].8.is_some(),
+            "no pruning happened inside the window"
+        );
+        assert_eq!(summary[0].8, summary[1].8, "gc rounds differ");
+        assert_eq!(
+            summary[0].7, summary[1].7,
+            "epoch schedules differ after pruning"
+        );
+        assert!(
+            summary[0].7.keys().next().copied() <= Some(summary[0].6),
+            "schedule dropped the current epoch"
+        );
+        assert_eq!(
+            summary[0].0.members(),
+            &[0, 1, 2, 3, NEW_ID],
+            "eager node's committee"
+        );
+        assert_eq!(summary[0].0, summary[1].0, "committees differ");
+        assert!(
+            summary[0].1.is_empty() && summary[1].1.is_empty(),
+            "live-proven not drained"
+        );
+        assert_eq!(summary[0].2, 150_000, "stake not activated");
+        assert_eq!(summary[0].2, summary[1].2);
+        assert_eq!(summary[0].3, summary[1].3, "commit frontier differs");
+        assert_eq!(summary[0].4, summary[1].4, "state roots differ");
+        assert_eq!(summary[0].5, summary[1].5, "commit sets differ");
+        assert!(
+            summary[0].6 >= 2,
+            "no boundary after the admission was crossed"
+        );
+        assert_eq!(
+            activated_at[0], activated_at[1],
+            "activation boundary differs (I-CT1)"
+        );
+        assert!(activated_at[0].is_some());
+        // Id 7 now holds leader slots in the rotation.
+        let slots: Vec<AuthorityId> = (0..10u64)
+            .map(|r| summary[0].0.leader(r).unwrap())
+            .collect();
+        assert!(
+            slots.contains(&NEW_ID),
+            "activated authority holds no leader slot: {slots:?}"
+        );
+    }
+
+    /// IQ-010 D3: evidence is accepted only when it is two distinct
+    /// certificates by one seated authority for one round, both validly
+    /// signed; valid evidence ejects at the boundary and is queued once.
+    #[tokio::test]
+    async fn bogus_evidence_is_dropped() {
+        let keys: Vec<(
+            suwappu_crypto::mldsa::PublicKey,
+            suwappu_crypto::mldsa::SecretKey,
+        )> = (0..4).map(|_| suwappu_crypto::mldsa::keypair()).collect();
+        let state = State::new(
+            &small_manifest("iq010-evidence-4n", &keys, 16),
+            keys[0].1.clone(),
+            None,
+        );
+        let (log, _task) =
+            EventLog::start(&std::env::temp_dir().join("suwappu-iq010-evidence.ndjson"))
+                .await
+                .unwrap();
+        let mk = |author: u32, round: u64, tag: u8, sk: &suwappu_crypto::mldsa::SecretKey| {
+            let mut c = Certificate {
+                author,
+                round,
+                parents: Vec::new(),
+                payload_digest: [tag; 32],
+                signature: Vec::new(),
+            };
+            c.sign(sk);
+            c
+        };
+        let a = mk(1, 3, 1, &keys[1].1);
+        let b = mk(1, 3, 2, &keys[1].1);
+        assert!(verify_equivocation_evidence(&state, &a, &b).await);
+        assert!(
+            !verify_equivocation_evidence(&state, &a, &a).await,
+            "same certificate"
+        );
+        assert!(
+            !verify_equivocation_evidence(&state, &a, &mk(1, 4, 2, &keys[1].1)).await,
+            "different rounds"
+        );
+        assert!(
+            !verify_equivocation_evidence(&state, &a, &mk(1, 3, 2, &keys[2].1)).await,
+            "signed by another key"
+        );
+        assert!(
+            !verify_equivocation_evidence(
+                &state,
+                &mk(9, 3, 1, &keys[1].1),
+                &mk(9, 3, 2, &keys[1].1)
+            )
+            .await,
+            "unseated author"
+        );
+        // Through the commit path: queued once, ejected at the boundary.
+        let evidence = Intent::EquivocationEvidence {
+            cert_a: a.clone(),
+            cert_b: b.clone(),
+        };
+        let digest = compute_payload_digest(std::slice::from_ref(&evidence), &[]);
+        let mut carrier = Certificate {
+            author: 0,
+            round: 5,
+            parents: Vec::new(),
+            payload_digest: digest,
+            signature: Vec::new(),
+        };
+        carrier.sign(&keys[0].1);
+        let block = BlockPayload {
+            payload_digest: digest,
+            author: 0,
+            round: 5,
+            cert_hash: carrier.hash(),
+            intents: vec![evidence.clone(), evidence.clone()],
+            governance_auth: Vec::new(),
+        };
+        apply_commit(
+            &state,
+            carrier.hash(),
+            carrier.clone(),
+            block.clone(),
+            5,
+            "t",
+            &log,
+            false,
+        )
+        .await;
+        apply_commit(&state, carrier.hash(), carrier, block, 5, "t", &log, false).await;
+        {
+            let inner = state.inner.lock().await;
+            let queued = inner
+                .pending_governance
+                .iter()
+                .filter(|(i, _)| matches!(i, Intent::EquivocationEvidence { .. }))
+                .count();
+            assert_eq!(queued, 1, "evidence queued once per slot");
+            assert!(inner.committee.contains(1), "ejection before the boundary");
+        }
+        apply_governance_intent(&state, &evidence, None, 16, "t", &log).await;
+        assert!(!state.authority_registry.read().await.contains(1));
+        assert_eq!(state.stake_table.read().await.weight(1), 0);
+        assert_eq!(state.inner.lock().await.committee.members(), &[0, 2, 3]);
+        // Replayed evidence against an ejected author is a no-op.
+        assert!(!verify_equivocation_evidence(&state, &a, &b).await);
+        // Retirement grace: the ejected author's certificates stay
+        // admissible (DAG structure only) for two epochs past the
+        // boundary, so a peer that crossed later and referenced them
+        // does not orphan every descendant; beyond it they are refused.
+        let from = PeerId("p".into());
+        {
+            // The grace horizon is what is under test, so pin it below
+            // the ingest ceiling (anchor 0 + gc_depth 16 on this empty
+            // DAG) rather than let the ceiling refuse first.
+            let mut inner = state.inner.lock().await;
+            let entry = inner
+                .retired
+                .get_mut(&1)
+                .expect("ejected member is retired");
+            entry.1 = 12;
+        }
+        let within = mk(1, 10, 7, &keys[1].1);
+        let beyond = mk(1, 14, 8, &keys[1].1);
+        assert!(ingest_cert(&state, within.clone(), &from, None)
+            .await
+            .is_empty());
+        assert!(
+            state
+                .inner
+                .lock()
+                .await
+                .awaiting_block
+                .contains_key(&within.hash()),
+            "retired member's certificate inside the grace was not admitted (parked on its block)"
+        );
+        assert!(ingest_cert(&state, beyond.clone(), &from, None)
+            .await
+            .is_empty());
+        assert!(!state
+            .inner
+            .lock()
+            .await
+            .awaiting_block
+            .contains_key(&beyond.hash()));
+
+        // Per-block bound: a block front-loaded with bogus evidence spends
+        // the budget and a valid pair behind it is not processed; the same
+        // valid pair alone is queued.
+        let x = mk(3, 4, 1, &keys[3].1);
+        let y = mk(3, 4, 2, &keys[3].1);
+        let valid = Intent::EquivocationEvidence {
+            cert_a: x.clone(),
+            cert_b: y.clone(),
+        };
+        // Bogus in the expensive sense: same author and round, distinct
+        // hashes, signed by the wrong key — it reaches the signature check
+        // and spends the budget. (A cheaply rejected pair does not.)
+        let bogus = Intent::EquivocationEvidence {
+            cert_a: mk(2, 4, 1, &keys[3].1),
+            cert_b: mk(2, 4, 2, &keys[3].1),
+        };
+        let mut intents = vec![bogus; MAX_EVIDENCE_PER_BLOCK];
+        intents.push(valid.clone());
+        let mk_carrier = |intents: Vec<Intent>, round: u64| {
+            let digest = compute_payload_digest(&intents, &[]);
+            let mut c = Certificate {
+                author: 0,
+                round,
+                parents: Vec::new(),
+                payload_digest: digest,
+                signature: Vec::new(),
+            };
+            c.sign(&keys[0].1);
+            let b = BlockPayload {
+                payload_digest: digest,
+                author: 0,
+                round,
+                cert_hash: c.hash(),
+                intents,
+                governance_auth: Vec::new(),
+            };
+            (c, b)
+        };
+        let (c1, b1) = mk_carrier(intents, 6);
+        apply_commit(&state, c1.hash(), c1, b1, 6, "t", &log, false).await;
+        let queued_for_3 = |inner: &StateInner| {
+            inner.pending_governance.iter().any(|(i, _)| {
+                matches!(i, Intent::EquivocationEvidence { cert_a, .. } if cert_a.author == 3)
+            })
+        };
+        assert!(
+            !queued_for_3(&*state.inner.lock().await),
+            "evidence beyond the bound was processed"
+        );
+        let (c2, b2) = mk_carrier(vec![valid], 7);
+        apply_commit(&state, c2.hash(), c2, b2, 7, "t", &log, false).await;
+        assert!(queued_for_3(&*state.inner.lock().await));
+    }
+
+    /// IQ-010 D6: a registered-but-inactive member (admitted, never
+    /// shown up) does not raise the checkpoint quorum. The signing
+    /// committee is the registry restricted to the committee, and a
+    /// checkpoint ratifies against it with the committee's quorum.
+    #[test]
+    fn checkpoint_quorum_ignores_inactive_members() {
+        use suwappu_execution::{ratify_checkpoint, CheckpointSignature};
+        let keys: Vec<(
+            suwappu_crypto::mldsa::PublicKey,
+            suwappu_crypto::mldsa::SecretKey,
+        )> = (0..6).map(|_| suwappu_crypto::mldsa::keypair()).collect();
+        let mut registry = AuthorityRegistry::new();
+        for (i, k) in keys.iter().enumerate() {
+            registry
+                .admit(AuthorityMember {
+                    id: i as u32,
+                    stake_suwappu: 150_000,
+                    public_key_bytes: k.0.as_bytes().to_vec(),
+                })
+                .unwrap();
+        }
+        let set = RegistrySet {
+            authority_registry: registry.clone(),
+            validator_registry: ValidatorRegistry::new(),
+            stake_table: StakeTable::new(),
+            epoch: (0, 16, 0),
+            committee: Committee::contiguous(4),
+        };
+        let signing = set.signing_committee();
+        assert_eq!(signing.len(), 4);
+        assert_eq!(signing.quorum_threshold(), 3);
+        assert_eq!(
+            registry.quorum_threshold(),
+            5,
+            "the full registry would need five"
+        );
+        let ck = Checkpoint {
+            height: 1,
+            round: 16,
+            state_root: [1; 32],
+            prev_checkpoint: [0; 32],
+            registry_root: set.root(),
+            snapshot_root: [2; 32],
+        };
+        let digest = ck.hash();
+        let sigs: Vec<CheckpointSignature> = (0..3u32)
+            .map(|i| CheckpointSignature {
+                authority: i,
+                signature: suwappu_crypto::mldsa::sign(&digest, &keys[i as usize].1)
+                    .unwrap()
+                    .as_bytes()
+                    .to_vec(),
+            })
+            .collect();
+        assert!(ratify_checkpoint(ck.clone(), sigs.clone(), &signing).is_ok());
+        assert!(
+            ratify_checkpoint(ck.clone(), sigs.clone(), &registry).is_err(),
+            "the registry denominator would freeze the chain on admission"
+        );
+        // An inactive member's signature is not a committee signature:
+        // `ratify_checkpoint` refuses the whole set on it, so the
+        // aggregator filters it out first (second S36 pass) and the
+        // remaining committee signatures still ratify.
+        let mut with_inactive = sigs.clone();
+        with_inactive.push(CheckpointSignature {
+            authority: 5,
+            signature: suwappu_crypto::mldsa::sign(&digest, &keys[5].1)
+                .unwrap()
+                .as_bytes()
+                .to_vec(),
+        });
+        assert!(ratify_checkpoint(ck.clone(), with_inactive.clone(), &signing).is_err());
+        let filtered = committee_signatures(with_inactive, &signing);
+        assert_eq!(filtered.len(), 3);
+        assert!(ratify_checkpoint(ck, filtered, &signing).is_ok());
+    }
+
+    /// IQ-010 D6 (third S36 pass): an activation changes the signing
+    /// committee without changing the registry. The served chain must
+    /// retain that checkpoint, or a joiner walking [CK1, CK3] verifies
+    /// CK3 under CK1's signing committee and refuses the activated
+    /// member's signature — and the whole chain with it.
+    #[test]
+    fn served_chain_witnesses_activations() {
+        use suwappu_execution::{verify_checkpoint_chain, ChainLink, CheckpointSignature};
+        let keys: Vec<(
+            suwappu_crypto::mldsa::PublicKey,
+            suwappu_crypto::mldsa::SecretKey,
+        )> = (0..5).map(|_| suwappu_crypto::mldsa::keypair()).collect();
+        let registry_of = |ids: &[u32]| {
+            let mut r = AuthorityRegistry::new();
+            for id in ids {
+                r.admit(AuthorityMember {
+                    id: *id,
+                    stake_suwappu: 150_000,
+                    public_key_bytes: keys[*id as usize].0.as_bytes().to_vec(),
+                })
+                .unwrap();
+            }
+            r
+        };
+        let set = |reg: &[u32], committee: &[u32], epoch: u64| RegistrySet {
+            authority_registry: registry_of(reg),
+            validator_registry: ValidatorRegistry::new(),
+            stake_table: StakeTable::new(),
+            epoch: (epoch, 32, epoch * 32),
+            committee: Committee::new(committee.iter().copied()),
+        };
+        let genesis = set(&[0, 1, 2, 3], &[0, 1, 2, 3], 0);
+        // CK1: id 4 admitted (registry changes, committee does not).
+        let s1 = set(&[0, 1, 2, 3, 4], &[0, 1, 2, 3], 1);
+        // CK2: id 4 activated (committee changes, registry does not).
+        let s2 = set(&[0, 1, 2, 3, 4], &[0, 1, 2, 3, 4], 2);
+        // CK3: steady state, signed by the five-member committee.
+        let s3 = s2.clone();
+        assert!(is_committee_transition(&genesis, &s1));
+        assert!(
+            is_committee_transition(&s1, &s2),
+            "activation must be a transition"
+        );
+        assert!(!is_committee_transition(&s2, &s3));
+        let mut prev = [0u8; 32];
+        let mut links = Vec::new();
+        let sets = [&s1, &s2, &s3];
+        for (i, s) in sets.iter().enumerate() {
+            let ck = Checkpoint {
+                height: i as u64,
+                round: 32 * (i as u64 + 1),
+                state_root: [i as u8 + 1; 32],
+                prev_checkpoint: prev,
+                registry_root: s.root(),
+                snapshot_root: [9; 32],
+            };
+            prev = ck.hash();
+            // Signed by the signing committee of the PREVIOUS link
+            // (genesis for the first): three of {0,1,2,3} for CK1 and CK2,
+            // then four of the five for CK3, including the activated 4.
+            let signers: Vec<u32> = if i < 2 {
+                vec![0, 1, 2]
+            } else {
+                vec![0, 1, 2, 4]
+            };
+            let digest = ck.hash();
+            let signatures = signers
+                .iter()
+                .map(|id| CheckpointSignature {
+                    authority: *id,
+                    signature: suwappu_crypto::mldsa::sign(&digest, &keys[*id as usize].1)
+                        .unwrap()
+                        .as_bytes()
+                        .to_vec(),
+                })
+                .collect();
+            links.push(ChainLink {
+                checkpoint: ck,
+                signatures,
+                next_committee: s.signing_committee(),
+                next_registry_root: s.root(),
+            });
+        }
+        // The chain the predicate retains: CK1 (admission), CK2
+        // (activation) and the latest.
+        assert!(verify_checkpoint_chain(&genesis.authority_registry, &links).is_ok());
+        // Keying on the registry alone drops CK2 and the joiner cannot
+        // verify CK3's signature by the activated member.
+        let registry_only: Vec<ChainLink> = vec![links[0].clone(), links[2].clone()];
+        assert!(verify_checkpoint_chain(&genesis.authority_registry, &registry_only).is_err());
+    }
+
+    /// IQ-010 D4 / Residual 1a guards: the manifest floor on epoch length
+    /// and the per-boundary change cap.
+    #[test]
+    fn manifest_epoch_floor_and_change_cap() {
+        let mut m = GenesisManifest {
+            network_id: "floors".into(),
+            validators: Vec::new(),
+            corridors: Vec::new(),
+            prebalances: Vec::new(),
+            rounds_per_epoch: 32,
+            gc_depth_rounds: 64,
+            checkpoint_cadence_rounds: 8,
+        };
+        assert!(validate_manifest(&m).is_ok());
+        m.rounds_per_epoch = 0;
+        assert!(validate_manifest(&m).is_ok(), "epochs disabled");
+        m.rounds_per_epoch = MIN_ROUNDS_PER_EPOCH - 1;
+        assert!(validate_manifest(&m).is_err(), "below the epoch floor");
+        assert_eq!(MIN_ROUNDS_PER_EPOCH, 17);
+        m.rounds_per_epoch = MIN_ROUNDS_PER_EPOCH;
+        m.checkpoint_cadence_rounds = 40;
+        assert!(
+            validate_manifest(&m).is_err(),
+            "cadence above half the gc depth"
+        );
+        assert_eq!(membership_change_cap(4), 1);
+        assert_eq!(membership_change_cap(7), 2);
+        assert_eq!(membership_change_cap(13), 4);
+        assert_eq!(membership_change_cap(1), 1);
+    }
+
+    /// IQ-010 Residual 1a: two valid ejections queued for one boundary of
+    /// a four-member committee (f = 1) apply one and carry the other, in
+    /// order, to the next boundary.
+    #[tokio::test]
+    async fn membership_changes_are_capped_per_boundary() {
+        let keys: Vec<(
+            suwappu_crypto::mldsa::PublicKey,
+            suwappu_crypto::mldsa::SecretKey,
+        )> = (0..4).map(|_| suwappu_crypto::mldsa::keypair()).collect();
+        let manifest = GenesisManifest {
+            network_id: "iq010-cap-4n".into(),
+            validators: (0..4u32)
+                .map(|i| GenesisValidator {
+                    authority_id: i,
+                    label: format!("v{}", i),
+                    mldsa_public_key_hex: hex::encode(keys[i as usize].0.as_bytes()),
+                    bls_public_key_hex: "00".into(),
+                    validator_stake_suwappu: 150_000,
+                    authority_stake_suwappu: 150_000,
+                })
+                .collect(),
+            corridors: Vec::new(),
+            prebalances: Vec::new(),
+            rounds_per_epoch: MIN_ROUNDS_PER_EPOCH,
+            gc_depth_rounds: 64,
+            checkpoint_cadence_rounds: 64,
+        };
+        let state = State::new(&manifest, keys[0].1.clone(), None);
+        let (log, _task) = EventLog::start(&std::env::temp_dir().join("suwappu-iq010-cap.ndjson"))
+            .await
+            .unwrap();
+        let mk = |author: u32, round: u64, tag: u8| {
+            let mut c = Certificate {
+                author,
+                round,
+                parents: Vec::new(),
+                payload_digest: [tag; 32],
+                signature: Vec::new(),
+            };
+            c.sign(&keys[author as usize].1);
+            c
+        };
+        let ev = |author: u32| Intent::EquivocationEvidence {
+            cert_a: mk(author, 2, 1),
+            cert_b: mk(author, 2, 2),
+        };
+        state
+            .inner
+            .lock()
+            .await
+            .pending_governance
+            .extend([(ev(1), None), (ev(2), None)]);
+        // A committed certificate at round 4 crosses into epoch 1.
+        let carrier = |round: u64| {
+            let digest = compute_payload_digest(&[], &[]);
+            let mut c = Certificate {
+                author: 0,
+                round,
+                parents: Vec::new(),
+                payload_digest: digest,
+                signature: Vec::new(),
+            };
+            c.sign(&keys[0].1);
+            let b = BlockPayload {
+                payload_digest: digest,
+                author: 0,
+                round,
+                cert_hash: c.hash(),
+                intents: Vec::new(),
+                governance_auth: Vec::new(),
+            };
+            (c, b)
+        };
+        let rpe = MIN_ROUNDS_PER_EPOCH;
+        let (c4, b4) = carrier(rpe);
+        apply_commit(&state, c4.hash(), c4, b4, rpe, "t", &log, false).await;
+        {
+            let inner = state.inner.lock().await;
+            assert_eq!(
+                inner.committee.members(),
+                &[0, 2, 3],
+                "one ejection per boundary at f = 1"
+            );
+            assert_eq!(inner.pending_governance.len(), 1, "the second waits");
+            assert_eq!(inner.committee_by_epoch[&2].members(), &[0, 2, 3]);
+            assert_eq!(
+                inner.committee_by_epoch[&1].members(),
+                &[0, 1, 2, 3],
+                "epoch 1 keeps the pre-drain committee"
+            );
+        }
+        let (c8, b8) = carrier(2 * rpe);
+        apply_commit(&state, c8.hash(), c8, b8, 2 * rpe, "t", &log, false).await;
+        let inner = state.inner.lock().await;
+        assert_eq!(inner.committee.members(), &[0, 3]);
+        assert!(inner.pending_governance.is_empty());
+        assert_eq!(inner.committee_by_epoch[&3].members(), &[0, 3]);
+    }
+
+    /// IQ-009 D5 / I-AV1, the `/goal` B2 block-withholding fault: one of
+    /// four validators broadcasts certificates without their blocks
+    /// (including as leader) and is then stopped for good. Under the
+    /// pre-IQ-009 rule every survivor admitted those certificates, the
+    /// commit walk deferred on the first one in a leader's history, and
+    /// the mesh froze until the author returned. Now the survivors never
+    /// admit a certificate they cannot complete, keep committing, and
+    /// agree on their roots.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn withholding_author_does_not_stall_the_mesh() {
+        let _serial = mesh_serial().await;
+        let n = 4u32;
+        let base_port: u16 = 24_600;
+        let keypairs: Vec<(
+            suwappu_crypto::mldsa::PublicKey,
+            suwappu_crypto::mldsa::SecretKey,
+        )> = (0..n).map(|_| suwappu_crypto::mldsa::keypair()).collect();
+        let manifest = GenesisManifest {
+            network_id: "test-withhold-4n".into(),
+            validators: (0..n)
+                .map(|i| GenesisValidator {
+                    authority_id: i,
+                    label: format!("v{}", i),
+                    mldsa_public_key_hex: hex::encode(keypairs[i as usize].0.as_bytes()),
+                    bls_public_key_hex: "00".into(),
+                    validator_stake_suwappu: 150_000,
+                    authority_stake_suwappu: 150_000,
+                })
+                .collect(),
+            corridors: Vec::new(),
+            prebalances: Vec::new(),
+            rounds_per_epoch: 1024,
+            gc_depth_rounds: 32,
+            checkpoint_cadence_rounds: 8,
+        };
+        let mut daemons = Vec::new();
+        for i in 0..n {
+            let peers: Vec<Peer> = (0..n)
+                .filter(|j| *j != i)
+                .map(|j| Peer {
+                    id: format!("v{}", j),
+                    addr: format!("127.0.0.1:{}", base_port + j as u16)
+                        .parse::<SocketAddr>()
+                        .unwrap(),
+                })
+                .collect();
+            let cfg = NodeConfig {
+                self_id: format!("v{}", i),
+                authority_id: i,
+                listen: format!("127.0.0.1:{}", base_port + i as u16)
+                    .parse::<SocketAddr>()
+                    .unwrap(),
+                client_listen: format!("127.0.0.1:{}", base_port + 100 + i as u16)
+                    .parse::<SocketAddr>()
+                    .unwrap(),
+                rpc_listen: None,
+                peers,
+                allow_post_genesis_join: false,
+                round_ms: 100,
+                checkpoint_cadence_rounds: 1,
+                mldsa_secret_key_path: write_mldsa_key_file(&keypairs[i as usize].1),
+                bls_secret_key_path: "/dev/null".into(),
+                genesis_manifest_path: "/dev/null".into(),
+                event_log_path: std::env::temp_dir()
+                    .join(format!("suwappu-daemon-withhold-test-v{}.ndjson", i)),
+                max_client_connections: 256,
+                client_idle_timeout_ms: 30_000,
+                client_per_ip_limit: 8,
+                rpc_per_ip_capacity: 60,
+                rpc_per_ip_refill_per_sec: 10,
+                bridge_oracle_address: None,
+                bridge_network_id: None,
+                metrics_listen: None,
+                data_dir: None,
+                store_fsync: false,
+            };
+            daemons.push(Daemon::start(cfg, manifest.clone()).await.unwrap());
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
+
+        // v3 withholds its blocks for ~12 rounds (it is leader in three of
+        // them), then is stopped for good.
+        let withheld_from = {
+            let v3 = &daemons[3];
+            v3.state
+                .withhold_blocks
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            v3.state.inner.lock().await.last_authored_round.unwrap_or(0) + 1
+        };
+        tokio::time::sleep(Duration::from_millis(1_200)).await;
+        // While the withheld rounds are still inside every survivor's
+        // window: no survivor admitted a blockless certificate (checked
+        // against the DAG itself, not a gc-pruned index).
+        async fn no_withheld_admitted(label: &str, d: &Daemon, withheld_from: u64) {
+            let dag = d.state.dag.read().await;
+            let admitted = dag
+                .linearize()
+                .into_iter()
+                .filter_map(|h| dag.get(&h).cloned())
+                .filter(|c| c.author == 3 && c.round >= withheld_from)
+                .count();
+            assert_eq!(
+                admitted, 0,
+                "{label}: admitted {admitted} of v3's blockless certificates"
+            );
+        }
+        let mut parked_somewhere = false;
+        for (i, d) in daemons.iter().enumerate().take(3) {
+            no_withheld_admitted(&format!("v{i} (author alive)"), d, withheld_from).await;
+            // Positive control: the withheld certificates did arrive and
+            // are parked, i.e. the fault is a withholding, not a silence.
+            parked_somewhere |= d
+                .state
+                .inner
+                .lock()
+                .await
+                .awaiting_block
+                .values()
+                .any(|c| c.author == 3 && c.round >= withheld_from);
+        }
+        assert!(
+            parked_somewhere,
+            "no survivor parked a withheld certificate; the fault was not exercised"
+        );
+        let mut v3 = daemons.remove(3);
+        v3.shutdown().await;
+        drop(v3);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        for (i, d) in daemons.iter().enumerate() {
+            no_withheld_admitted(&format!("v{i} (author gone)"), d, withheld_from).await;
+        }
+
+        let before: Vec<u64> = {
+            let mut v = Vec::new();
+            for d in &daemons {
+                v.push(
+                    d.state
+                        .inner
+                        .lock()
+                        .await
+                        .last_committed_leader_round
+                        .unwrap_or(0),
+                );
+            }
+            v
+        };
+        // Every survivor keeps committing without v3: poll (the suite
+        // runs many meshes in parallel) up to 20 s for +15 rounds each.
+        let mut advanced = false;
+        for _ in 0..200 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let mut all = true;
+            for (i, d) in daemons.iter().enumerate() {
+                let after = d
+                    .state
+                    .inner
+                    .lock()
+                    .await
+                    .last_committed_leader_round
+                    .unwrap_or(0);
+                all &= after >= before[i] + 15;
+            }
+            if all {
+                advanced = true;
+                break;
+            }
+        }
+        assert!(
+            advanced,
+            "a survivor's commit frontier stalled after the withholding author died"
+        );
+        for (i, d) in daemons.iter().enumerate() {
+            let dag = d.state.dag.read().await;
+            for h in dag.linearize() {
+                assert!(
+                    d.state.blocks.lock().contains_key(&h),
+                    "v{i}: DAG holds a certificate without its block (I-AV1)"
+                );
+            }
+        }
+        // Roots agree at an equal frontier.
+        let mut agreed = false;
+        for _ in 0..40 {
+            let mut fr = Vec::new();
+            for d in &daemons {
+                let inner = d.state.inner.lock().await;
+                fr.push((
+                    inner.last_committed_leader_round,
+                    inner.substrate.state_root(),
+                ));
+            }
+            if fr.iter().all(|(f, _)| *f == fr[0].0) {
+                assert!(
+                    fr.iter().all(|(_, r)| *r == fr[0].1),
+                    "survivors disagree on the state root at an equal frontier"
+                );
+                agreed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(agreed, "survivors never sampled at an equal frontier");
+    }
+
+    /// Consensus-review (S34.5, fourth pass): `ingest_cert` drops a
+    /// certificate more than one retention window above the quorum anchor
+    /// and admits one at the edge, and the anchor is what the node
+    /// advertises as its tip.
+    #[tokio::test]
+    async fn ingest_drops_certs_above_the_admissible_window() {
+        let n = 4u32;
+        let keypairs: Vec<(
+            suwappu_crypto::mldsa::PublicKey,
+            suwappu_crypto::mldsa::SecretKey,
+        )> = (0..n).map(|_| suwappu_crypto::mldsa::keypair()).collect();
+        let manifest = GenesisManifest {
+            network_id: "ingest-window-4n".into(),
+            validators: (0..n)
+                .map(|i| GenesisValidator {
+                    authority_id: i,
+                    label: format!("v{}", i),
+                    mldsa_public_key_hex: hex::encode(keypairs[i as usize].0.as_bytes()),
+                    bls_public_key_hex: "00".into(),
+                    validator_stake_suwappu: 150_000,
+                    authority_stake_suwappu: 150_000,
+                })
+                .collect(),
+            corridors: Vec::new(),
+            prebalances: Vec::new(),
+            rounds_per_epoch: 1024,
+            gc_depth_rounds: 8,
+            checkpoint_cadence_rounds: 4,
+        };
+        let state = State::new(&manifest, keypairs[0].1.clone(), None);
+        let from = PeerId("test".into());
+        // IQ-009: admission needs the block; hold one per certificate.
+        let digest = compute_payload_digest(&[], &[]);
+        let hold_block = |c: &Certificate| {
+            state.blocks.lock().insert(
+                c.hash(),
+                BlockPayload {
+                    payload_digest: digest,
+                    author: c.author,
+                    round: c.round,
+                    cert_hash: c.hash(),
+                    intents: Vec::new(),
+                    governance_auth: Vec::new(),
+                },
+            );
+        };
+        // Genesis round: a quorum of distinct authors.
+        let mut genesis = Vec::new();
+        for a in 0..n {
+            let mut c = Certificate {
+                author: a,
+                round: 0,
+                parents: Vec::new(),
+                payload_digest: digest,
+                signature: Vec::new(),
+            };
+            c.sign(&keypairs[a as usize].1);
+            genesis.push(c.hash());
+            hold_block(&c);
+            assert_eq!(ingest_cert(&state, c, &from, None).await.len(), 1);
+        }
+        assert_eq!(
+            highest_quorum_round(&*state.dag.read().await, &Committee::contiguous(n)),
+            Some(0)
+        );
+        // Authority 1 alone at round 8 (= anchor + gc_depth): admissible.
+        let mut edge = Certificate {
+            author: 1,
+            round: 8,
+            parents: genesis.clone(),
+            payload_digest: digest,
+            signature: Vec::new(),
+        };
+        edge.sign(&keypairs[1].1);
+        let edge_hash = edge.hash();
+        hold_block(&edge);
+        assert_eq!(ingest_cert(&state, edge, &from, None).await.len(), 1);
+        // Authority 1 at round 9 on top of it: one above the window, and
+        // the lone round-8 certificate did not move the anchor.
+        let mut beyond = Certificate {
+            author: 1,
+            round: 9,
+            parents: vec![edge_hash],
+            payload_digest: digest,
+            signature: Vec::new(),
+        };
+        beyond.sign(&keypairs[1].1);
+        hold_block(&beyond);
+        assert!(ingest_cert(&state, beyond, &from, None).await.is_empty());
+        let dag = state.dag.read().await;
+        assert_eq!(dag.max_round(), Some(8));
+        assert_eq!(
+            highest_quorum_round(&dag, &Committee::contiguous(n)),
+            Some(0)
+        );
+    }
+
+    fn small_manifest(
+        network_id: &str,
+        keypairs: &[(
+            suwappu_crypto::mldsa::PublicKey,
+            suwappu_crypto::mldsa::SecretKey,
+        )],
+        gc_depth_rounds: u64,
+    ) -> GenesisManifest {
+        GenesisManifest {
+            network_id: network_id.into(),
+            validators: keypairs
+                .iter()
+                .enumerate()
+                .map(|(i, kp)| GenesisValidator {
+                    authority_id: i as u32,
+                    label: format!("v{}", i),
+                    mldsa_public_key_hex: hex::encode(kp.0.as_bytes()),
+                    bls_public_key_hex: "00".into(),
+                    validator_stake_suwappu: 150_000,
+                    authority_stake_suwappu: 150_000,
+                })
+                .collect(),
+            corridors: Vec::new(),
+            prebalances: Vec::new(),
+            rounds_per_epoch: 1024,
+            gc_depth_rounds,
+            checkpoint_cadence_rounds: 4,
+        }
+    }
+
+    /// Consensus-review (S35, fourth and fifth passes): the parking-buffer
+    /// eviction path. With the buffer full of one equivocating flooder's
+    /// headers plus one honest author's single late-block header, a new
+    /// honest arrival evicts the flooder's LOWEST-round entry
+    /// (deterministic on ties), never the honest one; the victim was
+    /// parked through the real path, so it holds a fetch-history row
+    /// that survives the eviction, and its replay re-parks under that
+    /// back-off rather than fanning out afresh.
+    #[tokio::test]
+    async fn parking_eviction_prefers_the_equivocator_and_keeps_backoff() {
+        let keypairs: Vec<(
+            suwappu_crypto::mldsa::PublicKey,
+            suwappu_crypto::mldsa::SecretKey,
+        )> = (0..4).map(|_| suwappu_crypto::mldsa::keypair()).collect();
+        let state = State::new(
+            &small_manifest("park-evict-4n", &keypairs, 16),
+            keypairs[0].1.clone(),
+            None,
+        );
+        let from = PeerId("test".into());
+        let digest = compute_payload_digest(&[], &[]);
+        let honest_round = 7u64;
+        // The honest late-block header (author 2).
+        let mut honest = Certificate {
+            author: 2,
+            round: honest_round,
+            parents: Vec::new(),
+            payload_digest: digest,
+            signature: Vec::new(),
+        };
+        honest.sign(&keypairs[2].1);
+        let honest_hash = honest.hash();
+        // The flooder's (author 1) lowest-round header, parked through
+        // the real path so it carries a fetch-history row: the victim.
+        let mut victim = Certificate {
+            author: 1,
+            round: 0,
+            parents: Vec::new(),
+            payload_digest: digest,
+            signature: Vec::new(),
+        };
+        victim.sign(&keypairs[1].1);
+        let victim_hash = victim.hash();
+        assert!(ingest_cert(&state, victim.clone(), &from, None)
+            .await
+            .is_empty());
+        let victim_history = {
+            let inner = state.inner.lock().await;
+            assert!(inner.awaiting_block.contains_key(&victim_hash));
+            inner
+                .block_fetch_history
+                .get(&victim_hash)
+                .copied()
+                .expect("parked header has fetch history")
+        };
+        // The rest of the flooder's headers: distinct headers in ONE slot
+        // (round 1) until the buffer is full — an equivocating slot, which
+        // is what the victim policy keys on. Placed directly (the parking
+        // cap would refuse them on the wire); eviction reads only the
+        // parked headers, so the shape is what matters.
+        {
+            let mut inner = state.inner.lock().await;
+            inner.awaiting_block.insert(honest_hash, honest.clone());
+            inner.needed_blocks.insert(honest_hash);
+            let mut i = 0u32;
+            while inner.awaiting_block.len() < MAX_AWAITING_BLOCK {
+                let mut d = [0u8; 32];
+                d[..4].copy_from_slice(&i.to_le_bytes());
+                let c = Certificate {
+                    author: 1,
+                    round: 1,
+                    parents: Vec::new(),
+                    payload_digest: d,
+                    signature: Vec::new(),
+                };
+                let h = c.hash();
+                inner.awaiting_block.insert(h, c);
+                inner.needed_blocks.insert(h);
+                i += 1;
+            }
+            assert_eq!(inner.awaiting_block.len(), MAX_AWAITING_BLOCK);
+        }
+        // A new honest header (author 3) with no block arrives: parked,
+        // and the flooder's lowest-round entry made room for it.
+        let mut newcomer = Certificate {
+            author: 3,
+            round: honest_round,
+            parents: Vec::new(),
+            payload_digest: digest,
+            signature: Vec::new(),
+        };
+        newcomer.sign(&keypairs[3].1);
+        let newcomer_hash = newcomer.hash();
+        assert!(ingest_cert(&state, newcomer, &from, None).await.is_empty());
+        {
+            let inner = state.inner.lock().await;
+            assert_eq!(inner.awaiting_block.len(), MAX_AWAITING_BLOCK);
+            assert!(inner.awaiting_block.contains_key(&newcomer_hash));
+            assert!(
+                inner.awaiting_block.contains_key(&honest_hash),
+                "honest entry evicted"
+            );
+            assert!(
+                !inner.awaiting_block.contains_key(&victim_hash),
+                "lowest flooder entry kept"
+            );
+            assert!(!inner.needed_blocks.contains(&victim_hash));
+            assert_eq!(
+                inner.block_fetch_history.get(&victim_hash).copied(),
+                Some(victim_history),
+                "eviction dropped the fetch history"
+            );
+            assert!(inner.block_fetch_history.contains_key(&newcomer_hash));
+        }
+        // Replay of the evicted header: it evicts the next flooder entry
+        // and re-parks, and its back-off row is the original one.
+        assert!(ingest_cert(&state, victim, &from, None).await.is_empty());
+        let inner = state.inner.lock().await;
+        assert!(inner.awaiting_block.contains_key(&victim_hash));
+        assert!(inner.awaiting_block.contains_key(&honest_hash));
+        assert_eq!(
+            inner.block_fetch_history.get(&victim_hash).copied(),
+            Some(victim_history),
+            "replay restarted the back-off"
+        );
+    }
+
+    /// Consensus-review (S35, fourth pass): the candidate buffer refuses
+    /// blocks whose claimed round is outside the admissible window (above
+    /// the anchor + gc_depth ceiling, or at/below the gc round), and
+    /// keeps its byte budget exact across binding and pruning.
+    #[tokio::test]
+    async fn block_candidates_are_window_and_byte_bounded() {
+        let keypairs: Vec<(
+            suwappu_crypto::mldsa::PublicKey,
+            suwappu_crypto::mldsa::SecretKey,
+        )> = (0..4).map(|_| suwappu_crypto::mldsa::keypair()).collect();
+        let state = State::new(
+            &small_manifest("cand-window-4n", &keypairs, 8),
+            keypairs[0].1.clone(),
+            None,
+        );
+        let (log, _task) =
+            EventLog::start(&std::env::temp_dir().join("suwappu-cand-window.ndjson"))
+                .await
+                .unwrap();
+        let outbound: HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>> = HashMap::new();
+        let from = PeerId("test".into());
+        let digest = compute_payload_digest(&[], &[]);
+        let block_at = |round: u64, tag: u8| BlockPayload {
+            payload_digest: digest,
+            author: 1,
+            round,
+            cert_hash: CertHash([tag; 32]),
+            intents: Vec::new(),
+            governance_auth: Vec::new(),
+        };
+        // Empty DAG: anchor 0, ceiling = gc_depth = 8.
+        handle_block(&state, block_at(9, 1), &from, &outbound, 0, "v0", &log).await;
+        handle_block(&state, block_at(8, 2), &from, &outbound, 0, "v0", &log).await;
+        {
+            let inner = state.inner.lock().await;
+            assert!(
+                !inner.block_candidates.contains_key(&CertHash([1; 32])),
+                "above the ceiling"
+            );
+            assert!(
+                inner.block_candidates.contains_key(&CertHash([2; 32])),
+                "at the ceiling"
+            );
+            let held: usize = inner
+                .block_candidates
+                .values()
+                .flatten()
+                .map(|c| c.bytes)
+                .sum();
+            assert_eq!(inner.block_candidates_bytes, held);
+            assert!(held > 0);
+        }
+        // Prune to gc round 3: a candidate at round 3 is refused, one at
+        // round 4 kept; the budget follows.
+        let _ = prune_state(&state, 3, "v0", &log).await;
+        handle_block(&state, block_at(3, 3), &from, &outbound, 0, "v0", &log).await;
+        handle_block(&state, block_at(4, 4), &from, &outbound, 0, "v0", &log).await;
+        {
+            let inner = state.inner.lock().await;
+            assert!(
+                !inner.block_candidates.contains_key(&CertHash([3; 32])),
+                "at the gc round"
+            );
+            assert!(inner.block_candidates.contains_key(&CertHash([4; 32])));
+            let held: usize = inner
+                .block_candidates
+                .values()
+                .flatten()
+                .map(|c| c.bytes)
+                .sum();
+            assert_eq!(inner.block_candidates_bytes, held);
+        }
+        // A later prune past round 4 releases that candidate's bytes.
+        let _ = prune_state(&state, 5, "v0", &log).await;
+        {
+            let inner = state.inner.lock().await;
+            assert!(!inner.block_candidates.contains_key(&CertHash([4; 32])));
+            let held: usize = inner
+                .block_candidates
+                .values()
+                .flatten()
+                .map(|c| c.bytes)
+                .sum();
+            assert_eq!(inner.block_candidates_bytes, held);
+        }
+        // Binding a candidate to its certificate releases the bytes too.
+        let mut c = Certificate {
+            author: 1,
+            round: 8,
+            parents: Vec::new(),
+            payload_digest: digest,
+            signature: Vec::new(),
+        };
+        c.sign(&keypairs[1].1);
+        let h = c.hash();
+        let mut b = block_at(8, 0);
+        b.cert_hash = h;
+        handle_block(&state, b, &from, &outbound, 0, "v0", &log).await;
+        assert!(state.inner.lock().await.block_candidates.contains_key(&h));
+        // Whatever the DAG decides about a parentless round-8 header, the
+        // candidate is consumed at certificate arrival and the budget
+        // follows it.
+        let _ = ingest_cert(&state, c, &from, None).await;
+        let inner = state.inner.lock().await;
+        assert!(!inner.block_candidates.contains_key(&h));
+        let held: usize = inner
+            .block_candidates
+            .values()
+            .flatten()
+            .map(|c| c.bytes)
+            .sum();
+        assert_eq!(inner.block_candidates_bytes, held);
+    }
+
+    /// Consensus-review (S35, fifth pass): both refusal branches of the
+    /// candidate buffer — the key cap and the byte budget — and the
+    /// per-peer share: a second configured peer keeps its share when the
+    /// first has spent its own.
+    #[tokio::test]
+    async fn block_candidate_caps_refuse_and_shares_hold() {
+        let keypairs: Vec<(
+            suwappu_crypto::mldsa::PublicKey,
+            suwappu_crypto::mldsa::SecretKey,
+        )> = (0..4).map(|_| suwappu_crypto::mldsa::keypair()).collect();
+        let state = State::new(
+            &small_manifest("cand-caps-4n", &keypairs, 8),
+            keypairs[0].1.clone(),
+            None,
+        );
+        let (log, _task) = EventLog::start(&std::env::temp_dir().join("suwappu-cand-caps.ndjson"))
+            .await
+            .unwrap();
+        // Two configured peers: each holds half the entries and bytes.
+        let mut outbound: HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>> = HashMap::new();
+        let (tx_a, _rx_a) = tokio::sync::mpsc::channel(4);
+        let (tx_b, _rx_b) = tokio::sync::mpsc::channel(4);
+        let peer_a = PeerId("a".into());
+        let peer_b = PeerId("b".into());
+        outbound.insert(peer_a.clone(), tx_a);
+        outbound.insert(peer_b.clone(), tx_b);
+        let (share_entries, share_bytes) = candidate_share(2);
+        assert_eq!(share_entries, MAX_BLOCK_CANDIDATES / 2);
+        assert_eq!(share_bytes, MAX_BLOCK_CANDIDATE_BYTES / 2);
+        let digest = compute_payload_digest(&[], &[]);
+        let block_for = |key: u32| BlockPayload {
+            payload_digest: digest,
+            author: 1,
+            round: 1,
+            cert_hash: {
+                let mut h = [0u8; 32];
+                h[..4].copy_from_slice(&key.to_le_bytes());
+                CertHash(h)
+            },
+            intents: Vec::new(),
+            governance_auth: Vec::new(),
+        };
+        // Peer A spends its entry share (one entry per key).
+        for k in 0..share_entries as u32 {
+            handle_block(&state, block_for(k), &peer_a, &outbound, 0, "v0", &log).await;
+        }
+        handle_block(
+            &state,
+            block_for(u32::MAX),
+            &peer_a,
+            &outbound,
+            0,
+            "v0",
+            &log,
+        )
+        .await;
+        {
+            let inner = state.inner.lock().await;
+            assert_eq!(inner.block_candidates.len(), share_entries);
+            assert_eq!(inner.block_candidates_by_peer[&peer_a].0, share_entries);
+            assert!(
+                !inner
+                    .block_candidates
+                    .contains_key(&block_for(u32::MAX).cert_hash),
+                "peer A exceeded its entry share"
+            );
+        }
+        // Peer B still lands a candidate under its own share, and the
+        // global key cap holds at the same time.
+        handle_block(
+            &state,
+            block_for(u32::MAX),
+            &peer_b,
+            &outbound,
+            0,
+            "v0",
+            &log,
+        )
+        .await;
+        {
+            let inner = state.inner.lock().await;
+            assert!(inner
+                .block_candidates
+                .contains_key(&block_for(u32::MAX).cert_hash));
+            assert_eq!(inner.block_candidates_by_peer[&peer_b].0, 1);
+            // Peer A's spent share left the global key cap half free.
+            assert_eq!(inner.block_candidates.len(), share_entries + 1);
+        }
+        // Byte budget: a single peer's share is exhausted by large
+        // frames; the first over-budget frame is refused.
+        let state = State::new(
+            &small_manifest("cand-bytes-4n", &keypairs, 8),
+            keypairs[0].1.clone(),
+            None,
+        );
+        let big_intents: Vec<Intent> = (0..10_000u32)
+            .map(|i| Intent::Transfer {
+                from: [(i % 251) as u8; 20],
+                to: [(i % 241) as u8; 20],
+                amount: i as u128,
+            })
+            .collect();
+        let big_digest = compute_payload_digest(&big_intents, &[]);
+        let big_for = |key: u32| BlockPayload {
+            payload_digest: big_digest,
+            author: 1,
+            round: 1,
+            cert_hash: {
+                let mut h = [0xB0u8; 32];
+                h[..4].copy_from_slice(&key.to_le_bytes());
+                CertHash(h)
+            },
+            intents: big_intents.clone(),
+            governance_auth: Vec::new(),
+        };
+        let one = crate::codec::encode(&big_for(0)).unwrap().len();
+        assert!(one < crate::wire::MAX_FRAME_BYTES && one > 256 * 1024);
+        let fits = share_bytes / one;
+        for k in 0..=fits as u32 {
+            handle_block(&state, big_for(k), &peer_a, &outbound, 0, "v0", &log).await;
+        }
+        let inner = state.inner.lock().await;
+        assert_eq!(
+            inner.block_candidates.len(),
+            fits,
+            "byte share not enforced"
+        );
+        assert!(inner.block_candidates_by_peer[&peer_a].1 <= share_bytes);
+        assert_eq!(
+            inner.block_candidates_bytes,
+            inner.block_candidates_by_peer[&peer_a].1
+        );
+    }
+
+    /// Consensus-review (S35, fifth pass, HIGH): a block bound for a
+    /// certificate the DAG already holds is never released by a refusal
+    /// of a redelivery. The parent's tombstone has expired (a wide
+    /// parent gap inside the admissible window), so the redelivery fails
+    /// on `UnknownParent`; the orphan buffer is full, so the refusal
+    /// path runs — and the block must stay (I-AV1).
+    #[tokio::test]
+    async fn refused_redelivery_keeps_the_block_of_an_admitted_cert() {
+        let n = 4u32;
+        let keypairs: Vec<(
+            suwappu_crypto::mldsa::PublicKey,
+            suwappu_crypto::mldsa::SecretKey,
+        )> = (0..n).map(|_| suwappu_crypto::mldsa::keypair()).collect();
+        let gc_depth = 4u64;
+        let state = State::new(
+            &small_manifest("redeliver-4n", &keypairs, gc_depth),
+            keypairs[0].1.clone(),
+            None,
+        );
+        let (log, _task) = EventLog::start(&std::env::temp_dir().join("suwappu-redeliver.ndjson"))
+            .await
+            .unwrap();
+        let from = PeerId("test".into());
+        let digest = compute_payload_digest(&[], &[]);
+        let hold_block = |c: &Certificate| {
+            state.blocks.lock().insert(
+                c.hash(),
+                BlockPayload {
+                    payload_digest: digest,
+                    author: c.author,
+                    round: c.round,
+                    cert_hash: c.hash(),
+                    intents: Vec::new(),
+                    governance_auth: Vec::new(),
+                },
+            );
+        };
+        // Full rounds 0..=6 so the quorum anchor reaches 6 (ceiling 10).
+        let mut prev: Vec<CertHash> = Vec::new();
+        let mut round0_first: Option<CertHash> = None;
+        for r in 0..=6u64 {
+            let mut this = Vec::new();
+            for a in 0..n {
+                let mut c = Certificate {
+                    author: a,
+                    round: r,
+                    parents: prev.clone(),
+                    payload_digest: digest,
+                    signature: Vec::new(),
+                };
+                c.sign(&keypairs[a as usize].1);
+                this.push(c.hash());
+                hold_block(&c);
+                assert_eq!(ingest_cert(&state, c, &from, None).await.len(), 1);
+            }
+            if r == 0 {
+                round0_first = Some(this[0]);
+            }
+            prev = this;
+        }
+        // C: author 1 at round 7 whose only parent is a round-0 cert — a
+        // gap wider than gc_depth, inside the ceiling (anchor 6 + 4).
+        let mut c = Certificate {
+            author: 1,
+            round: 7,
+            parents: vec![round0_first.unwrap()],
+            payload_digest: digest,
+            signature: Vec::new(),
+        };
+        c.sign(&keypairs[1].1);
+        let h = c.hash();
+        hold_block(&c);
+        assert_eq!(ingest_cert(&state, c.clone(), &from, None).await.len(), 1);
+        // Prune to gc round 4: rounds 0..=4 evicted, round-0 tombstones
+        // expired (window = gc_depth), C live at round 7.
+        let _ = prune_state(&state, 4, "v0", &log).await;
+        {
+            let dag = state.dag.read().await;
+            assert!(dag.contains(&h));
+            assert!(!dag.contains(&round0_first.unwrap()));
+            assert!(!dag.is_tombstoned(&round0_first.unwrap()));
+        }
+        // Fill the orphan buffer so the redelivery takes the refusal path.
+        {
+            let mut inner = state.inner.lock().await;
+            let fillers: Vec<Certificate> = (0..MAX_ORPHAN_CERTS as u32)
+                .map(|i| {
+                    let mut d = [0u8; 32];
+                    d[..4].copy_from_slice(&i.to_le_bytes());
+                    Certificate {
+                        author: 3,
+                        round: 9,
+                        parents: vec![CertHash([0xEE; 32])],
+                        payload_digest: d,
+                        signature: Vec::new(),
+                    }
+                })
+                .collect();
+            inner.orphans.insert(CertHash([0xEE; 32]), fillers);
+        }
+        // Redelivery of C: `UnknownParent`, buffer full, refused — and
+        // the block of the admitted C is still held.
+        assert!(ingest_cert(&state, c, &from, None).await.is_empty());
+        assert!(state.dag.read().await.contains(&h));
+        assert!(
+            state
+                .blocks
+                .lock()
+                .get(&h)
+                .is_some_and(|b| b.payload_digest == digest),
+            "refused redelivery released the block of an admitted certificate"
+        );
+        // A plain redelivery of an admitted certificate whose parents are
+        // live takes the `DuplicateCertificate` arm: the block stays too.
+        let live = prev[1];
+        let live_cert = state.dag.read().await.get(&live).cloned().unwrap();
+        assert!(ingest_cert(&state, live_cert, &from, None).await.is_empty());
+        assert!(
+            state.blocks.lock().contains_key(&live),
+            "duplicate redelivery released the block of an admitted certificate"
+        );
+    }
+
+    /// Consensus-review (S34.5, eleventh pass): at every supported ring
+    /// size a Byzantine minority cannot fill the signature buffer.
+    #[test]
+    fn sig_buffer_bound_holds_at_every_ring_size() {
+        for n in 1..=(suwappu_authority::AUTHORITY_RING_MAX as u32) {
+            let f = ((n as usize).max(1) - 1) / 3;
+            let (cap, quota) = sig_buffer_params(n);
+            assert!(quota >= 1);
+            assert!(f * quota < cap, "n={n}: f={f} quota={quota} cap={cap}");
+            assert!(cap - f * quota >= 2, "n={n}: fewer than two free slots");
+        }
+        assert_eq!(sig_buffer_params(4), (8, 2));
+        assert_eq!(sig_buffer_params(13), (10, 2));
+        assert_eq!(sig_buffer_params(25), (18, 2));
+        assert_eq!(sig_buffer_params(50), (34, 2));
+    }
+
+    /// Consensus-review (S34.5, eighth pass): a seated authority flooding
+    /// the signature buffer with fabricated higher checkpoints cannot
+    /// evict this node's own current checkpoint, and adoption of a
+    /// verified chain the mesh co-signed (for a checkpoint this node
+    /// emitted but never saw the quorum for) re-anchors the cursor and
+    /// promotes that checkpoint's snapshot to the served one.
+    #[tokio::test]
+    async fn checkpoint_sig_buffer_and_chain_adoption() {
+        let n = 4u32;
+        let keypairs: Vec<(
+            suwappu_crypto::mldsa::PublicKey,
+            suwappu_crypto::mldsa::SecretKey,
+        )> = (0..n).map(|_| suwappu_crypto::mldsa::keypair()).collect();
+        let manifest = GenesisManifest {
+            network_id: "ck-adopt-4n".into(),
+            validators: (0..n)
+                .map(|i| GenesisValidator {
+                    authority_id: i,
+                    label: format!("v{}", i),
+                    mldsa_public_key_hex: hex::encode(keypairs[i as usize].0.as_bytes()),
+                    bls_public_key_hex: "00".into(),
+                    validator_stake_suwappu: 150_000,
+                    authority_stake_suwappu: 150_000,
+                })
+                .collect(),
+            corridors: Vec::new(),
+            prebalances: Vec::new(),
+            rounds_per_epoch: 1024,
+            gc_depth_rounds: 16,
+            checkpoint_cadence_rounds: 4,
+        };
+        let state = State::new(&manifest, keypairs[0].1.clone(), None);
+        let registries = current_registry_set(&state).await;
+        let snap = Arc::new(capture_snapshot(&state).await);
+        // This node's own checkpoint at height 0 (nothing co-signed yet).
+        let own = Checkpoint {
+            height: 0,
+            round: 4,
+            state_root: snap.state_root,
+            prev_checkpoint: [0; 32],
+            registry_root: registries.root(),
+            snapshot_root: snap.commit_root(),
+        };
+        let own_hash = own.hash();
+        let sig_for =
+            |ck: &Checkpoint, i: usize| sign_checkpoint(i as u32, &keypairs[i].1, ck).unwrap();
+        // Four stalled own emissions at height 0 (rounds 4, 12, 16, 20 —
+        // `own` itself at round 4), each with this node's signature.
+        for r in [4u64, 12, 16, 20] {
+            let mut c = own.clone();
+            c.round = r;
+            let h = c.hash();
+            state
+                .inner
+                .lock()
+                .await
+                .emitted_checkpoints
+                .insert(h, (c.clone(), snap.clone()));
+            buffer_checkpoint_sig(&state, &c, sig_for(&c, 0)).await;
+        }
+        buffer_checkpoint_sig(&state, &own, sig_for(&own, 1)).await;
+        // Authorities 2 and 3 flood: 2 x MAX fabricated checkpoints each at
+        // heights 1..=2*MAX with valid signatures.
+        for signer in [2usize, 3] {
+            for h in 1..=(2 * MAX_BUFFERED_CHECKPOINTS as u64) {
+                let fake = Checkpoint {
+                    height: h,
+                    round: 1_000 * signer as u64 + h,
+                    state_root: [h as u8; 32],
+                    prev_checkpoint: [signer as u8; 32],
+                    registry_root: [0; 32],
+                    snapshot_root: [0; 32],
+                };
+                buffer_checkpoint_sig(&state, &fake, sig_for(&fake, signer)).await;
+            }
+        }
+        {
+            let inner = state.inner.lock().await;
+            assert!(inner.checkpoint_sigs.len() <= MAX_BUFFERED_CHECKPOINTS);
+            assert!(
+                inner.checkpoint_sigs.contains_key(&own_hash),
+                "own current checkpoint evicted by fabricated entries"
+            );
+            // Heights beyond the admissible window were never buffered,
+            // and each signer opened at most its quota of foreign entries
+            // (n = 4: quota 2).
+            assert!(inner
+                .checkpoint_sigs
+                .values()
+                .all(|(h, _)| *h <= MAX_BUFFERED_CHECKPOINTS as u64));
+            for signer in [2u32, 3] {
+                let held = inner
+                    .checkpoint_sigs
+                    .iter()
+                    .filter(|(k, (_, sigs))| {
+                        !inner.emitted_checkpoints.contains_key(*k)
+                            && sigs.iter().any(|s| s.authority == signer)
+                    })
+                    .count();
+                assert!(held <= 2, "signer {signer} quota exceeded: {held}");
+            }
+            // 4 own + 4 fabrications = MAX: the buffer is full.
+            assert_eq!(inner.checkpoint_sigs.len(), MAX_BUFFERED_CHECKPOINTS);
+        }
+        // An honest peer's early signature for the checkpoint this node
+        // will emit next (height 1, the lowest admissible) still finds a
+        // slot after the flood.
+        let next = Checkpoint {
+            height: 1,
+            round: 8,
+            state_root: snap.state_root,
+            prev_checkpoint: own_hash,
+            registry_root: registries.root(),
+            snapshot_root: snap.commit_root(),
+        };
+        // Inserting it overflows the full buffer: the eviction must take a
+        // fabrication (its signer holds two foreign entries), not the
+        // honest singleton, and never an own emission.
+        buffer_checkpoint_sig(&state, &next, sig_for(&next, 1)).await;
+        buffer_checkpoint_sig(&state, &next, sig_for(&next, 2)).await;
+        {
+            let inner = state.inner.lock().await;
+            assert!(
+                inner
+                    .checkpoint_sigs
+                    .get(&next.hash())
+                    .is_some_and(|(_, sigs)| sigs.len() == 2),
+                "honest pre-emission entry starved by fabrications"
+            );
+            assert!(inner.checkpoint_sigs.len() <= MAX_BUFFERED_CHECKPOINTS);
+            let own_kept = inner
+                .checkpoint_sigs
+                .keys()
+                .filter(|k| inner.emitted_checkpoints.contains_key(*k))
+                .count();
+            assert_eq!(own_kept, 4, "an own emission was evicted for a fabrication");
+        }
+        // The mesh co-signs `own` (3 of 4) and serves it as its chain; this
+        // node never saw the quorum. Adoption re-anchors and promotes the
+        // snapshot it captured for it.
+        let cosigned = ratify_checkpoint(
+            own.clone(),
+            (0..3).map(|i| sig_for(&own, i)).collect(),
+            &registries.authority_registry,
+        )
+        .unwrap();
+        let chain = vec![CheckpointBundle {
+            cosigned,
+            registries: registries.clone(),
+        }];
+        let outbound: HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>> = HashMap::new();
+        handle_checkpoint_chain(&state, chain, &PeerId("v1".into()), &None, &outbound).await;
+        {
+            let inner = state.inner.lock().await;
+            let latest = inner.latest_checkpoint.as_ref().expect("chain adopted");
+            assert_eq!(latest.cosigned.checkpoint.hash(), own_hash);
+            assert_eq!(inner.checkpoint_height, 1);
+            assert_eq!(inner.last_checkpoint_hash, own_hash);
+            assert_eq!(inner.next_checkpoint_boundary, 8);
+            assert!(inner.emitted_checkpoints.is_empty());
+            assert!(inner.checkpoint_sigs.values().all(|(h, _)| *h > 0));
+            assert!(
+                inner
+                    .served_snapshot
+                    .as_ref()
+                    .is_some_and(|s| Arc::ptr_eq(s, &snap)),
+                "adopted checkpoint's snapshot must be served"
+            );
+            assert_eq!(inner.checkpoint_transitions.len(), 1);
+        }
+        // Same height, higher round: adopted (deterministic tie-break for
+        // a same-height fork), and the served snapshot for a checkpoint
+        // this node did not emit is left as it was.
+        let sibling = Checkpoint {
+            height: 0,
+            round: 8,
+            ..own.clone()
+        };
+        let sibling_cosigned = ratify_checkpoint(
+            sibling.clone(),
+            (0..3).map(|i| sig_for(&sibling, i)).collect(),
+            &registries.authority_registry,
+        )
+        .unwrap();
+        handle_checkpoint_chain(
+            &state,
+            vec![CheckpointBundle {
+                cosigned: sibling_cosigned,
+                registries: registries.clone(),
+            }],
+            &PeerId("v1".into()),
+            &None,
+            &outbound,
+        )
+        .await;
+        {
+            let inner = state.inner.lock().await;
+            assert_eq!(
+                inner
+                    .latest_checkpoint
+                    .as_ref()
+                    .unwrap()
+                    .cosigned
+                    .checkpoint
+                    .round,
+                8
+            );
+            assert_eq!(inner.next_checkpoint_boundary, 12);
+            assert!(
+                inner
+                    .served_snapshot
+                    .as_ref()
+                    .is_some_and(|s| Arc::ptr_eq(s, &snap)),
+                "served snapshot must be left as it was for a checkpoint this node did not emit"
+            );
+        }
+        // A chain that is not strictly ahead is ignored.
+        let stale = Checkpoint {
+            height: 0,
+            round: 3,
+            ..own.clone()
+        };
+        let stale_cosigned = ratify_checkpoint(
+            stale.clone(),
+            (0..3).map(|i| sig_for(&stale, i)).collect(),
+            &registries.authority_registry,
+        )
+        .unwrap();
+        handle_checkpoint_chain(
+            &state,
+            vec![CheckpointBundle {
+                cosigned: stale_cosigned,
+                registries,
+            }],
+            &PeerId("v1".into()),
+            &None,
+            &outbound,
+        )
+        .await;
+        assert_eq!(
+            state
+                .inner
+                .lock()
+                .await
+                .latest_checkpoint
+                .as_ref()
+                .unwrap()
+                .cosigned
+                .checkpoint
+                .round,
+            8
+        );
+    }
+
+    /// Consensus-review (S34.5, fourth pass): a running daemon records its
+    /// own Validator-Ring vote for every certificate it authors.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn round_driver_records_own_vote() {
+        let base_port: u16 = 24_300;
+        let (pk, sk) = suwappu_crypto::mldsa::keypair();
+        let manifest = GenesisManifest {
+            network_id: "self-vote-1n".into(),
+            validators: vec![GenesisValidator {
+                authority_id: 0,
+                label: "v0".into(),
+                mldsa_public_key_hex: hex::encode(pk.as_bytes()),
+                bls_public_key_hex: "00".into(),
+                validator_stake_suwappu: 150_000,
+                authority_stake_suwappu: 150_000,
+            }],
+            corridors: Vec::new(),
+            prebalances: Vec::new(),
+            rounds_per_epoch: 1024,
+            gc_depth_rounds: suwappu_consensus::GC_DEPTH,
+            checkpoint_cadence_rounds: 64,
+        };
+        let cfg = NodeConfig {
+            self_id: "v0".into(),
+            authority_id: 0,
+            listen: format!("127.0.0.1:{}", base_port).parse().unwrap(),
+            client_listen: format!("127.0.0.1:{}", base_port + 100).parse().unwrap(),
+            rpc_listen: None,
+            peers: vec![],
+            allow_post_genesis_join: false,
+            round_ms: 100,
+            checkpoint_cadence_rounds: 1,
+            mldsa_secret_key_path: write_mldsa_key_file(&sk),
+            bls_secret_key_path: "/dev/null".into(),
+            genesis_manifest_path: "/dev/null".into(),
+            event_log_path: std::env::temp_dir().join("suwappu-self-vote-1n.ndjson"),
+            max_client_connections: 256,
+            client_idle_timeout_ms: 30_000,
+            client_per_ip_limit: 8,
+            rpc_per_ip_capacity: 60,
+            rpc_per_ip_refill_per_sec: 10,
+            bridge_oracle_address: None,
+            bridge_network_id: None,
+            metrics_listen: None,
+            data_dir: None,
+            store_fsync: false,
+        };
+        let d = Daemon::start(cfg, manifest).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        let authored: Vec<CertHash> = {
+            let inner = d.state.inner.lock().await;
+            inner
+                .seen_at
+                .iter()
+                .filter(|((a, _), _)| *a == 0)
+                .map(|(_, h)| *h)
+                .collect()
+        };
+        assert!(authored.len() >= 2, "daemon did not author");
+        let votes = d.state.votes.lock();
+        for h in &authored {
+            assert!(
+                votes
+                    .get(h)
+                    .is_some_and(|v| v.iter().any(|vote| vote.validator == 0)),
+                "no self-vote recorded for an authored certificate"
+            );
+        }
+    }
+
+    /// Consensus-review (S34.5, third pass): with n = 4 and one member
+    /// down, the three survivors ratify a leader only if the author's own
+    /// vote counts — the liveness hole the widened restart test exposed.
+    #[tokio::test]
+    async fn author_self_vote_completes_quorum_with_one_member_down() {
+        let n = 4u32;
+        let keypairs: Vec<(
+            suwappu_crypto::mldsa::PublicKey,
+            suwappu_crypto::mldsa::SecretKey,
+        )> = (0..n).map(|_| suwappu_crypto::mldsa::keypair()).collect();
+        let manifest = GenesisManifest {
+            network_id: "self-vote-4n".into(),
+            validators: (0..n)
+                .map(|i| GenesisValidator {
+                    authority_id: i,
+                    label: format!("v{}", i),
+                    mldsa_public_key_hex: hex::encode(keypairs[i as usize].0.as_bytes()),
+                    bls_public_key_hex: "00".into(),
+                    validator_stake_suwappu: 150_000,
+                    authority_stake_suwappu: 150_000,
+                })
+                .collect(),
+            corridors: Vec::new(),
+            prebalances: Vec::new(),
+            rounds_per_epoch: 1024,
+            gc_depth_rounds: 16,
+            checkpoint_cadence_rounds: 4,
+        };
+        let state = State::new(&manifest, keypairs[0].1.clone(), None);
+        let candidate = CertHash([0xAA; 32]);
+        // Author 1's certificate; validator 3 is down. Votes from the two
+        // other survivors alone: 300k of 600k, below the 400,001 threshold.
+        for v in [0u32, 2] {
+            assert!(
+                store_vote(
+                    &state,
+                    Vote {
+                        validator: v,
+                        candidate
+                    }
+                )
+                .await
+            );
+        }
+        let votes: Vec<Vote> = state.votes.lock().get(&candidate).cloned().unwrap();
+        assert!(!validator_quorum_met(
+            &*state.stake_table.read().await,
+            candidate,
+            &votes
+        ));
+        // The author's own vote completes the quorum.
+        assert!(
+            store_vote(
+                &state,
+                Vote {
+                    validator: 1,
+                    candidate
+                }
+            )
+            .await
+        );
+        let votes: Vec<Vote> = state.votes.lock().get(&candidate).cloned().unwrap();
+        assert!(validator_quorum_met(
+            &*state.stake_table.read().await,
+            candidate,
+            &votes
+        ));
+        // A vote from an id outside the Validator Ring is dropped.
+        assert!(
+            !store_vote(
+                &state,
+                Vote {
+                    validator: 9,
+                    candidate
+                }
+            )
+            .await
+        );
+        // Duplicates do not grow the slot.
+        assert!(
+            !store_vote(
+                &state,
+                Vote {
+                    validator: 1,
+                    candidate
+                }
+            )
+            .await
+        );
+        assert_eq!(state.votes.lock().get(&candidate).unwrap().len(), 3);
+    }
+
+    /// IQ-008 D5 end to end: seeds co-sign checkpoints, prune past genesis,
+    /// and a late joiner that cannot backfill forward (every round it would
+    /// ask for is gone) walks the checkpoint chain from the genesis
+    /// committee, installs the verified snapshot, and catches up to the
+    /// cluster's state root. This is /goal A7.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn joiner_bootstraps_from_cosigned_checkpoint_snapshot() {
+        let _serial = mesh_serial().await;
+        let n = 4u32;
+        let base_port: u16 = 24_000;
+        let keypairs: Vec<(
+            suwappu_crypto::mldsa::PublicKey,
+            suwappu_crypto::mldsa::SecretKey,
+        )> = (0..=n).map(|_| suwappu_crypto::mldsa::keypair()).collect();
+        let manifest = GenesisManifest {
+            network_id: "test-joiner-4n".into(),
+            validators: (0..n)
+                .map(|i| GenesisValidator {
+                    authority_id: i,
+                    label: format!("v{}", i),
+                    mldsa_public_key_hex: hex::encode(keypairs[i as usize].0.as_bytes()),
+                    bls_public_key_hex: "00".into(),
+                    validator_stake_suwappu: 150_000,
+                    authority_stake_suwappu: 150_000,
+                })
+                .collect(),
+            corridors: Vec::new(),
+            prebalances: vec![GenesisPrebalance {
+                address: format!("0x{}", "33".repeat(20)),
+                balance_suwappu: 5_000_000,
+                role: None,
+            }],
+            rounds_per_epoch: 1024,
+            // Budget for a joiner to fetch the window edge before the
+            // seeds prune it is (depth - cadence) rounds = 6 s at 100 ms.
+            gc_depth_rounds: 64,
+            checkpoint_cadence_rounds: 4,
+        };
+        let cfg_for = |i: u32| -> NodeConfig {
+            // Seeds peer with each other; the joiner (id 4) dials the seeds
+            // but is not in any seed's config — a dynamic peer there.
+            let peers: Vec<Peer> = (0..n)
+                .filter(|j| *j != i)
+                .map(|j| Peer {
+                    id: format!("v{}", j),
+                    addr: format!("127.0.0.1:{}", base_port + j as u16)
+                        .parse::<SocketAddr>()
+                        .unwrap(),
+                })
+                .collect();
+            NodeConfig {
+                self_id: format!("v{}", i),
+                authority_id: i,
+                listen: format!("127.0.0.1:{}", base_port + i as u16)
+                    .parse::<SocketAddr>()
+                    .unwrap(),
+                client_listen: format!("127.0.0.1:{}", base_port + 100 + i as u16)
+                    .parse::<SocketAddr>()
+                    .unwrap(),
+                rpc_listen: None,
+                peers,
+                allow_post_genesis_join: i == n,
+                round_ms: 100,
+                checkpoint_cadence_rounds: 1,
+                mldsa_secret_key_path: write_mldsa_key_file(&keypairs[i as usize].1),
+                bls_secret_key_path: "/dev/null".into(),
+                genesis_manifest_path: "/dev/null".into(),
+                event_log_path: std::env::temp_dir()
+                    .join(format!("suwappu-daemon-joiner-test-v{}.ndjson", i)),
+                max_client_connections: 256,
+                client_idle_timeout_ms: 30_000,
+                client_per_ip_limit: 8,
+                rpc_per_ip_capacity: 60,
+                rpc_per_ip_refill_per_sec: 10,
+                bridge_oracle_address: None,
+                bridge_network_id: None,
+                metrics_listen: None,
+                data_dir: None,
+                store_fsync: false,
+            }
+        };
+
+        let mut seeds: Vec<Daemon> = Vec::new();
+        for i in 0..n {
+            seeds.push(Daemon::start(cfg_for(i), manifest.clone()).await.unwrap());
+        }
+        {
+            let mut client = crate::client::LoadGenClient::connect(
+                cfg_for(0).client_listen,
+                keypairs[0].1.clone(),
+                keypairs[0].0.clone(),
+                manifest.network_id.clone(),
+            )
+            .await
+            .unwrap();
+            client
+                .submit(Intent::Transfer {
+                    from: [0x33; 20],
+                    to: [0x44; 20],
+                    amount: 1234,
+                })
+                .await
+                .unwrap();
+        }
+        // Several checkpoint cadences and past the first prune (the seeds
+        // need a leader frontier of gc_depth before pruning anything).
+        tokio::time::sleep(Duration::from_secs(9)).await;
+
+        for d in &seeds {
+            let inner = d.state.inner.lock().await;
+            assert!(
+                inner.latest_checkpoint.is_some(),
+                "seed {:?} never co-signed a checkpoint",
+                inner.last_authored_round
+            );
+            assert_eq!(
+                inner.checkpoint_transitions.len(),
+                1,
+                "with a fixed committee only the first checkpoint is a transition"
+            );
+            assert!(
+                inner.served_snapshot.is_some(),
+                "seed holds no served snapshot for its co-signed checkpoint"
+            );
+            assert!(inner.gc_round.is_some(), "seeds did not prune");
+        }
+
+        let joiner = Daemon::start(cfg_for(n), manifest.clone()).await.unwrap();
+
+        // Wait for the bootstrap: needs_snapshot must be raised and then
+        // cleared by a verified install.
+        let mut saw_needs_snapshot = false;
+        let mut installed = false;
+        for _ in 0..120 {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            let inner = joiner.state.inner.lock().await;
+            if inner.needs_snapshot {
+                saw_needs_snapshot = true;
+            }
+            if saw_needs_snapshot && !inner.needs_snapshot && inner.latest_checkpoint.is_some() {
+                installed = true;
+                break;
+            }
+        }
+        assert!(
+            saw_needs_snapshot,
+            "joiner never detected that forward backfill was futile"
+        );
+        assert!(installed, "joiner never installed a verified snapshot");
+
+        // Catch-up: within a few seconds the joiner's leader frontier
+        // reaches a seed's, and at equal frontiers the roots must agree.
+        // Seeds' (frontier → root) recorded under their commit locks; the
+        // joiner is compared at whatever frontier it reaches after the
+        // install, not at a sampled coincidence.
+        let mut agreed = false;
+        let mut history: HashMap<u64, [u8; 32]> = HashMap::new();
+        for _ in 0..240 {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            for d in &seeds {
+                let _walk = d.state.commit_lock.lock().await;
+                let inner = d.state.inner.lock().await;
+                if let Some(f) = inner.last_committed_leader_round {
+                    let root = inner.substrate.state_root();
+                    if let Some(prev) = history.insert(f, root) {
+                        assert_eq!(prev, root, "a seed's root changed at a fixed frontier");
+                    }
+                }
+            }
+            let (jf, jr) = {
+                let _walk = joiner.state.commit_lock.lock().await;
+                let inner = joiner.state.inner.lock().await;
+                (
+                    inner.last_committed_leader_round,
+                    inner.substrate.state_root(),
+                )
+            };
+            if let Some(root) = jf.and_then(|f| history.get(&f)) {
+                assert_eq!(*root, jr, "joiner root differs at equal frontier");
+                agreed = true;
+                break;
+            }
+        }
+
+        assert!(
+            agreed,
+            "joiner never reached a seed's leader frontier after bootstrap"
+        );
+        // The joiner's substrate carries the funded transfer, i.e. it did
+        // not merely restart from genesis.
+        let inner = joiner.state.inner.lock().await;
+        assert_eq!(inner.substrate.balance(&[0x44u8; 20]), 1234);
+        assert!(!inner.needs_snapshot);
+        assert!(
+            inner.gc_round.is_some(),
+            "joiner did not adopt the gc round"
+        );
+        drop(inner);
+
+        // Adversarial snapshots (consensus-review finding on S34.4): a
+        // serving peer that keeps `state_root` / `registry_root` honest
+        // but tampers with anything the checkpoint's `snapshot_root` or
+        // the structural checks cover is rejected.
+        let served = seeds[0]
+            .state
+            .inner
+            .lock()
+            .await
+            .served_snapshot
+            .clone()
+            .expect("seed serves a snapshot");
+        let ck = served.checkpoint.clone().unwrap();
+        let gc_depth = manifest.gc_depth_rounds;
+        let cadence = manifest.checkpoint_cadence_rounds;
+        let net = manifest.network_id.clone();
+        let committees = vec![(0u64, served.authority_registry.clone())];
+        assert!(
+            verify_served_snapshot(&served, &ck, &net, gc_depth, &committees).is_ok(),
+            "honest served snapshot must verify"
+        );
+        assert!(
+            served.dag_certs.iter().all(|c| c.round <= ck.round),
+            "served window must not extend above the checkpoint round"
+        );
+        let mut bad = (*served).clone();
+        bad.committed.push(CertHash([0xEE; 32]));
+        assert_eq!(
+            verify_served_snapshot(&bad, &ck, &net, gc_depth, &committees),
+            Err("snapshot root mismatch"),
+            "forged commit mark"
+        );
+        let mut bad = (*served).clone();
+        let live_rounds = ck.round - served.gc_round.unwrap();
+        let n_ring = served.committee.size() as u64;
+        let max_certs = (n_ring * MAX_CERTS_PER_AUTHOR_ROUND as u64 * live_rounds) as usize;
+        assert!(
+            served.dag_certs.len() <= max_certs,
+            "honest window within the bound"
+        );
+        // A third certificate for one (author, round) is refused outright.
+        {
+            let c = bad.dag_certs[0].clone();
+            bad.dag_certs.push(c.clone());
+            bad.dag_certs.push(c);
+        }
+        assert_eq!(
+            verify_served_snapshot(&bad, &ck, &net, gc_depth, &committees),
+            Err("more than two certificates for one author and round"),
+            "triplicate slot"
+        );
+        // Padding beyond the window bound is rejected (by the size check
+        // when the honest window is saturated, by the per-slot cap
+        // otherwise — either way it does not install).
+        let mut bad = (*served).clone();
+        let originals = bad.dag_certs.clone();
+        for c in &originals {
+            bad.dag_certs.push(c.clone());
+        }
+        bad.dag_certs.push(originals[0].clone());
+        assert!(
+            matches!(
+                verify_served_snapshot(&bad, &ck, &net, gc_depth, &committees),
+                Err("certificate window too large")
+                    | Err("more than two certificates for one author and round")
+            ),
+            "padded certificate window"
+        );
+        let mut bad = (*served).clone();
+        bad.gc_round = Some(u64::MAX - 1);
+        assert!(
+            verify_served_snapshot(&bad, &ck, &net, gc_depth, &committees).is_err(),
+            "forged gc round"
+        );
+        let mut bad = (*served).clone();
+        bad.leader_round = ck.round + 1;
+        assert!(
+            verify_served_snapshot(&bad, &ck, &net, gc_depth, &committees).is_err(),
+            "forged leader frontier"
+        );
+        let mut bad = (*served).clone();
+        if let Some(c) = bad.dag_certs.first_mut() {
+            c.signature[0] ^= 1;
+        }
+        assert_eq!(
+            verify_served_snapshot(&bad, &ck, &net, gc_depth, &committees),
+            Err("certificate not signed by the committee in force at its round"),
+            "tampered certificate"
+        );
+        // IQ-009 D4: a certificate whose block is missing (or whose
+        // digest the block does not match) is refused before any
+        // signature work.
+        let mut bad = (*served).clone();
+        bad.blocks.pop();
+        assert_eq!(
+            verify_served_snapshot(&bad, &ck, &net, gc_depth, &committees),
+            Err("certificate without its block"),
+            "certificate without its block"
+        );
+        let mut bad = (*served).clone();
+        if let Some(c) = bad.dag_certs.first_mut() {
+            c.payload_digest[0] ^= 1;
+        }
+        assert_eq!(
+            verify_served_snapshot(&bad, &ck, &net, gc_depth, &committees),
+            Err("certificate without its block"),
+            "certificate whose block does not match its digest"
+        );
+        let mut bad = (*served).clone();
+        bad.tombstones
+            .push((CertHash([0xDD; 32]), bad.gc_round.unwrap() + 1));
+        assert_eq!(
+            verify_served_snapshot(&bad, &ck, &net, gc_depth, &committees),
+            Err("tombstone above gc round"),
+            "tombstone above the bound gc round"
+        );
+        let mut bad = (*served).clone();
+        bad.pending_governance.push((
+            Intent::Transfer {
+                from: [0x33; 20],
+                to: [0x55; 20],
+                amount: 1,
+            },
+            None,
+        ));
+        assert_eq!(
+            verify_served_snapshot(&bad, &ck, &net, gc_depth, &committees),
+            Err("snapshot root mismatch"),
+            "forged queued governance"
+        );
+        // Committees are scoped to the rounds they governed: a certificate
+        // at round r verifies against the rings established within
+        // gc_depth rounds below r (the honest ingest lag), the last one
+        // below r, and the next one (transition grace).
+        //  - eject at or below the window top: the full ring is within
+        //    the lag of every window round → ok;
+        //  - admit inside the window: rounds up to the admit checkpoint
+        //    see the full ring as successor, rounds above it directly → ok;
+        //  - a ring seated only more than gc_depth rounds below a window
+        //    round admits nothing there → rejected (when the window
+        //    reaches far enough above genesis for that to be testable);
+        //  - the shrunk ring alone never admits the departed author.
+        {
+            let full = served.authority_registry.clone();
+            let departed = full.members().next().map(|m| m.id).unwrap();
+            let mut shrunk = served.authority_registry.clone();
+            shrunk.remove(departed);
+            let gc = served.gc_round.unwrap();
+            let eject_at_top = vec![(0u64, full.clone()), (ck.round, shrunk.clone())];
+            assert!(
+                verify_served_snapshot(&served, &ck, &net, gc_depth, &eject_at_top).is_ok(),
+                "eject at the window top"
+            );
+            let eject_inside = vec![
+                (0u64, full.clone()),
+                (gc + 1, shrunk.clone()),
+                (ck.round, shrunk.clone()),
+            ];
+            assert!(
+                verify_served_snapshot(&served, &ck, &net, gc_depth, &eject_inside).is_ok(),
+                "eject inside the window: departed author's certificates within the ingest lag"
+            );
+            let admit_inside = vec![(0u64, shrunk.clone()), (gc + 2, full.clone())];
+            assert!(
+                verify_served_snapshot(&served, &ck, &net, gc_depth, &admit_inside).is_ok(),
+                "admit inside the window: new author's certificates admissible"
+            );
+            let long_range = vec![
+                (0u64, full.clone()),
+                (1, shrunk.clone()),
+                (2, shrunk.clone()),
+            ];
+            let departed_far_above = served
+                .dag_certs
+                .iter()
+                .any(|c| c.author == departed && c.round.saturating_sub(gc_depth) > 2);
+            if departed_far_above {
+                assert_eq!(
+                    verify_served_snapshot(&served, &ck, &net, gc_depth, &long_range),
+                    Err("certificate not signed by the committee in force at its round"),
+                    "a ring seated only far below the window admits nothing there"
+                );
+            }
+            let only_shrunk = vec![(0u64, shrunk)];
+            assert_eq!(
+                verify_served_snapshot(&served, &ck, &net, gc_depth, &only_shrunk),
+                Err("certificate not signed by the committee in force at its round"),
+                "shrunk ring alone"
+            );
+        }
+        // The committee is bound by the registry root and is the
+        // stake-weighted subset of the registries (IQ-010 D6).
+        assert!(served
+            .committee
+            .members()
+            .iter()
+            .all(
+                |id| served.authority_registry.contains(*id) && served.stake_table.weight(*id) > 0
+            ));
+        {
+            let inner = joiner.state.inner.lock().await;
+            let latest = inner.latest_checkpoint.as_ref().unwrap();
+            assert!(
+                inner.checkpoint_height > latest.cosigned.checkpoint.height,
+                "joiner cursor must be derived past the latest co-signed checkpoint"
+            );
+            assert_eq!(inner.next_checkpoint_boundary % cadence, 0);
         }
     }
 
@@ -3016,8 +10380,10 @@ mod tests {
             prebalances: Vec::new(),
             // Issue #18: short epochs so governance application
             // (which now lands at the next boundary) is exercised on
-            // CI-sane timescales. 16 rounds * 100ms = 1.6s/boundary.
-            rounds_per_epoch: 16,
+            // CI-sane timescales. 32 rounds * 100ms = 3.2s/boundary.
+            rounds_per_epoch: 32,
+            gc_depth_rounds: suwappu_consensus::GC_DEPTH,
+            checkpoint_cadence_rounds: 64,
         };
 
         let mut daemons = Vec::new();
@@ -3063,6 +10429,8 @@ mod tests {
                 bridge_oracle_address: None,
                 bridge_network_id: None,
                 metrics_listen: None,
+                data_dir: None,
+                store_fsync: false,
             };
             let d = Daemon::start(cfg, manifest.clone()).await.unwrap();
             daemons.push(d);
@@ -3178,7 +10546,7 @@ mod tests {
                     let last_authored = inner.last_authored_round.unwrap_or(u64::MAX);
                     let reg_size = reg.len();
                     let has_id4 = reg.contains(4);
-                    let n_auth = inner.n_authorities;
+                    let n_auth = inner.committee.size();
                     let stake_total = stake_table.total();
                     let stake_thresh =
                         suwappu_consensus::joint::validator_quorum_threshold(&stake_table);
@@ -3506,10 +10874,9 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
 
-        // Issue #18 + #32 deferred-activation: post-admit the
-        // authority_registry has size 5, but `inner.n_authorities`
-        // stays at 4 (v4 never authors a cert, so the pending_stake
-        // promotion site in `ingest_cert` never bumps it). Leader
+        // IQ-010 D2: post-admit the authority_registry has size 5, but
+        // the committee stays at 4 (v4 never authors a cert, so it is
+        // never proven live and never activates). Leader
         // rotation continues over v0..v3 at full speed and the
         // joint-quorum stake threshold is unchanged, so commits
         // flow at line rate. The eject Intent only has to make it
@@ -3628,7 +10995,7 @@ mod tests {
                     let last_authored = inner.last_authored_round.unwrap_or(u64::MAX);
                     let reg_size = reg.len();
                     let has_id4 = reg.contains(4);
-                    let n_auth = inner.n_authorities;
+                    let n_auth = inner.committee.size();
                     let stake_total = stake_table.total();
                     let stake_thresh =
                         suwappu_consensus::joint::validator_quorum_threshold(&stake_table);
@@ -3710,6 +11077,8 @@ mod tests {
             corridors: Vec::new(),
             prebalances: Vec::new(),
             rounds_per_epoch: 1024,
+            gc_depth_rounds: suwappu_consensus::GC_DEPTH,
+            checkpoint_cadence_rounds: 64,
         };
         let cfg = NodeConfig {
             self_id: "v0".into(),
@@ -3734,6 +11103,8 @@ mod tests {
             bridge_oracle_address: None,
             bridge_network_id: None,
             metrics_listen: None,
+            data_dir: None,
+            store_fsync: false,
         };
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -3880,6 +11251,8 @@ mod tests {
             }],
             corridors: Vec::new(),
             rounds_per_epoch: 1024,
+            gc_depth_rounds: suwappu_consensus::GC_DEPTH,
+            checkpoint_cadence_rounds: 64,
             prebalances: vec![
                 crate::config::GenesisPrebalance {
                     address: format!("0x{}", hex::encode(faucet_addr)),
@@ -3939,13 +11312,15 @@ mod tests {
                     label: format!("v{}", i),
                     mldsa_public_key_hex: "00".into(),
                     bls_public_key_hex: "00".into(),
-                    validator_stake_suwappu: 1_000,
-                    authority_stake_suwappu: 1_000,
+                    validator_stake_suwappu: 150_000,
+                    authority_stake_suwappu: 150_000,
                 })
                 .collect(),
             corridors: Vec::new(),
             prebalances: Vec::new(),
             rounds_per_epoch: 1024,
+            gc_depth_rounds: suwappu_consensus::GC_DEPTH,
+            checkpoint_cadence_rounds: 64,
         };
         let (log, _log_task) =
             EventLog::start(&std::env::temp_dir().join("suwappu-fastpath-test.ndjson"))
@@ -4040,13 +11415,15 @@ mod tests {
                     label: format!("v{}", i),
                     mldsa_public_key_hex: "00".into(),
                     bls_public_key_hex: "00".into(),
-                    validator_stake_suwappu: 1_000,
-                    authority_stake_suwappu: 1_000,
+                    validator_stake_suwappu: 150_000,
+                    authority_stake_suwappu: 150_000,
                 })
                 .collect(),
             corridors: Vec::new(),
             prebalances: Vec::new(),
             rounds_per_epoch: 1024,
+            gc_depth_rounds: suwappu_consensus::GC_DEPTH,
+            checkpoint_cadence_rounds: 64,
         };
         let (log, _log_task) =
             EventLog::start(&std::env::temp_dir().join("suwappu-fp-k-binding-test.ndjson"))
@@ -4148,13 +11525,15 @@ mod tests {
                     label: format!("v{}", i),
                     mldsa_public_key_hex: "00".into(),
                     bls_public_key_hex: "00".into(),
-                    validator_stake_suwappu: 1_000,
-                    authority_stake_suwappu: 1_000,
+                    validator_stake_suwappu: 150_000,
+                    authority_stake_suwappu: 150_000,
                 })
                 .collect(),
             corridors: Vec::new(),
             prebalances: Vec::new(),
             rounds_per_epoch: 1024,
+            gc_depth_rounds: suwappu_consensus::GC_DEPTH,
+            checkpoint_cadence_rounds: 64,
         };
         let (log, _log_task) =
             EventLog::start(&std::env::temp_dir().join("suwappu-ltp-test.ndjson"))
@@ -4251,13 +11630,15 @@ mod tests {
                     label: format!("v{}", i),
                     mldsa_public_key_hex: "00".into(),
                     bls_public_key_hex: "00".into(),
-                    validator_stake_suwappu: 1_000,
-                    authority_stake_suwappu: 1_000,
+                    validator_stake_suwappu: 150_000,
+                    authority_stake_suwappu: 150_000,
                 })
                 .collect(),
             corridors: Vec::new(),
             prebalances: Vec::new(),
             rounds_per_epoch: 1024,
+            gc_depth_rounds: suwappu_consensus::GC_DEPTH,
+            checkpoint_cadence_rounds: 64,
         };
         let (log, _log_task) =
             EventLog::start(&std::env::temp_dir().join("suwappu-ltp-unreg.ndjson"))
@@ -4314,6 +11695,8 @@ mod tests {
             corridors: Vec::new(),
             prebalances: Vec::new(),
             rounds_per_epoch: 1024,
+            gc_depth_rounds: suwappu_consensus::GC_DEPTH,
+            checkpoint_cadence_rounds: 64,
         };
         let cfg = NodeConfig {
             self_id: "v0".into(),
@@ -4338,6 +11721,8 @@ mod tests {
             bridge_oracle_address: None,
             bridge_network_id: None,
             metrics_listen: None,
+            data_dir: None,
+            store_fsync: false,
         };
         let _d = Daemon::start(cfg.clone(), manifest).await.unwrap();
         // Give the bound listener a tick to accept connections.
@@ -4408,6 +11793,8 @@ mod tests {
             corridors: Vec::new(),
             prebalances: Vec::new(),
             rounds_per_epoch: 1024,
+            gc_depth_rounds: suwappu_consensus::GC_DEPTH,
+            checkpoint_cadence_rounds: 64,
         };
         let cfg = NodeConfig {
             self_id: "v0".into(),
@@ -4432,6 +11819,8 @@ mod tests {
             bridge_oracle_address: None,
             bridge_network_id: None,
             metrics_listen: None,
+            data_dir: None,
+            store_fsync: false,
         };
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -4526,6 +11915,8 @@ mod tests {
             corridors: Vec::new(),
             prebalances: Vec::new(),
             rounds_per_epoch: 1024,
+            gc_depth_rounds: suwappu_consensus::GC_DEPTH,
+            checkpoint_cadence_rounds: 64,
         };
         let cfg = NodeConfig {
             self_id: "v0".into(),
@@ -4550,6 +11941,8 @@ mod tests {
             bridge_oracle_address: None,
             bridge_network_id: None,
             metrics_listen: None,
+            data_dir: None,
+            store_fsync: false,
         };
         let d = Daemon::start(cfg.clone(), manifest).await.unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -4646,6 +12039,8 @@ mod tests {
             corridors: Vec::new(),
             prebalances: Vec::new(),
             rounds_per_epoch: 1024,
+            gc_depth_rounds: suwappu_consensus::GC_DEPTH,
+            checkpoint_cadence_rounds: 64,
         };
         let cfg = NodeConfig {
             self_id: "v0".into(),
@@ -4670,6 +12065,8 @@ mod tests {
             bridge_oracle_address: None,
             bridge_network_id: None,
             metrics_listen: None,
+            data_dir: None,
+            store_fsync: false,
         };
         let _d = Daemon::start(cfg.clone(), manifest).await.unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;

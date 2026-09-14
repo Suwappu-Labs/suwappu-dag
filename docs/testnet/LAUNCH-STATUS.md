@@ -56,10 +56,13 @@ Gaps 1–3 below were closed on this branch (2026-08-15):
    non-genesis node in passive-sync mode; the new wire sync protocol
    (`GetTip`/`GetCertsByRound`/`GetBlock`) backfills forward through
    the ordinary verified ingest path, and authoring/voting begin only
-   once the node observes itself seated. Caveat: catch-up replays from
-   peers' in-memory history — nodes still have no persistence, so a
-   joiner can only sync back to what its peers have held since their
-   own boot. Snapshot/checkpoint sync remains future work.
+   once the node observes itself seated. The original caveat (catch-up
+   limited to peers' in-memory history, no persistence) is addressed by
+   DAG-S34 / IQ-008 on this branch: the DAG is pruned to a bounded
+   window, nodes with `data_dir` persist a commit log + snapshots, and a
+   joiner behind the window bootstraps from a co-signed checkpoint
+   snapshot (`/goal` A6, A7). Merge is gated on the consensus-reviewer
+   verdict and human sign-off IQ-008 requires.
 2. ~~**Peer discovery.**~~ CLOSED (minimally): seeds now accept up to 64
    dynamic inbound peers full-duplex on the joiner's own connection —
    no seed config edit or restart needed for a joiner to sync and, once
@@ -124,8 +127,9 @@ Ampere A1 (ARM64) seeds running the `aarch64` release binary (added on
 this branch; the GHCR image is amd64 for x86 hosts), GitHub
 Pages/Releases for genesis/peers/explorer/status, and Cloudflare free
 DNS/TLS. Read its "Honest caveats" section first: one box is not
-fault-independent, node RAM grows unbounded (plan periodic regenesis),
-and throughput is ~0.125 TPS (launch un-incentivized).
+fault-independent, node RAM is bounded only once DAG-S34 (IQ-008) is
+merged (set `data_dir`; until then plan periodic regenesis), and
+throughput is ~0.125 TPS (launch un-incentivized).
 
 ## Requires human action (cannot be done from a repo)
 

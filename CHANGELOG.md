@@ -44,6 +44,141 @@ will coincide with mainnet genesis.
 
 ### Added
 
+- **DAG-S34 (IQ-008): bounded DAG retention, durable commit log,
+  checkpoint-anchored snapshot sync.** Closes `/goal` A6 and A7 at the
+  code level; consensus-reviewer verdict + human sign-off gate the merge.
+  Decision record: `docs/iq/IQ-008-bounded-retention-and-checkpoint-sync.md`.
+  - `suwappu-consensus`: `gc.rs` (`GC_DEPTH = 256`, `gc_round`,
+    `commit_floor`), a GC-aware `DagStore` (`prune_below`, tombstone
+    window so a cert whose parent was pruned still inserts,
+    `BelowGcRound` rejection) and `causal_history_bounded`. The committed
+    sub-DAG of a leader is a function of the leader alone, so nodes with
+    different pruning progress commit the same set (I-GC1; `proptest_gc.rs`).
+  - `suwappu-node`: the gc round is `last_committed_leader − gc_depth`
+    (Narwhal / Sui consensus-core rule); every hash- and round-keyed map
+    is pruned at the same floor, ingest drops obsolete certs, `TipInfo`
+    carries the peer's gc round, and `suwappu_getSyncStatus` / `/metrics`
+    expose `gc_round`, `dag_certs`, `needs_snapshot`.
+  - `suwappu-node::store`: blake3-chained append-only commit log with
+    torn-tail truncation, atomic `StateSnapshot` files verified by
+    `state_root` on load, and startup replay that re-uses the live
+    `apply_commit` path (I-P1; `proptest_persistence.rs`). A restarted
+    validator resumes its authored-round marker from disk and never
+    re-signs a round (`restart_resumes_from_disk_without_equivocating`).
+    New `NodeConfig` fields `data_dir`, `store_fsync`.
+  - Checkpoint v2: `Checkpoint.registry_root` binds the committee, hash
+    domain `SUWAPPU-CHECKPOINT-V2`; seated authorities co-sign every
+    `checkpoint_cadence_rounds` (genesis manifest, default 32, must be ≤
+    half `gc_depth_rounds`) via `CheckpointSig` frames;
+    `verify_checkpoint_chain` walks a chain from the genesis committee
+    (I-CK1; `proptest_checkpoint_chain.rs`). A joiner whose peers have
+    pruned past its DAG requests `GetCheckpoints`, verifies the chain,
+    pulls the snapshot in `SnapshotChunk`s, checks it against the
+    co-signed root, installs it and resumes forward backfill
+    (`joiner_bootstraps_from_cosigned_checkpoint_snapshot`).
+  - Validator-Ring votes are retained until their certificate is pruned
+    and relayed in `Votes` frames after every `GetCert` /
+    `GetCertsByRound` reply, so a catching-up node ratifies leaders
+    through the same joint-quorum AND-gate as a live node instead of
+    halting at the first leader whose votes its peers had already
+    dropped. Seeds push certs, blocks, votes and checkpoint signatures to
+    dynamic peers; dynamic peers still cannot inject any of them.
+  - Consensus-review fixes (S34.5): one commit walk / snapshot capture
+    at a time (`State::commit_lock`); `Checkpoint.snapshot_root` binds
+    the served snapshot's commit-derived body and joiners verify it plus
+    every certificate's signature; checkpoints are crossed before the
+    first leader above the boundary so every node signs the same root;
+    the late-flip sweep floor is clamped explicitly and gated by
+    `proptest_gc.rs::bounded_history_below_gc_is_clamped`; a validator
+    that falls behind jumps its authoring round to one above the highest
+    round holding a quorum of authors and backfills from its commit
+    frontier rather than its DAG tip; ingest drops certificates more than
+    `gc_depth` rounds above the local tip; snapshot install runs under
+    the commit lock; the served certificate window is exact (rounds at or
+    below the checkpoint), validated against every committee the verified
+    chain binds, and the joiner derives its checkpoint cursor from the
+    trusted checkpoint; the advertised tip is the quorum anchor. Window
+    certificates are admitted only against the Authority Ring in force at
+    their round (or the next, as transition grace), at most two per
+    (author, round) — the same cap ingest applies. Checkpoint signatures
+    aggregate against every recently emitted checkpoint, not only the
+    latest, so a signature that arrives after the node crossed the next
+    boundary still counts (previously co-signing could silently stall
+    under load).
+  - **Liveness fix found by the widened restart test:** an author never
+    voted for its own certificate on the Validator-Ring side, so a
+    certificate could gather at most `n − 1` votes and a four-node ring
+    with one member down held its commit frontier until that member
+    returned (three survivors held 300k of stake against a 400,001
+    threshold on every leader). The round driver now records and
+    broadcasts the author's own vote.
+- **DAG-S36 (IQ-010): deterministic committee transitions.** The
+  DagBft-C rule now runs over a `Committee` (the sorted set of active
+  authority ids) instead of the integer range `0..n`: the leader of
+  round `r` is the `r mod |C|`-th member, only members count as support,
+  and parents may be any registered author's certificates. Authority ids
+  are caller-chosen and never renumbered, so under the old rule any
+  ejection of a non-highest id (or admission of a non-contiguous one)
+  left dead leader slots and an author no proposer would reference — a
+  permanent halt at threshold. Membership now changes only in the
+  epoch-boundary governance drain, a function of the commit sequence:
+  a newly admitted authority is registered (its certificates verify and
+  may be parents) but activates — leader slots, quorum weight, stake —
+  at the first boundary after one of its certificates has been
+  committed (`live_proven`), replacing the ingest-time stake promotion
+  that let honest nodes decide leaders with different `n`; a detected
+  equivocation is carried as `Intent::EquivocationEvidence` in the
+  detector's next block, verified at commit and ejected at the boundary
+  on every node, replacing the local auto-eject. The commit walk re-reads
+  the committee before every slot decision. Checkpoint registry roots
+  and snapshot roots bind the committee and the live-proven set (V2).
+  `State::equivocate` is the second `/goal` B2 fault-injection knob;
+  `middle_ejection_keeps_the_mesh_committing` exercises it. Gates:
+  `proptest_committee.rs` (4 × 10k),
+  `activation_is_a_commit_sequence_function`,
+  `bogus_evidence_is_dropped`. Decision record:
+  `docs/iq/IQ-010-deterministic-committee-transitions.md`.
+- **DAG-S35 (IQ-009): certificate availability.** A certificate enters
+  the DAG only together with its block (Narwhal §4.2 / Mysticeti §III
+  admission rule): a signature-verified certificate whose block is not
+  held is parked, the block is fetched from the sender and one other
+  peer, and the certificate is admitted — and voted for — when it
+  arrives. Parents are chosen only from held certificates and the
+  Validator-Ring vote is cast at admission, so a reference implies the
+  referrer holds the payload and a leader's vote quorum doubles as an
+  availability attestation. Closes the class the DAG-S34 restart test
+  exposed: an author that crashed between broadcasting its certificate
+  and its block froze every node's commit frontier until it returned.
+  `GetCert` / `GetCertsByRound` replies send the block before the
+  certificate; a served snapshot must carry a block for every
+  certificate. `State::withhold_blocks` is the first `/goal` B2
+  fault-injection knob; `withholding_author_does_not_stall_the_mesh`
+  exercises it. A block is bound to its certificate on the full signed
+  header (digest, author, round) on every path; the parking, candidate
+  and fetch-history buffers are bounded in entries and bytes with a
+  flooder-first, deterministic eviction. Decision record:
+  `docs/iq/IQ-009-certificate-availability.md`.
+- `suwappu_getSyncStatus` JSON-RPC method: the one-call answer to "is
+  this node caught up?" for operators, the status page (G8) and the
+  explorer (G7). Returns `local_dag_round`, `latest_committed_round`,
+  `peer_tip_round` (highest tip reported by a configured peer),
+  `rounds_behind`, `synced` (within the forward-backfill lag threshold,
+  now a shared constant so the RPC answer and the backfill loop cannot
+  drift), `seated` (own authority id present in the held Authority
+  Ring; `false` while a post-genesis joiner waits on its admit intent),
+  and the orphan / inflight-fetch / needed-block counts that explain a
+  stall. Exposed as `Client::get_sync_status` (Rust SDK) and
+  `client.getSyncStatus()` (TS SDK). Previously an external validator
+  admitted per `docs/testnet/VALIDATOR-OPERATORS.md` had no way to
+  observe its own catch-up. Same numbers on `/metrics` as
+  `suwappu_local_dag_round`, `suwappu_peer_tip_round`,
+  `suwappu_rounds_behind`, `suwappu_synced`, `suwappu_seated`,
+  `suwappu_orphan_certs` for the G6 dashboard + catch-up alarm.
+- Research note `docs/research/kasperchain-kasper.md`: evaluated
+  `kasperchain/kasper` for reusable material (verdict: a renamed copy of
+  the deprecated, unlicensed KDX desktop app with no implementation of
+  its README's PoW chain; nothing to adopt as code). The sync-status
+  method above is the one idea from that review worth carrying.
 - Portal live points lookup: the provider portal reads an operator's real
   points + TGE share estimate (2%-of-allocation cap honored) from the
   leaderboard API. Enabled by `Access-Control-Allow-Origin: *` on the

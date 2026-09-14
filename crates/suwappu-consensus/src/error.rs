@@ -34,4 +34,16 @@ pub enum ConsensusError {
     /// must have an empty parent set.
     #[error("genesis (round 0) certificate carried non-empty parent set")]
     GenesisWithParents,
+
+    /// The certificate's round is at or below the store's garbage
+    /// collection round (IQ-008 D1). Such a certificate is obsolete: it
+    /// can no longer appear in any committed sub-DAG, so it is neither
+    /// stored nor treated as an orphan.
+    #[error("certificate at round {round} is at or below the gc round {gc_round}")]
+    BelowGcRound {
+        /// The rejected certificate's round.
+        round: Round,
+        /// The store's current garbage collection round.
+        gc_round: Round,
+    },
 }

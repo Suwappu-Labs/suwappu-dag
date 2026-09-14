@@ -14,6 +14,7 @@ pub mod daemon;
 pub mod events;
 pub mod metrics_http;
 pub mod rpc_adapter;
+pub mod store;
 pub mod validator;
 pub mod wire;
 

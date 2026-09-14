@@ -57,6 +57,32 @@ test("getEpoch round-trips the result envelope", async () => {
   });
 });
 
+test("getSyncStatus round-trips the typed view", async () => {
+  const { fetch, captured } = makeFetchMock(() => ({
+    jsonrpc: "2.0",
+    id: 1,
+    result: {
+      local_dag_round: 91,
+      latest_committed_round: 88,
+      peer_tip_round: 100,
+      rounds_behind: 9,
+      synced: false,
+      seated: true,
+      orphan_certs: 3,
+      inflight_fetches: 2,
+      needed_blocks: 1,
+    },
+  }));
+  const client = new Client("http://localhost:0", { fetch });
+  const s = await client.getSyncStatus();
+  assert.equal(s.synced, false);
+  assert.equal(s.seated, true);
+  assert.equal(s.rounds_behind, 9);
+  assert.equal(s.peer_tip_round, 100);
+  const sent = JSON.parse(captured[0].init.body as string);
+  assert.equal(sent.method, "suwappu_getSyncStatus");
+});
+
 test("getStake returns null on NotFound (-32000)", async () => {
   const { fetch } = makeFetchMock(() => ({
     jsonrpc: "2.0",

@@ -271,6 +271,8 @@ fn run_genesis_flow(
         round: 0,
         state_root,
         prev_checkpoint: [0u8; 32],
+        registry_root: [0; 32],
+        snapshot_root: [0; 32],
     };
     let mut sigs = Vec::with_capacity(n as usize);
     for v in &mut validators {
@@ -392,6 +394,8 @@ pub fn run_genesis_flow_with_keys(
         round: 0,
         state_root: canonical,
         prev_checkpoint: [0u8; 32],
+        registry_root: [0; 32],
+        snapshot_root: [0; 32],
     };
     let mut sigs = Vec::with_capacity(n as usize);
     for (i, sk) in sks.iter().enumerate() {

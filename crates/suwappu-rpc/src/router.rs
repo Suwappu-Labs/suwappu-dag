@@ -183,6 +183,7 @@ async fn dispatch<S: StateView>(
         "suwappu_getBalance" => methods::get_balance(state, params).await,
         "suwappu_getBlock" => methods::get_block(state, params).await,
         "suwappu_getTransaction" => methods::get_transaction(state, params).await,
+        "suwappu_getSyncStatus" => methods::get_sync_status(state, params).await,
         "suwappu_getHeaderAttestation" => methods::get_header_attestation(state, params).await,
         "suwappu_submitIntent" => methods::submit_intent(state, params).await,
         unknown => Err(RpcError::MethodNotFound(unknown.into())),

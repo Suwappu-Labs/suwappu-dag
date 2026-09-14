@@ -49,12 +49,14 @@ async fn main() -> Result<()> {
         "suwappu-node starting"
     );
 
-    let _daemon = Daemon::start(cfg, manifest).await?;
+    let mut daemon = Daemon::start(cfg, manifest).await?;
     tracing::info!("suwappu-node running — SIGINT/SIGTERM to stop");
 
     // Park until the process is signalled; tokio's ctrl_c also catches
     // SIGTERM from systemd on Linux.
     tokio::signal::ctrl_c().await.ok();
     tracing::info!("suwappu-node shutting down");
+    // IQ-008 D4: final snapshot so the next start replays nothing.
+    daemon.shutdown().await;
     Ok(())
 }
