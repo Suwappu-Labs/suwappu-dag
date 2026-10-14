@@ -64,7 +64,8 @@ use thiserror::Error;
 /// Re-declared here to avoid a runtime check on every call; the
 /// `Note::pk_owner` field carries this width and `commit_note`
 /// asserts it.
-pub const ML_DSA_65_PUBLIC_KEY_BYTES: usize = 1312;
+/// ML-DSA-65 (FIPS 204) public-key size in bytes.
+pub const ML_DSA_65_PUBLIC_KEY_BYTES: usize = 1952;
 
 /// Length of a 20-byte L2 address (matches Ethereum's address
 /// width; L1 + L2 share the same address space).
@@ -109,7 +110,7 @@ pub struct Note {
     /// Randomness used for hiding. SHOULD be sampled uniformly
     /// from `[u8; 32]` per note; reuse breaks indistinguishability.
     pub r: [u8; 32],
-    /// ML-DSA-65 public key of the note's owner (1312 bytes).
+    /// ML-DSA-65 public key of the note's owner (1952 bytes).
     /// The owner spends by producing a STARK-of-ML-DSA-signature
     /// over `(cm_in, nf_out, cm_out_list)` (H.3).
     pub pk_owner: Vec<u8>,
@@ -128,7 +129,7 @@ pub enum ConfidentialError {
     /// caller has bypassed that gate.
     #[error("note.pk_owner length must be {expected}, got {got}")]
     BadPublicKeyLength {
-        /// Required width (ML_DSA_65_PUBLIC_KEY_BYTES = 1312).
+        /// Required width (ML_DSA_65_PUBLIC_KEY_BYTES = 1952).
         expected: usize,
         /// Observed width.
         got: usize,
@@ -144,7 +145,7 @@ pub enum ConfidentialError {
 /// cleartext `v` for the range proof.
 ///
 /// Returns `BadPublicKeyLength` if `note.pk_owner` is not
-/// the 1312-byte ML-DSA-65 public key width.
+/// the 1952-byte ML-DSA-65 public key width.
 pub fn commit_note(note: &Note) -> Result<Commitment, ConfidentialError> {
     if note.pk_owner.len() != ML_DSA_65_PUBLIC_KEY_BYTES {
         return Err(ConfidentialError::BadPublicKeyLength {
@@ -152,7 +153,7 @@ pub fn commit_note(note: &Note) -> Result<Commitment, ConfidentialError> {
             got: note.pk_owner.len(),
         });
     }
-    // Concatenate v_le(8) || r(32) || pk_owner(1312) = 1352 bytes.
+    // Concatenate v_le(8) || r(32) || pk_owner(1952) = 1992 bytes.
     let mut buf = Vec::with_capacity(8 + 32 + ML_DSA_65_PUBLIC_KEY_BYTES);
     buf.extend_from_slice(&note.v.to_le_bytes());
     buf.extend_from_slice(&note.r);
@@ -200,7 +201,7 @@ pub fn compute_nullifier(nk: &NullifierKey, cm: &Commitment, position: u64) -> N
 /// existing reserved-address gate from `suwappu-execution::reserved`
 /// — no special-casing needed at the address-space level.
 ///
-/// Returns `BadPublicKeyLength` if `pk` is not 1312 bytes.
+/// Returns `BadPublicKeyLength` if `pk` is not 1952 bytes.
 pub fn derive_l2_address(pk: &[u8]) -> Result<[u8; L2_ADDRESS_BYTES], ConfidentialError> {
     if pk.len() != ML_DSA_65_PUBLIC_KEY_BYTES {
         return Err(ConfidentialError::BadPublicKeyLength {
@@ -221,7 +222,7 @@ mod tests {
     use super::*;
 
     /// Build a Note with a deterministic-but-valid pk_owner
-    /// (1312 bytes of `pk_byte` repeated). Used in unit tests
+    /// (1952 bytes of `pk_byte` repeated). Used in unit tests
     /// where the actual ML-DSA-65 keypair content is irrelevant
     /// to the construction's semantics — only its width is
     /// checked.
