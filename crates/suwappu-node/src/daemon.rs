@@ -18,6 +18,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
@@ -98,6 +99,11 @@ pub(crate) struct State {
     /// verified against the author's genesis-registered public key in
     /// `ingest_cert`, not against this key.
     pub(crate) self_secret_key: suwappu_crypto::mldsa::SecretKey,
+    /// Durable anti-equivocation state (issue #17). `run_round_driver`
+    /// fsyncs `last_authored_round` here before broadcasting each cert, and
+    /// `Daemon::start` seeds `StateInner::last_authored_round` from it, so a
+    /// restarted validator never re-authors an already-broadcast round.
+    pub(crate) author_state_path: PathBuf,
     /// Manifest network id (string form) used to recompute the
     /// `intent_signing_digest` when re-verifying governance envelopes at
     /// commit. Distinct from the `[u8;32]` bridge `network_id` below.
@@ -250,6 +256,71 @@ fn load_mldsa_secret(raw: &[u8]) -> Option<suwappu_crypto::mldsa::SecretKey> {
     let text = std::str::from_utf8(raw).ok()?.trim();
     let decoded = hex::decode(text.trim_start_matches("0x")).ok()?;
     suwappu_crypto::mldsa::SecretKey::from_bytes(&decoded).ok()
+}
+
+/// Path of the durable author-state file, derived from the event-log path:
+/// `<event_log_dir>/author_state.json`. Every `NodeConfig` already carries an
+/// `event_log_path`, so this needs no new config surface and no test churn.
+fn author_state_path(event_log_path: &Path) -> PathBuf {
+    event_log_path
+        .parent()
+        .map(|d| d.join("author_state.json"))
+        .unwrap_or_else(|| PathBuf::from("author_state.json"))
+}
+
+/// Load the persisted `last_authored_round` (issue #17).
+///
+/// - Missing file → `Ok(None)`: fresh validator, nothing to resume.
+/// - Present but unreadable/corrupt → `Err`: fail CLOSED. A validator that
+///   cannot prove what it last authored must not restart from round 0 —
+///   that is exactly the self-equivocation this file exists to prevent
+///   (slashable under CLAUDE.md Invariant 5).
+fn load_author_state(path: &Path) -> anyhow::Result<Option<u64>> {
+    let raw = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "cannot read author state {:?}: {}",
+                path,
+                e
+            ))
+        }
+    };
+    let v: serde_json::Value = serde_json::from_slice(&raw)
+        .map_err(|e| anyhow::anyhow!("corrupt author state {:?}: {}", path, e))?;
+    let round = v
+        .get("last_authored_round")
+        .and_then(|r| r.as_u64())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "corrupt author state {:?}: missing last_authored_round",
+                path
+            )
+        })?;
+    Ok(Some(round))
+}
+
+/// Durably record `last_authored_round` BEFORE the cert leaves this process.
+///
+/// Atomic temp-write + fsync + rename (+ parent-dir fsync) so a crash at any
+/// point leaves either the old or the new round — never a torn file.
+/// Callers must invoke this before broadcast; see `run_round_driver`.
+fn persist_author_state(path: &Path, round: u64) -> std::io::Result<()> {
+    use std::io::Write;
+    let tmp = path.with_extension("json.tmp");
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        write!(f, "{{\"last_authored_round\":{}}}\n", round)?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)?;
+    if let Some(dir) = path.parent() {
+        if let Ok(d) = std::fs::File::open(dir) {
+            let _ = d.sync_all();
+        }
+    }
+    Ok(())
 }
 
 /// Cold-path fields. Pre-S31 these lived on `State` directly; now
@@ -476,6 +547,8 @@ impl State {
         manifest: &GenesisManifest,
         self_secret_key: suwappu_crypto::mldsa::SecretKey,
         bridge_signer: Option<BridgeHeaderSigner>,
+        author_state_path: PathBuf,
+        initial_last_authored_round: Option<u64>,
     ) -> Self {
         let mut stake_table = StakeTable::new();
         let mut authority_registry = AuthorityRegistry::new();
@@ -538,7 +611,7 @@ impl State {
             validator_registry: tokio::sync::RwLock::new(validator_registry),
             inner: tokio::sync::Mutex::new(StateInner {
                 substrate,
-                last_authored_round: None,
+                last_authored_round: initial_last_authored_round,
                 max_observed_round: 0,
                 sync_tip: 0,
                 n_authorities: n,
@@ -570,6 +643,7 @@ impl State {
                 suwappu_mempool::MempoolConfig::default(),
             )),
             self_secret_key,
+            author_state_path,
             manifest_network_id: manifest.network_id.clone(),
             governance_envelopes: parking_lot::Mutex::new(HashMap::new()),
             bridge_signer,
@@ -685,7 +759,24 @@ impl Daemon {
         // attestation is configured) so the RPC adapter can sign bridge
         // headers. `None` => attestation disabled; the daemon still runs.
         let bridge_signer = BridgeHeaderSigner::from_config(&cfg, &manifest);
-        let state = Arc::new(State::new(&manifest, self_secret_key, bridge_signer));
+        // Issue #17: seed last_authored_round from durable state so a
+        // restarted validator never re-authors a round it already broadcast
+        // (self-equivocation is slashable under Invariant 5). A corrupt
+        // state file fails startup closed — see load_author_state.
+        let author_state_path = author_state_path(&cfg.event_log_path);
+        let initial_last_authored_round = load_author_state(&author_state_path)?;
+        tracing::info!(
+            ?author_state_path,
+            ?initial_last_authored_round,
+            "author state loaded"
+        );
+        let state = Arc::new(State::new(
+            &manifest,
+            self_secret_key,
+            bridge_signer,
+            author_state_path,
+            initial_last_authored_round,
+        ));
 
         // DAG-S31.4 / A3: client + JSON-RPC intent submissions flow
         // through `state.mempool` directly. The pre-A3 `intent_tx` /
@@ -2385,6 +2476,19 @@ async fn run_round_driver(
             governance_auth,
         };
 
+        // Issue #17: durably record the round BEFORE the cert can leave this
+        // process. Fail CLOSED: if the state file can't be written, skip
+        // authoring this round rather than broadcast a cert we couldn't
+        // record — broadcasting without recording is the equivocation vector.
+        if let Err(e) = persist_author_state(&state.author_state_path, target_round) {
+            tracing::error!(
+                round = target_round,
+                err = %e,
+                "author state persist failed; skipping authoring this round"
+            );
+            continue;
+        }
+
         // Phase 3 (locked): brief — insert cert + block + update
         // markers + record own (author, round) for S30.1 incremental
         // equivocation detection.
@@ -3952,7 +4056,13 @@ mod tests {
                 .await
                 .unwrap();
         let (_unused_pk, self_sk) = suwappu_crypto::mldsa::keypair();
-        let state = Arc::new(State::new(&manifest, self_sk, None));
+        let state = Arc::new(State::new(
+            &manifest,
+            self_sk,
+            None,
+            std::env::temp_dir().join("author_state_test.json"),
+            None,
+        ));
         let outbound: HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>> = HashMap::new();
         let self_id: AuthorityId = 0;
 
@@ -4053,7 +4163,13 @@ mod tests {
                 .await
                 .unwrap();
         let (_unused_pk, self_sk) = suwappu_crypto::mldsa::keypair();
-        let state = Arc::new(State::new(&manifest, self_sk, None));
+        let state = Arc::new(State::new(
+            &manifest,
+            self_sk,
+            None,
+            std::env::temp_dir().join("author_state_test.json"),
+            None,
+        ));
         let outbound: HashMap<PeerId, tokio::sync::mpsc::Sender<WireMessage>> = HashMap::new();
         let self_id: AuthorityId = 0;
 
@@ -4161,7 +4277,13 @@ mod tests {
                 .await
                 .unwrap();
         let (_unused_pk, self_sk) = suwappu_crypto::mldsa::keypair();
-        let state = Arc::new(State::new(&manifest, self_sk, None));
+        let state = Arc::new(State::new(
+            &manifest,
+            self_sk,
+            None,
+            std::env::temp_dir().join("author_state_test.json"),
+            None,
+        ));
 
         let payload = suwappu_ltp::AttestationPayload {
             source_chain: 1u64, // Ethereum
@@ -4264,7 +4386,13 @@ mod tests {
                 .await
                 .unwrap();
         let (_unused_pk, self_sk) = suwappu_crypto::mldsa::keypair();
-        let state = Arc::new(State::new(&manifest, self_sk, None));
+        let state = Arc::new(State::new(
+            &manifest,
+            self_sk,
+            None,
+            std::env::temp_dir().join("author_state_test.json"),
+            None,
+        ));
         assert!(state.inner.lock().await.corridors.is_empty());
 
         let payload = suwappu_ltp::AttestationPayload {
@@ -4712,5 +4840,50 @@ mod tests {
             serde_json::from_str(resp_text[body_start..].trim_end()).unwrap();
 
         assert_eq!(parsed["error"]["code"], -32001);
+    }
+    // ---- Issue #17: durable author state (anti self-equivocation) ----
+
+    fn author_state_test_dir(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("author-state-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn author_state_path_derives_from_event_log_dir() {
+        assert_eq!(
+            author_state_path(std::path::Path::new("/var/lib/suwappu/events.ndjson")),
+            std::path::PathBuf::from("/var/lib/suwappu/author_state.json")
+        );
+    }
+
+    #[test]
+    fn author_state_roundtrip() {
+        let dir = author_state_test_dir("roundtrip");
+        let path = dir.join("author_state.json");
+        // Missing file = fresh validator: Ok(None), not an error.
+        assert_eq!(load_author_state(&path).unwrap(), None);
+        persist_author_state(&path, 42).unwrap();
+        assert_eq!(load_author_state(&path).unwrap(), Some(42));
+        // Monotone advance overwrites.
+        persist_author_state(&path, 43).unwrap();
+        assert_eq!(load_author_state(&path).unwrap(), Some(43));
+        // Crash mid-write safety: a stale temp file must not confuse the load.
+        std::fs::write(path.with_extension("json.tmp"), b"partial").unwrap();
+        assert_eq!(load_author_state(&path).unwrap(), Some(43));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn author_state_corrupt_fails_closed() {
+        let dir = author_state_test_dir("corrupt");
+        let path = dir.join("author_state.json");
+        std::fs::write(&path, b"not json at all").unwrap();
+        assert!(load_author_state(&path).is_err());
+        std::fs::write(&path, b"{\"other_field\":7}").unwrap();
+        assert!(load_author_state(&path).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
