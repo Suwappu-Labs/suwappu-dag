@@ -111,7 +111,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 # Testing
 proptest = "1.5"
-rand = "0.8"
+rand = "0.10"
 rand_chacha = "0.3"
 
 # Transitive feature unlock for musl cross-compile: openssl-sys is pulled in
