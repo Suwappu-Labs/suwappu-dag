@@ -84,7 +84,7 @@ blst = "0.3"
 # Hash + symmetric
 sha3 = "0.10"
 blake3 = "1.5"
-hkdf = "0.12"
+hkdf = "0.13"
 
 # Erasure coding (RFC 6330) — suwappu-transport block shred/reconstruct
 raptorq = "2.0"
