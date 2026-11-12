@@ -101,7 +101,7 @@ jobs:
           <p>See also: the <a href="https://github.com/Suwappu-Labs/suwappu-dag#readme">project README</a>, the <a href="https://github.com/Suwappu-Labs/suwappu-dag/blob/main/DEVNET.md">devnet quickstart</a>, and the <a href="https://github.com/Suwappu-Labs/suwappu-dag/tree/main/docs">full docs tree</a>.</p>
           EOF
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: target/pages
 
