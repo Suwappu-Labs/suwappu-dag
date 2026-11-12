@@ -112,7 +112,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 # Testing
 proptest = "1.5"
 rand = "0.8"
-rand_chacha = "0.3"
+rand_chacha = "0.9"
 
 # Transitive feature unlock for musl cross-compile: openssl-sys is pulled in
 # by reqwest (via suwappudb-bridge). Without the `vendored` feature, openssl-sys
