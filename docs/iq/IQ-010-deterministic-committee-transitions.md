@@ -220,8 +220,13 @@ is refused before that), and inside a live grace ingest accepts only the
 retained key for the id. A re-admitted key therefore never signs at a
 round of a committee it was not in, a re-removal cannot overwrite a grace
 whose rounds are still live, and admission never depends on which key a
-node holds. The predicate is prune-independent: an entry is pruned only
-at a gc round at or below the committing leader's. As defence in depth,
+node holds. The predicate is prune-independent: boundaries are crossed
+only in sweeps of a leader above the previous frontier (a late-flip sweep
+commits rounds whose epoch is already current), so every prune so far was
+derived from a frontier at or below the committing leader, and an entry
+is pruned only when the predicate is already false for it; the guard
+evaluates against `max(leader, frontier)` so this does not rest on the
+lemma. A joiner's verifier applies the same one-key rule. As defence in depth,
 a certificate inside its author's grace never marks the id live-proven
 (commit order is not monotone in rounds). The retained keys and graces (`retired`) are bound
 by `snapshot_root`, and a joiner verifies a served window's certificates

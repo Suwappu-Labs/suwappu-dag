@@ -2109,11 +2109,11 @@ async fn ingest_cert(
             .get(c.author)
             .map(|m| m.public_key_bytes.clone());
         // IQ-010: a member removed at a boundary keeps its certificates
-        // admissible through its grace — under its retained key, even if
-        // the id has since been re-admitted under a new one, so admission
-        // does not depend on whether this node has applied the re-admit
-        // yet (eighth S36 pass; `verify_served_snapshot` accepts the same
-        // two keys).
+        // admissible through its grace under its retained key. One key per
+        // (id, round): a re-admission waits until the old grace is obsolete
+        // at the committing leader, and while a grace covers the round only
+        // the retained key is admissible (`verify_served_snapshot` applies
+        // the same rule).
         let grace_key = state
             .inner
             .lock()
@@ -3517,22 +3517,27 @@ fn verify_served_snapshot(
             .unwrap_or(0)
             .min(i);
         let hi = (i + 1).min(committees.len() - 1);
-        let ok = committees[lo..=hi].iter().any(|(_, reg)| {
-            reg.get(c.author)
-                .and_then(|m| {
-                    suwappu_crypto::mldsa::PublicKey::from_bytes(&m.public_key_bytes).ok()
-                })
-                .is_some_and(|pk| c.verify_signature(&pk))
-        }) || snap
+        // A member removed at a boundary: its key and grace are bound by
+        // `snapshot_root`, which the checkpoint quorum co-signed, so its
+        // certificates inside the grace are as trustworthy as a registered
+        // member's (sixth S36 pass). One key per (id, round), as at ingest:
+        // a round the grace covers is verified under the retained key only.
+        let ok = match snap
             .retired
             .get(&c.author)
-            // A member removed at a boundary: its key and grace are bound
-            // by `snapshot_root`, which the checkpoint quorum co-signed,
-            // so its certificates inside the grace are as trustworthy as
-            // a registered member's (sixth S36 pass).
             .filter(|(_, until)| c.round <= *until)
-            .and_then(|(k, _)| suwappu_crypto::mldsa::PublicKey::from_bytes(k).ok())
-            .is_some_and(|pk| c.verify_signature(&pk));
+        {
+            Some((k, _)) => suwappu_crypto::mldsa::PublicKey::from_bytes(k)
+                .ok()
+                .is_some_and(|pk| c.verify_signature(&pk)),
+            None => committees[lo..=hi].iter().any(|(_, reg)| {
+                reg.get(c.author)
+                    .and_then(|m| {
+                        suwappu_crypto::mldsa::PublicKey::from_bytes(&m.public_key_bytes).ok()
+                    })
+                    .is_some_and(|pk| c.verify_signature(&pk))
+            }),
+        };
         if !ok {
             return Err("certificate not signed by the committee in force at its round");
         }
@@ -5458,7 +5463,14 @@ async fn apply_governance_intent(
         Intent::AdmitAuthority { authority_id, .. }
             if {
                 let inner = state.inner.lock().await;
-                let gc = suwappu_consensus::gc::gc_round(leader_round, inner.gc_depth);
+                // Boundaries are crossed only in sweeps of a leader above
+                // the previous frontier (a late-flip sweep commits rounds
+                // whose epoch is already current), so `leader_round` is at
+                // least the frontier every prune so far was derived from.
+                // Taking the max makes that independent of the lemma
+                // (tenth S36 pass): no pruned entry can satisfy the guard.
+                let lead = leader_round.max(inner.last_committed_leader_round.unwrap_or(0));
+                let gc = suwappu_consensus::gc::gc_round(lead, inner.gc_depth);
                 inner
                     .retired
                     .get(authority_id)
@@ -5477,7 +5489,8 @@ async fn apply_governance_intent(
             // pruned the old rounds, so exactly one key is admissible per
             // (id, round). Deterministic and prune-independent: an entry
             // is pruned only at a gc round at or below this leader's, i.e.
-            // only when this predicate is already false for it.
+            // only when this predicate is already false for it (see the
+            // frontier note in the guard).
             tracing::warn!(
                 authority = *authority_id,
                 round = cert_round,
@@ -9165,6 +9178,75 @@ mod tests {
         assert!(
             state.inner.lock().await.detected_equivocations.is_empty(),
             "grace certificate fed the detector"
+        );
+    }
+
+    /// Tenth S36 pass: the re-admit decision is the same whether the old
+    /// grace entry is still held or already pruned (restart replay prunes
+    /// once at the end, live execution after every walk), and refuses
+    /// while the old grace is live at the committing leader.
+    #[tokio::test]
+    async fn readmit_decision_is_prune_independent() {
+        let keys: Vec<(
+            suwappu_crypto::mldsa::PublicKey,
+            suwappu_crypto::mldsa::SecretKey,
+        )> = (0..4).map(|_| suwappu_crypto::mldsa::keypair()).collect();
+        let (log, _task) =
+            EventLog::start(&std::env::temp_dir().join("suwappu-iq010-readmit.ndjson"))
+                .await
+                .unwrap();
+        let (k2_pk, k2_sk) = suwappu_crypto::mldsa::keypair();
+        let admit = Intent::AdmitAuthority {
+            authority_id: 3,
+            stake_suwappu: 150_000,
+            mldsa_public_key: k2_pk.as_bytes().to_vec(),
+            bls_public_key: Vec::new(),
+        };
+        let mut registered = Vec::new();
+        for (pruned, leader_past_grace) in [(false, true), (true, true), (false, false)] {
+            let state = State::new(
+                &small_manifest("iq010-readmit-4n", &keys, 16),
+                keys[0].1.clone(),
+                None,
+            );
+            let rpe = state.inner.lock().await.epoch.rounds_per_epoch;
+            {
+                let mut inner = state.inner.lock().await;
+                let full = inner.committee.clone();
+                inner.committee_by_epoch.insert(1, full);
+            }
+            remove_authority(&state, 3, rpe, "t", "t", &log).await;
+            let until = state.inner.lock().await.retired[&3].1;
+            let leader = if leader_past_grace {
+                until + 16
+            } else {
+                until + 15
+            };
+            if pruned {
+                // What `prune_state` does once gc reaches `until`.
+                state.inner.lock().await.retired.remove(&3);
+            }
+            let digest = crate::client::intent_signing_digest(&state.manifest_network_id, &admit);
+            let sig = |sk: &suwappu_crypto::mldsa::SecretKey| {
+                suwappu_crypto::mldsa::sign(&digest, sk)
+                    .unwrap()
+                    .as_bytes()
+                    .to_vec()
+            };
+            let auth = crate::client::GovAuth {
+                sponsor_pubkey_hash: crate::client::signer_pubkey_hash(keys[0].0.as_bytes()),
+                sponsor_signature: sig(&keys[0].1),
+                co_signer_pubkey_hash: crate::client::signer_pubkey_hash(keys[1].0.as_bytes()),
+                co_signature: sig(&keys[1].1),
+                candidate_pop_signature: sig(&k2_sk),
+            };
+            apply_governance_intent(&state, &admit, Some(&auth), leader, leader, "t", &log).await;
+            registered.push(state.authority_registry.read().await.contains(3));
+        }
+        assert_eq!(
+            registered,
+            vec![true, true, false],
+            "held vs pruned grace decided differently, or a live grace admitted"
         );
     }
 

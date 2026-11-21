@@ -138,6 +138,24 @@ will coincide with mainnet genesis.
   `activation_is_a_commit_sequence_function`,
   `bogus_evidence_is_dropped`. Decision record:
   `docs/iq/IQ-010-deterministic-committee-transitions.md`.
+  Hardened over ten consensus-reviewer passes (APPROVE on the tenth):
+  each slot is decided under the committee pinned to its epoch (one-epoch
+  lag, walk defers on an unfixed epoch); at most `f` membership changes
+  per boundary; a removed member keeps a retirement grace through its
+  pinned epoch, keeps authoring while pinned and is verified by joiners
+  from the root-bound `retired` keys; one admissible key per (id, round);
+  checkpoints ratify against the signing committee; evidence is node-only,
+  bounded per block and verified at commit; block proposals are bounded
+  by bytes (`Mempool::drain_for_block_within`, governance cap, parent
+  bound, final frame-fit check). Further gates:
+  `leaving_member_keeps_authoring_through_its_pinned_epoch`,
+  `readmit_decision_is_prune_independent`,
+  `block_at_every_budget_fits_a_frame`,
+  `wide_or_duplicate_parents_are_refused`,
+  `governance_envelope_cannot_be_padded_or_replaced`,
+  `membership_changes_are_capped_per_boundary`,
+  `checkpoint_quorum_ignores_inactive_members`,
+  `served_chain_witnesses_activations`.
 - **DAG-S35 (IQ-009): certificate availability.** A certificate enters
   the DAG only together with its block (Narwhal §4.2 / Mysticeti §III
   admission rule): a signature-verified certificate whose block is not
