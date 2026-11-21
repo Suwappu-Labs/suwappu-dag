@@ -1,0 +1,191 @@
+<title>Commit Walk Perf Loop</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: one reading column; summary figures, then the two charts that carry the story, then the raw run log. */
+:root {
+  --bg: #f7f8f9;
+  --panel: #ffffff;
+  --fg: #14171a;
+  --fg-2: #4a5159;
+  --muted: #7a828b;
+  --rule: #dfe3e7;
+  --grid: #eceff2;
+  --series: #2a78d6;
+  --reverted: #9aa1a9;
+  --good: #1f7a3a;
+  --font-text: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-data: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #121416; --panel: #1a1d20; --fg: #eef0f2; --fg-2: #b9c0c7; --muted: #8b939b;
+    --rule: #2c3136; --grid: #23272b; --series: #3987e5; --reverted: #6b737b; --good: #4cb36b;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #121416; --panel: #1a1d20; --fg: #eef0f2; --fg-2: #b9c0c7; --muted: #8b939b;
+  --rule: #2c3136; --grid: #23272b; --series: #3987e5; --reverted: #6b737b; --good: #4cb36b;
+  color-scheme: dark;
+}
+body { background: var(--bg); color: var(--fg); font-family: var(--font-text); font-size: 15px; line-height: 1.5; }
+.wrap { max-width: 960px; margin: 0 auto; padding-block: 32px 48px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: grid; gap: 28px; }
+header { display: grid; gap: 6px; }
+.eyebrow { font-family: var(--font-data); font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+h1 { margin: 0; font-size: 28px; font-weight: 600; text-wrap: balance; }
+h2 { margin: 0; font-size: 17px; font-weight: 600; text-wrap: balance; }
+.lede { margin: 0; color: var(--fg-2); max-width: 65ch; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+.stat { background: var(--panel); border: 1px solid var(--rule); border-radius: 6px; padding: 14px 16px; display: grid; gap: 2px; min-width: 0; }
+.stat .k { font-size: 13px; color: var(--fg-2); }
+.stat .v { font-family: var(--font-data); font-size: 26px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.stat .s { font-size: 13px; color: var(--muted); }
+.stat .v .delta { font-size: 15px; color: var(--good); margin-left: 6px; }
+section { display: grid; gap: 10px; min-width: 0; }
+.note { margin: 0; color: var(--fg-2); font-size: 14px; max-width: 70ch; }
+.chart { background: var(--panel); border: 1px solid var(--rule); border-radius: 6px; padding: 12px; position: relative; min-width: 0; }
+.chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+.chart text { fill: var(--fg-2); font-family: var(--font-data); font-size: 11px; }
+.chart .axis-label { fill: var(--muted); }
+.chart .value-label { fill: var(--fg); font-size: 12px; }
+.tip { position: absolute; pointer-events: none; background: var(--fg); color: var(--bg); font-family: var(--font-data); font-size: 12px;
+  padding: 6px 8px; border-radius: 4px; white-space: nowrap; transform: translate(-50%, calc(-100% - 10px)); z-index: 2; }
+.legend { display: flex; flex-wrap: wrap; gap: 16px; font-size: 13px; color: var(--fg-2); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.table-wrap { overflow-x: auto; border: 1px solid var(--rule); border-radius: 6px; background: var(--panel); }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { padding: 7px 10px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--grid); }
+th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
+th { font-weight: 500; color: var(--fg-2); background: var(--panel); position: sticky; top: 0; }
+td { font-family: var(--font-data); font-variant-numeric: tabular-nums; }
+tr:last-child td { border-bottom: none; }
+.hit { fill: transparent; cursor: default; }
+.hit:focus { outline: none; }
+.hit:focus-visible { stroke: var(--fg); stroke-width: 1.5; }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">suwappu-dag · 4-node loopback · perf loop</div>
+    <h1>Commit Walk Perf Loop</h1>
+    <p class="lede">Each iteration profiles a running mesh, removes the top hot path without changing any commit decision, and re-measures. CPU is the sum over all four validators, per 1,000 committed intents, at 1,280 offered TPS.</p>
+  </header>
+
+  <div class="stats" id="stats"></div>
+
+  <section>
+    <h2>Node CPU per 1k intents, 50 ms rounds</h2>
+    <p class="note">Dots are individual runs; the line joins iteration means. Lower is better. Run-to-run spread is about ±20 ms.</p>
+    <div class="legend"><span><i class="sw" style="background:var(--series)"></i>Kept</span><span><i class="sw" style="border:2px solid var(--reverted);width:8px;height:8px"></i>Measured, reverted</span></div>
+    <div class="chart" id="cpu"></div>
+  </section>
+
+  <section>
+    <h2>Latency follows the round timer</h2>
+    <p class="note">Submit-to-commit p50 at 8 loadgens. A commit takes about 2.6 rounds, so the round timer sets the latency floor; shorter rounds cost CPU per round, which is what the loop reduces.</p>
+    <div class="chart" id="lat"></div>
+  </section>
+
+  <section>
+    <h2>Every run</h2>
+    <div class="table-wrap"><table id="runs"></table></div>
+  </section>
+</div>
+
+<script>
+const DATA = /*__DATA__*/null;
+const NS = "http://www.w3.org/2000/svg";
+const el = (tag, attrs = {}, parent) => { const e = document.createElementNS(NS, tag); for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v); if (parent) parent.appendChild(e); return e; };
+const fmt = (x, d = 0) => Number(x).toLocaleString("en-US", { maximumFractionDigits: d, minimumFractionDigits: d });
+
+function tooltip(box) {
+  const t = document.createElement("div"); t.className = "tip"; t.hidden = true; box.appendChild(t);
+  return {
+    show(html, x, y) { t.innerHTML = html; t.style.left = x + "px"; t.style.top = y + "px"; t.hidden = false; },
+    hide() { t.hidden = true; },
+  };
+}
+function niceMax(v) { const p = Math.pow(10, Math.floor(Math.log10(v))); return Math.ceil(v / (p / 2)) * (p / 2); }
+
+function stats() {
+  const s = DATA.summary, box = document.getElementById("stats");
+  const tile = (k, v, sub) => { const d = document.createElement("div"); d.className = "stat"; d.innerHTML = `<div class="k">${k}</div><div class="v">${v}</div><div class="s">${sub}</div>`; box.appendChild(d); };
+  tile("CPU per 1k intents, 50 ms rounds", `${fmt(s.current_cpu)} ms<span class="delta">${s.delta_pct}%</span>`, `from ${fmt(s.baseline_cpu)} ms at baseline`);
+  tile("p50 latency, 50 ms rounds", `${fmt(s.p50_50ms)} ms`, "submit to first commit");
+  tile("Highest measured throughput", `${fmt(s.peak_tps)} TPS`, `${s.peak_loadgens} loadgens, every intent committed; loadgen-bound`);
+}
+
+function cpuChart() {
+  const box = document.getElementById("cpu"), its = DATA.iterations;
+  const W = 880, H = 300, m = { l: 52, r: 16, t: 18, b: 52 };
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Node CPU per 1k intents by iteration" }, box);
+  const tip = tooltip(box);
+  const maxV = niceMax(Math.max(...its.flatMap(i => i.runs.map(r => r.cpu_ms_per_1k))) * 1.08);
+  const x = i => m.l + (i + 0.5) * (W - m.l - m.r) / its.length;
+  const y = v => H - m.b - v / maxV * (H - m.t - m.b);
+  const step = maxV / 4;
+  for (let v = 0; v <= maxV + 1e-6; v += step) {
+    el("line", { x1: m.l, x2: W - m.r, y1: y(v), y2: y(v), stroke: "var(--grid)", "stroke-width": 1 }, svg);
+    const t = el("text", { x: m.l - 8, y: y(v) + 4, "text-anchor": "end", class: "axis-label" }, svg); t.textContent = fmt(v);
+  }
+  el("line", { x1: m.l, x2: W - m.r, y1: y(0), y2: y(0), stroke: "var(--rule)", "stroke-width": 1 }, svg);
+  const kept = its.map((it, i) => ({ it, i })).filter(o => !o.it.reverted);
+  el("polyline", { points: kept.map(o => `${x(o.i)},${y(o.it.mean)}`).join(" "), fill: "none", stroke: "var(--series)", "stroke-width": 2, "stroke-linejoin": "round" }, svg);
+  its.forEach((it, i) => {
+    const c = it.reverted ? "var(--reverted)" : "var(--series)";
+    const name = el("text", { x: x(i), y: H - m.b + 18, "text-anchor": "middle" }, svg); name.textContent = it.n === 0 ? "Baseline" : `It ${it.n}`;
+    const sub = el("text", { x: x(i), y: H - m.b + 34, "text-anchor": "middle", class: "axis-label" }, svg); sub.textContent = it.reverted ? "reverted" : it.n === 0 ? "before the loop" : it.name.toLowerCase();
+    it.runs.forEach((r, k) => {
+      const cx = x(i) + (k - (it.runs.length - 1) / 2) * 10, cy = y(r.cpu_ms_per_1k);
+      if (it.reverted) el("circle", { cx, cy, r: 4.5, fill: "var(--panel)", stroke: c, "stroke-width": 2 }, svg);
+      else el("circle", { cx, cy, r: 4.5, fill: c, stroke: "var(--panel)", "stroke-width": 2 }, svg);
+      const hit = el("circle", { cx, cy, r: 12, class: "hit", tabindex: 0 }, svg);
+      const html = `${r.label} · ${r.sha}<br>${fmt(r.cpu_ms_per_1k, 1)} ms per 1k · p50 ${r.p50_ms} ms · p99 ${r.p99_ms} ms`;
+      const show = () => { const b = svg.getBoundingClientRect(), s = b.width / W; tip.show(html, cx * s + 12, cy * s + 12); };
+      hit.addEventListener("mouseenter", show); hit.addEventListener("focus", show);
+      hit.addEventListener("mouseleave", tip.hide); hit.addEventListener("blur", tip.hide);
+    });
+    if (!it.reverted) { const lbl = el("text", { x: x(i) + 14 + (it.runs.length - 1) * 5, y: y(it.mean) - 10, class: "value-label" }, svg); lbl.textContent = fmt(it.mean); }
+  });
+}
+
+function latChart() {
+  const box = document.getElementById("lat"), L = DATA.latency;
+  const W = 880, H = 220, m = { l: 52, r: 16, t: 18, b: 40 };
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "p50 latency by round timer" }, box);
+  const tip = tooltip(box);
+  const maxV = niceMax(Math.max(...L.map(r => r.p50)) * 1.1);
+  const bw = Math.min(56, (W - m.l - m.r) / L.length * 0.5);
+  const x = i => m.l + (i + 0.5) * (W - m.l - m.r) / L.length;
+  const y = v => H - m.b - v / maxV * (H - m.t - m.b);
+  for (let v = 0; v <= maxV + 1e-6; v += maxV / 4) {
+    el("line", { x1: m.l, x2: W - m.r, y1: y(v), y2: y(v), stroke: "var(--grid)", "stroke-width": 1 }, svg);
+    const t = el("text", { x: m.l - 8, y: y(v) + 4, "text-anchor": "end", class: "axis-label" }, svg); t.textContent = fmt(v);
+  }
+  L.forEach((r, i) => {
+    const top = y(r.p50), bottom = y(0), rad = 4, x0 = x(i) - bw / 2;
+    el("path", { d: `M${x0},${bottom} V${top + rad} Q${x0},${top} ${x0 + rad},${top} H${x0 + bw - rad} Q${x0 + bw},${top} ${x0 + bw},${top + rad} V${bottom} Z`, fill: "var(--series)" }, svg);
+    const v = el("text", { x: x(i), y: top - 8, "text-anchor": "middle", class: "value-label" }, svg); v.textContent = `${r.p50} ms`;
+    const n = el("text", { x: x(i), y: H - m.b + 18, "text-anchor": "middle" }, svg); n.textContent = `${r.round} ms rounds`;
+    const hit = el("rect", { x: x0 - 8, y: m.t, width: bw + 16, height: H - m.t - m.b, class: "hit", tabindex: 0 }, svg);
+    const html = `${r.label}<br>p50 ${r.p50} ms · p99 ${r.p99} ms · ${(r.p50 / r.round).toFixed(1)} rounds`;
+    const show = () => { const b = svg.getBoundingClientRect(), s = b.width / W; tip.show(html, x(i) * s + 12, top * s + 12); };
+    hit.addEventListener("mouseenter", show); hit.addEventListener("focus", show);
+    hit.addEventListener("mouseleave", tip.hide); hit.addEventListener("blur", tip.hide);
+  });
+  el("line", { x1: m.l, x2: W - m.r, y1: y(0), y2: y(0), stroke: "var(--rule)", "stroke-width": 1 }, svg);
+}
+
+function table() {
+  const cols = [["label", "Run"], ["sha", "Commit"], ["loadgens", "Loadgens"], ["round_cfg_ms", "Round ms"], ["committed", "Committed"], ["tps", "TPS"], ["p50_ms", "p50 ms"], ["p99_ms", "p99 ms"], ["cpu_ms_per_1k", "CPU ms / 1k"]];
+  const t = document.getElementById("runs");
+  t.innerHTML = `<thead><tr>${cols.map(c => `<th>${c[1]}</th>`).join("")}</tr></thead><tbody>${DATA.rows.map(r => `<tr>${cols.map(([k]) => `<td>${typeof r[k] === "number" ? fmt(r[k], k === "tps" || k === "cpu_ms_per_1k" ? 1 : 0) : r[k]}</td>`).join("")}</tr>`).join("")}</tbody>`;
+}
+
+stats(); cpuChart(); latChart(); table();
+</script>
