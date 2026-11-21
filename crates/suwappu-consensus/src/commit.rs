@@ -352,18 +352,32 @@ pub fn causal_history(dag: &DagStore, start: CertHash) -> Vec<CertHash> {
     // Filter to certs that are actually in the DAG (mirrors linearize's
     // implicit filter) then sort by (round, author, hash) to reproduce
     // linearize order.
-    let mut out: Vec<CertHash> = seen.into_iter().filter(|h| dag.contains(h)).collect();
-    // FORK-CRITICAL: the trailing `*h` is the only thing that makes this
+    // FORK-CRITICAL: the trailing hash is the only thing that makes this
     // order TOTAL. `seen` is a HashSet (nondeterministic iteration), and two
-    // equivocating certs can share the same (round, author). Without `*h`,
-    // sort_by_key would leave their relative order unspecified → different
-    // nodes could linearize the same anchor's causal history differently →
-    // consensus fork. Do not drop the `*h` tie-breaker.
-    out.sort_by_key(|h| {
-        let c = dag.get(h).expect("just filtered to in-dag hashes");
-        (c.round, c.author, *h)
-    });
-    out
+    // equivocating certs can share the same (round, author). Without the
+    // hash the relative order would be unspecified → different nodes could
+    // linearize the same anchor's causal history differently → consensus
+    // fork. Do not drop the hash tie-breaker.
+    sorted_by_round_author_hash(dag, seen.into_iter().filter(|h| dag.contains(h)))
+}
+
+/// Order hashes of held certificates by `(round, author, hash)`. Keys are
+/// built once, then sorted: the hash makes every key distinct, so the
+/// unstable sort yields the one total order a comparator-time lookup would
+/// (perf loop, iteration 8: the commit sweep sorted ~1k certificates per
+/// committed leader with two map lookups per comparison).
+fn sorted_by_round_author_hash(
+    dag: &DagStore,
+    hashes: impl Iterator<Item = CertHash>,
+) -> Vec<CertHash> {
+    let mut keyed: Vec<(Round, AuthorityId, CertHash)> = hashes
+        .map(|h| {
+            let c = dag.get(&h).expect("only held certificates are ordered");
+            (c.round, c.author, h)
+        })
+        .collect();
+    keyed.sort_unstable();
+    keyed.into_iter().map(|(_, _, h)| h).collect()
 }
 
 /// Whether `target` is in the causal history of `from`:
@@ -457,15 +471,8 @@ pub fn causal_history_bounded(
             queue.push_back(*p);
         }
     }
-    let mut out: Vec<CertHash> = seen.into_iter().collect();
     // Same FORK-CRITICAL total order as `causal_history`.
-    out.sort_by_key(|h| {
-        let c = dag
-            .get(h)
-            .expect("only in-dag hashes were inserted into `seen`");
-        (c.round, c.author, *h)
-    });
-    out
+    sorted_by_round_author_hash(dag, seen.into_iter())
 }
 
 /// Run the DagBft-C commit rule (direct + indirect) across every

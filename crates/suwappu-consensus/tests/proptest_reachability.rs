@@ -7,14 +7,17 @@
 //!   for every pair of held certificates.
 //! - `indirect_rule_unchanged` — `decide_slot_for` over the same DAGs
 //!   equals a reference that uses the full causal history, for every slot.
+//! - `history_order_matches_lookup_sort` — `causal_history` and
+//!   `causal_history_bounded` return exactly the (round, author, hash)
+//!   order of a comparator-time-lookup sort (the pre-perf-loop code).
 //!
 //! Sprint-close run:
 //! `PROPTEST_CASES=10000 cargo test -p suwappu-consensus --release --test proptest_reachability`.
 
 use proptest::prelude::*;
 use suwappu_consensus::{
-    causal_history, cert_at, decide_slot_for, reaches, try_direct_decide_for, CertHash,
-    Certificate, Committee, DagStore, LeaderStatus, Round,
+    causal_history, causal_history_bounded, cert_at, decide_slot_for, reaches,
+    try_direct_decide_for, CertHash, Certificate, Committee, DagStore, LeaderStatus, Round,
 };
 
 /// `n` authors, `rounds` rounds. Each slot is omitted with its omit bit;
@@ -153,6 +156,40 @@ proptest! {
                 reference_decide(&dag, r, &committee),
                 "slot {}", r
             );
+        }
+    }
+
+    #[test]
+    fn history_order_matches_lookup_sort(
+        n in 4usize..=7,
+        rounds in 2u64..=12,
+        omit in any::<u64>(),
+        masks in proptest::collection::vec(any::<u8>(), 1..32),
+        seed in any::<u8>(),
+        prune in proptest::option::of(0u64..6),
+        floor in proptest::option::of(0u64..8),
+    ) {
+        let certs = build_sparse(n, rounds, omit, &masks, seed);
+        let dag = store(&certs, prune);
+        let reference = |mut v: Vec<CertHash>| {
+            v.sort_by_key(|h| {
+                let c = dag.get(h).expect("held");
+                (c.round, c.author, *h)
+            });
+            v
+        };
+        for c in &certs {
+            let a = c.hash();
+            let full = causal_history(&dag, a);
+            prop_assert_eq!(&full, &reference(full.clone()));
+            let bounded = causal_history_bounded(&dag, a, floor);
+            prop_assert_eq!(&bounded, &reference(bounded.clone()));
+            let expected: Vec<CertHash> = full
+                .iter()
+                .copied()
+                .filter(|h| floor.map_or(true, |f| dag.get(h).expect("held").round > f))
+                .collect();
+            prop_assert_eq!(bounded, expected);
         }
     }
 }

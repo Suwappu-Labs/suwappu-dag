@@ -45,6 +45,11 @@
       "n": 7,
       "name": "Leader wait",
       "change": "Round driver waits up to one extra tick for the previous leader's certificate; removes late flips and the multi-second tail"
+    },
+    {
+      "n": 8,
+      "name": "Keyed sort",
+      "change": "Causal histories sorted on precomputed (round, author, hash) keys instead of two map lookups per comparison"
     }
   ]
 }
