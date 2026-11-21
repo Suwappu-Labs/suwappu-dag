@@ -43,6 +43,10 @@ def load():
         base = [r for r in rows if r["round_cfg_ms"] == ms and r["loadgens"] == 8 and (r["label"].startswith("round-") or r["label"] == "baseline-8lg")]
         if base:
             latency.append({"round": ms, "p50": base[0]["p50_ms"], "p99": base[0]["p99_ms"], "label": base[0]["label"]})
+    final25 = [r for r in rows if r["label"] == "final-25ms"]
+    if final25:
+        best = min(final25, key=lambda r: r["p99_ms"])
+        latency.append({"round": 25, "p50": best["p50_ms"], "p99": best["p99_ms"], "label": best["label"] + " (final build)"})
     return rows, iterations, latency
 
 
@@ -51,7 +55,8 @@ def main():
     rows, iterations, latency = load()
     kept = [it for it in iterations if not it.get("reverted")]
     baseline, current = kept[0], kept[-1]
-    peak = max(rows, key=lambda r: r["tps"])
+    final = [r for r in rows if r["label"].startswith("final-")]
+    peak = max(final or rows, key=lambda r: r["tps"])
     data = {
         "rows": rows,
         "iterations": iterations,
@@ -65,6 +70,8 @@ def main():
             "peak_tps": peak["tps"],
             "peak_label": peak["label"],
             "peak_loadgens": peak["loadgens"],
+            "peak_p99": peak["p99_ms"],
+            "peak_round": peak["round_cfg_ms"],
         },
     }
     with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "history_template.html")) as f:

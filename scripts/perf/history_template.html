@@ -93,7 +93,7 @@ tr:last-child td { border-bottom: none; }
 
   <section>
     <h2>Latency follows the round timer</h2>
-    <p class="note">Submit-to-commit p50 at 8 loadgens. A commit takes about 2.6 rounds, so the round timer sets the latency floor; shorter rounds cost CPU per round, which is what the loop reduces.</p>
+    <p class="note">Submit-to-commit p50 at 8 loadgens. A commit takes about 2.6 rounds, so the round timer sets the latency floor; shorter rounds cost CPU per round, which is what the loop reduces. The first three bars are the baseline build; the 25 ms bar is the final build, which runs 25 ms rounds for less CPU than the baseline spent at 50 ms.</p>
     <div class="chart" id="lat"></div>
   </section>
 
@@ -123,7 +123,7 @@ function stats() {
   const tile = (k, v, sub) => { const d = document.createElement("div"); d.className = "stat"; d.innerHTML = `<div class="k">${k}</div><div class="v">${v}</div><div class="s">${sub}</div>`; box.appendChild(d); };
   tile("CPU per 1k intents, 50 ms rounds", `${fmt(s.current_cpu)} ms<span class="delta">${s.delta_pct}%</span>`, `from ${fmt(s.baseline_cpu)} ms at baseline`);
   tile("p50 latency, 50 ms rounds", `${fmt(s.p50_50ms)} ms`, "submit to first commit");
-  tile("Highest measured throughput", `${fmt(s.peak_tps)} TPS`, `${s.peak_loadgens} loadgens, every intent committed; loadgen-bound`);
+  tile("Highest measured throughput", `${fmt(s.peak_tps)} TPS`, `${s.peak_loadgens} loadgens at ${s.peak_round} ms rounds, all committed, p99 ${fmt(s.peak_p99)} ms; loadgen-bound`);
 }
 
 function dotChart(id, field, opts) {
@@ -186,7 +186,7 @@ function latChart() {
     const top = y(r.p50), bottom = y(0), rad = 4, x0 = x(i) - bw / 2;
     el("path", { d: `M${x0},${bottom} V${top + rad} Q${x0},${top} ${x0 + rad},${top} H${x0 + bw - rad} Q${x0 + bw},${top} ${x0 + bw},${top + rad} V${bottom} Z`, fill: "var(--series)" }, svg);
     const v = el("text", { x: x(i), y: top - 8, "text-anchor": "middle", class: "value-label" }, svg); v.textContent = `${r.p50} ms`;
-    const n = el("text", { x: x(i), y: H - m.b + 18, "text-anchor": "middle" }, svg); n.textContent = `${r.round} ms rounds`;
+    const n = el("text", { x: x(i), y: H - m.b + 18, "text-anchor": "middle" }, svg); n.textContent = `${r.round} ms rounds` + (r.label.includes("final") ? " · final" : "");
     const hit = el("rect", { x: x0 - 8, y: m.t, width: bw + 16, height: H - m.t - m.b, class: "hit", tabindex: 0 }, svg);
     const html = `${r.label}<br>p50 ${r.p50} ms · p99 ${r.p99} ms · ${(r.p50 / r.round).toFixed(1)} rounds`;
     const show = () => { const b = svg.getBoundingClientRect(), s = b.width / W; tip.show(html, x(i) * s + 12, top * s + 12); };
