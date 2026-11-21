@@ -2108,33 +2108,38 @@ async fn ingest_cert(
             .await
             .get(c.author)
             .map(|m| m.public_key_bytes.clone());
-        let via_grace = registered_key.is_none();
-        let author_pubkey = {
-            let key_bytes = match registered_key {
-                Some(k) => Some(k),
-                // IQ-010: a member removed at a boundary keeps its
-                // certificates admissible for one retention window.
-                None => state
-                    .inner
-                    .lock()
-                    .await
-                    .retired
-                    .get(&c.author)
-                    .filter(|(_, until)| round <= *until)
-                    .map(|(k, _)| k.clone()),
-            };
-            key_bytes.and_then(|k| suwappu_crypto::mldsa::PublicKey::from_bytes(&k).ok())
-        };
-        match author_pubkey {
-            Some(pk) if c.verify_signature(&pk) => {}
-            Some(_) => {
-                debug!(peer = %from.0, author = c.author, round, "inbox: cert signature verification failed");
-                continue;
-            }
-            None => {
+        // IQ-010: a member removed at a boundary keeps its certificates
+        // admissible through its grace — under its retained key, even if
+        // the id has since been re-admitted under a new one, so admission
+        // does not depend on whether this node has applied the re-admit
+        // yet (eighth S36 pass; `verify_served_snapshot` accepts the same
+        // two keys).
+        let grace_key = state
+            .inner
+            .lock()
+            .await
+            .retired
+            .get(&c.author)
+            .filter(|(_, until)| round <= *until)
+            .map(|(k, _)| k.clone());
+        let parse = |k: &Vec<u8>| suwappu_crypto::mldsa::PublicKey::from_bytes(k).ok();
+        let by_registry = registered_key
+            .as_ref()
+            .and_then(parse)
+            .is_some_and(|pk| c.verify_signature(&pk));
+        let by_grace = !by_registry
+            && grace_key
+                .as_ref()
+                .and_then(parse)
+                .is_some_and(|pk| c.verify_signature(&pk));
+        let via_grace = by_grace;
+        if !by_registry && !by_grace {
+            if registered_key.is_none() && grace_key.is_none() {
                 debug!(peer = %from.0, author = c.author, round, "inbox: cert author not a seated authority (or malformed registered key)");
-                continue;
+            } else {
+                debug!(peer = %from.0, author = c.author, round, "inbox: cert signature verification failed");
             }
+            continue;
         }
 
         // Round window: a certificate more than one retention window
@@ -5120,7 +5125,18 @@ async fn apply_commit(
     // via execute_block above — they are unchanged.
     {
         let mut inner = state.inner.lock().await;
-        if author_registered && !inner.committee.contains(cert_author) {
+        // A certificate inside the author's retirement grace is the OLD
+        // key's (the id cannot be re-admitted inside it), even when it
+        // commits after a re-admission: commit order is not monotone in
+        // rounds. It proves nothing about the newly registered key
+        // (eighth S36 pass). Prune-independent: an entry is pruned only
+        // once `until` is at or below the gc round, below any round
+        // still committing.
+        let in_grace = inner
+            .retired
+            .get(&cert_author)
+            .is_some_and(|(_, until)| cert_round <= *until);
+        if author_registered && !in_grace && !inner.committee.contains(cert_author) {
             inner.live_proven.insert(cert_author);
         }
         let mut evidence_seen = 0usize;
@@ -6214,12 +6230,6 @@ async fn run_round_driver(
                 continue;
             }
         }
-        if !carried_evidence.is_empty() {
-            let mut inner = state.inner.lock().await;
-            inner
-                .evidence_emitted
-                .extend(carried_evidence.iter().map(|p| (p.author, p.round)));
-        }
 
         // The payload digest binds BOTH the intents AND the governance
         // authorization envelopes, so the signed cert transitively
@@ -6264,10 +6274,18 @@ async fn run_round_driver(
             if let Some(store) = inner.store.as_mut() {
                 if let Err(e) = store.append_authored(target_round, cert_hash) {
                     tracing::error!(err = %e, round = target_round, "authored marker append failed; skipping propose");
+                    // The block is dropped; its evidence goes back to the
+                    // detector to be carried next round.
+                    inner.detected_equivocations.extend(carried_evidence);
                     continue;
                 }
             }
             inner.last_authored_round = Some(target_round);
+            // Evidence counts as carried only once the block is certain to
+            // leave the process (eighth S36 pass).
+            inner
+                .evidence_emitted
+                .extend(carried_evidence.iter().map(|p| (p.author, p.round)));
             if target_round > inner.max_observed_round {
                 inner.max_observed_round = target_round;
             }
@@ -9066,6 +9084,38 @@ mod tests {
         assert!(
             state.authority_registry.read().await.contains(3),
             "admit after the grace refused"
+        );
+        // Eighth S36 pass: an old-key certificate from inside the grace,
+        // committed after the re-admission (commit order is not monotone
+        // in rounds), does not prove the new key live …
+        let inside_block = state.blocks.lock().get(&inside.hash()).cloned().unwrap();
+        apply_commit(
+            &state,
+            inside.hash(),
+            inside.clone(),
+            inside_block,
+            rpe + 26,
+            "t",
+            &log,
+            false,
+        )
+        .await;
+        assert!(
+            !state.inner.lock().await.live_proven.contains(&3),
+            "old-key grace certificate marked the re-admitted key live"
+        );
+        // … and a late old-key straggler is still admitted after the
+        // re-admission, as on a node that has not applied it yet.
+        let straggler = mk(rpe + 30, 5);
+        store(&straggler);
+        ingest_cert(&state, straggler.clone(), &from, None).await;
+        assert!(
+            state.dag.read().await.contains(&straggler.hash()),
+            "old-key straggler refused once the id was re-admitted"
+        );
+        assert!(
+            state.inner.lock().await.detected_equivocations.is_empty(),
+            "grace certificate fed the detector"
         );
     }
 

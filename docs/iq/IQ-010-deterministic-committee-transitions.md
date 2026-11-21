@@ -214,9 +214,12 @@ gate's tolerance in the pinned epoch is that of `|C| − k` members; safety
 (Theorem 2) is unaffected. Every removal, of an active or an inactive
 member, counts toward the per-boundary change cap, so the retired set
 grows by at most `f` per boundary. An id inside its grace cannot be
-re-admitted (the admit is refused at the boundary): a second key for one
-id would make admission depend on which key a node holds, and a late
-old-key certificate would prove the new key live. The retained keys and graces (`retired`) are bound
+re-admitted (the admit is refused at the boundary). Because commit order
+is not monotone in rounds, an old-key certificate from inside the grace
+can still commit after a later re-admission: such a certificate never
+marks the id live-proven, and ingest keeps admitting it under the
+retained key whether or not this node has applied the re-admission, as
+a joiner's verifier does. The retained keys and graces (`retired`) are bound
 by `snapshot_root`, and a joiner verifies a served window's certificates
 against them as well as against the chain-bound registries, so a graced
 certificate is always verifiable. A retired author cannot be ejected
@@ -308,8 +311,14 @@ commit rule).
    current or next epoch, whose committees are always fixed, so the
    deferral is inert; the dangerous direction is a short epoch, which
    the floor covers. Sign-off item: the two bounds together.
-2. **Activation and ejection wait for the boundary** (up to
-   `rounds_per_epoch`). An equivocator stays seated until then; its
+2. **Activation and ejection wait for the boundary** — up to
+   `rounds_per_epoch`, and longer when the queue is long: every removal
+   counts toward the per-boundary cap of `f` and the excess carries in
+   order, so an ejection queued behind k removals waits ⌈(k + 1)/f⌉
+   boundaries. Two governance signers can lengthen that wait with
+   throwaway admit-then-exit pairs (inside the governance trust
+   assumption, which already lets them eject). An equivocator stays
+   seated until then; its
    certificates are capped at two per slot and it is within `f`. A
    detection is reaped with its slot at the gc round, so ejection
    depends on at least one detector authoring a block while the slot is
