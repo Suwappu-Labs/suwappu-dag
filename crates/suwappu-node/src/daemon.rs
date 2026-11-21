@@ -2123,10 +2123,14 @@ async fn ingest_cert(
             .filter(|(_, until)| round <= *until)
             .map(|(k, _)| k.clone());
         let parse = |k: &Vec<u8>| suwappu_crypto::mldsa::PublicKey::from_bytes(k).ok();
-        let by_registry = registered_key
-            .as_ref()
-            .and_then(parse)
-            .is_some_and(|pk| c.verify_signature(&pk));
+        // One admissible key per (id, round) (ninth S36 pass): inside a
+        // live grace only the retained key signs for the id; a re-admitted
+        // key never gains a vote at rounds of a committee it was not in.
+        let by_registry = grace_key.is_none()
+            && registered_key
+                .as_ref()
+                .and_then(parse)
+                .is_some_and(|pk| c.verify_signature(&pk));
         let by_grace = !by_registry
             && grace_key
                 .as_ref()
@@ -5261,8 +5265,16 @@ async fn apply_commit(
             // boundary either (seventh S36 pass).
             let before = state.inner.lock().await.committee.len();
             let registered_before = state.authority_registry.read().await.len();
-            apply_governance_intent(state, &intent, env.as_ref(), cert_round, self_label, log)
-                .await;
+            apply_governance_intent(
+                state,
+                &intent,
+                env.as_ref(),
+                cert_round,
+                leader_round,
+                self_label,
+                log,
+            )
+            .await;
             let committee_changed = state.inner.lock().await.committee.len() != before;
             let removed = state.authority_registry.read().await.len() < registered_before;
             if committee_changed || removed {
@@ -5376,6 +5388,10 @@ async fn apply_governance_intent(
     intent: &Intent,
     auth: Option<&crate::client::GovAuth>,
     cert_round: u64,
+    // The leader whose committed sub-DAG carries the boundary: its gc
+    // round bounds which retirement graces are already obsolete
+    // mesh-wide (the re-admit rule below).
+    leader_round: u64,
     self_label: &str,
     log: &EventLog,
 ) {
@@ -5440,22 +5456,28 @@ async fn apply_governance_intent(
     }
     match intent {
         Intent::AdmitAuthority { authority_id, .. }
-            if state
-                .inner
-                .lock()
-                .await
-                .retired
-                .get(authority_id)
-                .is_some_and(|(_, until)| cert_round <= *until) =>
+            if {
+                let inner = state.inner.lock().await;
+                let gc = suwappu_consensus::gc::gc_round(leader_round, inner.gc_depth);
+                inner
+                    .retired
+                    .get(authority_id)
+                    .is_some_and(|(_, until)| !is_obsolete(*until, gc))
+            } =>
         {
-            // IQ-010 D4 (seventh S36 pass): an id inside its retirement
-            // grace cannot be re-admitted. Its old key still authors and
-            // is admitted under the grace; a second key for the same id
-            // would make admission depend on which key a node holds, and
-            // a late old-key certificate would prove the new key "live".
-            // A grace entry is pruned only once `until` is at or below the
-            // gc round, below any boundary round, so the answer does not
-            // depend on whether the entry is still held.
+            // IQ-010 D4 (seventh and ninth S36 passes): an id is
+            // re-admitted only once every round of its old key's grace is
+            // obsolete at the committing leader. Until then the old key
+            // still authors and is admitted under the grace, and a second
+            // key for the same id would give one id two signers at the
+            // same rounds — two votes in a past committee, admission that
+            // depends on which key a node holds, and a re-removal that
+            // overwrites the old grace. After it, every node that applies
+            // the admit has (or, at the end of this walk, will have)
+            // pruned the old rounds, so exactly one key is admissible per
+            // (id, round). Deterministic and prune-independent: an entry
+            // is pruned only at a gc round at or below this leader's, i.e.
+            // only when this predicate is already false for it.
             tracing::warn!(
                 authority = *authority_id,
                 round = cert_round,
@@ -8578,7 +8600,7 @@ mod tests {
             assert_eq!(queued, 1, "evidence queued once per slot");
             assert!(inner.committee.contains(1), "ejection before the boundary");
         }
-        apply_governance_intent(&state, &evidence, None, 16, "t", &log).await;
+        apply_governance_intent(&state, &evidence, None, 16, 16, "t", &log).await;
         assert!(!state.authority_registry.read().await.contains(1));
         assert_eq!(state.stake_table.read().await.weight(1), 0);
         assert_eq!(state.inner.lock().await.committee.members(), &[0, 2, 3]);
@@ -9075,15 +9097,42 @@ mod tests {
             co_signature: sig(&keys[1].1),
             candidate_pop_signature: sig(&k2_sk),
         };
-        apply_governance_intent(&state, &admit, Some(&auth), rpe + 40, "t", &log).await;
+        apply_governance_intent(&state, &admit, Some(&auth), rpe + 40, rpe + 40, "t", &log).await;
         assert!(
             !state.authority_registry.read().await.contains(3),
             "id re-admitted inside its retirement grace"
         );
-        apply_governance_intent(&state, &admit, Some(&auth), 2 * rpe, "t", &log).await;
+        // Past `until` but not yet obsolete at the committing leader
+        // (gc = leader − gc_depth): still refused (ninth S36 pass).
+        apply_governance_intent(&state, &admit, Some(&auth), 2 * rpe, 2 * rpe, "t", &log).await;
+        assert!(
+            !state.authority_registry.read().await.contains(3),
+            "id re-admitted while its old grace rounds are still live"
+        );
+        let leader = 2 * rpe - 1 + 16;
+        apply_governance_intent(&state, &admit, Some(&auth), leader, leader, "t", &log).await;
         assert!(
             state.authority_registry.read().await.contains(3),
-            "admit after the grace refused"
+            "admit once the old grace is obsolete refused"
+        );
+        // One key per (id, round): the new key cannot sign at a round
+        // inside the old grace (here still held: this test never prunes).
+        let new_key_old_round = {
+            let mut c = Certificate {
+                author: 3,
+                round: rpe + 40,
+                parents: Vec::new(),
+                payload_digest: [6; 32],
+                signature: Vec::new(),
+            };
+            c.sign(&k2_sk);
+            c
+        };
+        store(&new_key_old_round);
+        ingest_cert(&state, new_key_old_round.clone(), &from, None).await;
+        assert!(
+            !state.dag.read().await.contains(&new_key_old_round.hash()),
+            "re-admitted key admitted at a round of the old key's grace"
         );
         // Eighth S36 pass: an old-key certificate from inside the grace,
         // committed after the re-admission (commit order is not monotone

@@ -213,13 +213,17 @@ live stake table, which drops the member at the boundary, so the joint
 gate's tolerance in the pinned epoch is that of `|C| − k` members; safety
 (Theorem 2) is unaffected. Every removal, of an active or an inactive
 member, counts toward the per-boundary change cap, so the retired set
-grows by at most `f` per boundary. An id inside its grace cannot be
-re-admitted (the admit is refused at the boundary). Because commit order
-is not monotone in rounds, an old-key certificate from inside the grace
-can still commit after a later re-admission: such a certificate never
-marks the id live-proven, and ingest keeps admitting it under the
-retained key whether or not this node has applied the re-admission, as
-a joiner's verifier does. The retained keys and graces (`retired`) are bound
+grows by at most `f` per boundary. **One key per (id, round):** an id is
+re-admitted only once every round of its old key's grace is obsolete at
+the leader committing the boundary (`until ≤ gc_round(leader)`; the admit
+is refused before that), and inside a live grace ingest accepts only the
+retained key for the id. A re-admitted key therefore never signs at a
+round of a committee it was not in, a re-removal cannot overwrite a grace
+whose rounds are still live, and admission never depends on which key a
+node holds. The predicate is prune-independent: an entry is pruned only
+at a gc round at or below the committing leader's. As defence in depth,
+a certificate inside its author's grace never marks the id live-proven
+(commit order is not monotone in rounds). The retained keys and graces (`retired`) are bound
 by `snapshot_root`, and a joiner verifies a served window's certificates
 against them as well as against the chain-bound registries, so a graced
 certificate is always verifiable. A retired author cannot be ejected
