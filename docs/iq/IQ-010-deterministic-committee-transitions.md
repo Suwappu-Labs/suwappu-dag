@@ -164,7 +164,12 @@ proposal is bounded by bytes as well as count — mempool intents up to
 half a wire frame, governance intents capped per block, evidence at
 `MAX_EVIDENCE_PER_BLOCK` — so an honest author never signs a certificate
 whose block cannot be framed (an unframeable block is a certificate no
-peer can admit under IQ-009 D1).
+peer can admit under IQ-009 D1). The byte bounds are backed by bounds on
+every input — a certificate's parents are distinct and at most one per
+admissible author per slot; an Exit/Eject envelope carries exactly two
+ML-DSA-65 signatures and an Admit three, and a stored envelope is never
+replaced — and by a final encoded-size check before signing that returns
+trailing intents to the mempool until the block fits.
 
 ### D4. Each slot is decided under the committee pinned to its epoch
 
@@ -193,18 +198,21 @@ the denominator. Both legs are pure functions of the committed prefix
 and the gate is halt-not-fork, so a straddling slot can be deferred,
 never ratified to a different leader.
 
-An authority removed at a boundary is *retired* for a grace of one
-retention window (`gc_depth_rounds` past the removal round): its
-certificates at rounds up to the grace are still admitted (signature
-against its retained key) so a node that crossed the boundary later and
-referenced them as parents does not leave every descendant orphaned on
-the nodes that crossed earlier. The grace equals the era window a joiner
-verifies a served snapshot under, so every graced certificate is
-verifiable by a joiner, and a crossing skew beyond it is already refused
-by the ingest ceiling. Retired certificates are DAG structure only — the
-epoch's pinned committee decides leaders and support; a retired author
-cannot be ejected again (evidence against it is not carried) and cannot
-be re-activated.
+An authority removed at a boundary is *retired*. Its grace runs to the
+later of one retention window past the removal round and the last round
+of every epoch whose pinned committee still holds it — with the
+one-epoch lag, the rest of the epoch the removal opened. Inside the grace
+its certificates are admitted (signature against its retained key), it
+**keeps authoring** while the committee pinned to the round being
+authored holds it, and its certificates are admissible parents. A member
+the slot rule still counts therefore still participates: k voluntary
+exits at one boundary do not cut the epoch's fault tolerance to `f − k`
+(sixth review pass). The retained keys and graces (`retired`) are bound
+by `snapshot_root`, and a joiner verifies a served window's certificates
+against them as well as against the chain-bound registries, so a graced
+certificate is always verifiable. A retired author cannot be ejected
+again (evidence against it is not carried) and cannot be re-activated;
+its grace ends with its pinned epoch.
 
 ### D5. The fast path uses the committee
 
@@ -297,15 +305,19 @@ commit rule).
    detection is reaped with its slot at the gc round, so ejection
    depends on at least one detector authoring a block while the slot is
    inside its retention window — true of every live committee member.
-3. **Registered, inactive members — and retired ones, for one retention
-   window — can grow the DAG** (their certificates are admitted and may
-   be parents). Bounded by the per-slot cap, the ring ceiling (50) and
-   the retention window.
+3. **Registered, inactive members — and retired ones, through their
+   grace — can grow the DAG** (their certificates are admitted and may
+   be parents). Bounded by the per-slot cap, the ring ceiling (50), the
+   per-boundary change cap and the retention window; a certificate's
+   parents are distinct and at most `MAX_CERTS_PER_AUTHOR_ROUND × 50`.
 4. **The Validator Ring is still a mirror** of the Authority Ring
    (`/goal` A8); stake weight activation follows the committee.
-5. **Evidence size.** Two ML-DSA-65-signed certificates ≈ 7 KB per
-   intent, at most `MAX_EVIDENCE_PER_BLOCK` per block; a node that has
-   emitted evidence for a slot does not re-emit it.
+5. **Evidence size.** Two ML-DSA-65-signed certificates, ≈ 7 KB per
+   intent at honest widths and ≈ 13 KB at the parent bound, at most
+   `MAX_EVIDENCE_PER_BLOCK` per block; a node that has emitted evidence
+   for a slot does not re-emit it. The proposal's frame fit is checked
+   against encoded sizes before signing, so no input mix can make an
+   honest author sign an unframeable block.
 6. **The consensus-reviewer checklist item 2** ("use the `pending_stake`
    deferred-activation pattern") is superseded: activation is still
    deferred until liveness is proven, but the proof is a committed
@@ -323,3 +335,15 @@ commit rule).
    doubled in rate by this IQ. Fix direction: chunk the chain as
    snapshots are, or let an operator supply a trusted checkpoint the
    chain is served from. Sign-off item until then.
+9. **Governance digests carry no nonce or epoch** (pre-dates this IQ).
+   A historical dual-signed Exit/Eject can be resubmitted while its
+   signers are seated — e.g. against an id re-admitted later. Envelopes
+   can no longer be padded or replaced, so the replay is no longer a
+   size vector, but it remains a governance-semantics item: bind the
+   digest to an epoch or nonce. Sign-off item.
+10. **Snapshot install writes the registries, the stake table and the
+   committee in separate steps.** A checkpoint aggregation running
+   without the commit lock can read a half-installed set; the root
+   mismatch is logged and the aggregation dropped, so the effect is a
+   skipped checkpoint, not a wrong one. Follow-up: one critical section,
+   as `remove_authority` uses.

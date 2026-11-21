@@ -561,6 +561,15 @@ pub(crate) async fn verify_governed_intent(
     // admitted must itself sign the digest, so an admit cannot be forged
     // for a key nobody holds. This is IN ADDITION to the two seated
     // authorities above, not a substitute for the second one.
+    // Every signature field is exactly one ML-DSA-65 signature
+    // (`Signature::from_bytes` enforces the length for the two above and
+    // the candidate's below); an Exit/Eject carries no candidate field at
+    // all, so the envelope cannot be padded. Checked at ingress and again
+    // at commit, since both call this function (sixth S36 pass).
+    if !matches!(intent, Intent::AdmitAuthority { .. }) && !auth.candidate_pop_signature.is_empty()
+    {
+        return Err("governed submit: candidate PoP signature on a non-admit intent".to_string());
+    }
     if let Intent::AdmitAuthority {
         mldsa_public_key, ..
     } = intent

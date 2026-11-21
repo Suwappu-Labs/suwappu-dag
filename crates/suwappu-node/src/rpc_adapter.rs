@@ -337,6 +337,9 @@ impl StateView for NodeStateView {
                 suwappu_mempool::MempoolError::BelowFloor { .. } => SubmitIntentError::EnqueueFull,
                 suwappu_mempool::MempoolError::RateLimited { .. } => SubmitIntentError::EnqueueFull,
                 suwappu_mempool::MempoolError::Encode(_) => SubmitIntentError::EnqueueFull,
+                e @ suwappu_mempool::MempoolError::TooLarge { .. } => {
+                    SubmitIntentError::BadIntentEncoding(e.to_string())
+                }
             })?;
 
         Ok(intent_hash)

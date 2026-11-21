@@ -673,7 +673,13 @@ impl State {
         // submission simply needs resubmission. Reaching the cap requires
         // 4096 ingress-valid (two-authority-signed) submissions, so this
         // is a soft bound, not an attack surface.
-        if map.len() >= 4096 && !map.contains_key(&intent_hash) {
+        // Never overwrite: any stored envelope already verified for this
+        // intent, and a resubmission must not replace it (sixth S36 pass —
+        // a replayed public envelope was the vehicle for padding).
+        if map.contains_key(&intent_hash) {
+            return;
+        }
+        if map.len() >= 4096 {
             tracing::warn!("governance envelope store full; dropping new envelope (resubmit)");
             return;
         }
@@ -2091,6 +2097,10 @@ async fn ingest_cert(
         // effectively never gossips it further, satisfying "reject /
         // don't-gossip on failure" without needing an explicit relay step
         // (this daemon doesn't push-relay certs; peers pull via GetCert).
+        if !parents_well_formed(&c) {
+            debug!(peer = %from.0, author = c.author, round, parents = c.parents.len(), "inbox: cert parents duplicated or wider than any honest proposal, dropped");
+            continue;
+        }
         let registered_key = state
             .authority_registry
             .read()
@@ -3468,6 +3478,9 @@ fn verify_served_snapshot(
         if block_headers.get(&c.hash()) != Some(&cert_header(c)) {
             return Err("certificate without its block");
         }
+        if !parents_well_formed(c) {
+            return Err("certificate parents duplicated or too wide");
+        }
     }
     for c in &snap.dag_certs {
         let slot = per_slot.entry((c.author, c.round)).or_default();
@@ -3500,7 +3513,16 @@ fn verify_served_snapshot(
                     suwappu_crypto::mldsa::PublicKey::from_bytes(&m.public_key_bytes).ok()
                 })
                 .is_some_and(|pk| c.verify_signature(&pk))
-        });
+        }) || snap
+            .retired
+            .get(&c.author)
+            // A member removed at a boundary: its key and grace are bound
+            // by `snapshot_root`, which the checkpoint quorum co-signed,
+            // so its certificates inside the grace are as trustworthy as
+            // a registered member's (sixth S36 pass).
+            .filter(|(_, until)| c.round <= *until)
+            .and_then(|(k, _)| suwappu_crypto::mldsa::PublicKey::from_bytes(k).ok())
+            .is_some_and(|pk| c.verify_signature(&pk));
         if !ok {
             return Err("certificate not signed by the committee in force at its round");
         }
@@ -3884,6 +3906,14 @@ async fn recover_from_disk(
                         tracing::debug!(err = ?e, round = cert.round, "recovery: replayed cert tombstoned");
                     }
                 }
+                // A twin of a replayed certificate must still be detected.
+                state
+                    .inner
+                    .lock()
+                    .await
+                    .seen_at
+                    .entry((cert.author, cert.round))
+                    .or_insert(h);
                 if !state.committed.lock().insert(h) {
                     continue;
                 }
@@ -5509,16 +5539,31 @@ async fn remove_authority(
             .filter(|id| *id != authority_id)
             .collect();
         inner.committee = Committee::new(members);
-        // The grace equals the retention window, which is also the era
-        // window a joiner verifies a served snapshot's certificates under
-        // (`verify_served_snapshot`): a longer grace would admit
-        // certificates no joiner could verify, and a crossing skew
-        // beyond the window is already refused by the ingest ceiling
-        // (fourth S36 pass).
+        // The grace covers one retention window past the boundary (late
+        // certificates from a node that crossed later) and every round of
+        // an epoch whose pinned committee still holds the member (it is
+        // counted there, so it keeps authoring there — sixth S36 pass).
+        // A joiner verifies these certificates against the snapshot's
+        // root-bound `retired` keys (`verify_served_snapshot`).
         let grace = inner.gc_depth;
+        let rpe = inner.epoch.rounds_per_epoch;
+        let pinned_end = if rpe == 0 {
+            0
+        } else {
+            inner
+                .committee_by_epoch
+                .iter()
+                .filter(|(_, c)| c.contains(authority_id))
+                .map(|(e, _)| e.saturating_add(1).saturating_mul(rpe).saturating_sub(1))
+                .max()
+                .unwrap_or(0)
+        };
         inner.retired.insert(
             authority_id,
-            (removed.public_key_bytes, cert_round.saturating_add(grace)),
+            (
+                removed.public_key_bytes,
+                cert_round.saturating_add(grace).max(pinned_end),
+            ),
         );
     }
     log.emit(
@@ -5699,6 +5744,61 @@ const MAX_BLOCK_INTENT_BYTES: usize = crate::wire::MAX_FRAME_BYTES / 2;
 /// Governance intents per block proposal; the excess waits in the mempool.
 const MAX_GOVERNANCE_PER_BLOCK: usize = 16;
 
+/// Upper bound on the encoded block outside its intents and governance
+/// envelopes (wire tag, header fields, vector lengths, frame envelope).
+/// `block_at_every_budget_fits_a_frame` checks the estimate against the
+/// real encoding.
+const BLOCK_FRAME_MARGIN: usize = 4096;
+
+/// A certificate's parent list: distinct, and at most one certificate per
+/// admissible author per slot. An honest `parents_for_round` lists one
+/// certificate per registered or retiring author, never more than
+/// `MAX_CERTS_PER_AUTHOR_ROUND × AUTHORITY_RING_MAX`; anything wider is
+/// padding that inflates every structure the certificate travels in
+/// (evidence intents above all — sixth S36 pass).
+const MAX_PARENTS_PER_CERT: usize =
+    MAX_CERTS_PER_AUTHOR_ROUND * suwappu_authority::AUTHORITY_RING_MAX;
+
+const _: () = assert!(suwappu_mempool::MAX_INTENT_BYTES <= MAX_BLOCK_INTENT_BYTES);
+
+fn parents_well_formed(c: &Certificate) -> bool {
+    if c.parents.len() > MAX_PARENTS_PER_CERT {
+        return false;
+    }
+    let mut seen = HashSet::with_capacity(c.parents.len());
+    c.parents.iter().all(|p| seen.insert(*p))
+}
+
+/// IQ-010 (sixth S36 pass): a member removed at a boundary stays in the
+/// committee pinned to the rest of the epoch (D4's one-epoch lag) and is
+/// counted by every slot of it; it keeps authoring while pinned, under the
+/// retirement grace that admits its certificates on every node.
+fn may_author_retired(inner: &StateInner, self_id: AuthorityId, round: u64) -> bool {
+    inner
+        .retired
+        .get(&self_id)
+        .is_some_and(|(_, until)| round <= *until)
+        && inner
+            .committee_for_round(round)
+            .is_some_and(|c| c.contains(self_id))
+}
+
+/// Put an intent drained for a proposal back into the mempool (it did not
+/// fit this block). A governance intent the mempool refuses (full, below
+/// floor) is lost; its stored envelope is released with it rather than
+/// left to fill the envelope store (sixth S36 pass).
+fn requeue_or_release(state: &State, intent: Intent, now_ms: u64) {
+    let hash: [u8; 32] =
+        *blake3::hash(&crate::codec::encode(&intent).expect("intent serialize")).as_bytes();
+    let governance = crate::client::is_governance_intent(&intent);
+    if let Err(e) = state.mempool.submit(intent, 0, None, now_ms) {
+        tracing::warn!(error = %e, governance, "intent drained for a proposal could not be requeued; dropped");
+        if governance {
+            state.take_governance_envelope(&hash);
+        }
+    }
+}
+
 /// IQ-010 D3: take this node's detected equivocations that are still
 /// worth carrying as evidence. Only a still-registered author can be
 /// ejected; evidence against anyone else would be committed, verified and
@@ -5751,7 +5851,12 @@ async fn run_round_driver(
         // this gate just avoids authoring rejected certs and, more
         // importantly, keeps a joiner from burning its round cadence
         // before catch-up completes.
-        if !state.authority_registry.read().await.contains(self_id) {
+        //
+        // A member removed at a boundary keeps authoring while the
+        // committee pinned to the round still holds it (checked below,
+        // once the round is known).
+        let seated = state.authority_registry.read().await.contains(self_id);
+        if !seated && !state.inner.lock().await.retired.contains_key(&self_id) {
             continue;
         }
 
@@ -5814,6 +5919,9 @@ async fn run_round_driver(
             }
             target_round = next;
             prev_round = target_round.saturating_sub(1);
+            if !seated && !may_author_retired(&inner, self_id, target_round) {
+                continue;
+            }
             if inner.last_authored_round.is_some() {
                 // The parents live at `prev_round`; count and threshold
                 // them under that round's committee.
@@ -5847,7 +5955,18 @@ async fn run_round_driver(
                     );
                 }
             }
-            parents = parents_for_round(&dag, target_round, &registered);
+            // Retiring members inside their grace are admissible parents
+            // too: a pinned slot they lead must be able to gather support.
+            let mut parent_authors: BTreeSet<AuthorityId> = registered.iter().copied().collect();
+            parent_authors.extend(
+                inner
+                    .retired
+                    .iter()
+                    .filter(|(_, (_, until))| *until >= prev_round)
+                    .map(|(id, _)| *id),
+            );
+            let parent_authors: Vec<AuthorityId> = parent_authors.into_iter().collect();
+            parents = parents_for_round(&dag, target_round, &parent_authors);
         }
         round_started_at = tokio::time::Instant::now();
 
@@ -5888,9 +6007,7 @@ async fn run_round_driver(
             });
             let now = now_unix_ms();
             for i in deferred {
-                if let Err(e) = state.mempool.submit(i, 0, None, now) {
-                    tracing::warn!(error = %e, "governance intent over the per-block cap could not be requeued");
-                }
+                requeue_or_release(&state, i, now);
             }
         }
         // IQ-010 D3: carry equivocations this node detected as evidence,
@@ -5936,16 +6053,19 @@ async fn run_round_driver(
 
         // Per-intent hashes for the `tx_to_block` secondary index and the
         // governance-envelope lookup. Computed BEFORE the payload digest.
-        let intent_hash_bytes: Vec<[u8; 32]> = intents
+        let (mut intent_hash_bytes, mut intent_lens): (Vec<[u8; 32]>, Vec<usize>) = intents
             .iter()
-            .map(|i| *blake3::hash(&crate::codec::encode(i).expect("intent serialize")).as_bytes())
-            .collect();
+            .map(|i| {
+                let bytes = crate::codec::encode(i).expect("intent serialize");
+                (*blake3::hash(&bytes).as_bytes(), bytes.len())
+            })
+            .unzip();
 
         // Attach the on-chain governance authorization envelope for every
         // governance intent in this block (looked up by intent hash from
         // the ingest-time store and consumed). Committers re-verify these
         // at the epoch boundary.
-        let governance_auth: Vec<(u32, crate::client::GovAuth)> = intents
+        let mut governance_auth: Vec<(u32, crate::client::GovAuth)> = intents
             .iter()
             .enumerate()
             .filter(|(_, i)| {
@@ -5962,6 +6082,54 @@ async fn run_round_driver(
                     .map(|a| (idx as u32, a))
             })
             .collect();
+
+        // Frame guarantee (sixth S36 pass): every input above is bounded
+        // (mempool bytes, governance count and envelope shape, evidence
+        // count and certificate parents); this backstop makes the property
+        // unconditional. Trailing non-evidence intents go back to the
+        // mempool, with their envelopes, until the block fits one frame.
+        {
+            let env_len = |e: &(u32, crate::client::GovAuth)| {
+                crate::codec::encode(e)
+                    .map(|b| b.len())
+                    .unwrap_or(usize::MAX / 4)
+            };
+            let mut total = BLOCK_FRAME_MARGIN
+                + intent_lens.iter().sum::<usize>()
+                + governance_auth.iter().map(env_len).sum::<usize>();
+            let now = now_unix_ms();
+            while total > crate::wire::MAX_FRAME_BYTES
+                && intents
+                    .last()
+                    .is_some_and(|i| !crate::client::is_node_only_intent(i))
+            {
+                let idx = intents.len() - 1;
+                let (Some(i), Some(h), Some(len)) =
+                    (intents.pop(), intent_hash_bytes.pop(), intent_lens.pop())
+                else {
+                    break;
+                };
+                total -= len;
+                if governance_auth
+                    .last()
+                    .is_some_and(|(j, _)| *j as usize == idx)
+                {
+                    if let Some(e) = governance_auth.pop() {
+                        total -= env_len(&e);
+                        state.remember_governance_envelope(h, e.1);
+                    }
+                }
+                requeue_or_release(&state, i, now);
+            }
+            if total > crate::wire::MAX_FRAME_BYTES {
+                tracing::error!(
+                    round = target_round,
+                    bytes = total,
+                    "block over the frame cap with evidence alone; not proposing"
+                );
+                continue;
+            }
+        }
 
         // The payload digest binds BOTH the intents AND the governance
         // authorization envelopes, so the signed cert transitively
@@ -8480,7 +8648,13 @@ mod tests {
             let mut c = Certificate {
                 author: 1,
                 round: 3,
-                parents: (0..128u8).map(|i| CertHash([i; 32])).collect(),
+                parents: (0..MAX_PARENTS_PER_CERT)
+                    .map(|i| {
+                        let mut h = [0u8; 32];
+                        h[..8].copy_from_slice(&(i as u64).to_le_bytes());
+                        CertHash(h)
+                    })
+                    .collect(),
                 payload_digest: [tag; 32],
                 signature: Vec::new(),
             };
@@ -8521,14 +8695,228 @@ mod tests {
             intents,
             governance_auth,
         };
+        assert!(mk(0).parents.len() == MAX_PARENTS_PER_CERT && parents_well_formed(&mk(0)));
+        let estimate = BLOCK_FRAME_MARGIN
+            + block
+                .intents
+                .iter()
+                .map(|i| crate::codec::encode(i).unwrap().len())
+                .sum::<usize>()
+            + block
+                .governance_auth
+                .iter()
+                .map(|e| crate::codec::encode(e).unwrap().len())
+                .sum::<usize>();
         let frame = crate::codec::encode_frame(&WireMessage::Block(block))
             .unwrap()
             .len();
+        // The proposer's fit check never under-estimates the frame.
+        assert!(estimate >= frame, "estimate {estimate} < frame {frame}");
         assert!(
             frame < crate::wire::MAX_FRAME_BYTES,
             "worst-case block is {frame} B, frame cap {}",
             crate::wire::MAX_FRAME_BYTES
         );
+    }
+
+    /// Sixth S36 pass: a certificate whose parents repeat, or outnumber
+    /// any honest proposal, is refused at ingest (it would otherwise make
+    /// every evidence intent carrying it arbitrarily large).
+    #[tokio::test]
+    async fn wide_or_duplicate_parents_are_refused() {
+        let keys: Vec<(
+            suwappu_crypto::mldsa::PublicKey,
+            suwappu_crypto::mldsa::SecretKey,
+        )> = (0..4).map(|_| suwappu_crypto::mldsa::keypair()).collect();
+        let state = State::new(
+            &small_manifest("iq010-parents-4n", &keys, 16),
+            keys[0].1.clone(),
+            None,
+        );
+        let mk = |parents: Vec<CertHash>, tag: u8| {
+            let mut c = Certificate {
+                author: 1,
+                round: 2,
+                parents,
+                payload_digest: [tag; 32],
+                signature: Vec::new(),
+            };
+            c.sign(&keys[1].1);
+            c
+        };
+        let dup = mk(vec![CertHash([7; 32]), CertHash([7; 32])], 1);
+        let wide = mk(
+            (0..=MAX_PARENTS_PER_CERT)
+                .map(|i| {
+                    let mut h = [0u8; 32];
+                    h[..8].copy_from_slice(&(i as u64).to_le_bytes());
+                    CertHash(h)
+                })
+                .collect(),
+            2,
+        );
+        assert!(!parents_well_formed(&dup) && !parents_well_formed(&wide));
+        let from = PeerId("p".into());
+        for c in [dup, wide] {
+            ingest_cert(&state, c.clone(), &from, None).await;
+            let inner = state.inner.lock().await;
+            assert!(
+                !inner.awaiting_block.contains_key(&c.hash())
+                    && !inner
+                        .orphans
+                        .values()
+                        .flatten()
+                        .any(|o| o.hash() == c.hash()),
+                "malformed-parent certificate was parked or buffered"
+            );
+            drop(inner);
+            assert!(!state.dag.read().await.contains(&c.hash()));
+        }
+    }
+
+    /// Sixth S36 pass: an Exit/Eject envelope carries no candidate field
+    /// (it was unchecked and paddable to a frame), and a stored envelope
+    /// is never overwritten by a resubmission.
+    #[tokio::test]
+    async fn governance_envelope_cannot_be_padded_or_replaced() {
+        let keys: Vec<(
+            suwappu_crypto::mldsa::PublicKey,
+            suwappu_crypto::mldsa::SecretKey,
+        )> = (0..4).map(|_| suwappu_crypto::mldsa::keypair()).collect();
+        let state = State::new(
+            &small_manifest("iq010-envelope-4n", &keys, 16),
+            keys[0].1.clone(),
+            None,
+        );
+        let eject = Intent::EjectAuthority {
+            authority_id: 3,
+            proof_ref: [0; 32],
+        };
+        let digest = crate::client::intent_signing_digest(&state.manifest_network_id, &eject);
+        let sig = |sk: &suwappu_crypto::mldsa::SecretKey| {
+            suwappu_crypto::mldsa::sign(&digest, sk)
+                .unwrap()
+                .as_bytes()
+                .to_vec()
+        };
+        let auth = crate::client::GovAuth {
+            sponsor_pubkey_hash: crate::client::signer_pubkey_hash(keys[0].0.as_bytes()),
+            sponsor_signature: sig(&keys[0].1),
+            co_signer_pubkey_hash: crate::client::signer_pubkey_hash(keys[1].0.as_bytes()),
+            co_signature: sig(&keys[1].1),
+            candidate_pop_signature: Vec::new(),
+        };
+        crate::client::verify_governed_intent(&state, &state.manifest_network_id, &eject, &auth)
+            .await
+            .expect("well-formed eject envelope");
+        let mut padded = auth.clone();
+        padded.candidate_pop_signature = vec![0u8; 900 * 1024];
+        assert!(crate::client::verify_governed_intent(
+            &state,
+            &state.manifest_network_id,
+            &eject,
+            &padded
+        )
+        .await
+        .is_err());
+        let h = [9u8; 32];
+        state.remember_governance_envelope(h, auth.clone());
+        state.remember_governance_envelope(h, padded);
+        let kept = state.take_governance_envelope(&h).unwrap();
+        assert!(
+            kept.candidate_pop_signature.is_empty(),
+            "stored envelope replaced"
+        );
+    }
+
+    /// Sixth S36 pass: a member removed at the crossing into epoch e
+    /// stays in the committee pinned to epoch e, so it keeps authoring and
+    /// its certificates stay admissible through the end of that epoch —
+    /// not only for one retention window — and not beyond it.
+    #[tokio::test]
+    async fn leaving_member_keeps_authoring_through_its_pinned_epoch() {
+        let keys: Vec<(
+            suwappu_crypto::mldsa::PublicKey,
+            suwappu_crypto::mldsa::SecretKey,
+        )> = (0..4).map(|_| suwappu_crypto::mldsa::keypair()).collect();
+        let state = State::new(
+            &small_manifest("iq010-leaving-4n", &keys, 16),
+            keys[0].1.clone(),
+            None,
+        );
+        let (log, _task) =
+            EventLog::start(&std::env::temp_dir().join("suwappu-iq010-leaving.ndjson"))
+                .await
+                .unwrap();
+        let rpe = state.inner.lock().await.epoch.rounds_per_epoch;
+        assert_eq!(rpe, 1024);
+        {
+            let mut inner = state.inner.lock().await;
+            let full = inner.committee.clone();
+            inner.committee_by_epoch.insert(1, full);
+        }
+        // Removed at the crossing into epoch 1 (round 1024).
+        remove_authority(&state, 3, rpe, "t", "t", &log).await;
+        {
+            let mut inner = state.inner.lock().await;
+            assert_eq!(
+                inner.retired[&3].1,
+                2 * rpe - 1,
+                "grace does not reach the end of the pinned epoch"
+            );
+            let next = inner.committee.clone();
+            inner.committee_by_epoch.insert(2, next);
+            assert!(may_author_retired(&inner, 3, rpe + 26));
+            assert!(may_author_retired(&inner, 3, 2 * rpe - 1));
+            assert!(
+                !may_author_retired(&inner, 3, 2 * rpe),
+                "authors past its pinned epoch"
+            );
+            assert!(
+                !may_author_retired(&inner, 2, rpe + 26),
+                "a seated member is not retired"
+            );
+        }
+        let mk = |round: u64, tag: u8| {
+            let mut c = Certificate {
+                author: 3,
+                round,
+                parents: Vec::new(),
+                payload_digest: [tag; 32],
+                signature: Vec::new(),
+            };
+            c.sign(&keys[3].1);
+            c
+        };
+        let store = |c: &Certificate| {
+            state.blocks.lock().insert(
+                c.hash(),
+                BlockPayload {
+                    payload_digest: c.payload_digest,
+                    author: 3,
+                    round: c.round,
+                    cert_hash: c.hash(),
+                    intents: Vec::new(),
+                    governance_auth: Vec::new(),
+                },
+            );
+        };
+        let from = PeerId("p".into());
+        // Past one retention window but inside the pinned epoch: admitted.
+        let inside = mk(rpe + 26, 1);
+        state.inner.lock().await.last_committed_leader_round = Some(rpe + 20);
+        store(&inside);
+        ingest_cert(&state, inside.clone(), &from, None).await;
+        assert!(
+            state.dag.read().await.contains(&inside.hash()),
+            "pinned member's certificate refused past one retention window"
+        );
+        // First round of the next epoch: refused.
+        let beyond = mk(2 * rpe, 2);
+        state.inner.lock().await.last_committed_leader_round = Some(2 * rpe - 4);
+        store(&beyond);
+        ingest_cert(&state, beyond.clone(), &from, None).await;
+        assert!(!state.dag.read().await.contains(&beyond.hash()));
     }
 
     /// IQ-010 D6: a registered-but-inactive member (admitted, never
