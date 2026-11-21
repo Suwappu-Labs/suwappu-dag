@@ -44,7 +44,7 @@ pub mod joint;
 pub use cert::{AuthorityId, CertHash, Certificate, Round};
 pub use commit::{
     causal_history, causal_history_bounded, cert_at, commit_leader, commit_leader_for, decide_slot,
-    decide_slot_for, finalize, finalize_for, leader, quorum_threshold, try_direct_decide,
+    decide_slot_for, finalize, finalize_for, leader, quorum_threshold, reaches, try_direct_decide,
     try_direct_decide_for, try_indirect_decide, try_indirect_decide_for, CommitteeSize,
     LeaderStatus,
 };

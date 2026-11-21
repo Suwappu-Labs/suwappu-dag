@@ -209,7 +209,7 @@ pub fn try_indirect_decide_for(
         // No cert was ever authored at this slot — definitively skipped.
         None => return LeaderStatus::Skip,
     };
-    if causal_history(dag, anchor).contains(&target_hash) {
+    if reaches(dag, anchor, target_hash) {
         LeaderStatus::Direct(target_hash)
     } else {
         LeaderStatus::Skip
@@ -351,6 +351,48 @@ pub fn causal_history(dag: &DagStore, start: CertHash) -> Vec<CertHash> {
         (c.round, c.author, *h)
     });
     out
+}
+
+/// Whether `target` is in the causal history of `from`:
+/// `reaches(dag, from, target) == causal_history(dag, from).contains(&target)`.
+///
+/// The indirect rule only needs this membership bit, not the ordered
+/// history. Every stored certificate's parents have strictly smaller
+/// rounds (`DagStore::insert` enforces it), so nothing at or below the
+/// target's round other than the target itself can reach it: the search
+/// never expands below that round and stops at the first hit. Cost is
+/// bounded by the certificates between the two rounds instead of the
+/// whole retained history plus an `O(n log n)` sort, which made the
+/// indirect rule the dominant cost of the commit walk (perf loop,
+/// iteration 1). `proptest_reachability.rs` checks the equality above.
+pub fn reaches(dag: &DagStore, from: CertHash, target: CertHash) -> bool {
+    let Some(t) = dag.get(&target) else {
+        // `causal_history` only returns certificates held in the DAG.
+        return false;
+    };
+    let target_round = t.round;
+    let mut seen: HashSet<CertHash> = HashSet::new();
+    let mut stack: Vec<CertHash> = vec![from];
+    while let Some(h) = stack.pop() {
+        if h == target {
+            return true;
+        }
+        if !seen.insert(h) {
+            continue;
+        }
+        let Some(c) = dag.get(&h) else {
+            continue;
+        };
+        if c.round <= target_round {
+            continue;
+        }
+        for p in &c.parents {
+            if !seen.contains(p) {
+                stack.push(*p);
+            }
+        }
+    }
+    false
 }
 
 /// Causal history of `start` cut at a commit floor (IQ-008 D1).
