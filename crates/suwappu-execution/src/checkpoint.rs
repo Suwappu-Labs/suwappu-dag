@@ -37,6 +37,14 @@ use thiserror::Error;
 pub type CheckpointHeight = u64;
 
 /// A checkpoint over the joint state of the execution substrate.
+///
+/// V2 (DAG-S34, IQ-008 D5) adds `registry_root`: a checkpoint commits to
+/// the committee (Authority Ring, Validator Ring, stake table, epoch) as
+/// well as to the substrate, so a syncing node can walk a chain of
+/// checkpoints from the genesis committee and learn each successor
+/// committee from the checkpoint the previous one signed — the Sui
+/// checkpoint-verification method. Nothing was deployed under V1, so the
+/// hash domain simply moves to `SUWAPPU-CHECKPOINT-V2`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Checkpoint {
     /// Sequence number; increments by 1 per checkpoint.
@@ -48,20 +56,36 @@ pub struct Checkpoint {
     pub state_root: [u8; 32],
     /// BLAKE3 hash of the previous checkpoint, or `[0; 32]` at `height = 0`.
     pub prev_checkpoint: [u8; 32],
+    /// Commitment to the committee state in force after `round` (the
+    /// node computes it over the registries + stake table + epoch; this
+    /// crate treats it as opaque bytes). `[0; 32]` when unused.
+    #[serde(default)]
+    pub registry_root: [u8; 32],
+    /// Commitment to the commit-derived body of the state snapshot
+    /// served for this checkpoint (leader frontier, gc round, commit
+    /// marks, queued governance) so a joiner cannot be fed a snapshot
+    /// whose `state_root` is honest but whose commit marks or gc round
+    /// are not (IQ-008 D5; consensus-review finding on S34.4). The node
+    /// computes it; this crate treats it as opaque bytes. `[0; 32]` when
+    /// unused.
+    #[serde(default)]
+    pub snapshot_root: [u8; 32],
 }
 
 impl Checkpoint {
     /// Canonical hash of this checkpoint.
     ///
-    /// Encoding: `BLAKE3("SUWAPPU-CHECKPOINT-V1" || height (8 BE) || round (8 BE)
-    /// || state_root || prev_checkpoint)`.
+    /// Encoding: `BLAKE3("SUWAPPU-CHECKPOINT-V2" || height (8 BE) || round (8 BE)
+    /// || state_root || prev_checkpoint || registry_root || snapshot_root)`.
     pub fn hash(&self) -> [u8; 32] {
         let mut hasher = blake3::Hasher::new();
-        hasher.update(b"SUWAPPU-CHECKPOINT-V1");
+        hasher.update(b"SUWAPPU-CHECKPOINT-V2");
         hasher.update(&self.height.to_be_bytes());
         hasher.update(&self.round.to_be_bytes());
         hasher.update(&self.state_root);
         hasher.update(&self.prev_checkpoint);
+        hasher.update(&self.registry_root);
+        hasher.update(&self.snapshot_root);
         let mut out = [0u8; 32];
         out.copy_from_slice(hasher.finalize().as_bytes());
         out
@@ -69,7 +93,7 @@ impl Checkpoint {
 }
 
 /// A single Authority Ring member's signature over a checkpoint hash.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckpointSignature {
     /// Signing Authority Node.
     pub authority: AuthorityId,
@@ -78,7 +102,7 @@ pub struct CheckpointSignature {
 }
 
 /// A checkpoint plus an Authority-Ring-quorum of signatures verifying it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CoSignedCheckpoint {
     /// The checkpoint itself.
     pub checkpoint: Checkpoint,
@@ -160,6 +184,124 @@ pub fn ratify_checkpoint(
     })
 }
 
+/// One link of a checkpoint chain handed to a syncing node (IQ-008 D5):
+/// a checkpoint, the signatures over it, and the committee that
+/// checkpoint establishes (bound by `checkpoint.registry_root`, which the
+/// caller recomputes from the full registry set as `next_registry_root`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChainLink {
+    /// The checkpoint.
+    pub checkpoint: Checkpoint,
+    /// Signatures claimed over it.
+    pub signatures: Vec<CheckpointSignature>,
+    /// Authority Ring in force after this checkpoint.
+    pub next_committee: AuthorityRegistry,
+    /// Caller-computed root of the full registry set `next_committee`
+    /// belongs to; must equal `checkpoint.registry_root`.
+    pub next_registry_root: [u8; 32],
+}
+
+/// Why a checkpoint chain was rejected.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ChainError {
+    /// A link's signatures did not verify under the committee the
+    /// previous link established.
+    #[error("link {index}: {source}")]
+    Link {
+        /// Position in the chain.
+        index: usize,
+        /// The ratification failure.
+        #[source]
+        source: CheckpointError,
+    },
+    /// A link's `registry_root` does not bind the registry set supplied
+    /// with it.
+    #[error("link {index}: registry root does not match the supplied committee")]
+    RegistryRootMismatch {
+        /// Position in the chain.
+        index: usize,
+    },
+    /// Heights or rounds are not strictly increasing.
+    #[error("link {index}: height/round not strictly increasing")]
+    NotMonotone {
+        /// Position in the chain.
+        index: usize,
+    },
+    /// A link at height `h + 1` does not name the verified link at
+    /// height `h` as its predecessor, or the first link (height 0) has a
+    /// non-zero `prev_checkpoint`.
+    #[error("link {index}: prev_checkpoint does not match the preceding link")]
+    BrokenLink {
+        /// Position in the chain.
+        index: usize,
+    },
+}
+
+/// Verify a chain of co-signed checkpoints starting from a trusted
+/// committee (the genesis Authority Ring), returning the verified
+/// checkpoints in order (IQ-008 D5, invariant candidate I-CK1).
+///
+/// For each link, in order: the signatures must ratify under the
+/// committee established by the *previous* link (the genesis committee
+/// for the first), the `registry_root` must match the registry set
+/// supplied with the link, and heights and rounds must strictly
+/// increase. After a link verifies, its `next_committee` becomes the
+/// committee for the next link. This is Sui's checkpoint-verification
+/// walk: "the client needs to know the committee to verify checkpoints,
+/// but also learns the committee through checkpoint validation."
+///
+/// The chain need not be contiguous: links may skip checkpoints whose
+/// committee did not change, because only committee transitions have to
+/// be witnessed. `prev_checkpoint` links are therefore not checked here;
+/// the trust comes from each link being quorum-signed by the committee
+/// the previous link established.
+pub fn verify_checkpoint_chain(
+    genesis_committee: &AuthorityRegistry,
+    links: &[ChainLink],
+) -> Result<Vec<CoSignedCheckpoint>, ChainError> {
+    let mut committee = genesis_committee;
+    let mut out = Vec::with_capacity(links.len());
+    let mut last: Option<(CheckpointHeight, Round, [u8; 32])> = None;
+    for (index, link) in links.iter().enumerate() {
+        match last {
+            Some((h, r, _)) if link.checkpoint.height <= h || link.checkpoint.round <= r => {
+                return Err(ChainError::NotMonotone { index });
+            }
+            // Consecutive heights must chain by hash. The served chain is
+            // deliberately sparse (committee transitions plus the latest),
+            // so a gap is legal: every link is still signed by a quorum of
+            // a committee that was legitimately in force, and the joiner
+            // ends on the committee the last link binds. What a gap can
+            // hide is only *which* legitimate committee signed; see IQ-008
+            // Residual 6 (long-range keys) for why that is accepted.
+            Some((h, _, prev_hash))
+                if link.checkpoint.height == h + 1
+                    && link.checkpoint.prev_checkpoint != prev_hash =>
+            {
+                return Err(ChainError::BrokenLink { index });
+            }
+            None if link.checkpoint.height == 0 && link.checkpoint.prev_checkpoint != [0u8; 32] => {
+                return Err(ChainError::BrokenLink { index });
+            }
+            _ => {}
+        }
+        if link.checkpoint.registry_root != link.next_registry_root {
+            return Err(ChainError::RegistryRootMismatch { index });
+        }
+        let cosigned =
+            ratify_checkpoint(link.checkpoint.clone(), link.signatures.clone(), committee)
+                .map_err(|source| ChainError::Link { index, source })?;
+        last = Some((
+            link.checkpoint.height,
+            link.checkpoint.round,
+            link.checkpoint.hash(),
+        ));
+        out.push(cosigned);
+        committee = &link.next_committee;
+    }
+    Ok(out)
+}
+
 /// Cadence-driven checkpoint producer.
 ///
 /// Emits a `Checkpoint` at every round `r` where `r % cadence == 0`
@@ -205,6 +347,18 @@ impl Checkpointer {
     /// checkpoint over `state_root`, and advance internal state.
     /// Otherwise return `None`.
     pub fn maybe_emit(&mut self, round: Round, state_root: [u8; 32]) -> Option<Checkpoint> {
+        self.maybe_emit_with_registry(round, state_root, [0u8; 32])
+    }
+
+    /// [`Self::maybe_emit`] with an explicit committee commitment
+    /// (IQ-008 D5). The daemon passes the root over its registries so a
+    /// joiner can learn committee changes from co-signed checkpoints.
+    pub fn maybe_emit_with_registry(
+        &mut self,
+        round: Round,
+        state_root: [u8; 32],
+        registry_root: [u8; 32],
+    ) -> Option<Checkpoint> {
         let is_boundary = (round % self.cadence as Round) == 0;
         if !is_boundary {
             return None;
@@ -214,6 +368,8 @@ impl Checkpointer {
             round,
             state_root,
             prev_checkpoint: self.last_hash,
+            registry_root,
+            snapshot_root: [0; 32],
         };
         self.last_hash = ck.hash();
         self.next_height += 1;
@@ -242,6 +398,8 @@ mod tests {
             round: 5,
             state_root: [0xAB; 32],
             prev_checkpoint: [0; 32],
+            registry_root: [0; 32],
+            snapshot_root: [0; 32],
         };
         assert_eq!(ck.hash(), ck.hash());
     }
@@ -253,10 +411,15 @@ mod tests {
             round: 5,
             state_root: [0xAB; 32],
             prev_checkpoint: [0xCD; 32],
+            registry_root: [0; 32],
+            snapshot_root: [0; 32],
         };
         let h0 = base.hash();
         let mut variant = base.clone();
         variant.height = 2;
+        assert_ne!(h0, variant.hash());
+        let mut variant = base.clone();
+        variant.snapshot_root = [1; 32];
         assert_ne!(h0, variant.hash());
         let mut variant = base.clone();
         variant.round = 6;
@@ -282,6 +445,8 @@ mod tests {
             round: 0,
             state_root: [0xAA; 32],
             prev_checkpoint: [0; 32],
+            registry_root: [0; 32],
+            snapshot_root: [0; 32],
         };
         let sig = sign_checkpoint(0, &sk, &ck).unwrap();
         ratify_checkpoint(ck, vec![sig], &registry).unwrap();
@@ -304,6 +469,8 @@ mod tests {
             round: 0,
             state_root: [0; 32],
             prev_checkpoint: [0; 32],
+            registry_root: [0; 32],
+            snapshot_root: [0; 32],
         };
         // 4-member ring: quorum = 2f+1 = 3 (see IQ-001). One signature is below.
         let sig = sign_checkpoint(0, &sk, &ck).unwrap();

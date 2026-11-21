@@ -46,8 +46,8 @@ pub mod validator_registry;
 
 pub use block::{execute_block, Block, ExecutionReport};
 pub use checkpoint::{
-    ratify_checkpoint, sign_checkpoint, Checkpoint, CheckpointError, CheckpointHeight,
-    CheckpointSignature, Checkpointer, CoSignedCheckpoint,
+    ratify_checkpoint, sign_checkpoint, verify_checkpoint_chain, ChainError, ChainLink, Checkpoint,
+    CheckpointError, CheckpointHeight, CheckpointSignature, Checkpointer, CoSignedCheckpoint,
 };
 pub use error::ExecutionError;
 pub use substrate::{Address, Balance, InMemorySubstrate, Intent, RewardsRing, Substrate};

@@ -50,7 +50,7 @@ pub enum AdmissionError {
 }
 
 /// A seated Validator Ring member.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ValidatorMember {
     /// Validator identifier.
     pub id: ValidatorId,
@@ -60,7 +60,7 @@ pub struct ValidatorMember {
 }
 
 /// Validator Ring registry.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ValidatorRegistry {
     members: BTreeMap<ValidatorId, ValidatorMember>,
 }

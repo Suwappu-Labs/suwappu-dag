@@ -64,6 +64,11 @@ pub struct MempoolStats {
     pub tracked_peers: usize,
 }
 
+/// Largest canonical intent encoding the mempool admits. Equal to the
+/// node's per-block intent byte budget (half a 1 MiB wire frame), so any
+/// admitted intent fits some block.
+pub const MAX_INTENT_BYTES: usize = 512 * 1024;
+
 #[derive(Debug, Error)]
 pub enum MempoolError {
     /// Peer's leaky bucket is empty. Wait `retry_after_ms` and retry.
@@ -83,6 +88,11 @@ pub enum MempoolError {
         floor: u64,
         capacity: usize,
     },
+    /// The intent's canonical encoding exceeds [`MAX_INTENT_BYTES`]; it
+    /// could never fit a block proposal, so it is refused at admission
+    /// rather than acknowledged and discarded at drain.
+    #[error("intent of {bytes} bytes exceeds the {max}-byte per-intent cap")]
+    TooLarge { bytes: usize, max: usize },
     /// Bincode serialization failed. Shouldn't happen for well-formed
     /// `Intent` values; surfaced for completeness.
     #[error("bincode encode failed: {0}")]
@@ -100,6 +110,9 @@ type EntryKey = (Reverse<u64>, u64, IntentHash);
 struct Entry {
     intent: Intent,
     submit_ms: u64,
+    /// Canonical encoded size, measured once at admission so the
+    /// byte-budgeted drain does not re-encode.
+    bytes: usize,
 }
 
 struct Inner {
@@ -158,6 +171,12 @@ impl Mempool {
         let bytes = bincode::serde::encode_to_vec(&intent, bincode::config::legacy())
             .map_err(|e| MempoolError::Encode(e.to_string()))?;
         let hash: IntentHash = *blake3::hash(&bytes).as_bytes();
+        if bytes.len() > MAX_INTENT_BYTES {
+            return Err(MempoolError::TooLarge {
+                bytes: bytes.len(),
+                max: MAX_INTENT_BYTES,
+            });
+        }
 
         let mut inner = self.inner.lock().unwrap();
 
@@ -212,6 +231,7 @@ impl Mempool {
             Entry {
                 intent,
                 submit_ms: now_ms,
+                bytes: bytes.len(),
             },
         );
         Ok(hash)
@@ -232,6 +252,39 @@ impl Mempool {
                     out.push(entry.intent);
                 }
                 None => break,
+            }
+        }
+        out
+    }
+
+    /// Like [`Mempool::drain_for_block`], but also stops before the
+    /// drained intents' canonical encoded size would exceed `max_bytes`.
+    /// The entry that does not fit stays queued (in priority order) for
+    /// the next block — nothing is lost. An entry that alone exceeds
+    /// `max_bytes` can never fit any block; it is discarded so it cannot
+    /// pin the head of the queue.
+    pub fn drain_for_block_within(&self, max: usize, max_bytes: usize) -> Vec<Intent> {
+        let mut inner = self.inner.lock().unwrap();
+        let mut out = Vec::with_capacity(max.min(inner.queue.len()));
+        let mut used = 0usize;
+        while out.len() < max {
+            let next = match inner.queue.first_key_value() {
+                Some((_, entry)) => entry.bytes,
+                None => break,
+            };
+            if next > max_bytes {
+                if let Some((key, _)) = inner.queue.pop_first() {
+                    inner.seen.remove(&key.2);
+                }
+                continue;
+            }
+            if used.saturating_add(next) > max_bytes {
+                break;
+            }
+            if let Some((key, entry)) = inner.queue.pop_first() {
+                inner.seen.remove(&key.2);
+                used += entry.bytes;
+                out.push(entry.intent);
             }
         }
         out
@@ -479,6 +532,46 @@ mod tests {
         let drained = mp.drain_for_block(2);
         assert_eq!(drained.len(), 2);
         assert_eq!(mp.stats().size, 3);
+    }
+
+    #[test]
+    fn drain_within_byte_budget_keeps_the_overflow_queued() {
+        let mp = mp(100);
+        for i in 0..10u64 {
+            mp.submit(transfer(u128::from(i)), 0, None, 1_000 + i)
+                .unwrap();
+        }
+        let one = bincode::serde::encode_to_vec(transfer(0), bincode::config::legacy())
+            .unwrap()
+            .len();
+        // Room for exactly three.
+        let drained = mp.drain_for_block_within(100, 3 * one + one / 2);
+        assert_eq!(drained.len(), 3);
+        // The rest stays queued, in order.
+        let rest = mp.drain_for_block(100);
+        assert_eq!(rest.len(), 7);
+        assert!(matches!(rest[0], Intent::Transfer { amount: 3, .. }));
+        // An entry that can never fit is discarded, not left at the head.
+        mp.submit(transfer(42), 9, None, 5_000).unwrap();
+        mp.submit(transfer(43), 0, None, 5_001).unwrap();
+        assert!(mp.drain_for_block_within(100, one - 1).is_empty());
+        assert!(mp.drain_for_block(100).is_empty());
+    }
+
+    #[test]
+    fn oversized_intent_is_refused_at_admission() {
+        let mp = mp(10);
+        let huge = Intent::AdmitAuthority {
+            authority_id: 9,
+            stake_suwappu: 1,
+            mldsa_public_key: vec![0u8; MAX_INTENT_BYTES],
+            bls_public_key: Vec::new(),
+        };
+        assert!(matches!(
+            mp.submit(huge, 0, None, 1),
+            Err(MempoolError::TooLarge { .. })
+        ));
+        assert_eq!(mp.stats().size, 0);
     }
 
     #[test]

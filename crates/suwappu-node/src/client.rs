@@ -348,6 +348,11 @@ pub(crate) enum AuthOutcome {
     /// `ExitAuthority` / `EjectAuthority`), which requires the
     /// dual-signature rule — submit via `SubmitGoverned` instead.
     GovernanceRequiresCoSignature,
+    /// The intent is produced only by the node itself and never accepted
+    /// from a client (`EquivocationEvidence`, IQ-010 D3: the detector
+    /// carries it, bounded per block; a client path would let one signer
+    /// fill a block with ≈7 KB evidence entries — fifth S36 pass).
+    NodeOnlyIntent,
 }
 
 /// Resolve a `signer_pubkey_hash` against the seated Authority Ring and
@@ -401,6 +406,12 @@ pub(crate) fn is_governance_intent(intent: &Intent) -> bool {
     )
 }
 
+/// True for intents only the node itself produces; no ingress wire
+/// accepts them.
+pub(crate) fn is_node_only_intent(intent: &Intent) -> bool {
+    matches!(intent, Intent::EquivocationEvidence { .. })
+}
+
 pub(crate) async fn verify_signed_intent(
     state: &State,
     network_id: &str,
@@ -414,6 +425,9 @@ pub(crate) async fn verify_signed_intent(
     // submissions go through `verify_governed_intent`.
     if is_governance_intent(intent) {
         return AuthOutcome::GovernanceRequiresCoSignature;
+    }
+    if is_node_only_intent(intent) {
+        return AuthOutcome::NodeOnlyIntent;
     }
     verify_single_signature(
         state,
@@ -507,7 +521,9 @@ pub(crate) async fn verify_governed_intent(
         AuthOutcome::BadSignature => {
             return Err("governed submit: bad sponsor signature".to_string());
         }
-        AuthOutcome::GovernanceRequiresCoSignature => unreachable!("no gate in single-sig core"),
+        AuthOutcome::GovernanceRequiresCoSignature | AuthOutcome::NodeOnlyIntent => {
+            unreachable!("no gate in single-sig core")
+        }
     }
 
     // CO-SIGNER: a SECOND, distinct seated authority — for every
@@ -536,13 +552,24 @@ pub(crate) async fn verify_governed_intent(
         AuthOutcome::BadSignature => {
             return Err("governed submit: bad co-signature".to_string());
         }
-        AuthOutcome::GovernanceRequiresCoSignature => unreachable!("no gate in single-sig core"),
+        AuthOutcome::GovernanceRequiresCoSignature | AuthOutcome::NodeOnlyIntent => {
+            unreachable!("no gate in single-sig core")
+        }
     }
 
     // CANDIDATE proof-of-possession (AdmitAuthority only): the key being
     // admitted must itself sign the digest, so an admit cannot be forged
     // for a key nobody holds. This is IN ADDITION to the two seated
     // authorities above, not a substitute for the second one.
+    // Every signature field is exactly one ML-DSA-65 signature
+    // (`Signature::from_bytes` enforces the length for the two above and
+    // the candidate's below); an Exit/Eject carries no candidate field at
+    // all, so the envelope cannot be padded. Checked at ingress and again
+    // at commit, since both call this function (sixth S36 pass).
+    if !matches!(intent, Intent::AdmitAuthority { .. }) && !auth.candidate_pop_signature.is_empty()
+    {
+        return Err("governed submit: candidate PoP signature on a non-admit intent".to_string());
+    }
     if let Intent::AdmitAuthority {
         mldsa_public_key, ..
     } = intent
@@ -632,6 +659,14 @@ async fn handle_conn(
                         let _ = write_response(&mut stream, &resp).await;
                         return Ok(());
                     }
+                    AuthOutcome::NodeOnlyIntent => {
+                        let resp = ClientResponse::Err(
+                            "auth: equivocation evidence is node-generated, not client-submittable"
+                                .to_string(),
+                        );
+                        let _ = write_response(&mut stream, &resp).await;
+                        return Ok(());
+                    }
                 }
                 let intent_hash: [u8; 32] =
                     blake3::hash(&crate::codec::encode(&intent).expect("intent serialize")).into();
@@ -699,6 +734,14 @@ async fn handle_conn(
                         AuthOutcome::GovernanceRequiresCoSignature => {
                             let resp = ClientResponse::Err(
                                 "auth: governance intents require dual signatures (SubmitGoverned)"
+                                    .to_string(),
+                            );
+                            let _ = write_response(&mut stream, &resp).await;
+                            return Ok(());
+                        }
+                        AuthOutcome::NodeOnlyIntent => {
+                            let resp = ClientResponse::Err(
+                                "auth: equivocation evidence is node-generated, not client-submittable"
                                     .to_string(),
                             );
                             let _ = write_response(&mut stream, &resp).await;

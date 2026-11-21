@@ -39,6 +39,15 @@ pub async fn get_validator_registry<S: StateView>(
     serde_json::to_value(snap).map_err(|e| RpcError::Internal(e.to_string()))
 }
 
+/// `suwappu_getSyncStatus` — no params; returns `SyncStatusView`. The
+/// one-call answer to "is this node caught up?" for operators, the
+/// status page, and the explorer.
+pub async fn get_sync_status<S: StateView>(state: &S, params: &Value) -> Result<Value, RpcError> {
+    expect_no_params(params)?;
+    let snap = state.sync_status().await;
+    serde_json::to_value(snap).map_err(|e| RpcError::Internal(e.to_string()))
+}
+
 /// `suwappu_getHeaderAttestation` — no params; returns this node's signed
 /// bridge-header side-attestation over its latest finalized block as a
 /// `HeaderAttestationView`, or JSON `null` if no block has finalized yet or the

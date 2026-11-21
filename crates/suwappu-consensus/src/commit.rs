@@ -35,6 +35,7 @@ use std::collections::{BTreeSet, HashSet, VecDeque};
 
 use crate::{
     cert::{AuthorityId, CertHash, Round},
+    committee::Committee,
     dag::DagStore,
 };
 
@@ -92,14 +93,23 @@ pub fn cert_at(dag: &DagStore, round: Round, author: AuthorityId) -> Option<Cert
         .min()
 }
 
-/// Return the set of distinct authors at `round` who directly reference
-/// `target` as one of their parents.
-fn supporters(dag: &DagStore, target: CertHash, round: Round) -> BTreeSet<AuthorityId> {
+/// Return the set of distinct committee members at `round` who directly
+/// reference `target` as one of their parents. A certificate by a
+/// registered-but-inactive author is in the DAG and may be a parent, but
+/// it is not support (IQ-010 I-CT3): counting it while the committee
+/// size excludes it would let two threshold-sized support sets intersect
+/// in a single, possibly Byzantine, author.
+fn supporters(
+    dag: &DagStore,
+    target: CertHash,
+    round: Round,
+    committee: &Committee,
+) -> BTreeSet<AuthorityId> {
     dag.round_hashes(round)
         .iter()
         .filter_map(|h| {
             let c = dag.get(h).expect("hash from round_hashes must resolve");
-            if c.parents.contains(&target) {
+            if committee.contains(c.author) && c.parents.contains(&target) {
                 Some(c.author)
             } else {
                 None
@@ -144,13 +154,22 @@ pub enum LeaderStatus {
 /// folded into the indirect rule for simplicity — see
 /// [`try_indirect_decide`] and [`decide_slot`].
 pub fn try_direct_decide(dag: &DagStore, round: Round, n: CommitteeSize) -> LeaderStatus {
-    let author = leader(round, n);
+    try_direct_decide_for(dag, round, &Committee::contiguous(n))
+}
+
+/// [`try_direct_decide`] over an explicit committee (IQ-010 D1): the
+/// leader is `committee.leader(round)` and only members count as
+/// supporters. An empty committee decides nothing.
+pub fn try_direct_decide_for(dag: &DagStore, round: Round, committee: &Committee) -> LeaderStatus {
+    let Some(author) = committee.leader(round) else {
+        return LeaderStatus::Undecided;
+    };
     let leader_hash = match cert_at(dag, round, author) {
         Some(h) => h,
         None => return LeaderStatus::Undecided,
     };
-    let support = supporters(dag, leader_hash, round + 1);
-    if support.len() as u32 >= quorum_threshold(n) {
+    let support = supporters(dag, leader_hash, round + 1, committee);
+    if support.len() as u32 >= committee.quorum_threshold() {
         LeaderStatus::Direct(leader_hash)
     } else {
         LeaderStatus::Undecided
@@ -172,13 +191,25 @@ pub fn try_indirect_decide(
     anchor: CertHash,
     n: CommitteeSize,
 ) -> LeaderStatus {
-    let target_author = leader(target_round, n);
+    try_indirect_decide_for(dag, target_round, anchor, &Committee::contiguous(n))
+}
+
+/// [`try_indirect_decide`] over an explicit committee (IQ-010 D1).
+pub fn try_indirect_decide_for(
+    dag: &DagStore,
+    target_round: Round,
+    anchor: CertHash,
+    committee: &Committee,
+) -> LeaderStatus {
+    let Some(target_author) = committee.leader(target_round) else {
+        return LeaderStatus::Skip;
+    };
     let target_hash = match cert_at(dag, target_round, target_author) {
         Some(h) => h,
         // No cert was ever authored at this slot — definitively skipped.
         None => return LeaderStatus::Skip,
     };
-    if causal_history(dag, anchor).contains(&target_hash) {
+    if reaches(dag, anchor, target_hash) {
         LeaderStatus::Direct(target_hash)
     } else {
         LeaderStatus::Skip
@@ -214,7 +245,15 @@ pub fn try_indirect_decide(
 /// anchor itself, which is finalized via the joint-quorum AND-gate
 /// before its causal history can reach the late leader cert.
 pub fn decide_slot(dag: &DagStore, target_round: Round, n: CommitteeSize) -> LeaderStatus {
-    match try_direct_decide(dag, target_round, n) {
+    decide_slot_for(dag, target_round, &Committee::contiguous(n))
+}
+
+/// [`decide_slot`] over an explicit committee (IQ-010 D1). The
+/// `n`-based function is this one over `Committee::contiguous(n)`;
+/// `proptest_committee.rs` proves they agree on contiguous committees
+/// and that this rule is invariant under relabelling the members.
+pub fn decide_slot_for(dag: &DagStore, target_round: Round, committee: &Committee) -> LeaderStatus {
+    match try_direct_decide_for(dag, target_round, committee) {
         LeaderStatus::Direct(h) => return LeaderStatus::Direct(h),
         LeaderStatus::Skip => return LeaderStatus::Skip,
         LeaderStatus::Undecided => {}
@@ -231,16 +270,31 @@ pub fn decide_slot(dag: &DagStore, target_round: Round, n: CommitteeSize) -> Lea
     // (R'=target+1) are the leader itself and not informative.
     //
     // We do NOT early-return on the first anchor's Skip — see IQ-004.
-    let mut any_anchor_seen = false;
-    for anchor_round in (target_round + 2)..=max_round {
-        if let LeaderStatus::Direct(anchor_hash) = try_direct_decide(dag, anchor_round, n) {
-            any_anchor_seen = true;
-            match try_indirect_decide(dag, target_round, anchor_hash, n) {
-                LeaderStatus::Direct(h) => return LeaderStatus::Direct(h),
-                // This anchor's causal history doesn't reach the leader
-                // cert. Keep scanning — a later anchor may, via certs
-                // that have arrived since.
-                LeaderStatus::Skip | LeaderStatus::Undecided => continue,
+    //
+    // The scan's outcome depends only on whether ANY directly-decided
+    // anchor's causal history reaches the leader cert (the first one that
+    // does yields `Direct(leader cert)`, and every anchor tests the same
+    // cert), so the anchors are collected first and one multi-source
+    // search answers for all of them. Same decision as testing each anchor
+    // in turn; cost O(window) instead of O(window²) for a slot no anchor
+    // reaches (perf loop, iteration 3; `proptest_reachability.rs` checks
+    // it against the per-anchor rule).
+    let anchors: Vec<CertHash> = ((target_round + 2)..=max_round)
+        .filter_map(
+            |anchor_round| match try_direct_decide_for(dag, anchor_round, committee) {
+                LeaderStatus::Direct(a) => Some(a),
+                _ => None,
+            },
+        )
+        .collect();
+    let any_anchor_seen = !anchors.is_empty();
+    if any_anchor_seen {
+        if let Some(target) = committee
+            .leader(target_round)
+            .and_then(|author| cert_at(dag, target_round, author))
+        {
+            if reaches_any(dag, &anchors, target) {
+                return LeaderStatus::Direct(target);
             }
         }
     }
@@ -261,7 +315,12 @@ pub fn decide_slot(dag: &DagStore, target_round: Round, n: CommitteeSize) -> Lea
 /// `Direct(hash)`. New code should call `decide_slot` directly so it
 /// can distinguish `Skip` from `Undecided`.
 pub fn commit_leader(dag: &DagStore, round: Round, n: CommitteeSize) -> Option<CertHash> {
-    match decide_slot(dag, round, n) {
+    commit_leader_for(dag, round, &Committee::contiguous(n))
+}
+
+/// [`commit_leader`] over an explicit committee (IQ-010 D1).
+pub fn commit_leader_for(dag: &DagStore, round: Round, committee: &Committee) -> Option<CertHash> {
+    match decide_slot_for(dag, round, committee) {
         LeaderStatus::Direct(h) => Some(h),
         _ => None,
     }
@@ -293,18 +352,127 @@ pub fn causal_history(dag: &DagStore, start: CertHash) -> Vec<CertHash> {
     // Filter to certs that are actually in the DAG (mirrors linearize's
     // implicit filter) then sort by (round, author, hash) to reproduce
     // linearize order.
-    let mut out: Vec<CertHash> = seen.into_iter().filter(|h| dag.contains(h)).collect();
-    // FORK-CRITICAL: the trailing `*h` is the only thing that makes this
+    // FORK-CRITICAL: the trailing hash is the only thing that makes this
     // order TOTAL. `seen` is a HashSet (nondeterministic iteration), and two
-    // equivocating certs can share the same (round, author). Without `*h`,
-    // sort_by_key would leave their relative order unspecified → different
-    // nodes could linearize the same anchor's causal history differently →
-    // consensus fork. Do not drop the `*h` tie-breaker.
-    out.sort_by_key(|h| {
-        let c = dag.get(h).expect("just filtered to in-dag hashes");
-        (c.round, c.author, *h)
-    });
-    out
+    // equivocating certs can share the same (round, author). Without the
+    // hash the relative order would be unspecified → different nodes could
+    // linearize the same anchor's causal history differently → consensus
+    // fork. Do not drop the hash tie-breaker.
+    sorted_by_round_author_hash(dag, seen.into_iter().filter(|h| dag.contains(h)))
+}
+
+/// Order hashes of held certificates by `(round, author, hash)`. Keys are
+/// built once, then sorted: the hash makes every key distinct, so the
+/// unstable sort yields the one total order a comparator-time lookup would
+/// (perf loop, iteration 8: the commit sweep sorted ~1k certificates per
+/// committed leader with two map lookups per comparison).
+fn sorted_by_round_author_hash(
+    dag: &DagStore,
+    hashes: impl Iterator<Item = CertHash>,
+) -> Vec<CertHash> {
+    let mut keyed: Vec<(Round, AuthorityId, CertHash)> = hashes
+        .map(|h| {
+            let c = dag.get(&h).expect("only held certificates are ordered");
+            (c.round, c.author, h)
+        })
+        .collect();
+    keyed.sort_unstable();
+    keyed.into_iter().map(|(_, _, h)| h).collect()
+}
+
+/// Whether `target` is in the causal history of `from`:
+/// `reaches(dag, from, target) == causal_history(dag, from).contains(&target)`.
+///
+/// The indirect rule only needs this membership bit, not the ordered
+/// history. Every stored certificate's parents have strictly smaller
+/// rounds (`DagStore::insert` enforces it), so nothing at or below the
+/// target's round other than the target itself can reach it: the search
+/// never expands below that round and stops at the first hit. Cost is
+/// bounded by the certificates between the two rounds instead of the
+/// whole retained history plus an `O(n log n)` sort, which made the
+/// indirect rule the dominant cost of the commit walk (perf loop,
+/// iteration 1). `proptest_reachability.rs` checks the equality above.
+pub fn reaches(dag: &DagStore, from: CertHash, target: CertHash) -> bool {
+    reaches_any(dag, &[from], target)
+}
+
+/// Whether `target` is in the causal history of any of `sources` — the
+/// union form of [`reaches`], one search with a shared visited set.
+pub fn reaches_any(dag: &DagStore, sources: &[CertHash], target: CertHash) -> bool {
+    let Some(t) = dag.get(&target) else {
+        // `causal_history` only returns certificates held in the DAG.
+        return false;
+    };
+    let target_round = t.round;
+    let mut seen: HashSet<CertHash> = HashSet::new();
+    let mut stack: Vec<CertHash> = sources.to_vec();
+    while let Some(h) = stack.pop() {
+        if h == target {
+            return true;
+        }
+        if !seen.insert(h) {
+            continue;
+        }
+        let Some(c) = dag.get(&h) else {
+            continue;
+        };
+        if c.round <= target_round {
+            continue;
+        }
+        for p in &c.parents {
+            if !seen.contains(p) {
+                stack.push(*p);
+            }
+        }
+    }
+    false
+}
+
+/// Causal history of `start` cut at a commit floor (IQ-008 D1).
+///
+/// Returns every ancestor of `start` (inclusive) whose round is strictly
+/// greater than `floor`, in the same `(round, author, hash)` order as
+/// [`causal_history`]. `floor = None` is the unbounded walk.
+///
+/// Because a parent's round is strictly smaller than its child's, every
+/// certificate reachable only through a below-floor certificate is
+/// itself below the floor. So "do not expand below the floor" and
+/// "filter the unbounded history by round" yield the same set; this
+/// function does the former for cost, and `proptest_gc.rs` checks the
+/// latter as the reference. The set is a pure function of `start`,
+/// `floor` and the certificates above the floor — pruning anything at or
+/// below the floor cannot change it (I-GC1).
+pub fn causal_history_bounded(
+    dag: &DagStore,
+    start: CertHash,
+    floor: Option<Round>,
+) -> Vec<CertHash> {
+    let above_floor = |round: Round| match floor {
+        Some(f) => round > f,
+        None => true,
+    };
+    let mut seen: HashSet<CertHash> = HashSet::new();
+    let mut queue: VecDeque<CertHash> = VecDeque::new();
+    queue.push_back(start);
+    while let Some(h) = queue.pop_front() {
+        if seen.contains(&h) {
+            continue;
+        }
+        let Some(c) = dag.get(&h) else {
+            // Pruned or never held: not part of the committed set, and
+            // nothing below it can be either.
+            continue;
+        };
+        if !above_floor(c.round) {
+            continue;
+        }
+        seen.insert(h);
+        for p in &c.parents {
+            queue.push_back(*p);
+        }
+    }
+    // Same FORK-CRITICAL total order as `causal_history`.
+    sorted_by_round_author_hash(dag, seen.into_iter())
 }
 
 /// Run the DagBft-C commit rule (direct + indirect) across every
@@ -315,6 +483,11 @@ pub fn causal_history(dag: &DagStore, start: CertHash) -> Vec<CertHash> {
 /// inherited via the indirect rule — deduplicated to preserve
 /// append-only finality.
 pub fn finalize(dag: &DagStore, n: CommitteeSize) -> Vec<CertHash> {
+    finalize_for(dag, &Committee::contiguous(n))
+}
+
+/// [`finalize`] over an explicit committee (IQ-010 D1).
+pub fn finalize_for(dag: &DagStore, committee: &Committee) -> Vec<CertHash> {
     let max_round = match dag.max_round() {
         Some(r) => r,
         None => return Vec::new(),
@@ -328,7 +501,7 @@ pub fn finalize(dag: &DagStore, n: CommitteeSize) -> Vec<CertHash> {
     // can still resolve here if a later anchor (within the same DAG
     // snapshot) is directly decided.
     for r in 0..max_round {
-        if let LeaderStatus::Direct(leader_hash) = decide_slot(dag, r, n) {
+        if let LeaderStatus::Direct(leader_hash) = decide_slot_for(dag, r, committee) {
             for h in causal_history(dag, leader_hash) {
                 if included.insert(h) {
                     finalized.push(h);

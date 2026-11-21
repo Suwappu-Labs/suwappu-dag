@@ -219,6 +219,92 @@ pub struct HeaderAttestationView {
     pub oracle: String,
 }
 
+/// Snapshot of this node's catch-up position relative to its configured
+/// peers. Answers the operator question "is my node caught up?" with
+/// one number (`rounds_behind`) and one boolean (`synced`), plus the raw
+/// inputs so a dashboard can show *why* a node is behind.
+///
+/// Every field is local to the node being queried. Behind a load
+/// balancer that fans out across validators, `synced` still reads as
+/// "the validator that answered is caught up", which is what a status
+/// page wants; a per-validator view needs a direct connection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncStatusView {
+    /// Highest DAG round this node holds a certificate for, committed
+    /// or not. Zero before the first certificate is ingested.
+    pub local_dag_round: u64,
+    /// Highest round committed on this node. Same value as
+    /// `EpochView::latest_committed_round`; repeated here so a single
+    /// call answers the sync question.
+    pub latest_committed_round: u64,
+    /// Highest DAG round any *configured* peer has reported via the
+    /// wire sync protocol. Zero until the first tip reply arrives, so
+    /// a freshly started node reads `rounds_behind = 0, synced = true`
+    /// for its first couple of seconds; clients that need certainty
+    /// should also require `peer_tip_round > 0`.
+    pub peer_tip_round: u64,
+    /// `peer_tip_round - local_dag_round`, saturating at zero. Advancing
+    /// peers put a running node one or two rounds behind at any instant;
+    /// that is normal and covered by `synced`.
+    pub rounds_behind: u64,
+    /// `rounds_behind` is within the daemon's backfill lag threshold, so
+    /// the forward backfill loop is idle and the node is tracking its
+    /// peers in real time.
+    pub synced: bool,
+    /// This node's own authority id is seated in the Authority Ring it
+    /// currently holds, so it authors certificates and votes. `false`
+    /// for a post-genesis joiner whose `AdmitAuthority` intent has not
+    /// landed yet (passive-sync mode).
+    pub seated: bool,
+    /// Certificates received whose parents are not yet in the local
+    /// DAG. A large, non-shrinking count means catch-up is stalled on
+    /// missing parents.
+    pub orphan_certs: u64,
+    /// Certificate fetches issued to peers and not yet answered.
+    pub inflight_fetches: u64,
+    /// Certificates whose block payload has not arrived yet: parked
+    /// before admission (IQ-009) or, rarely, committed-in-order and
+    /// deferred. A large, non-shrinking count means block propagation
+    /// is failing.
+    pub needed_blocks: u64,
+    /// Certificates parked before admission because their block has not
+    /// arrived (IQ-009 D1). Transient in a healthy mesh.
+    #[serde(default)]
+    pub awaiting_block: u64,
+    /// This node's garbage-collection round (IQ-008): every round at or
+    /// below it has been pruned. `null` until the chain is `gc_depth`
+    /// rounds deep.
+    #[serde(default)]
+    pub gc_round: Option<u64>,
+    /// Highest gc round reported by a configured peer.
+    #[serde(default)]
+    pub peer_gc_round: Option<u64>,
+    /// Forward backfill cannot reach the peers' tip because they have
+    /// pruned every round this node would request; a checkpoint
+    /// snapshot bootstrap is required (IQ-008 D5).
+    #[serde(default)]
+    pub needs_snapshot: bool,
+    /// Certificates currently held in the DAG store. Bounded by
+    /// `authorities × gc_depth` once pruning is active.
+    #[serde(default)]
+    pub dag_certs: u64,
+}
+
+impl SyncStatusView {
+    /// Lag (in rounds) at which a node stops counting as synced. Matches
+    /// the daemon's forward-backfill threshold: below this the backfill
+    /// loop idles, at or above it the node is actively pulling rounds.
+    pub const SYNCED_LAG_THRESHOLD: u64 = 2;
+
+    /// Derive `rounds_behind` and `synced` from the raw round numbers.
+    /// Pure; kept on the view so the daemon adapter and the tests agree
+    /// on the arithmetic.
+    pub fn lag(local_dag_round: u64, peer_tip_round: u64) -> (u64, bool) {
+        let behind = peer_tip_round.saturating_sub(local_dag_round);
+        (behind, behind <= Self::SYNCED_LAG_THRESHOLD)
+    }
+}
+
 /// Read-only view over the node state needed by the JSON-RPC methods.
 ///
 /// Implementers must guarantee:
@@ -294,6 +380,12 @@ pub trait StateView: Send + Sync + 'static {
     /// returned receiver is per-subscriber: dropping it cancels the
     /// subscription cleanly.
     fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<EventView>;
+
+    /// This node's catch-up position relative to its configured peers.
+    /// Must be cheap: operators and status pages poll it every few
+    /// seconds, so the adapter takes short snapshots and never holds a
+    /// lock across an await.
+    fn sync_status(&self) -> impl std::future::Future<Output = SyncStatusView> + Send;
 
     /// This node's signed bridge-header side-attestation over its latest
     /// finalized block, or `None` if no block has finalized yet or the node has

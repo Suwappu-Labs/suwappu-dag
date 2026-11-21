@@ -28,7 +28,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     cert::{AuthorityId, CertHash, Round},
-    commit::{commit_leader, CommitteeSize},
+    commit::{commit_leader_for, CommitteeSize},
+    committee::Committee,
     dag::DagStore,
 };
 
@@ -48,7 +49,7 @@ pub type Stake = u128;
 ///
 /// Phase-1 keeps this as an in-memory map; the on-chain registry lands
 /// in DAG-S6 alongside cert-signature verification.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StakeTable {
     weights: BTreeMap<ValidatorId, Stake>,
 }
@@ -151,7 +152,26 @@ pub fn joint_commit(
     stake_table: &StakeTable,
     votes: &[Vote],
 ) -> Option<CertHash> {
-    let candidate = commit_leader(dag, round, committee)?;
+    joint_commit_for(
+        dag,
+        round,
+        &Committee::contiguous(committee),
+        stake_table,
+        votes,
+    )
+}
+
+/// [`joint_commit`] over an explicit Authority committee (IQ-010 D1).
+/// The Validator-Ring leg is unchanged: the AND-gate still requires the
+/// stake-weighted quorum over the stake table independently.
+pub fn joint_commit_for(
+    dag: &DagStore,
+    round: Round,
+    committee: &Committee,
+    stake_table: &StakeTable,
+    votes: &[Vote],
+) -> Option<CertHash> {
+    let candidate = commit_leader_for(dag, round, committee)?;
     if validator_quorum_met(stake_table, candidate, votes) {
         Some(candidate)
     } else {

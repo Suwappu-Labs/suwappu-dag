@@ -58,4 +58,6 @@ pub mod bucket;
 pub mod mempool;
 
 pub use bucket::LeakyBucket;
-pub use mempool::{IntentHash, Mempool, MempoolConfig, MempoolError, MempoolStats};
+pub use mempool::{
+    IntentHash, Mempool, MempoolConfig, MempoolError, MempoolStats, MAX_INTENT_BYTES,
+};
