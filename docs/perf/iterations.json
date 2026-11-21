@@ -50,6 +50,11 @@
       "n": 8,
       "name": "Keyed sort",
       "change": "Causal histories sorted on precomputed (round, author, hash) keys instead of two map lookups per comparison"
+    },
+    {
+      "n": 9,
+      "name": "RPC index prune",
+      "change": "Explorer indices pruned a quarter window at a time instead of on every gc advance; prune_state left the profile, total gain within noise"
     }
   ]
 }

@@ -517,6 +517,14 @@ pub(crate) struct StateInner {
     /// from `try_commit`. `usize` is the position in `block.intents` so
     /// the explorer can resolve to a single intent cheaply.
     pub(crate) tx_to_block: HashMap<[u8; 32], (Round, CertHash, usize)>,
+    /// Floor the RPC indices (`blocks_by_round`, `tx_to_block`) were last
+    /// pruned to. They are node-local explorer indices, bound into no root,
+    /// so they are pruned a quarter window at a time instead of on every
+    /// gc advance: `tx_to_block` holds five windows of intents, and a full
+    /// scan per committed leader was the top cost of `prune_state` (perf
+    /// loop, iteration 9). The retained set is still a pure function of the
+    /// gc round.
+    pub(crate) rpc_index_floor: Round,
     /// Latest finalized `(round, post_root)` captured at commit for the bridge
     /// header attestation surface. Lossy-latest: overwritten on every commit,
     /// `None` until the first block finalizes. Read by the RPC adapter to
@@ -833,6 +841,7 @@ impl State {
                 evidence_emitted: BTreeSet::new(),
                 blocks_by_round: BTreeMap::new(),
                 tx_to_block: HashMap::new(),
+                rpc_index_floor: 0,
                 latest_bridge_header: None,
             }),
             mempool: std::sync::Arc::new(suwappu_mempool::Mempool::new(
@@ -4131,8 +4140,13 @@ async fn prune_state(
             // (S34.3) answers historical lookups; they are still bounded.
             let rpc_floor =
                 gc_round.saturating_sub(RPC_INDEX_EXTRA_DEPTH_MULTIPLIER * inner.gc_depth);
-            inner.blocks_by_round.retain(|r, _| *r > rpc_floor);
-            inner.tx_to_block.retain(|_, (r, _, _)| *r > rpc_floor);
+            let step = (inner.gc_depth / 4).max(1);
+            let rpc_floor = rpc_floor - rpc_floor % step;
+            if rpc_floor > inner.rpc_index_floor {
+                inner.rpc_index_floor = rpc_floor;
+                inner.blocks_by_round.retain(|r, _| *r > rpc_floor);
+                inner.tx_to_block.retain(|_, (r, _, _)| *r > rpc_floor);
+            }
             inner
                 .orphans
                 .keys()
