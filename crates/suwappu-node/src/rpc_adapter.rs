@@ -304,6 +304,11 @@ impl StateView for NodeStateView {
             AuthOutcome::GovernanceRequiresCoSignature => {
                 return Err(SubmitIntentError::GovernanceRequiresCoSignature)
             }
+            AuthOutcome::NodeOnlyIntent => {
+                return Err(SubmitIntentError::BadIntentEncoding(
+                    "equivocation evidence is node-generated, not client-submittable".to_string(),
+                ))
+            }
         }
 
         // 3. Compute the canonical intent hash — same blake3 over the

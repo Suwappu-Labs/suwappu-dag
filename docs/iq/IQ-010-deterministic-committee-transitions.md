@@ -157,6 +157,15 @@ evidence is dropped. The substrate treats the intent as a no-op. The
 DAG-S30.1 local auto-eject is removed; `EjectAuthority` (governance
 co-signed) remains for evidence the protocol does not carry.
 
+Evidence is node-generated only: both client ingress wires refuse it, so
+the per-block bound is the only path it takes into a block. Because one
+evidence intent is two orders of magnitude larger than a transfer, the
+proposal is bounded by bytes as well as count — mempool intents up to
+half a wire frame, governance intents capped per block, evidence at
+`MAX_EVIDENCE_PER_BLOCK` — so an honest author never signs a certificate
+whose block cannot be framed (an unframeable block is a certificate no
+peer can admit under IQ-009 D1).
+
 ### D4. Each slot is decided under the committee pinned to its epoch
 
 A committee change must never re-schedule a slot that is still in the

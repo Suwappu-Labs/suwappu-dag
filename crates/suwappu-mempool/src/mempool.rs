@@ -100,6 +100,9 @@ type EntryKey = (Reverse<u64>, u64, IntentHash);
 struct Entry {
     intent: Intent,
     submit_ms: u64,
+    /// Canonical encoded size, measured once at admission so the
+    /// byte-budgeted drain does not re-encode.
+    bytes: usize,
 }
 
 struct Inner {
@@ -212,6 +215,7 @@ impl Mempool {
             Entry {
                 intent,
                 submit_ms: now_ms,
+                bytes: bytes.len(),
             },
         );
         Ok(hash)
@@ -232,6 +236,39 @@ impl Mempool {
                     out.push(entry.intent);
                 }
                 None => break,
+            }
+        }
+        out
+    }
+
+    /// Like [`Mempool::drain_for_block`], but also stops before the
+    /// drained intents' canonical encoded size would exceed `max_bytes`.
+    /// The entry that does not fit stays queued (in priority order) for
+    /// the next block — nothing is lost. An entry that alone exceeds
+    /// `max_bytes` can never fit any block; it is discarded so it cannot
+    /// pin the head of the queue.
+    pub fn drain_for_block_within(&self, max: usize, max_bytes: usize) -> Vec<Intent> {
+        let mut inner = self.inner.lock().unwrap();
+        let mut out = Vec::with_capacity(max.min(inner.queue.len()));
+        let mut used = 0usize;
+        while out.len() < max {
+            let next = match inner.queue.first_key_value() {
+                Some((_, entry)) => entry.bytes,
+                None => break,
+            };
+            if next > max_bytes {
+                if let Some((key, _)) = inner.queue.pop_first() {
+                    inner.seen.remove(&key.2);
+                }
+                continue;
+            }
+            if used.saturating_add(next) > max_bytes {
+                break;
+            }
+            if let Some((key, entry)) = inner.queue.pop_first() {
+                inner.seen.remove(&key.2);
+                used += entry.bytes;
+                out.push(entry.intent);
             }
         }
         out
@@ -479,6 +516,30 @@ mod tests {
         let drained = mp.drain_for_block(2);
         assert_eq!(drained.len(), 2);
         assert_eq!(mp.stats().size, 3);
+    }
+
+    #[test]
+    fn drain_within_byte_budget_keeps_the_overflow_queued() {
+        let mp = mp(100);
+        for i in 0..10u64 {
+            mp.submit(transfer(u128::from(i)), 0, None, 1_000 + i)
+                .unwrap();
+        }
+        let one = bincode::serde::encode_to_vec(transfer(0), bincode::config::legacy())
+            .unwrap()
+            .len();
+        // Room for exactly three.
+        let drained = mp.drain_for_block_within(100, 3 * one + one / 2);
+        assert_eq!(drained.len(), 3);
+        // The rest stays queued, in order.
+        let rest = mp.drain_for_block(100);
+        assert_eq!(rest.len(), 7);
+        assert!(matches!(rest[0], Intent::Transfer { amount: 3, .. }));
+        // An entry that can never fit is discarded, not left at the head.
+        mp.submit(transfer(42), 9, None, 5_000).unwrap();
+        mp.submit(transfer(43), 0, None, 5_001).unwrap();
+        assert!(mp.drain_for_block_within(100, one - 1).is_empty());
+        assert!(mp.drain_for_block(100).is_empty());
     }
 
     #[test]

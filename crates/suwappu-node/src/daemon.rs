@@ -341,6 +341,10 @@ pub(crate) struct StateInner {
     /// by the sync-status RPC; consumed by the checkpoint-snapshot
     /// bootstrap (S34.4).
     pub(crate) needs_snapshot: bool,
+    /// Verified checkpoint-snapshot installs this process has completed
+    /// (node-local; not in any snapshot or root). Lets tests and metrics
+    /// observe a bootstrap without sampling the transient flag above.
+    pub(crate) snapshot_installs: u64,
     /// Manifest `gc_depth_rounds` (IQ-008 D1). Identical mesh-wide by
     /// construction (same genesis.toml), which is what makes
     /// `commit_floor` deterministic across nodes.
@@ -762,6 +766,7 @@ impl State {
                 backfill_resume: None,
                 peer_gc_round: None,
                 needs_snapshot: false,
+                snapshot_installs: 0,
                 gc_depth: manifest.gc_depth_rounds.max(1),
                 gc_round: None,
                 last_committed_leader_round: None,
@@ -3279,6 +3284,7 @@ async fn handle_snapshot_chunk(
     {
         let mut inner = state.inner.lock().await;
         inner.needs_snapshot = false;
+        inner.snapshot_installs += 1;
         inner.snapshot_sync = SnapshotSync::default();
         // Everything buffered before the install refers to a world the
         // snapshot superseded; a stale orphan waiting on a pruned parent
@@ -5683,6 +5689,43 @@ const LEADER_TIMEOUT_ROUNDS: u32 = 4;
 /// fill rate.
 const MAX_INTENTS_PER_BLOCK: usize = 4096;
 
+/// Encoded bytes of mempool intents per block proposal. Half a wire frame:
+/// the rest is headroom for at most [`MAX_GOVERNANCE_PER_BLOCK`] governance
+/// envelopes (≈10 KB each), [`MAX_EVIDENCE_PER_BLOCK`] evidence intents
+/// (≈7 KB each) and the block envelope. `block_at_every_budget_fits_a_frame`
+/// pins the arithmetic.
+const MAX_BLOCK_INTENT_BYTES: usize = crate::wire::MAX_FRAME_BYTES / 2;
+
+/// Governance intents per block proposal; the excess waits in the mempool.
+const MAX_GOVERNANCE_PER_BLOCK: usize = 16;
+
+/// IQ-010 D3: take this node's detected equivocations that are still
+/// worth carrying as evidence. Only a still-registered author can be
+/// ejected; evidence against anyone else would be committed, verified and
+/// dropped on every node for nothing, and each `(author, round)` is
+/// carried once.
+///
+/// The registry is read in its own statement, guard dropped, BEFORE
+/// `inner` is taken: holding it across `inner.lock()` inverts the
+/// canonical order against `remove_authority` (inner → authority_registry)
+/// and can deadlock the node at an ejection boundary (fifth S36 pass).
+async fn take_emittable_proofs(state: &State) -> Vec<EquivocationProof> {
+    let registered: BTreeSet<AuthorityId> = state
+        .authority_registry
+        .read()
+        .await
+        .members()
+        .map(|m| m.id)
+        .collect();
+    let mut inner = state.inner.lock().await;
+    let all = std::mem::take(&mut inner.detected_equivocations);
+    all.into_iter()
+        .filter(|p| {
+            registered.contains(&p.author) && !inner.evidence_emitted.contains(&(p.author, p.round))
+        })
+        .collect()
+}
+
 async fn run_round_driver(
     self_label: String,
     self_id: AuthorityId,
@@ -5816,25 +5859,44 @@ async fn run_round_driver(
         // `state.mempool.submit` so per-peer rate limits + dedup +
         // capacity-floor eviction live at admission, and the round
         // driver simply pops the top-priority intents at propose time.
-        let mut intents: Vec<suwappu_execution::Intent> =
-            state.mempool.drain_for_block(MAX_INTENTS_PER_BLOCK);
+        // Bounded by count AND bytes (fifth S36 pass): the block must fit
+        // one wire frame, or the author holds a certificate no peer can
+        // ever admit (IQ-009 D1) and orphans its own later rounds.
+        let mut intents: Vec<suwappu_execution::Intent> = state
+            .mempool
+            .drain_for_block_within(MAX_INTENTS_PER_BLOCK, MAX_BLOCK_INTENT_BYTES);
+        // Node-only intents never come from the mempool (both ingress
+        // wires refuse them); drop any defensively so the evidence bound
+        // below is the only path evidence takes into a block.
+        intents.retain(|i| !crate::client::is_node_only_intent(i));
+        // Governance envelopes are ≈10 KB each and not in the mempool's
+        // byte count; past the per-block cap the intent goes back to the
+        // mempool and its envelope stays stored for the next block.
+        {
+            let mut governance = 0usize;
+            let mut deferred = Vec::new();
+            intents.retain(|i| {
+                if !crate::client::is_governance_intent(i) {
+                    return true;
+                }
+                governance += 1;
+                if governance <= MAX_GOVERNANCE_PER_BLOCK {
+                    return true;
+                }
+                deferred.push(i.clone());
+                false
+            });
+            let now = now_unix_ms();
+            for i in deferred {
+                if let Err(e) = state.mempool.submit(i, 0, None, now) {
+                    tracing::warn!(error = %e, "governance intent over the per-block cap could not be requeued");
+                }
+            }
+        }
         // IQ-010 D3: carry equivocations this node detected as evidence,
         // once per slot, ahead of the user intents.
         {
-            let proofs: Vec<EquivocationProof> = {
-                // Only a still-registered author can be ejected; evidence
-                // against anyone else would be committed, verified and
-                // dropped on every node for nothing.
-                let registry = state.authority_registry.read().await;
-                let mut inner = state.inner.lock().await;
-                let all = std::mem::take(&mut inner.detected_equivocations);
-                all.into_iter()
-                    .filter(|p| {
-                        registry.contains(p.author)
-                            && !inner.evidence_emitted.contains(&(p.author, p.round))
-                    })
-                    .collect()
-            };
+            let proofs = take_emittable_proofs(&state).await;
             let mut evidence = Vec::new();
             let mut carried: Vec<(AuthorityId, Round)> = Vec::new();
             let mut overflow: Vec<EquivocationProof> = Vec::new();
@@ -8247,9 +8309,10 @@ mod tests {
         // Replayed evidence against an ejected author is a no-op.
         assert!(!verify_equivocation_evidence(&state, &a, &b).await);
         // Retirement grace: the ejected author's certificates stay
-        // admissible (DAG structure only) for two epochs past the
-        // boundary, so a peer that crossed later and referenced them
-        // does not orphan every descendant; beyond it they are refused.
+        // admissible (DAG structure only) for one retention window
+        // (`gc_depth`) past the boundary, so a peer that crossed later and
+        // referenced them does not orphan every descendant; beyond it they
+        // are refused.
         let from = PeerId("p".into());
         {
             // The grace horizon is what is under test, so pin it below
@@ -8285,6 +8348,65 @@ mod tests {
             .await
             .awaiting_block
             .contains_key(&beyond.hash()));
+
+        // A retired author's equivocation inside the grace is admitted as
+        // DAG structure but never becomes a proof: it cannot be ejected
+        // again (fourth S36 pass).
+        let g1 = mk(1, 11, 9, &keys[1].1);
+        let g2 = mk(1, 11, 10, &keys[1].1);
+        for g in [&g1, &g2] {
+            state.blocks.lock().insert(
+                g.hash(),
+                BlockPayload {
+                    payload_digest: g.payload_digest,
+                    author: 1,
+                    round: 11,
+                    cert_hash: g.hash(),
+                    intents: Vec::new(),
+                    governance_auth: Vec::new(),
+                },
+            );
+            let _ = ingest_cert(&state, g.clone(), &from, None).await;
+        }
+        {
+            let dag = state.dag.read().await;
+            assert!(
+                dag.contains(&g1.hash()) && dag.contains(&g2.hash()),
+                "graced pair not admitted"
+            );
+        }
+        assert!(
+            state.inner.lock().await.detected_equivocations.is_empty(),
+            "a retired author's equivocation became a proof"
+        );
+        // The round driver carries no proof against an unregistered author,
+        // and a registered author's proof once.
+        {
+            let mut inner = state.inner.lock().await;
+            inner.detected_equivocations.push(EquivocationProof {
+                author: 1,
+                round: 11,
+                cert_a: g1.hash(),
+                cert_b: g2.hash(),
+            });
+            inner.detected_equivocations.push(EquivocationProof {
+                author: 3,
+                round: 4,
+                cert_a: CertHash([0xC1; 32]),
+                cert_b: CertHash([0xC2; 32]),
+            });
+        }
+        let carried: Vec<AuthorityId> = take_emittable_proofs(&state)
+            .await
+            .iter()
+            .map(|p| p.author)
+            .collect();
+        assert_eq!(
+            carried,
+            vec![3],
+            "proof against an unregistered author carried"
+        );
+        assert!(state.inner.lock().await.detected_equivocations.is_empty());
 
         // Per-block bound: a block front-loaded with bogus evidence spends
         // the budget and a valid pair behind it is not processed; the same
@@ -8338,6 +8460,75 @@ mod tests {
         let (c2, b2) = mk_carrier(vec![valid], 7);
         apply_commit(&state, c2.hash(), c2, b2, 7, "t", &log, false).await;
         assert!(queued_for_3(&*state.inner.lock().await));
+    }
+
+    /// Fifth S36 pass: a proposal built at every per-block budget at once
+    /// (mempool bytes, governance envelopes, evidence with wide parent
+    /// sets) still fits one wire frame, so an honest author can never
+    /// sign a certificate whose block no peer can receive.
+    #[test]
+    fn block_at_every_budget_fits_a_frame() {
+        let (_, sk) = suwappu_crypto::mldsa::keypair();
+        let transfer = |i: usize| Intent::Transfer {
+            from: [1; 20],
+            to: [2; 20],
+            amount: i as u128,
+        };
+        let one = crate::codec::encode(&transfer(0)).unwrap().len();
+        let mut intents: Vec<Intent> = (0..MAX_BLOCK_INTENT_BYTES / one).map(transfer).collect();
+        let mk = |tag: u8| {
+            let mut c = Certificate {
+                author: 1,
+                round: 3,
+                parents: (0..128u8).map(|i| CertHash([i; 32])).collect(),
+                payload_digest: [tag; 32],
+                signature: Vec::new(),
+            };
+            c.sign(&sk);
+            c
+        };
+        for k in 0..MAX_EVIDENCE_PER_BLOCK as u8 {
+            intents.insert(
+                0,
+                Intent::EquivocationEvidence {
+                    cert_a: mk(2 * k),
+                    cert_b: mk(2 * k + 1),
+                },
+            );
+        }
+        let sig = vec![0xAB; mk(0).signature.len()];
+        let governance_auth: Vec<(u32, crate::client::GovAuth)> = (0..MAX_GOVERNANCE_PER_BLOCK
+            as u32)
+            .map(|i| {
+                (
+                    i,
+                    crate::client::GovAuth {
+                        sponsor_pubkey_hash: [0; 32],
+                        sponsor_signature: sig.clone(),
+                        co_signer_pubkey_hash: [0; 32],
+                        co_signature: sig.clone(),
+                        candidate_pop_signature: sig.clone(),
+                    },
+                )
+            })
+            .collect();
+        let payload_digest = compute_payload_digest(&intents, &governance_auth);
+        let block = BlockPayload {
+            payload_digest,
+            author: 1,
+            round: 3,
+            cert_hash: CertHash([0; 32]),
+            intents,
+            governance_auth,
+        };
+        let frame = crate::codec::encode_frame(&WireMessage::Block(block))
+            .unwrap()
+            .len();
+        assert!(
+            frame < crate::wire::MAX_FRAME_BYTES,
+            "worst-case block is {frame} B, frame cap {}",
+            crate::wire::MAX_FRAME_BYTES
+        );
     }
 
     /// IQ-010 D6: a registered-but-inactive member (admitted, never
@@ -10030,25 +10221,22 @@ mod tests {
 
         let joiner = Daemon::start(cfg_for(n), manifest.clone()).await.unwrap();
 
-        // Wait for the bootstrap: needs_snapshot must be raised and then
-        // cleared by a verified install.
-        let mut saw_needs_snapshot = false;
+        // Wait for the bootstrap: a verified install (which the snapshot
+        // sync only attempts once backfill has been judged futile). The
+        // flag itself is raised and cleared inside one sampling interval
+        // on a fast run, so the install counter is what is observed.
         let mut installed = false;
         for _ in 0..120 {
             tokio::time::sleep(Duration::from_millis(250)).await;
             let inner = joiner.state.inner.lock().await;
-            if inner.needs_snapshot {
-                saw_needs_snapshot = true;
-            }
-            if saw_needs_snapshot && !inner.needs_snapshot && inner.latest_checkpoint.is_some() {
+            if inner.snapshot_installs >= 1
+                && !inner.needs_snapshot
+                && inner.latest_checkpoint.is_some()
+            {
                 installed = true;
                 break;
             }
         }
-        assert!(
-            saw_needs_snapshot,
-            "joiner never detected that forward backfill was futile"
-        );
         assert!(installed, "joiner never installed a verified snapshot");
 
         // Catch-up: within a few seconds the joiner's leader frontier
