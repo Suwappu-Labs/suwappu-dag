@@ -4818,11 +4818,27 @@ async fn try_commit(
         };
         let status = {
             let dag = state.dag.read().await;
-            decide_slot_for(&dag, round, &committee)
+            // Both commit rules decide a slot only on
+            // `cert_at(round, leader)`, so a slot whose leader cert is
+            // already committed can only end in `continue` below. Skip the
+            // decision (direct support count, and for an indirectly
+            // committed leader the whole anchor scan) instead of redoing
+            // it for every live round on every certificate arrival — the
+            // walk's dominant cost (perf loop, iteration 2). Lock order:
+            // dag → committed.
+            let leader_done = committee
+                .leader(round)
+                .and_then(|a| cert_at(&dag, round, a))
+                .is_some_and(|h| state.committed.lock().contains(&h));
+            if leader_done {
+                None
+            } else {
+                Some(decide_slot_for(&dag, round, &committee))
+            }
         };
         let leader_hash = match status {
-            LeaderStatus::Direct(h) => h,
-            LeaderStatus::Skip | LeaderStatus::Undecided => continue,
+            Some(LeaderStatus::Direct(h)) => h,
+            None | Some(LeaderStatus::Skip | LeaderStatus::Undecided) => continue,
         };
 
         if state.committed.lock().contains(&leader_hash) {

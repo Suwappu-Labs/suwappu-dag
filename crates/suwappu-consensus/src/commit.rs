@@ -270,18 +270,31 @@ pub fn decide_slot_for(dag: &DagStore, target_round: Round, committee: &Committe
     // (R'=target+1) are the leader itself and not informative.
     //
     // We do NOT early-return on the first anchor's Skip — see IQ-004.
-    let mut any_anchor_seen = false;
-    for anchor_round in (target_round + 2)..=max_round {
-        if let LeaderStatus::Direct(anchor_hash) =
-            try_direct_decide_for(dag, anchor_round, committee)
+    //
+    // The scan's outcome depends only on whether ANY directly-decided
+    // anchor's causal history reaches the leader cert (the first one that
+    // does yields `Direct(leader cert)`, and every anchor tests the same
+    // cert), so the anchors are collected first and one multi-source
+    // search answers for all of them. Same decision as testing each anchor
+    // in turn; cost O(window) instead of O(window²) for a slot no anchor
+    // reaches (perf loop, iteration 3; `proptest_reachability.rs` checks
+    // it against the per-anchor rule).
+    let anchors: Vec<CertHash> = ((target_round + 2)..=max_round)
+        .filter_map(
+            |anchor_round| match try_direct_decide_for(dag, anchor_round, committee) {
+                LeaderStatus::Direct(a) => Some(a),
+                _ => None,
+            },
+        )
+        .collect();
+    let any_anchor_seen = !anchors.is_empty();
+    if any_anchor_seen {
+        if let Some(target) = committee
+            .leader(target_round)
+            .and_then(|author| cert_at(dag, target_round, author))
         {
-            any_anchor_seen = true;
-            match try_indirect_decide_for(dag, target_round, anchor_hash, committee) {
-                LeaderStatus::Direct(h) => return LeaderStatus::Direct(h),
-                // This anchor's causal history doesn't reach the leader
-                // cert. Keep scanning — a later anchor may, via certs
-                // that have arrived since.
-                LeaderStatus::Skip | LeaderStatus::Undecided => continue,
+            if reaches_any(dag, &anchors, target) {
+                return LeaderStatus::Direct(target);
             }
         }
     }
@@ -366,13 +379,19 @@ pub fn causal_history(dag: &DagStore, start: CertHash) -> Vec<CertHash> {
 /// indirect rule the dominant cost of the commit walk (perf loop,
 /// iteration 1). `proptest_reachability.rs` checks the equality above.
 pub fn reaches(dag: &DagStore, from: CertHash, target: CertHash) -> bool {
+    reaches_any(dag, &[from], target)
+}
+
+/// Whether `target` is in the causal history of any of `sources` — the
+/// union form of [`reaches`], one search with a shared visited set.
+pub fn reaches_any(dag: &DagStore, sources: &[CertHash], target: CertHash) -> bool {
     let Some(t) = dag.get(&target) else {
         // `causal_history` only returns certificates held in the DAG.
         return false;
     };
     let target_round = t.round;
     let mut seen: HashSet<CertHash> = HashSet::new();
-    let mut stack: Vec<CertHash> = vec![from];
+    let mut stack: Vec<CertHash> = sources.to_vec();
     while let Some(h) = stack.pop() {
         if h == target {
             return true;

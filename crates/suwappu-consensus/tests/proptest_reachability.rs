@@ -24,6 +24,7 @@ use suwappu_consensus::{
 fn build_sparse(n: usize, rounds: u64, omit: u64, masks: &[u8], seed: u8) -> Vec<Certificate> {
     let mut certs = Vec::new();
     let mut prev: Vec<CertHash> = Vec::new();
+    let mut prev2: Vec<CertHash> = Vec::new();
     let mut k = 0usize;
     for r in 0..rounds {
         let mut this = Vec::new();
@@ -43,6 +44,14 @@ fn build_sparse(n: usize, rounds: u64, omit: u64, masks: &[u8], seed: u8) -> Vec
             if parents.is_empty() && !prev.is_empty() {
                 parents.push(prev[(mask as usize) % prev.len()]);
             }
+            // A round-skipping edge (a Byzantine author may reference any
+            // lower round): exercises paths that bypass round r + 1.
+            if (mask >> 7) & 1 == 1 && !prev2.is_empty() {
+                let p = prev2[(mask as usize / 3) % prev2.len()];
+                if !parents.contains(&p) {
+                    parents.push(p);
+                }
+            }
             let mut payload = [0u8; 32];
             payload[0] = i as u8;
             payload[1] = r as u8;
@@ -57,7 +66,7 @@ fn build_sparse(n: usize, rounds: u64, omit: u64, masks: &[u8], seed: u8) -> Vec
             this.push(cert.hash());
             certs.push(cert);
         }
-        prev = this;
+        prev2 = std::mem::replace(&mut prev, this);
     }
     certs
 }
