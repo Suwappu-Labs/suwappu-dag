@@ -658,14 +658,14 @@ fn load_corridors(manifest: &GenesisManifest) -> HashMap<(ChainId, ChainId), Cor
 
 impl State {
     /// Retain a verified governance envelope for later block attachment.
-    /// Governance intents are rare; if the map grows past the cap
-    /// (submissions never mined), clear it — a dropped envelope only
-    /// means the submitter must resubmit.
+    /// Returns whether an envelope for the intent is now held (newly
+    /// stored or already present); `false` only when the store is full.
+    /// A dropped envelope only means the submitter must resubmit.
     pub(crate) fn remember_governance_envelope(
         &self,
         intent_hash: [u8; 32],
         auth: crate::client::GovAuth,
-    ) {
+    ) -> bool {
         let mut map = self.governance_envelopes.lock();
         // Drop the NEW envelope when at capacity rather than clearing the
         // map: never evict an already-pending (legitimately dual-signed)
@@ -677,13 +677,14 @@ impl State {
         // intent, and a resubmission must not replace it (sixth S36 pass —
         // a replayed public envelope was the vehicle for padding).
         if map.contains_key(&intent_hash) {
-            return;
+            return true;
         }
         if map.len() >= 4096 {
             tracing::warn!("governance envelope store full; dropping new envelope (resubmit)");
-            return;
+            return false;
         }
         map.insert(intent_hash, auth);
+        true
     }
 
     /// Take (remove) a retained envelope by intent hash, if present.
@@ -5237,10 +5238,18 @@ async fn apply_commit(
                 deferred.push((intent, env));
                 continue;
             }
+            // Every removal counts, not only those that change the
+            // committee: a removed member is retired, and its grace
+            // certificates are admitted and served, so removals of
+            // registered-but-inactive members must not be unbounded per
+            // boundary either (seventh S36 pass).
             let before = state.inner.lock().await.committee.len();
+            let registered_before = state.authority_registry.read().await.len();
             apply_governance_intent(state, &intent, env.as_ref(), cert_round, self_label, log)
                 .await;
-            if state.inner.lock().await.committee.len() != before {
+            let committee_changed = state.inner.lock().await.committee.len() != before;
+            let removed = state.authority_registry.read().await.len() < registered_before;
+            if committee_changed || removed {
                 changes += 1;
             }
         }
@@ -5270,6 +5279,21 @@ async fn apply_commit(
             }
             let next = inner.committee.clone();
             inner.committee_by_epoch.insert(new_epoch + 1, next);
+            // A member removed by this drain is pinned through every epoch
+            // the fill above gave the pre-drain committee; its grace must
+            // cover them (`remove_authority` computed it before the fill).
+            let rpe = inner.epoch.rounds_per_epoch;
+            if rpe != 0 && new_epoch > old_epoch + 1 {
+                let pinned_end = new_epoch
+                    .saturating_add(1)
+                    .saturating_mul(rpe)
+                    .saturating_sub(1);
+                for (id, (_, until)) in inner.retired.iter_mut() {
+                    if pre_drain.contains(*id) && *until >= cert_round {
+                        *until = (*until).max(pinned_end);
+                    }
+                }
+            }
             if !deferred.is_empty() {
                 tracing::warn!(
                     round = cert_round,
@@ -5399,6 +5423,32 @@ async fn apply_governance_intent(
         }
     }
     match intent {
+        Intent::AdmitAuthority { authority_id, .. }
+            if state
+                .inner
+                .lock()
+                .await
+                .retired
+                .get(authority_id)
+                .is_some_and(|(_, until)| cert_round <= *until) =>
+        {
+            // IQ-010 D4 (seventh S36 pass): an id inside its retirement
+            // grace cannot be re-admitted. Its old key still authors and
+            // is admitted under the grace; a second key for the same id
+            // would make admission depend on which key a node holds, and
+            // a late old-key certificate would prove the new key "live".
+            // A grace entry is pruned only once `until` is at or below the
+            // gc round, below any boundary round, so the answer does not
+            // depend on whether the entry is still held.
+            tracing::warn!(
+                authority = *authority_id,
+                round = cert_round,
+                "admit refused: id is inside its retirement grace"
+            );
+            log.emit(
+                Event::now(self_label, Lane::Main, "governance_rejected").with_round(cert_round),
+            );
+        }
         Intent::AdmitAuthority {
             authority_id,
             stake_suwappu,
@@ -5750,9 +5800,10 @@ const MAX_GOVERNANCE_PER_BLOCK: usize = 16;
 /// real encoding.
 const BLOCK_FRAME_MARGIN: usize = 4096;
 
-/// A certificate's parent list: distinct, and at most one certificate per
-/// admissible author per slot. An honest `parents_for_round` lists one
-/// certificate per registered or retiring author, never more than
+/// A certificate's parent list: distinct and bounded. An honest proposal
+/// lists one certificate per author in `parent_authors` — the registry
+/// (≤ `AUTHORITY_RING_MAX`) plus retired members of the pinned committee
+/// (≤ `AUTHORITY_RING_MAX`) — so never more than
 /// `MAX_CERTS_PER_AUTHOR_ROUND × AUTHORITY_RING_MAX`; anything wider is
 /// padding that inflates every structure the certificate travels in
 /// (evidence intents above all — sixth S36 pass).
@@ -5767,6 +5818,32 @@ fn parents_well_formed(c: &Certificate) -> bool {
     }
     let mut seen = HashSet::with_capacity(c.parents.len());
     c.parents.iter().all(|p| seen.insert(*p))
+}
+
+/// Authors whose certificates at `prev_round` an honest proposal lists as
+/// parents: the registry, plus retired members the committee pinned to
+/// `prev_round` still holds (a pinned slot they lead must gather support).
+/// Retired members outside their pinned epoch are not parents even while
+/// their grace admits them: the retired set is not bounded by the ring
+/// ceiling, and listing them could push an honest certificate past
+/// `MAX_PARENTS_PER_CERT` (seventh S36 pass). The result is at most the
+/// registry (≤ ring ceiling) plus a pinned committee (≤ ring ceiling).
+fn parent_authors(
+    inner: &StateInner,
+    registered: &[AuthorityId],
+    prev_round: u64,
+) -> Vec<AuthorityId> {
+    let mut authors: BTreeSet<AuthorityId> = registered.iter().copied().collect();
+    if let Some(pinned) = inner.committee_for_round(prev_round) {
+        authors.extend(
+            inner
+                .retired
+                .iter()
+                .filter(|(id, (_, until))| *until >= prev_round && pinned.contains(**id))
+                .map(|(id, _)| *id),
+        );
+    }
+    authors.into_iter().collect()
 }
 
 /// IQ-010 (sixth S36 pass): a member removed at a boundary stays in the
@@ -5955,18 +6032,11 @@ async fn run_round_driver(
                     );
                 }
             }
-            // Retiring members inside their grace are admissible parents
-            // too: a pinned slot they lead must be able to gather support.
-            let mut parent_authors: BTreeSet<AuthorityId> = registered.iter().copied().collect();
-            parent_authors.extend(
-                inner
-                    .retired
-                    .iter()
-                    .filter(|(_, (_, until))| *until >= prev_round)
-                    .map(|(id, _)| *id),
+            parents = parents_for_round(
+                &dag,
+                target_round,
+                &parent_authors(&inner, &registered, prev_round),
             );
-            let parent_authors: Vec<AuthorityId> = parent_authors.into_iter().collect();
-            parents = parents_for_round(&dag, target_round, &parent_authors);
         }
         round_started_at = tokio::time::Instant::now();
 
@@ -6012,10 +6082,11 @@ async fn run_round_driver(
         }
         // IQ-010 D3: carry equivocations this node detected as evidence,
         // once per slot, ahead of the user intents.
+        let carried_evidence: Vec<EquivocationProof>;
         {
             let proofs = take_emittable_proofs(&state).await;
             let mut evidence = Vec::new();
-            let mut carried: Vec<(AuthorityId, Round)> = Vec::new();
+            let mut carried: Vec<EquivocationProof> = Vec::new();
             let mut overflow: Vec<EquivocationProof> = Vec::new();
             {
                 let dag = state.dag.read().await;
@@ -6031,7 +6102,7 @@ async fn run_round_driver(
                             cert_a: a,
                             cert_b: b,
                         });
-                        carried.push((p.author, p.round));
+                        carried.push(p);
                     }
                     // A proof whose certificates are no longer held (pruned
                     // or superseded by an install) is dropped, not marked:
@@ -6039,12 +6110,12 @@ async fn run_round_driver(
                 }
             }
             {
-                // Marked only once the intent is actually built; the
-                // overflow is carried next round.
+                // The overflow is carried next round; the carried proofs
+                // are marked only once the block is known to fit (below).
                 let mut inner = state.inner.lock().await;
-                inner.evidence_emitted.extend(carried);
                 inner.detected_equivocations.extend(overflow);
             }
+            carried_evidence = carried;
             if !evidence.is_empty() {
                 evidence.append(&mut intents);
                 intents = evidence;
@@ -6110,16 +6181,23 @@ async fn run_round_driver(
                     break;
                 };
                 total -= len;
+                let mut envelope_kept = true;
                 if governance_auth
                     .last()
                     .is_some_and(|(j, _)| *j as usize == idx)
                 {
                     if let Some(e) = governance_auth.pop() {
                         total -= env_len(&e);
-                        state.remember_governance_envelope(h, e.1);
+                        envelope_kept = state.remember_governance_envelope(h, e.1);
                     }
                 }
-                requeue_or_release(&state, i, now);
+                if envelope_kept {
+                    requeue_or_release(&state, i, now);
+                } else {
+                    // Requeued without its envelope it would be proposed
+                    // unauthorised and dropped at commit; release it.
+                    tracing::warn!("governance intent trimmed with a full envelope store; dropped");
+                }
             }
             if total > crate::wire::MAX_FRAME_BYTES {
                 tracing::error!(
@@ -6127,8 +6205,20 @@ async fn run_round_driver(
                     bytes = total,
                     "block over the frame cap with evidence alone; not proposing"
                 );
+                state
+                    .inner
+                    .lock()
+                    .await
+                    .detected_equivocations
+                    .extend(carried_evidence);
                 continue;
             }
+        }
+        if !carried_evidence.is_empty() {
+            let mut inner = state.inner.lock().await;
+            inner
+                .evidence_emitted
+                .extend(carried_evidence.iter().map(|p| (p.author, p.round)));
         }
 
         // The payload digest binds BOTH the intents AND the governance
@@ -8917,6 +9007,66 @@ mod tests {
         store(&beyond);
         ingest_cert(&state, beyond.clone(), &from, None).await;
         assert!(!state.dag.read().await.contains(&beyond.hash()));
+
+        // Parents (seventh S36 pass): a retired member is a parent author
+        // only while the committee pinned to the parent round holds it;
+        // retired ids outside it are not, however many there are.
+        {
+            let mut inner = state.inner.lock().await;
+            for id in 100..(100 + 2 * suwappu_authority::AUTHORITY_RING_MAX as u32) {
+                inner.retired.insert(id, (Vec::new(), u64::MAX));
+            }
+            let registered: Vec<AuthorityId> = vec![0, 1, 2];
+            let pinned = parent_authors(&inner, &registered, rpe + 26);
+            assert_eq!(
+                pinned,
+                vec![0, 1, 2, 3],
+                "pinned retired member not a parent author"
+            );
+            let after = parent_authors(&inner, &registered, 2 * rpe + 1);
+            assert_eq!(
+                after,
+                vec![0, 1, 2],
+                "unpinned retired ids listed as parents"
+            );
+            for id in 100..(100 + 2 * suwappu_authority::AUTHORITY_RING_MAX as u32) {
+                inner.retired.remove(&id);
+            }
+        }
+
+        // Re-admission (seventh S36 pass): the id cannot be admitted again
+        // while its old key's grace runs; afterwards it can.
+        let (k2_pk, k2_sk) = suwappu_crypto::mldsa::keypair();
+        let admit = Intent::AdmitAuthority {
+            authority_id: 3,
+            stake_suwappu: 150_000,
+            mldsa_public_key: k2_pk.as_bytes().to_vec(),
+            bls_public_key: Vec::new(),
+        };
+        let digest = crate::client::intent_signing_digest(&state.manifest_network_id, &admit);
+        let sig = |sk: &suwappu_crypto::mldsa::SecretKey| {
+            suwappu_crypto::mldsa::sign(&digest, sk)
+                .unwrap()
+                .as_bytes()
+                .to_vec()
+        };
+        let auth = crate::client::GovAuth {
+            sponsor_pubkey_hash: crate::client::signer_pubkey_hash(keys[0].0.as_bytes()),
+            sponsor_signature: sig(&keys[0].1),
+            co_signer_pubkey_hash: crate::client::signer_pubkey_hash(keys[1].0.as_bytes()),
+            co_signature: sig(&keys[1].1),
+            candidate_pop_signature: sig(&k2_sk),
+        };
+        apply_governance_intent(&state, &admit, Some(&auth), rpe + 40, "t", &log).await;
+        assert!(
+            !state.authority_registry.read().await.contains(3),
+            "id re-admitted inside its retirement grace"
+        );
+        apply_governance_intent(&state, &admit, Some(&auth), 2 * rpe, "t", &log).await;
+        assert!(
+            state.authority_registry.read().await.contains(3),
+            "admit after the grace refused"
+        );
     }
 
     /// IQ-010 D6: a registered-but-inactive member (admitted, never

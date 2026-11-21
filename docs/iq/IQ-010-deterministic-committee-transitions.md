@@ -204,10 +204,19 @@ of every epoch whose pinned committee still holds it — with the
 one-epoch lag, the rest of the epoch the removal opened. Inside the grace
 its certificates are admitted (signature against its retained key), it
 **keeps authoring** while the committee pinned to the round being
-authored holds it, and its certificates are admissible parents. A member
-the slot rule still counts therefore still participates: k voluntary
-exits at one boundary do not cut the epoch's fault tolerance to `f − k`
-(sixth review pass). The retained keys and graces (`retired`) are bound
+authored holds it, and honest proposals list its certificates as parents
+while (and only while) that pinned committee holds it. A member the slot
+rule still counts therefore still participates in the Authority leg: k
+voluntary exits at one boundary do not cut that leg's tolerance to
+`f − k` (sixth review pass). The Validator leg is stake-weighted over the
+live stake table, which drops the member at the boundary, so the joint
+gate's tolerance in the pinned epoch is that of `|C| − k` members; safety
+(Theorem 2) is unaffected. Every removal, of an active or an inactive
+member, counts toward the per-boundary change cap, so the retired set
+grows by at most `f` per boundary. An id inside its grace cannot be
+re-admitted (the admit is refused at the boundary): a second key for one
+id would make admission depend on which key a node holds, and a late
+old-key certificate would prove the new key live. The retained keys and graces (`retired`) are bound
 by `snapshot_root`, and a joiner verifies a served window's certificates
 against them as well as against the chain-bound registries, so a graced
 certificate is always verifiable. A retired author cannot be ejected
@@ -306,10 +315,17 @@ commit rule).
    depends on at least one detector authoring a block while the slot is
    inside its retention window — true of every live committee member.
 3. **Registered, inactive members — and retired ones, through their
-   grace — can grow the DAG** (their certificates are admitted and may
-   be parents). Bounded by the per-slot cap, the ring ceiling (50), the
-   per-boundary change cap and the retention window; a certificate's
-   parents are distinct and at most `MAX_CERTS_PER_AUTHOR_ROUND × 50`.
+   grace — can grow the DAG** (their certificates are admitted).
+   Registered members are bounded by the ring ceiling (50); retired ones
+   by the per-boundary change cap (every removal counts, at most `f`)
+   times the boundaries a grace spans. Honest parents are the registry
+   plus retired members of the pinned committee, at most
+   `MAX_CERTS_PER_AUTHOR_ROUND × 50`, and ingest refuses wider or
+   duplicated parent lists. A served window's size cap counts authors
+   from the chain-bound registries only, so a grace author never
+   registered at any retained checkpoint is not in it; the cap's 2×
+   per-author headroom absorbs `f` such authors per boundary. Sign-off
+   item at large `gc_depth / rounds_per_epoch` ratios.
 4. **The Validator Ring is still a mirror** of the Authority Ring
    (`/goal` A8); stake weight activation follows the committee.
 5. **Evidence size.** Two ML-DSA-65-signed certificates, ≈ 7 KB per
