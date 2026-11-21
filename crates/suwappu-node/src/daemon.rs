@@ -6008,6 +6008,9 @@ async fn run_round_driver(
     // (≥ f+1). Bypasses the strict quorum gate so a slow peer can't
     // permanently stall the cluster. Matches Sui's `leader_timeout`.
     let leader_timeout = Duration::from_millis(round_ms * LEADER_TIMEOUT_ROUNDS as u64);
+    // Ticks fire every `round_ms` and `elapsed` counts from the last
+    // proposal, so 1.5 rounds admits exactly one extra tick of leader wait.
+    let leader_wait = Duration::from_millis(round_ms * 3 / 2);
     let mut round_started_at = tokio::time::Instant::now();
 
     loop {
@@ -6102,6 +6105,30 @@ async fn run_round_driver(
                 let elapsed = round_started_at.elapsed();
                 let strict_ok = parents_count >= quorum_threshold(n);
                 let timeout_force = parents_count >= f_plus_one(n) && elapsed >= leader_timeout;
+                // Leader wait (perf loop, iteration 7): with a parent quorum
+                // but no certificate yet from the previous round's leader,
+                // wait up to one more tick for it. Proposing on the first
+                // quorum leaves a validator running slightly behind out of
+                // every parent set, so each of its leader slots is skipped
+                // and later commits as a late flip (IQ-010 Residual 1) —
+                // seconds of tail latency and the undecided slots that
+                // dominate the commit walk. Timing only: the commit rule,
+                // the parent set and the quorum are unchanged, and the wait
+                // is bounded, so a crashed leader costs one extra tick on
+                // its own slots.
+                if strict_ok && elapsed < leader_wait {
+                    let leader_present = gate_committee
+                        .leader(prev_round)
+                        .is_some_and(|l| cert_at(&dag, prev_round, l).is_some());
+                    if !leader_present {
+                        debug!(
+                            target_round,
+                            prev_round,
+                            "round driver: quorum present, waiting for the previous leader"
+                        );
+                        continue;
+                    }
+                }
                 if !strict_ok && !timeout_force {
                     debug!(
                         target_round,

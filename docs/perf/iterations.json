@@ -34,6 +34,17 @@
       "n": 5,
       "name": "Commit walker",
       "change": "One task runs commit walks, woken through a coalescing Notify instead of a walk per certificate and vote"
+    },
+    {
+      "n": 6,
+      "name": "Direct memo",
+      "change": "Per-walk memo of direct decisions keyed by DAG version; no measurable gain, reverted",
+      "reverted": true
+    },
+    {
+      "n": 7,
+      "name": "Leader wait",
+      "change": "Round driver waits up to one extra tick for the previous leader's certificate; removes late flips and the multi-second tail"
     }
   ]
 }
