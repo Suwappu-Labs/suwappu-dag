@@ -1,10 +1,39 @@
 {
   "_doc": "Perf-loop iterations charted by scripts/perf/render_history.py. Runs are matched to an iteration by label prefix (itN-) or by the listed baseline labels; only 8-loadgen, 50 ms-round runs are charted.",
   "iterations": [
-    {"n": 0, "name": "Baseline", "change": "b04fa56, before the perf loop", "labels": ["round-50ms"]},
-    {"n": 1, "name": "Reachability", "change": "Indirect rule asks reachability instead of building and sorting the full causal history"},
-    {"n": 2, "name": "Skip committed", "change": "Commit walk skips slots whose leader certificate is already committed"},
-    {"n": 3, "name": "One search", "change": "Indirect rule: one multi-source search over all directly decided anchors"},
-    {"n": 4, "name": "Descendants", "change": "Upward descendant scan for the walk; slower, reverted", "reverted": true}
+    {
+      "n": 0,
+      "name": "Baseline",
+      "change": "b04fa56, before the perf loop",
+      "labels": [
+        "round-50ms"
+      ]
+    },
+    {
+      "n": 1,
+      "name": "Reachability",
+      "change": "Indirect rule asks reachability instead of building and sorting the full causal history"
+    },
+    {
+      "n": 2,
+      "name": "Skip committed",
+      "change": "Commit walk skips slots whose leader certificate is already committed"
+    },
+    {
+      "n": 3,
+      "name": "One search",
+      "change": "Indirect rule: one multi-source search over all directly decided anchors"
+    },
+    {
+      "n": 4,
+      "name": "Descendants",
+      "change": "Upward descendant scan for the walk; slower, reverted",
+      "reverted": true
+    },
+    {
+      "n": 5,
+      "name": "Commit walker",
+      "change": "One task runs commit walks, woken through a coalescing Notify instead of a walk per certificate and vote"
+    }
   ]
 }

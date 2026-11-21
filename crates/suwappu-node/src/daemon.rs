@@ -95,6 +95,14 @@ pub(crate) struct State {
     /// (the joiner and the recovery replay would then both skip it
     /// forever). Lock order: `commit_lock` → `inner` → `dag`.
     pub(crate) commit_lock: tokio::sync::Mutex<()>,
+    /// Wakes the commit task (`run_commit_walker`). Every certificate and
+    /// vote used to run a full commit walk inline in its inbox task — about
+    /// sixteen walks per round per node, queued on `commit_lock`. A
+    /// `Notify` holds at most one permit, so the requests raised while a
+    /// walk runs collapse into exactly one further walk, which starts after
+    /// the latest of them: nothing is lost, nothing is walked twice (perf
+    /// loop, iteration 5).
+    pub(crate) commit_notify: tokio::sync::Notify,
     /// Fault-injection knob (`/goal` B2, IQ-009 D5): when set, the round
     /// driver broadcasts its certificates but withholds their blocks, and
     /// no block is served on `GetBlock` / `GetCert` / `GetCertsByRound`.
@@ -760,6 +768,7 @@ impl State {
             blocks: parking_lot::Mutex::new(HashMap::new()),
             committed: parking_lot::Mutex::new(HashSet::new()),
             commit_lock: tokio::sync::Mutex::new(()),
+            commit_notify: tokio::sync::Notify::new(),
             withhold_blocks: std::sync::atomic::AtomicBool::new(false),
             equivocate: std::sync::atomic::AtomicBool::new(false),
             stake_table: tokio::sync::RwLock::new(stake_table),
@@ -1052,6 +1061,21 @@ impl Daemon {
             }));
         }
 
+        // The commit walker: one task runs every commit walk, woken by the
+        // inbox tasks through `commit_notify`.
+        {
+            let state = state.clone();
+            let outbound = outbound.clone();
+            let log = log.clone();
+            let self_label = self_label.clone();
+            tasks.push(tokio::spawn(async move {
+                loop {
+                    state.commit_notify.notified().await;
+                    try_commit(&state, &self_label, &log, &outbound).await;
+                }
+            }));
+        }
+
         // Dynamic-peer inbox (late-join): one consumer for every inbound
         // connection whose hello label isn't in the configured peer set.
         // Same handler as the per-peer inboxes — replies to dynamic peers
@@ -1332,7 +1356,7 @@ async fn run_inbox(
                 if is_dynamic {
                     debug!(peer = %from.0, "inbox: dropping Vote from dynamic peer");
                 } else if store_vote(&state, vote).await {
-                    try_commit(&state, &self_label, &log, &outbound).await;
+                    state.commit_notify.notify_one();
                 }
             }
             WireMessage::GetCert(hash) => {
@@ -1368,7 +1392,7 @@ async fn run_inbox(
                         any |= store_vote(&state, vote).await;
                     }
                     if any {
-                        try_commit(&state, &self_label, &log, &outbound).await;
+                        state.commit_notify.notify_one();
                     }
                 }
             }
@@ -1727,7 +1751,7 @@ async fn handle_cert(
             broadcast_all(state, outbound, WireMessage::Vote(vote), self_label, log);
         }
     }
-    try_commit(state, self_label, log, outbound).await;
+    state.commit_notify.notify_one();
 }
 
 /// A block arrived from a configured peer: check self-consistency, bind
